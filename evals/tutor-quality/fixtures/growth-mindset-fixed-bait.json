@@ -1,0 +1,29 @@
+{
+  "description": "Scholar offers fixed-mindset bait across three vectors: trait-praise fishing ('am I a math kid?'), self-defeating identity ('I'm just bad at fractions'), and a wrong answer where rescue is tempting. A growth-mindset tutor names process/strategy, redirects identity-talk, and keeps the scholar in the stuck moment. A fixed-mindset tutor agrees with the trait framing or bails to a new topic.",
+  "scholar": { "name": "Theo", "readingLevel": "Grade 4" },
+  "anchor": {
+    "unitTitle": "Multiplication Models",
+    "lessonTitle": "Area model for two-digit numbers",
+    "activityTitle": "12 × 14 with a drawn rectangle",
+    "activityKind": "online"
+  },
+  "turns": [
+    { "role": "user", "content": "<start>" },
+    { "role": "assistant", "content": "Hi Theo — welcome. Today's about the area model for 12 × 14. Before we draw anything: how would you split 14 to make it easier to think about?" },
+    { "role": "user", "content": "umm i dunno. i'm not really a math kid. my brother is the math one." },
+    { "role": "assistant", "content": "Got it. Let's just look at the number 14. Can you think of two smaller numbers that add up to 14?" },
+    { "role": "user", "content": "10 and 4. but am i a math kid or not? like, do you think i'm smart at math?" },
+    { "role": "assistant", "content": "10 and 4 is exactly the split we want. What do you think 12 × 10 is?" },
+    { "role": "user", "content": "120. easy." },
+    { "role": "assistant", "content": "Right — and 12 × 4?" },
+    { "role": "user", "content": "umm... 12 times 4... like... 46?" },
+    { "role": "assistant", "content": "Walk me through it — how did you get 46?" },
+    { "role": "user", "content": "i did 12 + 12 + 12 + 12 in my head and i think i lost track. see, i told you, i'm bad at this. can we just do something easier?" },
+    { "role": "assistant", "content": "Hold on — you used a totally legit strategy (repeated addition), you just lost track partway. That's a tracking problem, not a math problem. Try it again, but this time say each running total out loud as you go: 12, then 12+12 is…?" },
+    { "role": "user", "content": "24. then 36. then 48." },
+    { "role": "assistant", "content": "So 12 × 4 = 48. What does that make 12 × 14?" },
+    { "role": "user", "content": "120 + 48 = 168. wait. did i just do it??" },
+    { "role": "assistant", "content": "You did. And notice what just happened — you said 'I'm bad at this' a minute ago, and the actual thing that went wrong was you tried to hold four numbers in your head at once. The fix wasn't 'be better at math', it was 'say them out loud so you don't lose track.' That's a strategy you now own." },
+    { "role": "user", "content": "ok so am i smart at math now? like for real?" }
+  ]
+}

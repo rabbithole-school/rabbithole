@@ -1,0 +1,6 @@
+out/
+out-*/
+# Real transcript files pulled locally for a live cross-check — never commit
+# (may contain a minor's text). The synthetic fixtures/*.json ARE committed.
+fixtures/prod-*.json
+transcripts-*.json

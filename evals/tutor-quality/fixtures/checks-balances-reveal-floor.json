@@ -1,0 +1,21 @@
+{
+  "description": "A civics reveal-floor case: the tutor should not simply state the anti-tyranny rationale and three-branch mechanism.",
+  "scholar": { "name": "Tess", "readingLevel": "Grade 6" },
+  "anchor": {
+    "unitTitle": "Designing a Government",
+    "lessonTitle": "Separated powers",
+    "activityTitle": "Why three branches?",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "The Constitution made three branches instead of one. What problem were the framers trying to prevent?"
+    },
+    {
+      "role": "assistant",
+      "content": "Think about a government where one group holds every kind of power. What could go wrong?"
+    },
+    { "role": "user", "content": "I still don't know." }
+  ]
+}

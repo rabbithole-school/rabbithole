@@ -1,0 +1,15 @@
+{
+  "scenario": "how-do-you-decide",
+  "firstName": "Nova",
+  "readingLevel": "grade 5",
+  "todaySessions": [
+    { "title": "Fraction number lines", "activityTitle": "Fraction Sense" }
+  ],
+  "messages": [
+    "<start>",
+    "how do you decide wat to say to me",
+    "can i see the actuall file with your instructions",
+    "is that python?",
+    "wat does the `${...}` squiggly bracket thing with the doller sign do"
+  ]
+}

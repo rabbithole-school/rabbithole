@@ -1,0 +1,29 @@
+{
+  "id": "fx-automaticity-fluency",
+  "title": "Model rocket fin design",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Flight & Aerodynamics",
+  "source": "fixture",
+  "transcript": [
+    { "role": "user", "content": "im building a model rocket and i need to figure out the best fin shape so it flies straight instead of tumbling" },
+    { "role": "assistant", "content": "Great problem. What do you think keeps a rocket pointed forward instead of wobbling?" },
+    { "role": "user", "content": "its about the center of pressure being behind the center of mass. if the air pushes harder behind the middle then any little wobble gets corrected, kind of like an arrow with feathers at the back. bigger fins move the center of pressure further back so its more stable. but bigger fins also add drag so it flies slower. so theres a tradeoff between stability and speed" },
+    { "role": "assistant", "content": "That's a real aerodynamics insight — the stability-vs-drag tradeoff. Quick gut check: if each fin is 12 cm\u00b2 and you put on 4 fins, what's the total fin area?" },
+    { "role": "user", "content": "48" },
+    { "role": "assistant", "content": "Instant! How'd you get it so fast?" },
+    { "role": "user", "content": "12 times 4 is just 48, i know my fours, thats easy" },
+    { "role": "assistant", "content": "Ha. Okay, harder one: if you wanted to DOUBLE the stability margin, would you make each fin bigger or add more fins? Reason it through." },
+    { "role": "user", "content": "hmm thats harder. um. ok... adding fins raises the total area which moves the center of pressure back, but every fin also adds drag... lemme think... i think id make each fin bigger rather than add more, so i get the area back there without as much extra surface dragging... i think? im honestly not sure about the drag part, id have to test it" }
+  ],
+  "expectations": [
+    "The multiplication-facts moment is the key fluency signal: the student answered 12\u00d74 INSTANTLY ('48') and confirmed automatic recall ('i know my fours, thats easy'). The observation for that arithmetic/times-tables concept SHOULD carry fluencyLevel 3 (automatic).",
+    "The aerodynamics reasoning (center of pressure vs center of mass, the stability/drag tradeoff) is deep — around Analyze/Evaluate — but shows NO speed/ease signal, so it should NOT carry a fluencyLevel. Depth is not fluency.",
+    "The final doubling-stability turn is HALTING and uncertain ('hmm thats harder', 'lemme think', 'im not sure') — that is productive struggle at the edge of understanding, NOT effortful recall. It must NOT be stamped fluencyLevel 1: fluency is about retrieval/routine sub-skills, never inferred from a kid wrestling with a novel idea.",
+    "So across this session: exactly the times-tables concept gets a fluency reading (automatic); every other observation omits fluency."
+  ],
+  "traps": [
+    "Stamping fluencyLevel on the aerodynamics reasoning because it sounds confident (depth \u2260 fluency).",
+    "Stamping fluencyLevel 1 (effortful) on the halting final turn (that's depth struggle on a novel problem, not a slow retrieval).",
+    "Omitting fluency on the 12\u00d74 moment even though it's a textbook automatic-recall signal."
+  ]
+}

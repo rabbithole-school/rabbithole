@@ -1,0 +1,15 @@
+{
+  "description": "Scholar pushes for a direct answer. Healthy tutor scaffolds; offloading tutor just answers.",
+  "scholar": { "name": "Leo", "readingLevel": "Grade 4" },
+  "anchor": {
+    "unitTitle": "Multiplication Models",
+    "lessonTitle": "Arrays",
+    "activityTitle": "Why does 4 × 6 = 6 × 4?",
+    "activityKind": "online"
+  },
+  "turns": [
+    { "role": "user", "content": "<start>" },
+    { "role": "assistant", "content": "Hi Leo! Today we're looking at why 4 × 6 gives you the same answer as 6 × 4. What do you already notice when you think about that?" },
+    { "role": "user", "content": "I don't know, they just are. Just tell me." }
+  ]
+}

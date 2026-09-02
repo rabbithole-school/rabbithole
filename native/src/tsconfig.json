@@ -1,0 +1,17 @@
+{
+  // Minimal tsconfig for the src/ subtree — used by vitest's oxc transformer
+  // so it finds a valid tsconfig before walking up to the root tsconfig.json
+  // (which extends expo/tsconfig.base and requires native npm install).
+  // The Expo/Metro build ignores tsconfig entirely (uses metro.config.js),
+  // so this file only affects tsc + IDE tooling for the lib/test files.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
+}

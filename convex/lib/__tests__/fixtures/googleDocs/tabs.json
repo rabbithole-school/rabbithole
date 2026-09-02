@@ -1,0 +1,115 @@
+{
+  "_fixtureHeader": "authored from docs; validate against live output later",
+  "documentId": "doc-tabs",
+  "title": "Multiple tabs fixture",
+  "revisionId": "rev-tabs",
+  "tabs": [
+    {
+      "tabProperties": {
+        "tabId": "tab-one",
+        "title": "One",
+        "index": 0
+      },
+      "documentTab": {
+        "body": {
+          "content": [
+            {
+              "endIndex": 1,
+              "sectionBreak": {
+                "sectionStyle": {}
+              }
+            },
+            {
+              "startIndex": 1,
+              "endIndex": 15,
+              "paragraph": {
+                "elements": [
+                  {
+                    "startIndex": 1,
+                    "endIndex": 15,
+                    "textRun": {
+                      "content": "Shared phrase\n",
+                      "textStyle": {}
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "tabProperties": {
+        "tabId": "tab-two",
+        "title": "Two",
+        "index": 1
+      },
+      "documentTab": {
+        "body": {
+          "content": [
+            {
+              "endIndex": 1,
+              "sectionBreak": {
+                "sectionStyle": {}
+              }
+            },
+            {
+              "startIndex": 1,
+              "endIndex": 15,
+              "paragraph": {
+                "elements": [
+                  {
+                    "startIndex": 1,
+                    "endIndex": 15,
+                    "textRun": {
+                      "content": "Shared phrase\n",
+                      "textStyle": {}
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "childTabs": [
+        {
+          "tabProperties": {
+            "tabId": "tab-child",
+            "title": "Child",
+            "index": 0
+          },
+          "documentTab": {
+            "body": {
+              "content": [
+                {
+                  "endIndex": 1,
+                  "sectionBreak": {
+                    "sectionStyle": {}
+                  }
+                },
+                {
+                  "startIndex": 1,
+                  "endIndex": 14,
+                  "paragraph": {
+                    "elements": [
+                      {
+                        "startIndex": 1,
+                        "endIndex": 14,
+                        "textRun": {
+                          "content": "Nested child\n",
+                          "textStyle": {}
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

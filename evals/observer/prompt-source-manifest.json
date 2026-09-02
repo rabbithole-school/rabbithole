@@ -1,0 +1,42 @@
+{
+  "schema": "rabbithole.prompt-source-manifest.v1",
+  "tutorAssemblySources": [
+    "convex/prompts.ts",
+    "convex/sessionHelpers.ts",
+    "convex/sessionContextHelpers.ts",
+    "convex/sessionStreamHelpers.ts",
+    "convex/http.ts",
+    "convex/lib/institutionPromptProfile.ts",
+    "convex/lib/deliverable.ts",
+    "convex/lib/pcm.ts",
+    "convex/lib/tutorSessionTools.ts",
+    "convex/lib/customAppTools.ts",
+    "convex/lib/activityCompletionTool.ts",
+    "convex/lib/practice/chatPractice.ts",
+    "convex/lib/practice/chatInstruction.ts",
+    "convex/lib/teachBack.ts",
+    "convex/lib/simulatorTemplatesCatalog.ts",
+    "lib/games/promptContext.ts"
+  ],
+  "observerAssemblySources": [
+    "convex/prompts.ts",
+    "convex/lib/institutionPromptProfile.ts",
+    "convex/lib/observerShared.ts"
+  ],
+  "observerRuntimeAssemblySources": [
+    "convex/observer.ts",
+    "convex/metaObserver.ts"
+  ],
+  "observerEvaluatorSources": [
+    "evals/observer/lib/runObserver.ts",
+    "evals/observer/rigor-check.ts",
+    "evals/observer/fluency-check.ts",
+    "evals/observer/rigor-check.sh",
+    "evals/observer/fluency-check.sh"
+  ],
+  "contractSources": [
+    ".github/workflows/eval-gates.yml",
+    "evals/observer/prompt-source-manifest.json",
+    "evals/observer/__tests__/promptSourceManifest.test.ts"
+  ]
+}

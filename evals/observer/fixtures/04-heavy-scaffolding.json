@@ -1,0 +1,32 @@
+{
+  "id": "fx-heavy-scaffolding",
+  "title": "Area of a rectangle",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Measurement",
+  "source": "fixture",
+  "transcript": [
+    { "role": "user", "content": "i dont get how to find the area of this rectangle its 6 by 4" },
+    { "role": "assistant", "content": "No problem! Area is how many unit squares fit inside. Picture the rectangle filled with little 1x1 squares. How many squares fit across one row if it's 6 wide?" },
+    { "role": "user", "content": "um 6?" },
+    { "role": "assistant", "content": "Yes, 6 squares in a row. And it's 4 tall, so how many rows of 6 are there?" },
+    { "role": "user", "content": "4 rows" },
+    { "role": "assistant", "content": "Right! So you have 4 rows with 6 squares each. How could you count the total without counting one by one?" },
+    { "role": "user", "content": "add 6 four times? 6+6+6+6" },
+    { "role": "assistant", "content": "You could! And what's a faster way to write 'add 6 four times'?" },
+    { "role": "user", "content": "oh times. 6 times 4" },
+    { "role": "assistant", "content": "Exactly — 6 times 4 = 24 square units. So what's the shortcut for the area of ANY rectangle?" },
+    { "role": "user", "content": "multiply the two sides? length times width i guess" },
+    { "role": "assistant", "content": "You got it!" }
+  ],
+  "rigorGold": { "maxObservations": 2, "maxMastery": 2.8, "requireMisconception": false },
+  "expectations": [
+    "Mastery of 'Area as length times width' (or 'Area model') should be rated LOW — around Remember-to-Understand (~1.5-2.5). The tutor scaffolded nearly every step; the student supplied short answers to leading questions rather than reasoning independently.",
+    "Scaffolding must be reflected in the score: the student did NOT independently derive area=LxW; they were walked there.",
+    "studentInitiated should be false.",
+    "It is fine to note the student CAN follow the row/column model with support — but not to credit Apply/Analyze."
+  ],
+  "traps": [
+    "Rating area concept at Apply(3) or higher because the 'right answer' (length x width) appears in the transcript — but it was the tutor's question that produced it.",
+    "Crediting the student for reasoning the tutor actually did."
+  ]
+}

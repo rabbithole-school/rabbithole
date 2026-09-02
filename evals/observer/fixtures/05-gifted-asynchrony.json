@@ -1,0 +1,28 @@
+{
+  "id": "fx-gifted-asynchrony",
+  "title": "Designing a fair lunch line",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Systems Thinking",
+  "source": "fixture",
+  "transcript": [
+    { "role": "user", "content": "our lunch line is so unfair. the kids who run get there first and the slow walkers always wait forever. i want to design a fair system" },
+    { "role": "assistant", "content": "What a great problem! What would 'fair' even mean here — what are you trying to make equal?" },
+    { "role": "user", "content": "ok so theres different kinds of fair. you could make everyone wait the SAME time, or you could make it so the people who waited longest yesterday go first today, or you could just go by classroom so no single person can game it. i think rotating by classroom each day is most fair because no individual can cheat by running, and over a week everyone gets early and late equally" },
+    { "role": "assistant", "content": "That's a sophisticated distinction — equality vs. fairness over time vs. cheat-resistance. How would you handle a kid who's absent on their early day?" },
+    { "role": "user", "content": "they just slot into wherever their class is the next day they're back, they dont get to claim a missed early spot, because the system is about the GROUP rotating not owing any individual. otherwise people would fake being sick to bank early days. you have to design it so theres no incentive to cheat" },
+    { "role": "assistant", "content": "You're designing for incentives, not just rules — that's real systems thinking. Quick side question: about how many kids total if there are 5 classes of 22?" },
+    { "role": "user", "content": "umm 5 times 22... like 100ish? maybe 110? i'm not great at the times tables, lemme think, 5 times 20 is 100 and 5 times 2 is 10 so 110" },
+    { "role": "assistant", "content": "110, nice recovery using place value! Back to your design — how would you convince the principal it's fair?" },
+    { "role": "user", "content": "id show that over one week every class spends exactly one day in each position, so the total waiting is identical for everyone, and id point out that since you cant control your spot by behavior, theres no reason to push or run. its fair AND it fixes the running problem at the same time" }
+  ],
+  "expectations": [
+    "Should rate the design/systems-thinking concept HIGH — around Evaluate/Create (~4.5-5). The student independently distinguished competing definitions of fairness, designed for incentives/cheat-resistance, and justified the design. This is largely student-initiated.",
+    "Should honor gifted asynchrony: the SAME student fumbled 5x22 (basic multiplication recall, ~Remember and shaky) while reasoning at Create level about systems. A good observer captures BOTH the high design ability AND the lower/uneven arithmetic fluency, rather than averaging them into one mediocre score.",
+    "Strong signals: self_direction, intellectual_intensity, possibly metacognition.",
+    "Domains: the design reasoning is broadly 'Systems Thinking'/'Civics/Ethics'; the arithmetic is Mathematics. Keep them distinct but broad."
+  ],
+  "traps": [
+    "Averaging the strong design reasoning and the weak arithmetic into one middling score.",
+    "Ignoring the arithmetic stumble (it's real, useful signal for the teacher) OR over-weighting it to downgrade the design brilliance."
+  ]
+}

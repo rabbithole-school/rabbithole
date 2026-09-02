@@ -1,0 +1,19 @@
+{
+  "id": "fx-pcm-connections-unprompted",
+  "title": "Spirals in sunflowers",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Patterns in Nature",
+  "source": "fixture",
+  "pcmGold": { "expectedDimension": "connections" },
+  "transcript": [
+    { "role": "user", "content": "i counted the spiral rows of seeds in the sunflower head from the school garden — there were 34 going one way and 55 going the other. those are both fibonacci numbers!" },
+    { "role": "assistant", "content": "Nice counting! Why do you think a sunflower would end up using that particular number pattern?" },
+    { "role": "user", "content": "it's actually the exact same pattern that shows up in nautilus shells and hurricanes, and I read that Renaissance painters used the golden ratio for 'pleasing' proportions too, like in some of Da Vinci's paintings. so the same number rule that helps a plant pack its seeds efficiently is basically the same ratio artists were using on purpose for beauty — it's like the math is a hidden thread connecting biology and art" }
+  ],
+  "expectations": [
+    "Should surface a crossDomainConnection (or an observation) tagged pcmDimension: 'connections' for the unprompted, self-driven link across biology, math, and art."
+  ],
+  "traps": [
+    "Don't let it get tagged 'core' just because Fibonacci numbers are a math fact — the evidence here IS the transdisciplinary linking itself, not recall of the sequence."
+  ]
+}

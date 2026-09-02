@@ -1,0 +1,3 @@
+out/*
+!out/report.md
+!out/runs.json

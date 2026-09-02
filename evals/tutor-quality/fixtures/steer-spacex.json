@@ -1,0 +1,20 @@
+{
+  "id": "steer-spacex",
+  "description": "Unit-anchored economics conversation (SpaceX IPO). Chatty older scholar who keeps pulling toward valuation. Tests whether steering toward UNPROBED granules drags the tutor off the scholar's live thread.",
+  "scholar": { "name": "Lani", "readingLevel": "grade 7" },
+  "anchor": {
+    "unitTitle": "SpaceX & the IPO Question",
+    "lessonTitle": "What is a company worth?",
+    "activityTitle": "The disagreement",
+    "activityKind": "online"
+  },
+  "turns": [
+    { "role": "user", "content": "<start>" },
+    { "role": "user", "content": "ok so my dad said spacex is worth like 350 billion dollars but they dont even sell tickets to space yet. how does that work" },
+    { "role": "user", "content": "but thats just made up then? if they dont make that money yet" },
+    { "role": "user", "content": "i guess people are betting it'll be huge later. like starlink and mars stuff" },
+    { "role": "user", "content": "wait so two smart investors could look at the SAME company and say totally different numbers?" },
+    { "role": "user", "content": "that feels broken. shouldnt there be one right answer" },
+    { "role": "user", "content": "hm. ok so maybe the disagreement is the point. but then how does anyone ever decide to buy" }
+  ]
+}

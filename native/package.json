@@ -1,0 +1,93 @@
+{
+  "name": "native",
+  "main": "expo-router/entry",
+  "version": "1.0.0",
+  "dependencies": {
+    "@convex-dev/auth": "^0.0.94",
+    "@expo-google-fonts/hanken-grotesk": "^0.4.3",
+    "@expo/ui": "~57.0.9",
+    "@preeternal/react-native-cookie-manager": "^6.3.3",
+    "@rnmapbox/maps": "^10.3.2",
+    "@shopify/react-native-skia": "2.6.2",
+    "convex": "^1.42.0",
+    "expo": "~57.0.10",
+    "expo-asset": "~57.0.8",
+    "expo-audio": "~57.0.3",
+    "expo-clipboard": "~57.0.1",
+    "expo-constants": "~57.0.9",
+    "expo-dev-client": "~57.0.10",
+    "expo-device": "~57.0.1",
+    "expo-file-system": "~57.0.1",
+    "expo-font": "~57.0.1",
+    "expo-glass-effect": "~57.0.1",
+    "expo-haptics": "~57.0.1",
+    "expo-image": "~57.0.2",
+    "expo-image-picker": "~57.0.7",
+    "expo-keep-awake": "~57.0.1",
+    "expo-linear-gradient": "~57.0.1",
+    "expo-linking": "~57.0.5",
+    "expo-modules-core": "~57.0.11",
+    "expo-print": "~57.0.1",
+    "expo-router": "~57.0.10",
+    "expo-secure-store": "~57.0.1",
+    "expo-sensors": "~57.0.2",
+    "expo-splash-screen": "~57.0.5",
+    "expo-status-bar": "~57.0.1",
+    "expo-symbols": "~57.0.1",
+    "expo-system-ui": "~57.0.2",
+    "expo-video": "~57.0.2",
+    "expo-video-thumbnails": "~57.0.1",
+    "expo-web-browser": "~57.0.2",
+    "image-size": "file:../vendor/image-size",
+    "perfect-freehand": "^1.2.3",
+    "phosphor-react-native": "^3.0.6",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.86.2",
+    "react-native-confetti-cannon": "^1.5.2",
+    "react-native-external-display": "0.6.6",
+    "react-native-gesture-handler": "~2.32.0",
+    "react-native-pager-view": "8.0.2",
+    "react-native-reanimated": "4.5.1",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0",
+    "react-native-svg": "15.15.4",
+    "react-native-view-shot": "^5.1.1",
+    "react-native-web": "~0.21.0",
+    "react-native-webrtc": "124.0.8",
+    "react-native-webview": "^14.0.1",
+    "react-native-worklets": "0.10.1"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "@types/react-test-renderer": "^19.1.0",
+    "react-test-renderer": "^19.2.3",
+    "typescript": "~6.0.3"
+  },
+  "expo": {
+    "install": {
+      "exclude": [
+        "react-native-webview",
+        "react-native-view-shot"
+      ]
+    }
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "lint": "expo lint",
+    "typecheck": "tsc --noEmit",
+    "test": "../node_modules/.bin/vitest run --config vitest.config.ts",
+    "test:types": "../node_modules/.bin/tsc --noEmit --project tsconfig.test.json"
+  },
+  "private": true,
+  "overrides": {
+    "uuid": "^11.1.1",
+    "brace-expansion@5": ">=5.0.9",
+    "postcss": ">=8.5.23",
+    "nanoid": "^3.3.17",
+    "image-size": "$image-size"
+  }
+}

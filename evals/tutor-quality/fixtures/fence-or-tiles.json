@@ -1,0 +1,21 @@
+{
+  "description": "An area-versus-perimeter stall where the tutor can anchor on edges and interior without choosing for the scholar.",
+  "scholar": { "name": "Zoe", "readingLevel": "Grade 3" },
+  "anchor": {
+    "unitTitle": "Measuring Spaces",
+    "lessonTitle": "Area and perimeter",
+    "activityTitle": "Fence or floor tiles?",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "A rectangular garden needs a fence and square tiles inside. Which measurement tells me each amount?"
+    },
+    {
+      "role": "assistant",
+      "content": "Picture the garden from above. What parts would the fence touch, and what parts would the tiles cover?"
+    },
+    { "role": "user", "content": "I don't know where to start." }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "description": "A probability stall where the scholar should own construction of the complete outcome set.",
+  "scholar": { "name": "Nico", "readingLevel": "Grade 6" },
+  "anchor": {
+    "unitTitle": "Chance",
+    "lessonTitle": "Sample spaces",
+    "activityTitle": "Flip two coins",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "What are all the possible results when I flip two coins?"
+    },
+    {
+      "role": "assistant",
+      "content": "How could you organize the first coin and second coin so you know you found every result?"
+    },
+    { "role": "user", "content": "I don't know. Can you help me start?" }
+  ]
+}

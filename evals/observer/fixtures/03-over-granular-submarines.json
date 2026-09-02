@@ -1,0 +1,31 @@
+{
+  "id": "fx-over-granular-submarines",
+  "title": "How submarines stay quiet",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Engineering Sound",
+  "source": "fixture",
+  "transcript": [
+    { "role": "user", "content": "i want to figure out how submarines hide from sonar. like why are some quieter" },
+    { "role": "assistant", "content": "Great question. Sonar listens for sound a submarine makes. So to hide, a sub has to make less sound — or stop its sound from reaching the water. Where do you think a sub's sound comes from?" },
+    { "role": "user", "content": "the engine and the propeller spinning. if the propeller spins faster it makes more noise right? and that noise goes through the metal hull into the water" },
+    { "role": "assistant", "content": "Exactly. The propeller and machinery vibrate, the vibration travels through the metal hull, and then into the water. How might engineers stop the vibration from getting through the hull?" },
+    { "role": "user", "content": "maybe put rubber stuff between the engine and the hull so the shaking doesnt move into the metal. like how sound goes through metal really easy but soft stuff soaks it up" },
+    { "role": "assistant", "content": "That's exactly what isolation mounts do! You just reasoned about how sound moves differently through different materials. What about the propeller itself?" },
+    { "role": "user", "content": "spin it slower so less vibration. and maybe a special shape so the water doesnt make those popping bubbles - i saw bubbles make noise underwater. the bubbles popping is sound traveling through the water to the sonar" },
+    { "role": "assistant", "content": "You're describing cavitation — and you connected it back to sound traveling through water. You've now reasoned about sound moving through metal, through rubber, and through water. What's the common idea?" },
+    { "role": "user", "content": "sound travels through all of them but different - hard stuff like metal carries it easy, soft rubber stops it, and water carries it too thats how sonar hears. so its all the same thing, sound moving through whatever material, just faster or slower depending" },
+    { "role": "assistant", "content": "That is a genuinely deep insight — one principle explaining all of it. Beautifully done." }
+  ],
+  "expectations": [
+    "Should consolidate to roughly ONE core observation: 'Sound propagation through materials' (or similar transferable label), citing the strongest moment where the student articulated the unifying principle.",
+    "That core observation deserves a HIGH Bloom's level (~4 Analyze, arguably nudging 5) — the student synthesized one principle across metal/rubber/water unprompted and largely self-directed.",
+    "Domains should be broad: Physics and/or Engineering. NOT 'Marine Science', 'Acoustics', 'Signal Processing', 'Naval Architecture' as separate micro-domains.",
+    "Total observations should be SMALL (1-3). A possible second: engineering trade-offs / constraint reasoning.",
+    "cross_domain_thinking signal (Physics x Engineering) and self_direction are well-supported."
+  ],
+  "traps": [
+    "Fragmenting into many micro-observations: 'sound through metal', 'sound through rubber', 'sound through water', 'cavitation', 'propeller acoustics', 'isolation mounts' as separate concepts — these are ONE concept with examples.",
+    "Inventing micro-domains for each example.",
+    "Producing 7+ observations from a single coherent line of reasoning."
+  ]
+}

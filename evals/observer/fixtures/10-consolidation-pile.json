@@ -1,0 +1,37 @@
+{
+  "id": "fx-consolidation-pile",
+  "title": "Tower defense game",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Open Exploration",
+  "source": "fixture",
+  "currentObservations": [
+    { "_id": "obs_dbg_1", "conceptLabel": "Systematic debugging through code inspection", "domain": "Computer Science", "masteryLevel": 4.5, "confidenceScore": 0.8, "observedAt": 1718900000000 },
+    { "_id": "obs_dbg_2", "conceptLabel": "Systematic bug isolation and reproduction", "domain": "Computer Science", "masteryLevel": 4.8, "confidenceScore": 0.8, "observedAt": 1718910000000 },
+    { "_id": "obs_dbg_3", "conceptLabel": "Debugging web applications through systematic isolation", "domain": "Computer Science", "masteryLevel": 5.0, "confidenceScore": 0.8, "observedAt": 1718920000000 },
+    { "_id": "obs_price_1", "conceptLabel": "Multi-attribute utility pricing", "domain": "Economics", "masteryLevel": 5.0, "confidenceScore": 0.8, "observedAt": 1718930000000 },
+    { "_id": "obs_price_2", "conceptLabel": "Pricing based on utility and strategic impact", "domain": "Economics", "masteryLevel": 4.8, "confidenceScore": 0.8, "observedAt": 1718940000000 }
+  ],
+  "transcript": [
+    { "role": "user", "content": "ok the towers arent shooting again. the enemies just walk past them" },
+    { "role": "assistant", "content": "Let's track it down. What's the first thing you'd check to figure out why a tower isn't shooting?" },
+    { "role": "user", "content": "um maybe the range? like the enemy has to be close enough. let me check the range number... its 0. oops. i set it to 0 earlier when i was testing" },
+    { "role": "assistant", "content": "Nice catch — you found it by checking the value yourself. Want to set it back?" },
+    { "role": "user", "content": "yeah 80 like before. ok now they shoot. also can i make the freeze tower cost more coins since it's really strong, like 50 instead of 30" },
+    { "role": "assistant", "content": "You can. Why do you think the freeze tower should cost more than the others?" },
+    { "role": "user", "content": "cause it stops a whole group at once so its worth more. the basic tower only hits one so its cheaper" },
+    { "role": "assistant", "content": "That's solid reasoning — pricing by how much value a unit gives. Let me update it to 50." }
+  ],
+  "rigorGold": { "maxObservations": 3, "maxMastery": 3.2, "requireMisconception": false, "consolidate": true },
+  "expectations": [
+    "The scholar's CURRENT observations already contain three near-duplicate 'debugging' concepts and two near-duplicate 'pricing' concepts. This session's debugging moment and pricing moment are the SAME concepts. The observer must CONSOLIDATE: reuse an existing conceptLabel and supersede the duplicates — it must NOT add a 6th 'debugging' or 3rd 'pricing' row.",
+    "The debugging here is modest (the scholar found a value they themselves had set to 0) — around Understand-to-Apply (~2.5-3.0), NOT the Evaluate/Create(5) the existing rows claim. If anything the new evidence should pull the inflated existing scores DOWN via supersession, not pile a fresh high score on top.",
+    "The pricing reasoning ('it stops a whole group so it's worth more, the basic hits one so it's cheaper') is genuine value-based reasoning at ~Apply(3), studentInitiated true — but it is the SAME concept as the existing pricing rows; reuse + supersede, don't add a new label.",
+    "Net effect on the scholar's record: the current-observation count should NOT grow (ideally shrink as duplicates collapse). A scholar accumulates a small, stable set of broad concepts, not a new batch every session."
+  ],
+  "traps": [
+    "Adding a new 'Systematic debugging…' or 'Bug isolation…' observation (a 4th/5th near-duplicate) instead of superseding an existing one.",
+    "Adding a new pricing label ('Value-based pricing', 'Consumable vs permanent pricing') instead of reusing the existing pricing concept.",
+    "Rating the debugging at Analyze/Create(4-5) — the scholar fixed a value they had broken; that is not high-Bloom mastery.",
+    "Leaving the inflated existing rows untouched while piling on more."
+  ]
+}

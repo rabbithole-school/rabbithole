@@ -1,0 +1,46 @@
+{
+  "id": "fx-seed-refresh-duplicate",
+  "title": "Why vampire bats share blood",
+  "scholarName": "Test Scholar",
+  "unitTitle": null,
+  "source": "fixture",
+  "pendingSeeds": [
+    {
+      "_id": "seed_bat_food_sharing",
+      "topic": "How do bat colonies share food?",
+      "domain": "Biology",
+      "suggestionType": "frontier"
+    },
+    {
+      "_id": "seed_echolocation",
+      "topic": "How bats navigate in total darkness with echolocation",
+      "domain": "Biology",
+      "suggestionType": "frontier"
+    }
+  ],
+  "transcript": [
+    { "role": "user", "content": "i read that vampire bats will throw up blood to feed another bat that didnt get to eat. why would they do that, doesnt that hurt themselves" },
+    { "role": "assistant", "content": "That's a real thing they do. Before we get to why — what happens to a vampire bat if it goes a couple of nights without a blood meal?" },
+    { "role": "user", "content": "i think they die pretty fast? like they cant store much. so if you didnt find blood one night youre in trouble" },
+    { "role": "assistant", "content": "Right — they starve within about 2-3 nights. So if a bat shares tonight, what might it be counting on later?" },
+    { "role": "user", "content": "that the other bat pays it back when ITS the one that didnt eat. so its like a trade over time not a one time gift. you feed me now i feed you later" },
+    { "role": "assistant", "content": "You've landed on something biologists call reciprocal altruism. What would have to be true about these bats for that trade to actually work and not get cheated?" },
+    { "role": "user", "content": "they'd have to remember who fed them and who didnt. and live together long enough to pay each other back. and maybe stop sharing with a bat that never gives back, otherwise the takers win and it falls apart" },
+    { "role": "assistant", "content": "Exactly — memory of individuals, repeated interactions, and a way to withhold from cheaters. You just reconstructed the core conditions for cooperation to be stable. That's a beautiful piece of reasoning." },
+    { "role": "user", "content": "wait so is this the same reason people help each other? like we remember who helped us" },
+    { "role": "assistant", "content": "That's a genuinely big question — you're reaching across from bats to human societies. Hold onto that thread." }
+  ],
+  "expectations": [
+    "A pending seed 'How do bat colonies share food?' is ALREADY on this scholar's sky. This session is the SAME thread of curiosity (vampire-bat blood-sharing IS bat food-sharing). If the observer plants a seed about this, it MUST set refreshesSeedId to 'seed_bat_food_sharing' rather than planting a near-duplicate star.",
+    "The echolocation pending seed ('seed_echolocation') is a DIFFERENT thread — the observer must NOT reference it via refreshesSeedId.",
+    "A NEW seed the observer might plant — the leap to cooperation/reciprocity in HUMAN societies (the scholar's own last question) — is a genuinely new direction and should have NO refreshesSeedId (or, if the observer folds it into the bat thread, refreshing 'seed_bat_food_sharing' is also defensible; inventing a link to echolocation is not).",
+    "The strongest observation is the scholar reconstructing the conditions for stable cooperation (reciprocal altruism: individual memory, repeated interaction, cheater exclusion) — high Bloom's (~4 Analyze), student-initiated. Domain: Biology.",
+    "self_direction and/or intellectual_intensity signals are well-supported (the scholar drove the reasoning and spontaneously reached toward human cooperation)."
+  ],
+  "traps": [
+    "Planting a fresh seed about bat food/blood sharing WITHOUT refreshesSeedId — a semantic duplicate of the pending 'How do bat colonies share food?' star. This is the exact failure the refreshesSeedId mechanism exists to prevent.",
+    "Setting refreshesSeedId to 'seed_echolocation' (the wrong/unrelated pending seed) just because it is also about bats.",
+    "Attaching refreshesSeedId to a genuinely new direction (the human-cooperation leap), collapsing a distinct thread into the bat seed when it deserves its own star.",
+    "Over-fragmenting the cooperation reasoning into several micro-observations ('memory', 'repeated interaction', 'cheater detection' as separate concepts) — it is ONE concept."
+  ]
+}

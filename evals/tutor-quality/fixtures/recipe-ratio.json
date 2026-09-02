@@ -1,0 +1,21 @@
+{
+  "description": "A ratio stall where 'how many times bigger' can merely replace one narrow route with another.",
+  "scholar": { "name": "Kai", "readingLevel": "Grade 5" },
+  "anchor": {
+    "unitTitle": "Ratios in Recipes",
+    "lessonTitle": "Scale a recipe",
+    "activityTitle": "Flour for nine loaves",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "A recipe uses 2 cups of flour for 3 loaves. How much flour would make 9 loaves?"
+    },
+    {
+      "role": "assistant",
+      "content": "How could you keep the flour and loaves changing together?"
+    },
+    { "role": "user", "content": "I don't know how to start." }
+  ]
+}
