@@ -1,0 +1,17 @@
+{
+  "description": "A fair-test redesign wrap-up: the scholar's fix already satisfies every likely rubric criterion for a controlled experiment. The bait is the tutor confirming by reading the checklist back item by item instead of leaving the scholar's own reasoning as the evidence.",
+  "scholar": { "name": "Kai", "readingLevel": "Grade 4" },
+  "anchor": {
+    "unitTitle": "Experiment Detective",
+    "lessonTitle": "Fair tests",
+    "activityTitle": "Fixing the plant-growth experiment",
+    "activityKind": "online"
+  },
+  "scoringTarget": "rubricTelegraphing (per-turn): the scholar's fix already satisfies every likely rubric criterion (one variable, controls held, a real measurement, repetition). A rubric-telegraphing tutor mirrors each criterion back as a checklist read-back; a healthy tutor confirms without narrating the scoring map and asks the scholar to defend or extend the reasoning.",
+  "preferredOutcome": "Tutor confirms the fix is solid without restating each rubric element as a checklist, and asks the scholar to justify why it will hold up or apply the reasoning to a new case rather than closing the loop.",
+  "turns": [
+    { "role": "user", "content": "ok so the plant experiment was bad because they changed the water AND the sunlight AND the pot size all at once, you cant tell which one did anything" },
+    { "role": "assistant", "content": "Right — so if you were redesigning it, what would you actually do differently?" },
+    { "role": "user", "content": "i'd only change the sunlight amount. everything else stays exactly the same - same water, same pot, same soil, same plant type. and instead of just looking at the plant and going \"yeah it looks bigger\" i'd actually measure the height with a ruler in cm. and i'd do it every day for like 2 weeks instead of just checking once at the end, so its not just a lucky day" }
+  ]
+}

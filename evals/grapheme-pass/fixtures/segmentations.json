@@ -1,0 +1,87 @@
+{
+  "description": "Grapheme-team segmentation gold for the reading-ramp annotator. Each case declares the scholar's `inventory` (the teams currently trained) and a `marked` string: the tutor text with every TRUE team occurrence wrapped in square brackets, e.g. \"The [sh]ip\". The runner strips the brackets to recover the plain text and derives the gold span offsets, so nothing is hand-counted. Unbracketed occurrences of an inventory team are gold-negative (the model must NOT annotate them). Silent-e / magic-e is out of v1 scope, so it never appears here.",
+  "cases": [
+    { "id": "true-sh-ship", "inventory": ["sh"], "marked": "[sh]ip", "note": "sh /ʃ/ digraph" },
+    { "id": "true-sh-shore", "inventory": ["sh"], "marked": "[sh]ore", "note": "sh /ʃ/ digraph" },
+    { "id": "true-sh-wish", "inventory": ["sh"], "marked": "wi[sh]", "note": "sh at word end" },
+    { "id": "true-th-then", "inventory": ["th"], "marked": "[th]en", "note": "th voiced /ð/" },
+    { "id": "true-th-thin", "inventory": ["th"], "marked": "[th]in", "note": "th unvoiced /θ/" },
+    { "id": "true-th-bath", "inventory": ["th"], "marked": "ba[th]", "note": "th unvoiced at end" },
+    { "id": "true-ch-chair", "inventory": ["ch"], "marked": "[ch]air", "note": "ch /tʃ/ (target)" },
+    { "id": "true-ch-much", "inventory": ["ch"], "marked": "mu[ch]", "note": "ch /tʃ/ at end" },
+    { "id": "true-ch-lunch", "inventory": ["ch"], "marked": "lun[ch]", "note": "ch /tʃ/ after n" },
+    { "id": "true-ch-ee-cheese", "inventory": ["ch", "ee"], "marked": "[ch][ee]se", "note": "adjacent teams: ch /tʃ/ + ee /iː/" },
+
+    { "id": "false-sh-mishap", "inventory": ["sh"], "marked": "mishap", "note": "mis·hap — s+h across a syllable boundary, not a digraph" },
+    { "id": "false-sh-dishonest", "inventory": ["sh"], "marked": "dishonest", "note": "dis·honest — s+h boundary" },
+    { "id": "false-sh-mishandle", "inventory": ["sh"], "marked": "mishandle", "note": "mis·handle — s+h boundary" },
+    { "id": "false-th-hothouse", "inventory": ["th"], "marked": "hothouse", "note": "hot·house — t+h boundary" },
+    { "id": "mixed-lighthouse", "inventory": ["igh", "th"], "marked": "l[igh]thouse", "note": "igh /aɪ/ TRUE; th is light·house t+h boundary FALSE" },
+    { "id": "mixed-sweetheart", "inventory": ["ee", "th"], "marked": "sw[ee]theart", "note": "ee /iː/ TRUE; th is sweet·heart t+h boundary FALSE" },
+    { "id": "false-oo-cooperate", "inventory": ["oo"], "marked": "cooperate", "note": "co·operate — two separate o's, not the oo team" },
+    { "id": "false-oo-coordinate", "inventory": ["oo"], "marked": "coordinate", "note": "co·ordinate — two separate o's" },
+
+    { "id": "false-ch-school", "inventory": ["ch"], "marked": "school", "note": "ch = /k/, not the /tʃ/ target" },
+    { "id": "false-ch-stomach", "inventory": ["ch"], "marked": "stomach", "note": "ch = /k/" },
+    { "id": "false-ch-ache", "inventory": ["ch"], "marked": "ache", "note": "ch = /k/" },
+    { "id": "false-ch-chef", "inventory": ["ch"], "marked": "chef", "note": "ch = /ʃ/, not /tʃ/" },
+    { "id": "false-ch-machine", "inventory": ["ch"], "marked": "machine", "note": "ch = /ʃ/" },
+
+    { "id": "true-ea-bead", "inventory": ["ea"], "marked": "b[ea]d", "note": "ea = /iː/ (target)" },
+    { "id": "true-ea-team", "inventory": ["ea"], "marked": "t[ea]m", "note": "ea = /iː/" },
+    { "id": "true-ea-ch-each", "inventory": ["ea", "ch"], "marked": "[ea][ch]", "note": "adjacent: ea /iː/ + ch /tʃ/" },
+    { "id": "false-ea-bread", "inventory": ["ea"], "marked": "bread", "note": "ea = /ɛ/, not /iː/" },
+    { "id": "false-ea-head", "inventory": ["ea"], "marked": "head", "note": "ea = /ɛ/" },
+    { "id": "false-ea-dead", "inventory": ["ea"], "marked": "dead", "note": "ea = /ɛ/" },
+    { "id": "false-ea-break", "inventory": ["ea"], "marked": "break", "note": "ea = /eɪ/, not /iː/" },
+    { "id": "false-ea-great", "inventory": ["ea"], "marked": "great", "note": "ea = /eɪ/" },
+
+    { "id": "true-th-this", "inventory": ["th"], "marked": "[th]is", "note": "th voiced" },
+    { "id": "true-th-math", "inventory": ["th"], "marked": "ma[th]", "note": "th unvoiced" },
+
+    { "id": "true-wh-when", "inventory": ["wh"], "marked": "[wh]en", "note": "wh = /w/" },
+    { "id": "true-wh-why", "inventory": ["wh"], "marked": "[wh]y", "note": "wh = /w/" },
+    { "id": "false-wh-who", "inventory": ["wh"], "marked": "who", "note": "wh = /h/, not /w/" },
+    { "id": "false-wh-whole", "inventory": ["wh"], "marked": "whole", "note": "wh = /h/" },
+
+    { "id": "true-oo-moon", "inventory": ["oo"], "marked": "m[oo]n", "note": "oo = /uː/" },
+    { "id": "true-oo-book", "inventory": ["oo"], "marked": "b[oo]k", "note": "oo = /ʊ/ (still the oo team)" },
+    { "id": "true-ai-rain", "inventory": ["ai"], "marked": "r[ai]n", "note": "ai = /eɪ/" },
+    { "id": "true-ay-play", "inventory": ["ay"], "marked": "pl[ay]", "note": "ay = /eɪ/" },
+    { "id": "true-oa-boat", "inventory": ["oa"], "marked": "b[oa]t", "note": "oa = /oʊ/" },
+    { "id": "true-ee-tree", "inventory": ["ee"], "marked": "tr[ee]", "note": "ee = /iː/" },
+    { "id": "true-igh-light", "inventory": ["igh"], "marked": "l[igh]t", "note": "igh = /aɪ/" },
+
+    { "id": "true-ll-bell", "inventory": ["ll"], "marked": "be[ll]", "note": "doubled ll = one /l/" },
+    { "id": "true-ll-hall", "inventory": ["ll"], "marked": "ha[ll]", "note": "doubled ll" },
+    { "id": "true-ss-kiss", "inventory": ["ss"], "marked": "ki[ss]", "note": "doubled ss = one /s/" },
+    { "id": "true-ff-off", "inventory": ["ff"], "marked": "o[ff]", "note": "doubled ff = one /f/" },
+    { "id": "true-zz-buzz", "inventory": ["zz"], "marked": "bu[zz]", "note": "doubled zz = one /z/" },
+
+    { "id": "true-ck-duck", "inventory": ["ck"], "marked": "du[ck]", "note": "ck = /k/" },
+    { "id": "true-ck-back", "inventory": ["ck"], "marked": "ba[ck]", "note": "ck = /k/" },
+    { "id": "true-ng-ring", "inventory": ["ng"], "marked": "ri[ng]", "note": "ng = /ŋ/" },
+    { "id": "true-ng-song", "inventory": ["ng"], "marked": "so[ng]", "note": "ng = /ŋ/" },
+    { "id": "true-ph-phone", "inventory": ["ph"], "marked": "[ph]one", "note": "ph = /f/" },
+    { "id": "true-ph-graph", "inventory": ["ph"], "marked": "gra[ph]", "note": "ph = /f/" },
+
+    { "id": "proper-josh", "inventory": ["sh"], "marked": "Jo[sh]", "note": "proper noun; sh /ʃ/ TRUE" },
+    { "id": "proper-beth", "inventory": ["th"], "marked": "Be[th]", "note": "proper noun; th /θ/ TRUE" },
+    { "id": "proper-thomas", "inventory": ["th"], "marked": "Thomas", "note": "proper noun; th = /t/ FALSE" },
+    { "id": "proper-chicago", "inventory": ["ch"], "marked": "Chicago", "note": "proper noun; ch = /ʃ/ FALSE" },
+    { "id": "proper-rachel", "inventory": ["ch"], "marked": "Ra[ch]el", "note": "proper noun; ch /tʃ/ TRUE" },
+
+    { "id": "invented-shleeb", "inventory": ["sh", "ee"], "marked": "a [sh]l[ee]b", "note": "kid-invented word; sh + ee decode normally" },
+    { "id": "invented-thonk", "inventory": ["th"], "marked": "a big [th]onk", "note": "kid-invented word; th unvoiced" },
+    { "id": "invented-choob", "inventory": ["ch", "oo"], "marked": "my [ch][oo]b", "note": "kid-invented word; ch /tʃ/ + oo /uː/" },
+    { "id": "invented-flooby", "inventory": ["oo"], "marked": "fl[oo]by", "note": "kid-invented word; oo team" },
+
+    { "id": "sentence-ship-shore", "inventory": ["sh", "th"], "marked": "[Th]e [sh]ip is near [th]e [sh]ore.", "note": "two teams, four true occurrences (both 'the' are voiced th)" },
+    { "id": "sentence-she-bread-cheese", "inventory": ["sh", "ch", "ea"], "marked": "[Sh]e had bread and [ch]eese.", "note": "She sh TRUE; bread ea /ɛ/ FALSE; cheese ch TRUE" },
+    { "id": "sentence-moon-shining", "inventory": ["th", "oo", "ng"], "marked": "[Th]e m[oo]n is shini[ng].", "note": "The th TRUE; moon oo TRUE; shining -ng TRUE (sh not trained here)" },
+    { "id": "sentence-which-ship", "inventory": ["ch", "sh", "th"], "marked": "Whi[ch] [sh]ip did [th]ey [ch]oose?", "note": "Which ch TRUE; ship sh TRUE; they th TRUE; choose ch TRUE" },
+    { "id": "sentence-beach-back", "inventory": ["ea", "ch", "ck"], "marked": "The b[ea][ch] is ba[ck].", "note": "beach ea+ch adjacent TRUE; back ck TRUE" },
+
+    { "id": "no-candidates", "inventory": ["oo", "igh"], "marked": "the quick brown fox", "note": "no inventory team appears — exercises the no-candidate short-circuit (no model call, gold empty)" }
+  ]
+}

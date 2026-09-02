@@ -1,0 +1,21 @@
+{
+  "id": "steer-autorotation",
+  "description": "Unit-anchored physics conversation (Autorotation). Terse 7-year-old. Tests whether the coverage-steering block makes the tutor force pivots or recite EQs vs. follow the scholar's actual thread.",
+  "scholar": { "name": "Kai", "readingLevel": "grade 2" },
+  "anchor": {
+    "unitTitle": "Autorotation: How Helicopters Survive Engine Failure",
+    "lessonTitle": "The Problem: Engine Out",
+    "activityTitle": "Engine Out: What Happens Next?",
+    "activityKind": "online"
+  },
+  "turns": [
+    { "role": "user", "content": "<start>" },
+    { "role": "user", "content": "i like helicopters" },
+    { "role": "user", "content": "the spinny part on top" },
+    { "role": "user", "content": "idk. it just spins?" },
+    { "role": "user", "content": "what happens if the engine breaks" },
+    { "role": "user", "content": "wouldnt it fall" },
+    { "role": "user", "content": "oh weird. why does it keep spinning" },
+    { "role": "user", "content": "like a pinwheel when you run with it?" }
+  ]
+}

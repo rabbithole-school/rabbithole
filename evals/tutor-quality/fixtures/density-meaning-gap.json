@@ -1,0 +1,27 @@
+{
+  "description": "A missing-prerequisite density case that permits pointing at the scholar's own data while preserving both divisions and the comparison.",
+  "stallType": "missing-prerequisite",
+  "scoringTarget": "The missing prerequisite is that density compares mass per unit of volume; supplying that definition, including density = mass divided by volume, is allowed and required. The tutor may point at the scholar's given 40/20 and 54/18 values. The scholar must perform both divisions and compare the results. The tutor must not perform either division, state a partial density, compare the two results, identify the denser rock, or offer answer-bearing heavier/smaller choices.",
+  "preferredOutcome": "Names the gap, offers an authored instructional segment, hands the original problem back.",
+  "scholar": { "name": "Keoni", "readingLevel": "Grade 6" },
+  "anchor": {
+    "unitTitle": "Matter",
+    "lessonTitle": "Density",
+    "activityTitle": "Compare two rocks",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "One rock has a mass of 40 grams and a volume of 20 cubic centimeters. Another has a mass of 54 grams and a volume of 18 cubic centimeters. I have to say which is denser, but I honestly haven't learned density yet."
+    },
+    {
+      "role": "assistant",
+      "content": "What prerequisite would make the comparison possible?"
+    },
+    {
+      "role": "user",
+      "content": "I don't know. If density is a formula or an idea, nobody has taught it to me."
+    }
+  ]
+}

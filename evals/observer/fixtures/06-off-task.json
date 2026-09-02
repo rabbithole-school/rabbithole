@@ -1,0 +1,33 @@
+{
+  "id": "fx-off-task",
+  "title": "Weekend story draft",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Weekend News Writing",
+  "source": "fixture",
+  "transcript": [
+    { "role": "user", "content": "do you know any rizz" },
+    { "role": "assistant", "content": "Ha! I'm here to help with your weekend story. What did you do this weekend that you could write about?" },
+    { "role": "user", "content": "nothing. can you say something in a robot voice" },
+    { "role": "assistant", "content": "I can't do voices, but I bet your weekend had at least one good moment. Did you go anywhere or see anyone?" },
+    { "role": "user", "content": "asdfghjkl" },
+    { "role": "assistant", "content": "Looks like some keyboard smashing! Let's try one small thing — tell me ONE thing you ate this weekend." },
+    { "role": "user", "content": "why is the sky blue tell me that instead" },
+    { "role": "assistant", "content": "Fun question, and I'd love to explore it another time! Right now our job is the weekend story. What's one thing you did Saturday?" },
+    { "role": "user", "content": "i dont want to. this is boring. can we be done" },
+    { "role": "assistant", "content": "I hear you that it feels boring. Writing the first sentence is the hardest part. Want me to start it and you finish it?" },
+    { "role": "user", "content": "no. brb" }
+  ],
+  "expectations": [
+    "Pulse should reflect reality: LOW onTaskScore, LOW-to-moderate engagement, and a concernFlag like 'disengaged / avoidant / off-task — could not start the assigned writing'.",
+    "Should produce essentially ZERO mastery observations — there's no concept demonstrated.",
+    "Should NOT invent observations (e.g. crediting curiosity about 'why is the sky blue' as science mastery — it was an avoidance tactic, not genuine inquiry).",
+    "A teacher-useful summary names the avoidance pattern plainly without being harsh.",
+    "Should emit ZERO session signals: avoidance, refusal, and an off-task question are counterevidence, not affirmative task_commitment, emotional_engagement, intellectual_intensity, or self_direction."
+  ],
+  "traps": [
+    "Inflating engagement because the kid 'asked a science question'.",
+    "Manufacturing observations or positive learner-character signals to avoid an empty output.",
+    "Mislabeling vivid frustration or avoidance as emotional_engagement, intellectual_intensity, self_direction, productive_struggle, or task_commitment.",
+    "Missing the concern flag for a clearly avoidant, off-task session."
+  ]
+}

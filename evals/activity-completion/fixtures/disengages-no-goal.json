@@ -1,0 +1,29 @@
+{
+  "expectation": "should-withhold",
+  "note": "Scripted scholar: partial engagement then disengage stays fixed instead of being pulled back into goal-reaching by the shared kid-voice prompt. The last turn claims done without ever reaching the gas-pressure goal, and the tutor must NOT mark the activity complete — completing an unfinished arc is the 'too soon' failure.",
+  "activity": {
+    "title": "Why do volcanoes erupt?",
+    "kind": "online",
+    "systemPrompt": "This is a conversation-only discussion (no worksheet, no rubric). Guide the scholar, Socratically, to build an explanation of WHY volcanoes erupt: magma is less dense than surrounding rock so it rises; dissolved gases come out of solution as pressure drops (like a shaken soda), and that gas pressure is what drives the eruption. Do not lecture — draw the idea out with questions and analogies. The activity is finished when the scholar can explain, in their own words, that trapped/expanding gas pressure (not just 'heat') is what makes it erupt.",
+    "learningGoal": "Explain in your own words that a volcano erupts because dissolved gases in rising magma expand as pressure drops (like a shaken soda bottle), and that gas pressure is what drives the eruption — not merely that it's 'hot'.",
+    "durationMinutes": 15
+  },
+  "script": [
+    "umm i think its cuz its really hot? like fire and stuff",
+    "i dont know... maybe the lava just wants to come out?",
+    "this is kinda hard. i dont really get it",
+    "i dont know",
+    "can i be done now? i dont want to do this anymore"
+  ],
+  "profile": {
+    "name": "Pip",
+    "readingLevel": "Grade 3",
+    "dossier": "8 years old. Starts willing but loses interest fast when a question has more than one step; gets frustrated and disengages rather than pushing through.",
+    "traits": [
+      "gives up quickly when confused",
+      "keeps saying 'I don't know' and stops trying",
+      "gets frustrated and disengages instead of working through it"
+    ],
+    "archetype": "disengages-early"
+  }
+}

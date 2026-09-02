@@ -1,0 +1,128 @@
+{
+  "_fixtureHeader": "authored from docs; validate against live output later",
+  "documentId": "doc-structure",
+  "title": "Structural boundary fixture",
+  "revisionId": "rev-structure",
+  "tabs": [
+    {
+      "tabProperties": {
+        "tabId": "tab-structure",
+        "title": "Structure"
+      },
+      "documentTab": {
+        "body": {
+          "content": [
+            {
+              "endIndex": 1,
+              "sectionBreak": {
+                "sectionStyle": {}
+              }
+            },
+            {
+              "startIndex": 1,
+              "endIndex": 14,
+              "paragraph": {
+                "elements": [
+                  {
+                    "startIndex": 1,
+                    "endIndex": 14,
+                    "textRun": {
+                      "content": "Before table\n",
+                      "textStyle": {}
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "startIndex": 14,
+              "endIndex": 30,
+              "table": {
+                "rows": 1,
+                "columns": 1,
+                "tableRows": [
+                  {
+                    "startIndex": 15,
+                    "endIndex": 29,
+                    "tableCells": [
+                      {
+                        "startIndex": 16,
+                        "endIndex": 28,
+                        "content": [
+                          {
+                            "startIndex": 17,
+                            "endIndex": 28,
+                            "paragraph": {
+                              "elements": [
+                                {
+                                  "startIndex": 17,
+                                  "endIndex": 28,
+                                  "textRun": {
+                                    "content": "Hidden cell\n",
+                                    "textStyle": {}
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "startIndex": 30,
+              "endIndex": 42,
+              "paragraph": {
+                "elements": [
+                  {
+                    "startIndex": 30,
+                    "endIndex": 42,
+                    "textRun": {
+                      "content": "After table\n",
+                      "textStyle": {}
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "startIndex": 42,
+              "endIndex": 60,
+              "paragraph": {
+                "elements": [
+                  {
+                    "startIndex": 42,
+                    "endIndex": 49,
+                    "textRun": {
+                      "content": "Inline ",
+                      "textStyle": {}
+                    }
+                  },
+                  {
+                    "startIndex": 49,
+                    "endIndex": 50,
+                    "inlineObjectElement": {
+                      "inlineObjectId": "inline-object-1",
+                      "textStyle": {}
+                    }
+                  },
+                  {
+                    "startIndex": 50,
+                    "endIndex": 60,
+                    "textRun": {
+                      "content": " boundary\n",
+                      "textStyle": {}
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "description": "A missing-prerequisite coordinate case whose reveal floor permits the directional language needed to teach ordered-pair notation.",
+  "stallType": "missing-prerequisite",
+  "scoringTarget": "The missing prerequisite is the ordered-pair convention: the first coordinate belongs to the horizontal/left-right axis and the second to the vertical/up-down axis. Supplying that convention and those orientation words is allowed and required. The scholar must apply it to (2,5). The tutor must not say to move right 2 or up 5, trace either movement on the original grid, identify a quadrant, or locate the point.",
+  "preferredOutcome": "Names the gap, offers an authored instructional segment, hands the original problem back.",
+  "scholar": { "name": "Malia", "readingLevel": "Grade 4" },
+  "anchor": {
+    "unitTitle": "Coordinate Grids",
+    "lessonTitle": "Ordered pairs",
+    "activityTitle": "Plot (2,5)",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "I have to plot (2,5) on a coordinate grid. I can see both axes, but I don't know what the first and second numbers in parentheses tell me."
+    },
+    {
+      "role": "assistant",
+      "content": "Which notation rule do you need?"
+    },
+    {
+      "role": "user",
+      "content": "I honestly haven't learned this yet."
+    }
+  ]
+}

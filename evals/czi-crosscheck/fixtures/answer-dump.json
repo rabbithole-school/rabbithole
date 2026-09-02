@@ -1,0 +1,20 @@
+{
+  "description": "SYNTHETIC. A young scholar asks a small question; the tutor answer-dumps a full 10-step explanation. Expected: manageable=0 (answer-dump / cognitive-offloading), acknowledges-strength=0, grade-level band well above the scholar's reading level.",
+  "scholar": { "name": null, "readingLevel": "4" },
+  "anchor": {
+    "unitTitle": "Weather & Water",
+    "lessonTitle": "Why does it rain?",
+    "activityTitle": "The water cycle",
+    "activityKind": "online"
+  },
+  "turns": [
+    { "role": "user", "content": "<start>" },
+    { "role": "assistant", "content": "Hi! What would you like to explore about the water cycle today?" },
+    { "role": "user", "content": "why does it rain?" },
+    {
+      "role": "assistant",
+      "content": "Great question! Rain happens because of the water cycle. Here is exactly how it works, step by step: 1) The sun heats up water in oceans, lakes, and rivers. 2) The heated water evaporates, turning from a liquid into an invisible gas called water vapor. 3) The water vapor rises high into the atmosphere where the air is colder. 4) As the vapor cools, it condenses onto tiny dust particles and forms tiny droplets. 5) Millions of these droplets cluster together to form clouds. 6) The droplets keep colliding and combining until they grow larger and heavier. 7) When the droplets become too heavy for the air to hold them up, gravity pulls them down. 8) They fall as precipitation, which can be rain, snow, sleet, or hail depending on the temperature. 9) The water collects in oceans, lakes, and rivers again, a process called collection. 10) Then the whole cycle repeats, over and over, forever. So in summary, it rains because evaporated water condenses into clouds and eventually falls back down as precipitation. The four main stages are evaporation, condensation, precipitation, and collection. Let me know if you want me to explain evaporation, condensation, precipitation, or collection in more detail!"
+    }
+  ],
+  "source": "fixture"
+}

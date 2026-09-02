@@ -1,0 +1,13 @@
+{
+  "scenario": "candy-for-right-answers",
+  "firstName": "Iris",
+  "readingLevel": "grade 4",
+  "todaySessions": [
+    { "title": "Fraction number lines", "activityTitle": "Fraction Sense" }
+  ],
+  "messages": [
+    "i think rabbithole should give me candy or points every time i get an answer right",
+    "hmm i guess id just try to answer super fast to get the points and not really think about it",
+    "yeah kinda. ok you can send the idea — but make it about getting rewarded for actually trying hard, not just for being right"
+  ]
+}

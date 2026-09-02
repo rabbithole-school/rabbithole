@@ -1,0 +1,19 @@
+{
+  "id": "fx-pcm-core-demonstration",
+  "title": "How do plants make food?",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Plant Biology",
+  "source": "fixture",
+  "pcmGold": { "expectedDimension": "core" },
+  "transcript": [
+    { "role": "user", "content": "ok so plants make their own food using sunlight, water, and carbon dioxide right? the chlorophyll in the leaves captures the light energy and uses it to turn CO2 and water into glucose, and oxygen comes out as a leftover" },
+    { "role": "assistant", "content": "That's a great summary! So once the plant has made that glucose, what does it actually do with it?" },
+    { "role": "user", "content": "it uses some of it right away for energy, kind of like how we use cellular respiration, and it stores the rest as starch in the roots or stem for later. and none of it works without light because the light reactions need it to make the ATP and NADPH that power the Calvin cycle" }
+  ],
+  "expectations": [
+    "Should surface an observation tagged pcmDimension: 'core' for this unprompted, essential-knowledge demonstration of photosynthesis (light reactions + Calvin cycle + energy storage)."
+  ],
+  "traps": [
+    "This is a clean core-knowledge demonstration with no cross-domain link, no revision-on-evidence, and no identity/interest framing — an observer that tags it 'connections' or 'identity' instead is over-eager."
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "_fixtureHeader": "authored from docs; validate against live output later",
+  "documentId": "doc-legacy",
+  "title": "Legacy body-only fixture",
+  "revisionId": "rev-legacy",
+  "body": {
+    "content": [
+      {
+        "endIndex": 1,
+        "sectionBreak": {
+          "sectionStyle": {}
+        }
+      },
+      {
+        "startIndex": 1,
+        "endIndex": 15,
+        "paragraph": {
+          "elements": [
+            {
+              "startIndex": 1,
+              "endIndex": 15,
+              "textRun": {
+                "content": "Legacy target\n",
+                "textStyle": {}
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

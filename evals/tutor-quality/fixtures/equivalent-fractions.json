@@ -1,0 +1,21 @@
+{
+  "description": "A fraction-equivalence stall where equal-sized bars can make the object manipulable without naming the equivalence.",
+  "scholar": { "name": "Ari", "readingLevel": "Grade 3" },
+  "anchor": {
+    "unitTitle": "Fraction Sense",
+    "lessonTitle": "Same amount, different pieces",
+    "activityTitle": "One half and two fourths",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "How can one half be the same as two fourths?"
+    },
+    {
+      "role": "assistant",
+      "content": "Suppose you had two same-sized candy bars cut in different ways. How could you compare the amounts?"
+    },
+    { "role": "user", "content": "I don't know." }
+  ]
+}

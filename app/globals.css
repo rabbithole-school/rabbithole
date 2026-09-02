@@ -1,0 +1,397 @@
+/* Global styles */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  max-width: 100vw;
+  overflow: hidden;
+  height: 100dvh;
+}
+
+/* Draw the app edge-to-edge and keep it out of the device's safe areas
+   (status bar / home indicator). env() is 0 in desktop browsers — a no-op on
+   the web, real on iPad Safari. The body background fills the inset strips so
+   they blend with app chrome: white by default, overridable per-screen via
+   --rh-shell-bg (useDarkShellChrome sets it to a dark color on full-bleed dark
+   screens so no light bar sits above the status bar). */
+body {
+  padding-top: env(safe-area-inset-top);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  background-color: var(--rh-shell-bg, #ffffff);
+}
+
+/* Selection */
+::selection {
+  background: rgba(173, 96, 191, 0.3);
+  color: #222656;
+}
+
+/* ── Selection discipline ────────────────────────────────────────────────
+   Interactive chrome (buttons, toggles, tabs, menu items, Ark triggers,
+   labels) is an action target, not copyable content — so dragging across the
+   UI never accidentally selects it. This is the DRY backbone: it covers app-
+   wide controls in one place. Content regions (chat, artifacts, reports,
+   headings, prose) are unaffected and stay selectable. Bespoke non-button
+   text chrome (SVG maps, captions, column titles) opts in locally with
+   `userSelect="none"`. */
+button,
+[role="button"],
+[role="tab"],
+[role="switch"],
+[role="menuitem"],
+[role="menuitemradio"],
+[role="menuitemcheckbox"],
+[role="option"],
+[role="radio"],
+[role="checkbox"],
+summary,
+label {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Form fields always opt back in, so typed text stays selectable/editable even
+   when an ancestor (e.g. a label) turns selection off. */
+input,
+textarea,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* ── Touch ergonomics (any coarse-pointer device, incl. iPad web) ────────
+   Apple HIG wants ≥44pt touch targets. Most of our icon buttons are
+   visually 32-40px — correct for the design — so instead of inflating
+   them, an invisible ::after pad expands each button's HIT AREA to 44px
+   minimum. inset percentages resolve against the button's own box (it is
+   the ::after's containing block), so one rule covers both axes: a 32px
+   button gets -6px pads; a ≥44px button gets 0. */
+@media (pointer: coarse) {
+  /* No double-tap-zoom wait and no synthetic-click delay on single-tap
+     controls. (Belt-and-suspenders with userScalable:false.) */
+  button,
+  a,
+  [role="button"],
+  [data-part="trigger"] {
+    touch-action: manipulation;
+  }
+  /* position:relative only on button — it anchors the ::after hit-area pad
+     below. Don't spread it to links/triggers (would shift their stacking /
+     containing block app-wide for no reason). */
+  button {
+    position: relative;
+  }
+  button::after {
+    content: "";
+    position: absolute;
+    top: min(0px, calc((100% - 44px) / 2));
+    bottom: min(0px, calc((100% - 44px) / 2));
+    left: min(0px, calc((100% - 44px) / 2));
+    right: min(0px, calc((100% - 44px) / 2));
+  }
+  /* Pressed feedback: controls dim on touch (hover states are meaningless
+     here). Quick recover on release. */
+  button:not(:disabled):active {
+    opacity: 0.55;
+    transition: opacity 0s;
+  }
+}
+
+/* On touch-primary devices there is no hover to reveal the per-message
+   read-aloud button — keep it visible. (Desktop keeps hover-reveal.) */
+@media (hover: none) {
+  .tts-btn {
+    opacity: 1 !important;
+  }
+}
+
+/* Focus styles */
+:focus-visible {
+  outline: 2px solid #ad60bf;
+  outline-offset: 2px;
+}
+
+/* Typography overrides */
+.font-heading {
+  font-family: var(--font-hanken-grotesk), sans-serif;
+}
+
+.font-body {
+  font-family: var(--font-hanken-grotesk), sans-serif;
+}
+
+/* Force pure horizontal slide on drawer (no vertical component) */
+[data-scope="drawer"][data-part="positioner"] {
+  translate: none !important;
+}
+
+/* The picker sets an inline z-index (~1001) on its dialog + backdrop, which is
+   below Chakra's modal layer, so it opens BEHIND the scanner "Upload" drawer it
+   was launched from. Force it above. `!important` is required to beat the
+   picker's inline style; doing it in CSS (not JS) avoids the timing race where
+   the picker re-applies its own z-index after we set it.
+
+   This chrome (dialog, backdrop, title, buttons) is the ONLY part of the picker
+   our CSS can reach — every row, thumbnail and control lives inside the
+   cross-origin `iframe.picker-dialog-frame` pointed at docs.google.com/picker,
+   which no parent stylesheet can style. So don't add rules here trying to fix
+   how the picker's CONTENT looks; they match nothing. */
+.picker-dialog {
+  z-index: 2147483000 !important;
+}
+.picker-dialog-bg {
+  z-index: 2147482999 !important;
+}
+
+/* Animations */
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 2s ease-in-out infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out forwards;
+}
+
+/* Message bubble styles */
+.message-bubble {
+  max-width: 85%;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.message-bubble.user {
+  margin-left: auto;
+}
+
+.message-bubble.assistant {
+  margin-right: auto;
+}
+
+@media (max-width: 768px) {
+  .message-bubble.assistant {
+    max-width: 100%;
+  }
+}
+
+/* Markdown in chat */
+.chat-markdown {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.chat-markdown p {
+  margin-bottom: 0.5rem;
+}
+
+.chat-markdown p:last-child {
+  margin-bottom: 0;
+}
+
+/* Bold is the tutor's one inline-emphasis tool, reserved for terms the scholar
+   needs to remember — render it as a deliberate navy term, not shouty black. */
+.chat-markdown strong {
+  font-weight: 600;
+  color: var(--chakra-colors-navy-500, #222656);
+}
+
+.chat-markdown code {
+  background: var(--chakra-colors-gray-100, #f0f1f3);
+  color: var(--chakra-colors-charcoal-600, #303a4a);
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.25rem;
+  font-size: 0.9em;
+}
+
+.chat-markdown pre {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+}
+
+.chat-markdown pre code {
+  background: none;
+  padding: 0;
+  color: inherit;
+}
+
+/* Steps (ordered) and options (unordered). padding-left (not margin-left) so
+   markers sit just inside the bubble; comfortable per-item leading so multi-line
+   items don't crowd. */
+.chat-markdown ul,
+.chat-markdown ol {
+  padding-left: 1.5rem;
+  margin-block: 0.5rem;
+}
+
+/* Chakra's CSS baseline resets list-style to none — restore real markers so
+   numbered steps actually show their numbers and options show bullets. */
+.chat-markdown ol {
+  list-style: decimal outside;
+}
+
+.chat-markdown ul {
+  list-style: disc outside;
+}
+
+.chat-markdown li {
+  margin-bottom: 0.375rem;
+  line-height: 1.5;
+}
+
+.chat-markdown li:last-child {
+  margin-bottom: 0;
+}
+
+/* Numbered steps: let the number lead in navy. Unordered: a quiet muted marker
+   so the text, not the bullet, carries the line. */
+.chat-markdown ol > li::marker {
+  color: var(--chakra-colors-navy-500, #222656);
+  font-weight: 600;
+}
+
+.chat-markdown ul > li::marker {
+  color: var(--chakra-colors-charcoal-400, #6d7584);
+}
+
+/* Tighten nested lists so a sub-list reads as part of its parent item. */
+.chat-markdown li > ul,
+.chat-markdown li > ol {
+  margin-block: 0.25rem;
+}
+
+/* Status indicator colors */
+.status-green {
+  background-color: #00dd91;
+}
+
+.status-yellow {
+  background-color: #ffe77c;
+}
+
+.status-red {
+  background-color: #ef4444;
+}
+
+/* Typing indicator */
+.typing-indicator span {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #ad60bf;
+  margin: 0 2px;
+  animation: typing 1.4s infinite ease-in-out both;
+}
+
+.typing-indicator span:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.typing-indicator span:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+/* TTS playing pulse */
+@keyframes tts-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(173, 96, 191, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(173, 96, 191, 0);
+  }
+}
+
+/* Recording pulse */
+@keyframes recording-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(239, 68, 68, 0);
+  }
+}
+
+.recording-pulse {
+  animation: recording-pulse 1.5s ease-in-out infinite;
+}
+
+/* Chat markdown heading styles. Headings only show up inside an explicitly
+   requested multi-section walkthrough; h3/h4 are the only levels the tutor
+   should reach for. Brand them navy with a gentle size step. */
+.chat-markdown h1,
+.chat-markdown h2,
+.chat-markdown h3,
+.chat-markdown h4 {
+  font-family: var(--font-hanken-grotesk), sans-serif;
+  font-weight: 600;
+  color: var(--chakra-colors-navy-500, #222656);
+  margin-bottom: 0.25rem;
+  margin-top: 1rem;
+}
+
+.chat-markdown h3 {
+  font-size: 1.05em;
+}
+
+.chat-markdown h4 {
+  font-size: 1em;
+}
+
+.chat-markdown h1:first-child,
+.chat-markdown h2:first-child,
+.chat-markdown h3:first-child,
+.chat-markdown h4:first-child {
+  margin-top: 0;
+}
+
+.chat-markdown hr {
+  border: none;
+  border-top: 1px solid var(--chakra-colors-gray-200, #e6e8ea);
+  margin: 1rem 0;
+}
+
+@keyframes typing {
+  0%,
+  80%,
+  100% {
+    transform: scale(0.6);
+    opacity: 0.6;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}

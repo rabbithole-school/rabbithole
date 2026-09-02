@@ -1,0 +1,43 @@
+{
+  "_comment": "Drift guard for vendored Learning Commons rubric content. rubrics.test.ts checks each sha256 so an accidental edit to a vendored copy fails CI. To intentionally re-sync from upstream, re-copy and update the sha256 here (see ATTRIBUTION.md).",
+  "upstreamRepo": "https://github.com/learning-commons-org/evaluators",
+  "upstreamCommit": "fcdf01c006a347e09aee042f986b95cac9f59456",
+  "files": {
+    "grade-level-appropriateness/output_schema.json": {
+      "sha256": "e80e1c3a201373ee2d4cbaca683db8965040b5bd0069d2f62d662a758adb73bc",
+      "upstream": "(transcribed from sdks/typescript/src/schemas/grade-level-appropriateness.ts)"
+    },
+    "grade-level-appropriateness/system.txt": {
+      "sha256": "ce5df1418404f44cb6236fd67b567b0bd205c12f15a1a475ab37f692d0508daf",
+      "upstream": "evals/prompts/grade-level-appropriateness/system.txt"
+    },
+    "grade-level-appropriateness/user.txt": {
+      "sha256": "41729e9eb488012734c668d48009bc94bf7d279ac60d4d1d10b45c566106c42e",
+      "upstream": "evals/prompts/grade-level-appropriateness/user.txt"
+    },
+    "productive-coaching/acknowledges-strength/output_schema.json": {
+      "sha256": "7e6b42a4e372853b99d2941058e9c9daf23ab04b461a55d81a629d9d307ccc24",
+      "upstream": "evals/feedback/productive-coaching-writing-feedback/acknowledges-strength/output_schema.json"
+    },
+    "productive-coaching/acknowledges-strength/system.txt": {
+      "sha256": "d66c26d4780f0df12b5099b117d10a5b5c518dd4505c41a15043492b319437e9",
+      "upstream": "evals/feedback/productive-coaching-writing-feedback/acknowledges-strength/system.txt"
+    },
+    "productive-coaching/acknowledges-strength/user.txt": {
+      "sha256": "eaac7e6eadcc43716e4a98b9e7f34c493c1cbe46adb38367dd8697b904d11bfa",
+      "upstream": "evals/feedback/productive-coaching-writing-feedback/acknowledges-strength/user.txt"
+    },
+    "productive-coaching/manageable/output_schema.json": {
+      "sha256": "7f9a02855134e42b73c173541736657c223eeacd464ea418f17e9aa3e8ae8a28",
+      "upstream": "evals/feedback/productive-coaching-writing-feedback/manageable/output_schema.json"
+    },
+    "productive-coaching/manageable/system.txt": {
+      "sha256": "91f7840d9fc0d77951e168376f7f357de2d5114e740192785682fca6497b44fc",
+      "upstream": "evals/feedback/productive-coaching-writing-feedback/manageable/system.txt"
+    },
+    "productive-coaching/manageable/user.txt": {
+      "sha256": "eaac7e6eadcc43716e4a98b9e7f34c493c1cbe46adb38367dd8697b904d11bfa",
+      "upstream": "evals/feedback/productive-coaching-writing-feedback/manageable/user.txt"
+    }
+  }
+}

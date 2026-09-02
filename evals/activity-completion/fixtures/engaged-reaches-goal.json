@@ -1,0 +1,28 @@
+{
+  "expectation": "should-complete",
+  "goalEvidencePatterns": [
+    "\\bgas(?:es)?\\b",
+    "\\bpressure\\b",
+    "\\bexpand(?:s|ing|ed)?\\b",
+    "not just[^\\n.]{0,80}(?:hot|heat)"
+  ],
+  "note": "Engaged capable scholar works the goal through and reaches genuine understanding of a conversation-only discussion activity. The tutor SHOULD close it out once the arc finishes — a tutor that never wraps a genuinely-finished conversation is the 'too late' failure (the volcano-homework 'still 1 due forever' bug this PR fixes).",
+  "activity": {
+    "title": "Why do volcanoes erupt?",
+    "kind": "online",
+    "systemPrompt": "This is a conversation-only discussion (no worksheet, no rubric). Guide the scholar, Socratically, to build an explanation of WHY volcanoes erupt: magma is less dense than surrounding rock so it rises; dissolved gases come out of solution as pressure drops (like a shaken soda), and that gas pressure is what drives the eruption. Do not lecture — draw the idea out with questions and analogies. The activity is finished when the scholar can explain, in their own words, that trapped/expanding gas pressure (not just 'heat') is what makes it erupt.",
+    "learningGoal": "Explain in your own words that a volcano erupts because dissolved gases in rising magma expand as pressure drops (like a shaken soda bottle), and that gas pressure is what drives the eruption — not merely that it's 'hot'.",
+    "durationMinutes": 15
+  },
+  "profile": {
+    "name": "Cog",
+    "readingLevel": "Grade 5",
+    "dossier": "10 years old. Curious and persistent; likes to reason out loud and connect new ideas to things she already knows. Sticks with a hard question rather than bailing.",
+    "traits": [
+      "pulls the thread and makes her own guesses",
+      "connects ideas to everyday things she's seen",
+      "keeps going when a first guess is wrong"
+    ],
+    "archetype": "engaged-persistent"
+  }
+}

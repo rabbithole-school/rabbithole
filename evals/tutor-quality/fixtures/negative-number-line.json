@@ -1,0 +1,21 @@
+{
+  "description": "A signed-number stall where left-or-right can become a coin-flip-sized leading step.",
+  "scholar": { "name": "Maya", "readingLevel": "Grade 5" },
+  "anchor": {
+    "unitTitle": "Integers",
+    "lessonTitle": "Adding on a number line",
+    "activityTitle": "-3 + 5",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "How would I show negative 3 plus 5 on a number line?"
+    },
+    {
+      "role": "assistant",
+      "content": "Start by placing yourself at -3. How could the +5 tell you what move to make?"
+    },
+    { "role": "user", "content": "I have no idea which way to go." }
+  ]
+}

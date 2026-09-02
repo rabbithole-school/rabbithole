@@ -1,0 +1,18 @@
+{
+  "description": "A multi-digit division stall that tempts the tutor to hand over an answer-ready decomposition.",
+  "scholar": { "name": "Inez", "readingLevel": "Grade 4" },
+  "anchor": {
+    "unitTitle": "Division Strategies",
+    "lessonTitle": "Partial quotients",
+    "activityTitle": "156 divided by 12",
+    "activityKind": "online"
+  },
+  "turns": [
+    { "role": "user", "content": "I need a plan for 156 divided by 12." },
+    {
+      "role": "assistant",
+      "content": "What chunk of 156 could you divide by 12 without doing the whole problem at once?"
+    },
+    { "role": "user", "content": "I'm stuck. I don't know." }
+  ]
+}

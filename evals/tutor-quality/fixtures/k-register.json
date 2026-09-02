@@ -1,0 +1,25 @@
+{
+  "description": "Gifted-K (age 5, pre-reader) curiosity thread — same behaviors as the k-bug-legs spot script: breathless run-ons, invented spelling, a mid-thread topic hop (bugs → worms), and an 'i dont know' stall. The authored assistant turns are the healthy K register (plan §5): 1–3 short sentences, one idea and one question per turn, NO markdown/bullets/headers, physical + think-aloud probes, an offered image, warmth about the THINKING not the child, a gentle bridge back after the hop — the reasoning stays hers. In --mode regenerate against the current (pre-P0, register-less) prompt, the dimensions that catch adult-register drift are ageFit (should crater on stacked questions / big words / long turns read aloud to a 5-year-old), didacticDensity (info-dumping the six-legs answer), socratic/overScaffolding (answer-dumping vs. handing back), and onTask (chasing the worm hop instead of honoring-then-bridging).",
+  "scholar": { "name": "Posy Kaimana", "readingLevel": "pre-reader" },
+  "anchor": {
+    "unitTitle": "Bugs and Their Bodies",
+    "lessonTitle": "How Many Legs?",
+    "activityTitle": "Counting an ant's legs",
+    "activityKind": "online"
+  },
+  "turns": [
+    { "role": "user", "content": "<start>" },
+    { "role": "assistant", "content": "Hi Posy. Bugs today. What made you start wondering about their legs?" },
+    { "role": "user", "content": "why do bugs have six legs why not like a hundred legs" },
+    { "role": "assistant", "content": "Six is a funny number, huh. Try this with me. Stand up and lift one foot. Are you wobbly?" },
+    { "role": "user", "content": "i counted a ant one time. one two three... it had six i counted all of them" },
+    { "role": "assistant", "content": "Six, and you counted every one. That's careful looking. So when you stood on one foot, what did your body do?" },
+    { "role": "user", "content": "i dont know" },
+    { "role": "assistant", "content": "That's okay. When I get stuck, I try it small. Put just one finger down on the table. Can one finger hold up a whole book?" },
+    { "role": "user", "content": "OH WAIT do worms have legs. becuz i digged one up in the yard and it was all squishy and it had NO legs not even one leg" },
+    { "role": "assistant", "content": "Ooh, a worm with no legs at all. Want me to draw one so we can look?" },
+    { "role": "user", "content": "worms dont got bones thats why there squishy. i got bones look i can feel them right here on my arm" },
+    { "role": "assistant", "content": "You figured that out yourself. Squishy because no bones. So back to your bug. What do you think six feet help it do?" },
+    { "role": "user", "content": "wait but why do the bugs need six tho. thats what i wanna know" }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  // Type-checks the test files, which native/tsconfig.json deliberately
+  // EXCLUDES (`"exclude": ["**/*.test.ts", "**/__tests__/**"]`) — so without
+  // this config `npm run typecheck` covers no test file at all.
+  //
+  // Run it with `npm run test:types`. Its header used to claim it worked
+  // "without needing expo installed"; that stopped being true once
+  // src/lib/__tests__/nativeTTS.test.ts started importing lib/nativeTTS.ts
+  // (→ `expo-audio`, `expo-file-system/legacy`) and other tests pulled in
+  // lib/convex.ts (→ `@convex/*`). Both are transitive roots now, so this
+  // needs the SAME two installs as CI's typecheck-native job: the root pnpm
+  // deps AND native's own `npm ci`. In a git worktree, which only symlinks the
+  // ROOT node_modules, expect ~3 unresolved-`expo-*` errors that are an
+  // artifact of that, not of the code.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "paths": {
+      "@/*": ["./src/*"],
+      // Mirrors native/tsconfig.json. Without it every test that reaches
+      // lib/convex.ts failed with TS2307 on `@convex/api` / `@convex/dataModel`
+      // — a missing mapping here, NOT a missing dependency.
+      "@convex/*": ["../convex/_generated/*"]
+    }
+  },
+  "include": [
+    "src/lib/skyLayout.ts",
+    "src/lib/markdownParse.ts",
+    "src/lib/kidSafePrinciples.ts",
+    "src/lib/__tests__/**/*.ts",
+    "src/components/unit-progress.test.ts",
+    "src/components/games/**/*.test.ts",
+    "src/components/PrepChooserCard.test.ts",
+    "src/components/manipulatives/__tests__/**/*.test.ts",
+    "src/components/slides/slidesEditorBackgroundCommit.test.ts",
+    "src/components/slides/slidesEditorSlideSwitch.test.ts",
+    // Individually named — not a `src/app/__tests__/**` /
+    // `src/hooks/__tests__/**` glob — matching this file's own convention
+    // above (unit-progress.test.ts, PrepChooserCard.test.ts, …) of listing
+    // specific known-clean files rather than a whole directory. Neither
+    // directory has been covered by this config before, and each holds
+    // OTHER pre-existing test files (e.g. useKeyboardInset.test.ts) this
+    // migration never touched and isn't responsible for making typecheck-clean.
+    "src/app/__tests__/practiceMachineOwnership.test.ts",
+    "src/app/__tests__/practiceResumeWiring.test.ts",
+    "src/hooks/__tests__/usePracticeMachine.test.ts"
+  ]
+}

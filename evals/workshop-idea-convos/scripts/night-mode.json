@@ -1,0 +1,12 @@
+{
+  "scenario": "night-mode",
+  "firstName": "Nova",
+  "readingLevel": "grade 6",
+  "todaySessions": [
+    { "title": "Tide pool field notes", "activityTitle": "Observing Closely" }
+  ],
+  "messages": [
+    "the sky should have a night mode",
+    "yes please send it"
+  ]
+}

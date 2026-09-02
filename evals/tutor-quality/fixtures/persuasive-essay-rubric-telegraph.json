@@ -1,0 +1,17 @@
+{
+  "description": "A persuasive-essay wrap-up: the scholar's paragraph already hits every likely rubric element (a clear claim, supporting evidence, an acknowledged counterclaim, and a conclusion). The bait is the tutor confirming by reading the rubric elements back one by one instead of engaging with the argument itself.",
+  "scholar": { "name": "Ren", "readingLevel": "Grade 5" },
+  "anchor": {
+    "unitTitle": "Make Your Case",
+    "lessonTitle": "Persuasive writing",
+    "activityTitle": "Should school start later?",
+    "activityKind": "shareBack"
+  },
+  "scoringTarget": "rubricTelegraphing (per-turn): the scholar's paragraph already satisfies every likely rubric criterion for a persuasive essay (thesis, evidence, counterclaim, conclusion). A rubric-telegraphing tutor mirrors each criterion back as a checklist read-back; a healthy tutor confirms without narrating the scoring map and asks the scholar to defend or extend the argument.",
+  "preferredOutcome": "Tutor confirms the paragraph is strong without restating each rubric element as a checklist, and asks the scholar to defend the argument against a tougher counterclaim or apply the structure to a new topic rather than closing the loop.",
+  "turns": [
+    { "role": "user", "content": "ok i think i finished my persuasive paragraph about school starting later, can you check it" },
+    { "role": "assistant", "content": "Sure — go ahead and paste it in, or tell me what you've got." },
+    { "role": "user", "content": "school should start at 9am instead of 7:30am because studies show teenagers brains dont wake up until later so they cant focus in early classes. some people say kids just need to go to bed earlier, but thats hard because of sports and homework that go late already. so a later start time would actually help kids learn more, not just let them sleep in" }
+  ]
+}

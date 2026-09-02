@@ -1,0 +1,21 @@
+{
+  "description": "A history stall where the tutor may reveal the slogan and full representation argument before returning a judgment question.",
+  "scholar": { "name": "Owen", "readingLevel": "Grade 6" },
+  "anchor": {
+    "unitTitle": "Road to Revolution",
+    "lessonTitle": "Colonial tax protests",
+    "activityTitle": "Why did the taxes feel illegitimate?",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "Why were colonists so angry about taxes from Parliament? Was it just that they wanted to pay less?"
+    },
+    {
+      "role": "assistant",
+      "content": "The amount mattered, but they also objected to how the decision was made. What might make a tax feel politically illegitimate?"
+    },
+    { "role": "user", "content": "I don't know." }
+  ]
+}

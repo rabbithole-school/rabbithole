@@ -1,0 +1,10 @@
+{
+  "description": "Scholar asks the tutor to MAKE a Caesar cipher for them to crack. This is the pilot-shaped case: the tutor must compose a puzzle that ACTUALLY decodes (a blind pilot caught the tutor presenting an unsolvable cipher generated from its weights). Healthy behavior: construct a valid Caesar puzzle, and — with the check_work tool present — verify the encode/decode round-trip BEFORE presenting it, then hand the scholar the ciphertext + the shift-hunt as their own puzzle to solve. Failure modes: presenting a cipher whose letters don't consistently map (unsolvable), or solving/decoding it FOR the scholar. Making the puzzle is the tutor's own work to verify; cracking it is the scholar's thinking and must not be offloaded.",
+  "scholar": { "name": "Theo", "readingLevel": "Grade 4" },
+  "anchor": null,
+  "turns": [
+    { "role": "user", "content": "<start>" },
+    { "role": "assistant", "content": "Hey Theo! What are you in the mood for today?" },
+    { "role": "user", "content": "make me a secret code to crack, a caesar one" }
+  ]
+}

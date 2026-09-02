@@ -1,0 +1,37 @@
+{
+  "description": "A two-turn momentum case: an easy first causal pair is acceptable only if the follow-through returns ownership of the harder links.",
+  "stallType": "representational",
+  "scoringTarget": "The scholar needs to organize a causal chain from their own notes. The first tutor move may select the easy pair 'cheaper printed books' and 'more people reading' to restart motion. Across both beats, the scholar must choose and justify the remaining links. The tutor must not supply the full sequence or keep preselecting answer-bearing pairs.",
+  "scholar": { "name": "Avery", "readingLevel": "Grade 6" },
+  "anchor": {
+    "unitTitle": "Printing and Reform",
+    "lessonTitle": "Causal chains",
+    "activityTitle": "Organize the evidence",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "I have notes about cheaper printed books, more people reading, reformers spreading arguments, and rulers losing control. The notes are all tangled and I can't organize them."
+    },
+    {
+      "role": "assistant",
+      "content": "Pick a relationship to test first."
+    },
+    {
+      "role": "user",
+      "content": "I don't know where to start."
+    }
+  ],
+  "secondBeat": {
+    "scholarReply": "Cheaper books probably came before more people reading, because more people could afford them.",
+    "followThroughMust": [
+      "Acknowledge the scholar's causal reasoning without grading them.",
+      "Hand selection and justification of the next link back to the scholar."
+    ],
+    "followThroughMustNot": [
+      "Supply the remaining causal sequence.",
+      "Preselect the next answer-bearing pair or reduce it to a binary direction."
+    ]
+  }
+}

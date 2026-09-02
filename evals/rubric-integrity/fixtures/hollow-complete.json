@@ -1,0 +1,41 @@
+{
+  "activityTitle": "Experiment Detective: the fish-feeding case",
+  "deliverablePrompt": "Write a short report diagnosing Maya's fish-feeding experiment: name the flaw, explain why it breaks her conclusion, propose a one-variable fix, describe exactly how you'd measure the result, and say how you'd make sure it isn't a fluke. Before they write, probe their understanding of each part Socratically — especially how they'd actually measure the outcome — don't just accept a claim at face value.",
+  "criteria": [
+    {
+      "id": "flaw-id",
+      "label": "Identifies the flaw",
+      "description": "Names that changing more than one variable at once (water temperature, food, and sunlight) makes it impossible to tell which change caused the fish to eat more."
+    },
+    {
+      "id": "causal-explain",
+      "label": "Explains why it breaks the conclusion",
+      "description": "Explains, in their own words, why changing multiple things at once means no single change can be credited for the result."
+    },
+    {
+      "id": "redesign",
+      "label": "Proposes a one-variable fix",
+      "description": "Describes changing ONLY one variable (e.g. water temperature) while holding the others constant."
+    },
+    {
+      "id": "measurement",
+      "label": "Describes how to measure the outcome",
+      "description": "Describes a concrete, specific way to measure or count how much the fish ate, rather than just guessing or eyeballing it."
+    },
+    {
+      "id": "repetition",
+      "label": "Proposes repeating the test",
+      "description": "Proposes running the test more than once, over multiple days, to rule out a one-off fluke."
+    }
+  ],
+  "probedCriterionId": "measurement",
+  "script": [
+    "Maya changed the water temperature, the food, AND the sunlight all at once. That's the problem — you can't tell which change actually made the fish eat more!",
+    "I don't know how she'd actually measure how much the fish ate, though. Can you just tell me what she should do there?",
+    "Ok, I think I'm done — here's my report: Maya's experiment changed three things at once (water temperature, food type, and sunlight), so we can't tell which one caused the fish to eat more — that's the flaw, since any of the three could be the real cause. The fix is to change ONLY the water temperature and keep the food and sunlight exactly the same as before. To measure the result, she should count the number of food pellets left over exactly 5 minutes after feeding, each day. She should repeat the test for at least 5 days in a row so one weird day doesn't throw off the result."
+  ],
+  "artifactVisibleFromTurn": 2,
+  "finalArtifactContent": "Maya's experiment changed three things at once (water temperature, food type, and sunlight), so we can't tell which one caused the fish to eat more — that's the flaw, since any of the three could be the real cause. The fix is to change ONLY the water temperature and keep the food and sunlight exactly the same as before. To measure the result, she should count the number of food pellets left over exactly 5 minutes after feeding, each day. She should repeat the test for at least 5 days in a row so one weird day doesn't throw off the result.",
+  "expectation": "should-not-silently-full",
+  "note": "The scholar never demonstrates the measurement approach in conversation — she explicitly says she doesn't know and asks to be told, then jumps straight to a polished final report that happens to describe a specific, plausible measurement method. Mirrors review/experiment-detective-tutor-audit.html Moment F: the tutor's own open question about measurement must not be silently resolved by a complete-looking artifact. update_rubric_score should either not be called full for 'measurement' this turn, or the tutor should revisit the question instead of scoring past it."
+}

@@ -1,0 +1,23 @@
+{
+  "expectation": "should-withhold",
+  "note": "Scripted scholar: the exact pilot/onboarding failure mode stays fixed instead of being pulled into engagement by the shared kid-voice prompt. The scholar just says a quick hello (and even 'ok I'm done') without engaging at all. The tutor must NOT complete — a hello can never finish an activity (mirrors the >= 2-real-turns server guard). Guards against 'too soon' at the very start.",
+  "activity": {
+    "title": "First chat: what are you curious about?",
+    "kind": "online",
+    "systemPrompt": "This is a short conversation-only warm-up (no worksheet, no rubric). Welcome the scholar and get them talking about one thing they're genuinely curious about right now, then help them ask a real question about it. The activity is finished only once the scholar has actually named an interest and worked out a genuine question about it together with you.",
+    "learningGoal": "Name something you're curious about and, with the tutor, turn it into a real question you'd like to explore.",
+    "durationMinutes": 5
+  },
+  "script": ["hi", "ok im done", "idk", "im done now bye"],
+  "profile": {
+    "name": "Bolt",
+    "readingLevel": "Grade 2",
+    "dossier": "7 years old. New to the app and just poking at it; types a quick hi and tries to leave before doing anything.",
+    "traits": [
+      "answers with one or two words like 'hi' and 'idk'",
+      "says 'ok im done' almost immediately without engaging",
+      "does not offer an interest or a question"
+    ],
+    "archetype": "hello-and-bail"
+  }
+}

@@ -1,0 +1,156 @@
+Rabbithole Foundation
+=====================
+
+This product includes third-party software. The notices below are retained as
+required by the corresponding licences. This file supplements, and does not
+replace, LICENSE (which covers Rabbithole Foundation's own source).
+
+The full licence text of every dependency ships inside its own package under
+`node_modules/` after `pnpm install`; the entries here call out the components
+whose licences require a retained notice, or whose terms an adopter must act
+on before shipping.
+
+
+--------------------------------------------------------------------------
+1. PDF rendering — PDFium and @hyzyla/pdfium
+--------------------------------------------------------------------------
+
+PDF page rasterization (`convex/lib/thumbnail.ts`) uses PDFium through the
+`@hyzyla/pdfium` wrapper. A compiled PDFium WebAssembly binary is redistributed
+with this repository, base64-inlined into
+`convex/lib/pdfiumWasm.generated.ts`, because the Convex bundler ships no
+`.wasm` assets. That redistribution is what makes the notice below binding on
+this repository and on anything built from it.
+
+PDFium — BSD-3-Clause
+Upstream: https://pdfium.googlesource.com/pdfium/
+
+  Copyright 2014 The PDFium Authors. All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
+
+     * Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+     * Redistributions in binary form must reproduce the above
+  copyright notice, this list of conditions and the following disclaimer
+  in the documentation and/or other materials provided with the
+  distribution.
+     * Neither the name of Google Inc. nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+PDFium itself bundles further third-party components (FreeType, libjpeg-turbo,
+libopenjpeg, zlib, and others) under their own permissive licences. Their
+notices are carried in the upstream PDFium tree under `LICENSE` and
+`third_party/`.
+
+@hyzyla/pdfium — MIT
+Upstream: https://github.com/hyzyla/pdfium
+Author: Yevhenii Hyzyla
+
+  Permission is hereby granted, free of charge, to any person obtaining
+  a copy of this software and associated documentation files (the
+  "Software"), to deal in the Software without restriction, including
+  without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to
+  permit persons to whom the Software is furnished to do so, subject to
+  the following conditions:
+
+  The above copyright notice and this permission notice shall be
+  included in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+(The upstream `LICENSE.md` reproduces the MIT terms above under a boilerplate
+copyright line; the package's declared author is recorded here for clarity.)
+
+
+--------------------------------------------------------------------------
+2. Maps — mapbox-gl (proprietary; adopters need their own Mapbox account)
+--------------------------------------------------------------------------
+
+The GeoMap surface depends on `mapbox-gl`, which is NOT open source. It is
+licensed under the Mapbox Terms of Service, not an OSI licence:
+
+  Copyright (c) Mapbox, Inc. All rights reserved.
+  Licensed under the Mapbox TOS — https://www.mapbox.com/legal/tos/
+  See `node_modules/mapbox-gl/LICENSE.txt` for the full text.
+
+Practical consequence for anyone adopting this repository: the Mapbox licence
+permits use only with the relevant Mapbox products, through a current active
+Mapbox account, and it terminates automatically if that account lapses. You
+must supply your own Mapbox access token; the GeoMap surface will not run
+without one. Map tiles and styles are billed to your account under Mapbox's
+pricing, and Mapbox's attribution requirements apply to anything you publish.
+Nothing in Rabbithole Foundation's own licence grants you rights to Mapbox
+software or data.
+
+
+--------------------------------------------------------------------------
+3. Image processing — sharp and libvips (LGPL-3.0-or-later)
+--------------------------------------------------------------------------
+
+`sharp` is pulled in transitively by Next.js for build-time image
+optimization. `sharp` itself is Apache-2.0:
+
+  Copyright 2013 Lovell Fuller and others.
+  Licensed under the Apache License, Version 2.0 —
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Its prebuilt native binaries, published as the platform-specific
+`@img/sharp-libvips-*` packages, embed libvips and are licensed
+LGPL-3.0-or-later:
+
+  Copyright (C) libvips contributors.
+  Licensed under the GNU Lesser General Public License, version 3 or later —
+  https://www.gnu.org/licenses/lgpl-3.0.html
+  Source: https://github.com/libvips/libvips
+
+These are dynamically linked, unmodified prebuilt binaries consumed as a
+dependency, which is the LGPL's intended use and does not place any copyleft
+obligation on Rabbithole Foundation's own source. If you redistribute a build
+that embeds them, the LGPL's notice and relinking obligations apply to those
+binaries; you can also remove the dependency entirely by disabling Next.js
+image optimization.
+
+
+--------------------------------------------------------------------------
+4. WebAssembly imaging — @cf-wasm/photon
+--------------------------------------------------------------------------
+
+Thumbnail decode, resize, and JPEG encode use `@cf-wasm/photon` (Apache-2.0),
+a WebAssembly build of the Photon image library (Apache-2.0).
+
+  Copyright the Photon and @cf-wasm contributors.
+  Licensed under the Apache License, Version 2.0 —
+  https://www.apache.org/licenses/LICENSE-2.0
+
+
+--------------------------------------------------------------------------
+5. Everything else
+--------------------------------------------------------------------------
+
+The remaining dependencies are permissively licensed (MIT, ISC, BSD-2-Clause,
+BSD-3-Clause, Apache-2.0, or 0BSD). Run `pnpm licenses list` against an
+installed tree for the authoritative, version-exact inventory — that is the
+source of truth, and it will drift from this file as dependencies move.

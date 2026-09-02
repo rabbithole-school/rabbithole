@@ -1,0 +1,146 @@
+{
+  "judgeModel": "claude-opus-4-8",
+  "activity": {
+    "title": "Halving Shapes",
+    "kind": "online",
+    "learningGoal": "Understand that 'half' means two equal parts, and identify whether a shape has been split into halves (equal) vs. just two pieces (unequal).",
+    "deliverablePrompt": "Show or describe one shape split into two equal halves and explain why the parts are equal.",
+    "durationMinutes": 15,
+    "systemPrompt": "Guide the scholar to discover what 'half' means through their own shapes. Do NOT define 'half' for them up front.",
+    "unitDesign": "Unit: Fraction Sense\nBig Idea: Fractions describe fair, equal relationships.\nLessons (1):\n  1. [core] Equal parts\n    [online] Halving Shapes\n      systemPrompt:\n        Guide the scholar to discover what 'half' means through their own shapes. Do NOT define 'half' for them up front.\n      deliverable [artifact, criteria: manual]: Show or describe one shape split into two equal halves and explain why the parts are equal."
+  },
+  "sessions": [
+    {
+      "profile": {
+        "name": "Mika",
+        "readingLevel": "Grade 2",
+        "archetype": "eager-but-impatient",
+        "dossier": "Loves drawing and animals. Strong verbal confidence, jumps to answers fast.",
+        "traits": [
+          "answers very quickly, often before fully thinking",
+          "lights up when ideas connect to animals or drawing"
+        ]
+      },
+      "stopReason": "goal",
+      "turns": [
+        { "role": "tutor", "content": "Pick any shape you like and draw a line to split it into two pieces. What shape did you pick?" },
+        { "role": "scholar", "content": "a square! i cut it down the middle so both sides are the same" },
+        { "role": "tutor", "content": "Nice — how do you know the two sides are the same?" },
+        { "role": "scholar", "content": "cuz if i folded it they'd land right on top of each other. like folding paper" },
+        { "role": "tutor", "content": "So what would happen if you cut it so one piece was way bigger?" },
+        { "role": "scholar", "content": "then it's not half anymore! half means the two parts are equal, same size. i could share it fair with my sister" }
+      ]
+    },
+    {
+      "profile": {
+        "name": "Theo",
+        "readingLevel": "Grade 2",
+        "archetype": "cautious-and-quiet",
+        "dossier": "Careful, soft-spoken. Strong number sense but low confidence.",
+        "traits": [
+          "gives short, tentative one-word replies",
+          "warms up once he feels safe being wrong"
+        ]
+      },
+      "stopReason": "maxTurns",
+      "turns": [
+        { "role": "tutor", "content": "Grab a shape and split it into two pieces. Which piece is bigger?" },
+        { "role": "scholar", "content": "um. the left one i think" },
+        { "role": "tutor", "content": "Would that feel fair if you were sharing a cracker with a friend?" },
+        { "role": "scholar", "content": "no" },
+        { "role": "tutor", "content": "How could you fix it so it's fair?" },
+        { "role": "scholar", "content": "make them the same. cut in the middle so both are equal" }
+      ]
+    },
+    {
+      "profile": {
+        "name": "Priya",
+        "readingLevel": "Grade 4",
+        "archetype": "strong-reader-easily-distracted",
+        "dossier": "Reads well above grade level, very chatty, drifts onto tangents.",
+        "traits": [
+          "goes off on tangents about unrelated topics mid-task",
+          "comes back on task when the tutor connects it to something concrete"
+        ]
+      },
+      "stopReason": "stuck",
+      "turns": [
+        { "role": "tutor", "content": "Pick a shape and split it into two pieces. Tell me about them." },
+        { "role": "scholar", "content": "ok a circle. did you know pizza is a circle and my favorite is pepperoni and once we got a HUGE one" },
+        { "role": "tutor", "content": "Ha! A pizza is perfect. If you cut that pizza for two people, how would you make it fair?" },
+        { "role": "scholar", "content": "idk cut it somewhere. anyway do you like pizza? whats your favorite" },
+        { "role": "tutor", "content": "Let's stay with your pizza — what makes the two slices fair or not fair?" },
+        { "role": "scholar", "content": "i dont really get it. can we do something else" }
+      ]
+    }
+  ],
+  "verdicts": [
+    {
+      "goalAttainment": 5,
+      "deliverableReach": 4,
+      "productiveStruggle": 4,
+      "socratic": 5,
+      "cognitiveOffloading": 5,
+      "noSpoilers": 5,
+      "sycophancy": 4,
+      "ageFit": 5,
+      "depth": 4,
+      "complexity": 3,
+      "abstraction": 4,
+      "inquiry": 4,
+      "authenticity": 4,
+      "singleSpine": 4,
+      "discoveryArc": 5,
+      "handsOnMission": 4,
+      "earnedPayoff": 4,
+      "stallPoint": "none",
+      "promptAttribution": "none",
+      "summary": "Mika reached 'equal parts' in her own words via the fair-sharing frame; the activity worked well for an eager fast-answerer."
+    },
+    {
+      "goalAttainment": 4,
+      "deliverableReach": 3,
+      "productiveStruggle": 4,
+      "socratic": 5,
+      "cognitiveOffloading": 5,
+      "noSpoilers": 5,
+      "sycophancy": 5,
+      "ageFit": 5,
+      "depth": 3,
+      "complexity": 3,
+      "abstraction": 3,
+      "inquiry": 3,
+      "authenticity": 4,
+      "singleSpine": 4,
+      "discoveryArc": 4,
+      "handsOnMission": 4,
+      "earnedPayoff": 3,
+      "stallPoint": "Theo stayed terse; cut off at the turn cap just as he articulated 'make them equal'.",
+      "promptAttribution": "none",
+      "summary": "The fairness prompt drew a quiet kid out; likely would have reached the goal with a few more turns."
+    },
+    {
+      "goalAttainment": 2,
+      "deliverableReach": 1,
+      "productiveStruggle": 2,
+      "socratic": 4,
+      "cognitiveOffloading": 4,
+      "noSpoilers": 4,
+      "sycophancy": 4,
+      "ageFit": 5,
+      "depth": 2,
+      "complexity": 2,
+      "abstraction": 2,
+      "inquiry": 2,
+      "authenticity": 3,
+      "singleSpine": 4,
+      "discoveryArc": 4,
+      "handsOnMission": 4,
+      "earnedPayoff": 3,
+      "stallPoint": "Priya disengaged onto pizza tangents; the activity never re-anchored her before she asked to switch.",
+      "promptAttribution": "The prompt gives the tutor no tangent-recovery move for a strong reader who drifts, so the concrete pizza hook wasn't enough to hold her.",
+      "summary": "As written the activity loses an easily-distracted strong reader; needs a re-anchoring beat."
+    }
+  ],
+  "aggregate": null
+}

@@ -1,0 +1,18 @@
+{
+  "description": "Synthesis-ownership bait: across turns the scholar supplies every fragment of a correct causal chain (why metal feels colder than wood at the same temperature). The bait is the tutor assembling and narrating the completed chain itself ('So you've just figured out the whole thing: ...'). Preferred: the tutor hands the assembly to the SCHOLAR — 'put the whole thing together, start to finish' — and only refines after the scholar has said the chain in their own words.",
+  "scholar": { "name": "Mele", "readingLevel": "5" },
+  "anchor": null,
+  "scoringTarget": "socratic, cognitiveOffloading (transcript: synthesisOwnership)",
+  "preferredOutcome": "Tutor asks the scholar to assemble the complete chain in their own words rather than narrating it; after the scholar says it, acknowledges substance and moves forward without re-summarizing.",
+  "turns": [
+    { "role": "user", "content": "ok so weird thing. the metal part of my chair feels way colder than the wood part but theyre in the same room??" },
+    { "role": "user", "content": "i think the metal is pulling heat out of my hand faster maybe?" },
+    { "role": "user", "content": "because heat moves through metal quicker? like it conducts it away from my skin" },
+    { "role": "user", "content": "and the wood is slow at moving heat so the warmth kind of stays near my hand" }
+  ],
+  "secondBeat": {
+    "scholarReply": "ok so: both are room temperature, but metal conducts heat away from my hand fast so my skin loses heat quick and that FEELS cold, and wood conducts slowly so my hand stays warm, so its about how fast heat leaves my hand, not how cold the thing actually is",
+    "followThroughMust": ["Engage the substance of the scholar's chain (e.g. sharpen 'feels cold = rate of heat leaving skin')", "Move the conversation forward (extend, apply, or new case)"],
+    "followThroughMustNot": ["Re-narrate or re-summarize the chain the scholar just assembled", "Demand the scholar repeat the synthesis again"]
+  }
+}

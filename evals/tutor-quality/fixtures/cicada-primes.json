@@ -1,0 +1,21 @@
+{
+  "description": "A predator-cycle explanation tempts the tutor to precompute a divisibility list and funnel to yes/no.",
+  "scholar": { "name": "Mika", "readingLevel": "Grade 5" },
+  "anchor": {
+    "unitTitle": "Cicada Cycles",
+    "lessonTitle": "Prime-number survival",
+    "activityTitle": "Why 13 and 17?",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "Cicadas can come out every 13 or 17 years. Why might prime-number cycles help them avoid predators?"
+    },
+    {
+      "role": "assistant",
+      "content": "Imagine a predator population that peaks on a repeating schedule. How could you compare that schedule with a cicada cycle?"
+    },
+    { "role": "user", "content": "I don't know." }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "scholarName": "Scholar T",
+  "_source": "Authored synthetic regression script. It is not a transcript reconstruction and makes no claim about production wording or turn order.",
+  "messages": [
+    "<start>",
+    "I think tide-pool animals hide more when the water gets warmer.",
+    "Could I test that without moving the animals?",
+    "I would count how many are visible at the same rocks before and after noon.",
+    "But the tide height changes too, so that might confuse the result.",
+    "Maybe I could compare two pools at the same time instead.",
+    "What should I record besides temperature?",
+    "I do not know how many days would be enough.",
+    "If my counts disagree with my guess, I would want to know what else changed."
+  ]
+}

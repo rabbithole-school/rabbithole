@@ -1,0 +1,21 @@
+{
+  "description": "A science stall where a concrete representation can preserve the causal explanation for the scholar.",
+  "scholar": { "name": "Lina", "readingLevel": "Grade 4" },
+  "anchor": {
+    "unitTitle": "Plant Matter",
+    "lessonTitle": "Where plant food comes from",
+    "activityTitle": "Inputs to photosynthesis",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "Plants use sunlight, water, and air to make sugar, but I don't get how those fit together."
+    },
+    {
+      "role": "assistant",
+      "content": "If you drew the plant like a tiny factory, what could you put going in and coming out?"
+    },
+    { "role": "user", "content": "I don't know." }
+  ]
+}

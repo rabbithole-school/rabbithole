@@ -1,0 +1,61 @@
+{
+  "_fixtureHeader": "authored from docs; validate against live output later",
+  "documentId": "doc-suggestions",
+  "title": "Pending suggestion fixture",
+  "revisionId": "rev-suggestions",
+  "tabs": [
+    {
+      "tabProperties": {
+        "tabId": "tab-suggestions",
+        "title": "Suggestions"
+      },
+      "documentTab": {
+        "body": {
+          "content": [
+            {
+              "endIndex": 1,
+              "sectionBreak": {
+                "sectionStyle": {}
+              }
+            },
+            {
+              "startIndex": 1,
+              "endIndex": 20,
+              "paragraph": {
+                "elements": [
+                  {
+                    "startIndex": 1,
+                    "endIndex": 8,
+                    "textRun": {
+                      "content": "Before ",
+                      "textStyle": {}
+                    }
+                  },
+                  {
+                    "startIndex": 8,
+                    "endIndex": 19,
+                    "textRun": {
+                      "content": "suggestion ",
+                      "suggestedInsertionIds": [
+                        "suggestion-1"
+                      ],
+                      "textStyle": {}
+                    }
+                  },
+                  {
+                    "startIndex": 19,
+                    "endIndex": 20,
+                    "textRun": {
+                      "content": "\n",
+                      "textStyle": {}
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "id": "fx-directed-build-inflation",
+  "title": "Chain reaction animation",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Open Exploration",
+  "source": "fixture",
+  "transcript": [
+    { "role": "user", "content": "can you build me a chain reaction thing? like dominoes that knock stuff over" },
+    { "role": "assistant", "content": "Oh, I love this — what you're describing is a **Rube Goldberg machine**: a deliberately over-complicated chain of events where one thing triggers the next. I can build you an interactive animation of one! Tell me what you want in the chain and I'll make it. What should kick it off?" },
+    { "role": "user", "content": "a domino falls, then it hits a hot wheels car that rolls down a ramp, then the car knocks over more dominoes, then the last domino pulls a string that lifts a little flag" },
+    { "role": "assistant", "content": "Perfect, that's a great sequence! I'll build that now. The car rolling down the ramp uses gravity — as it descends, gravitational potential energy turns into kinetic energy, so it speeds up and has enough momentum to knock the next dominoes. And that string-and-flag at the end is a simple pulley: it redirects the pulling force upward. Here's your machine — watch it run!" },
+    { "role": "user", "content": "whoa that's so cool!! can you make the car heavier? it'll fall down the ramp faster if it's heavier right" },
+    { "role": "assistant", "content": "I can make the car bigger! Quick thing to notice though when it runs: watch how fast it reaches the bottom. I'll set the heavier car going down the same ramp — see if it actually gets there faster than the light one did." },
+    { "role": "user", "content": "huh it looks the same speed. weird. but ok cool. can the ramp be steeper" },
+    { "role": "assistant", "content": "Sure! Here's the steeper ramp." },
+    { "role": "user", "content": "oh now the car actually makes it all the way and knocks the dominoes! before it was too slow and stopped. the ramp has to be steep enough or the car doesn't get going fast enough" },
+    { "role": "assistant", "content": "Exactly — you just diagnosed that yourself by testing it. A steeper ramp means more of that height turns into speed, so the car carries enough momentum down the line. Nice debugging." },
+    { "role": "user", "content": "can you also add a balloon that pops at the end" },
+    { "role": "assistant", "content": "Done — the flag now triggers a pin that pops the balloon. 🎈" },
+    { "role": "user", "content": "this is awesome. i can't wait to build more stuff with you, maybe a pinball machine next time!" },
+    { "role": "assistant", "content": "That would be a blast — a pinball machine is full of fun chain reactions too. We can do that whenever you like!" }
+  ],
+  "rigorGold": { "maxObservations": 3, "maxMastery": 3.2, "requireMisconception": true },
+  "expectations": [
+    "This session should produce VERY FEW observations — at most 2-3. The scholar mostly directed the tutor to build, reacted ('so cool!', 'awesome'), and requested tweaks. Most of the conceptual content (Rube Goldberg, gravity→kinetic energy, pulley, mechanical advantage, momentum) was the TUTOR's explanation, not the scholar's demonstration.",
+    "The 'heavier object falls faster' belief MUST be captured as its own misconception_signal at ~Remember(1.0), high confidence — the scholar stated it plainly ('it'll fall down the ramp faster if it's heavier right'). This is the single most valuable observation in the session.",
+    "The one genuine scholar demonstration is the ramp-steepness insight ('the ramp has to be steep enough or the car doesn't get going fast enough') — the scholar tested a change and reasoned about cause and effect. That is a MODEST observation, around Understand-to-Apply (~2.5-3.0), studentInitiated true. It is NOT Analyze/Evaluate/Create.",
+    "No observation should be rated Analyze(4) or higher. Nothing in this transcript shows the scholar breaking a system down, comparing, judging, or designing at a high Bloom level on their own.",
+    "Concepts the TUTOR named or explained (pulley systems, mechanical advantage, gravitational potential energy, momentum, Rube Goldberg machines) must NOT be logged as the scholar's direct_demonstration. Never credit the scholar for what the tutor said.",
+    "Excited reactions about future projects ('can't wait to build more', 'pinball next time') are interest/engagement, NOT a concept-mastery observation."
+  ],
+  "traps": [
+    "Emitting 6+ hyper-granular observations ('pulley systems and mechanical advantage', 'iterative design refinement', 'material selection', 'production scope management', 'blueprint documentation', 'engineering trade-offs') — over-granular AND crediting tutor-supplied ideas.",
+    "Rating the session at Evaluate/Create(5) because the scholar 'designed a machine' — they described a sequence and the tutor built and explained it.",
+    "Crediting 'pulley systems and mechanical advantage' or 'gravitational potential energy' to the scholar at high Bloom because those words appear — they were the TUTOR's explanation.",
+    "Burying the 'heavier falls faster' misconception inside a direct_demonstration's evidenceSummary instead of surfacing it as its own misconception_signal.",
+    "Logging emotional excitement ('can't wait to build more') as a mastery observation.",
+    "Marking studentInitiated true and evidenceType direct_demonstration on the physics concepts the tutor supplied."
+  ]
+}

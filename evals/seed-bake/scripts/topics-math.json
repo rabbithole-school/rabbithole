@@ -1,0 +1,18 @@
+[
+  {
+    "id": "dice-love-seven",
+    "topic": "Why dice love the number 7",
+    "domain": "math",
+    "learningGoal": "The scholar can explain with a ways-count grid why some two-dice totals are more common, and predict the distribution.",
+    "rationale": "Kid noticed 7 keeps winning in board games.",
+    "readingLevel": "Grade 4"
+  },
+  {
+    "id": "biggest-number",
+    "topic": "The biggest number",
+    "domain": "math",
+    "learningGoal": "The scholar can run the add-one argument to show no biggest number exists and explain why the argument is airtight.",
+    "rationale": "Kid keeps claiming googolplex is the biggest.",
+    "readingLevel": "Grade 4"
+  }
+]
