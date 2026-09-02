@@ -1,0 +1,19 @@
+{
+  "id": "fx-pcm-practice-revised-hypothesis",
+  "title": "Does the plant need light?",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Plant Biology",
+  "source": "fixture",
+  "pcmGold": { "expectedDimension": "practice" },
+  "transcript": [
+    { "role": "user", "content": "so I set up two identical bean plants, one in a dark closet and one on the windowsill, and watered them the exact same amount every day for two weeks. my hypothesis was the dark one would just stay short but still turn green, because I figured water was the main thing plants needed" },
+    { "role": "assistant", "content": "Solid experimental setup — controlling the water like that was smart. What did you actually see after the two weeks?" },
+    { "role": "user", "content": "it was really different than I expected. the dark one actually grew SUPER tall and spindly, but it was pale yellow, not green at all. since that didn't match my hypothesis, I changed my idea: I think now light doesn't stop growth, it controls whether the plant makes chlorophyll, and the plant in the dark stretched out trying to search for light. I found an article online that called this 'etiolation,' which backed up my new idea" }
+  ],
+  "expectations": [
+    "Should surface an observation/signal tagged pcmDimension: 'practice' — designed an investigation, revised the hypothesis when the data disagreed, and cited a second source ('etiolation')."
+  ],
+  "traps": [
+    "This is squarely PRACTICE (working like a scientist), not just a 'core' plant-biology fact — the behavior being tested is the scientific-method revision, not content recall."
+  ]
+}

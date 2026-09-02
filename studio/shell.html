@@ -1,0 +1,253 @@
+<!doctype html>
+<!--
+  The Studio shell — markup and every pixel of CSS for the sandbox document.
+
+  This file is a TEMPLATE, not a page. `studio/build.mjs` bundles `src/main.ts`
+  and substitutes it for the `/*BUNDLE*/` marker below, producing ONE
+  self-contained HTML string with no network dependency of any kind. That is a
+  hard requirement, not an optimization: these are kiosk iPads, the elective
+  meets in a room whose wifi we do not control, and a creative-coding surface
+  that pauses to fetch a syntax highlighter is not the surface we promised.
+
+  Layout is editor-over-canvas in portrait and side-by-side in landscape. The
+  canvas never scrolls out of view while typing: watching the drawing change IS
+  the feedback loop, and a keyboard that hides the result breaks the one thing
+  this surface is for.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Studio</title>
+<style>
+  :root {
+    --ink: #10151c;
+    --paper: #f7f5f0;
+    --panel: #ffffff;
+    --line: #e2ded4;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --win: #15803d;
+    --warn: #b45309;
+    --err: #b91c1c;
+    --radius: 14px;
+    /* One knob for the whole surface. iPads sit further away than a laptop and
+       these are nine-to-thirteen-year-olds, so the floor is generous. */
+    --code: 19px;
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.45 ui-rounded, "SF Pro Rounded", system-ui, -apple-system, sans-serif;
+    /* The document owns its own gestures; the host disables WebView scrolling. */
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  #studio {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    gap: 8px;
+    padding: 8px;
+  }
+
+  /* Landscape: code on the left, world on the right, both full height. */
+  @media (orientation: landscape) {
+    #studio { flex-direction: row-reverse; }
+    #stage  { flex: 1 1 52%; }
+    #deck   { flex: 1 1 48%; }
+  }
+
+  /* ── the world ───────────────────────────────────────────────────────── */
+  #stage {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    gap: 8px;
+  }
+  #world {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #paper { display: block; touch-action: none; }
+
+  /*
+    The scrubber is not a debugger; it is the whole argument for this surface.
+    Dragging it walks the program one step at a time with the responsible line
+    lit in the editor, so "it worked" can become "I know why it worked". It sits
+    under the world rather than under the code because it scrubs the world.
+  */
+  #track { display: flex; align-items: center; gap: 12px; padding: 0 4px; }
+  #scrub {
+    -webkit-appearance: none;
+    appearance: none;
+    flex: 1 1 auto;
+    height: 34px;
+    background: transparent;
+    touch-action: none;
+  }
+  #scrub::-webkit-slider-runnable-track {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--line);
+  }
+  /* A 30px thumb, because this is dragged with a thumb. */
+  #scrub::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 30px; height: 30px;
+    margin-top: -11px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 3px solid #fff;
+    box-shadow: 0 2px 8px rgba(16,21,28,.28);
+  }
+  #scrub[disabled]::-webkit-slider-thumb { background: #c3c8d2; }
+
+  #verdict {
+    position: absolute;
+    left: 10px; right: 10px; bottom: 10px;
+    padding: 10px 14px;
+    border-radius: 11px;
+    font-size: 16px;
+    font-weight: 600;
+    background: rgba(255,255,255,.94);
+    border: 1px solid var(--line);
+    box-shadow: 0 6px 20px rgba(16,21,28,.09);
+    transform: translateY(140%);
+    transition: transform .26s cubic-bezier(.2,.9,.3,1);
+  }
+  #verdict.show { transform: none; }
+  #verdict.win  { color: var(--win);  border-color: #bbf7d0; background: #f0fdf4; }
+  #verdict.err  { color: var(--err);  border-color: #fecaca; background: #fef2f2; }
+  #verdict.warn { color: var(--warn); border-color: #fde68a; background: #fffbeb; }
+
+  /* ── the code side ───────────────────────────────────────────────────── */
+  #deck {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    gap: 8px;
+  }
+
+  #hint {
+    padding: 9px 13px;
+    border-radius: 11px;
+    background: #eef4ff;
+    border: 1px solid #d5e2ff;
+    color: #1e3a8a;
+    font-size: 15px;
+    line-height: 1.4;
+  }
+  #hint b { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-weight: 700; }
+
+  #editor {
+    flex: 1 1 auto;
+    min-height: 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .cm-editor { height: 100%; }
+  .cm-editor.cm-focused { outline: none; }
+  .cm-scroller {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: var(--code);
+    line-height: 1.62;
+  }
+  /* Bottom padding so the last line can rise above the soft keyboard. */
+  .cm-content { padding: 12px 0 40vh 0; }
+  .cm-gutters { background: transparent; border-right: 1px solid var(--line); color: #b9b4a8; }
+  .cm-activeLine, .cm-activeLineGutter { background: rgba(37,99,235,.055); }
+  /* A fat caret and a fat selection: fingers, not mice. */
+  .cm-cursor { border-left-width: 2.5px; }
+  .cm-selectionBackground, ::selection { background: #cfe0ff !important; }
+  .cm-line.studio-blame { background: rgba(185,28,28,.09); }
+  /* The line the scrubber is currently sitting on. Softer than blame: this is
+     "here is where the robot is", not "here is what went wrong". */
+  .cm-line.studio-step { background: rgba(37,99,235,.10); }
+
+  /* The offered repair. Never applied behind the scholar's back. */
+  #offer {
+    display: none;
+    padding: 10px 12px;
+    border-radius: 11px;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    color: #78350f;
+    font-size: 15px;
+  }
+  #offer.show { display: block; }
+  #offer code { font-family: ui-monospace, Menlo, monospace; font-size: 14px; }
+  #offer .row { display: flex; gap: 8px; align-items: center; margin-top: 9px; }
+  #offer button { min-height: 40px; }
+
+  /* ── controls ────────────────────────────────────────────────────────── */
+  #bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button {
+    font: inherit;
+    font-weight: 650;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    border-radius: 11px;
+    /* 46px min target: a missed Run button costs a whole train of thought. */
+    min-height: 46px;
+    padding: 0 16px;
+    transition: transform .08s ease, background .12s ease;
+  }
+  button:active { transform: scale(.96); }
+  button[disabled] { opacity: .4; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; padding: 0 22px; }
+  button.ghost { background: transparent; }
+  #steps { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; min-width: 68px; text-align: right; }
+</style>
+</head>
+<body>
+<div id="studio">
+  <div id="stage">
+    <div id="world">
+      <canvas id="paper"></canvas>
+      <div id="verdict"></div>
+    </div>
+    <div id="track">
+      <input id="scrub" type="range" min="0" max="0" value="0" step="1" disabled aria-label="Step through the program">
+      <span id="steps"></span>
+    </div>
+  </div>
+  <div id="deck">
+    <div id="hint"></div>
+    <div id="editor"></div>
+    <div id="offer"></div>
+    <div id="bar">
+      <button id="run" class="primary">Run</button>
+      <button id="stop" class="ghost" disabled>Stop</button>
+      <button id="roll" class="ghost">🎲 Change the world</button>
+      <button id="reset" class="ghost">Start over</button>
+    </div>
+  </div>
+</div>
+<script type="module">/*BUNDLE*/</script>
+</body>
+</html>

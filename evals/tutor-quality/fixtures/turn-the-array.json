@@ -1,0 +1,24 @@
+{
+  "description": "A commutative-property stall where a smaller visible array can preserve the rotation inference.",
+  "scholar": { "name": "Leo", "readingLevel": "Grade 2" },
+  "anchor": {
+    "unitTitle": "Multiplication Models",
+    "lessonTitle": "Arrays",
+    "activityTitle": "Why does 4 x 6 = 6 x 4?",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "Why does 4 times 6 equal 6 times 4?"
+    },
+    {
+      "role": "assistant",
+      "content": "How could an array show whether those two facts match?"
+    },
+    {
+      "role": "user",
+      "content": "I don't know, they just are. Just tell me."
+    }
+  ]
+}

@@ -1,0 +1,876 @@
+"use client";
+
+import { useState, useMemo } from "react";
+import { useQuery, useMutation } from "convex/react";
+import { api } from "@/convex/_generated/api";
+import type { Doc, Id } from "@/convex/_generated/dataModel";
+import {
+  Box,
+  Flex,
+  VStack,
+  HStack,
+  Text,
+  Badge,
+  Spinner,
+  Button,
+} from "@chakra-ui/react";
+import { CaretDown, CaretRight, Plus, X } from "@phosphor-icons/react";
+import { formatTimeAgo } from "@/lib/relativeTime";
+import { SubNav } from "@/components/ui/SubNav";
+import { FieldSelect } from "@/components/ui/FieldSelect";
+
+// ─── Bloom's helpers ────────────────────────────────────────────────
+
+function bloomLabel(level: number): string {
+  if (level >= 4.5) return "Create";
+  if (level >= 3.5) return "Evaluate";
+  if (level >= 2.5) return "Analyze";
+  if (level >= 1.5) return "Apply";
+  if (level >= 0.5) return "Understand";
+  return "Remember";
+}
+
+function bloomColor(level: number): string {
+  if (level >= 4.5) return "purple";
+  if (level >= 3.5) return "violet";
+  if (level >= 2.5) return "teal";
+  if (level >= 1.5) return "cyan";
+  if (level >= 0.5) return "blue";
+  return "gray";
+}
+
+// timeAgo dropped — use formatTimeAgo from lib/relativeTime
+
+// ─── Bloom's Bar ────────────────────────────────────────────────────
+
+function BloomBar({ level, maxLevel = 5 }: { level: number; maxLevel?: number }) {
+  const pct = Math.min((level / maxLevel) * 100, 100);
+  const color = bloomColor(level);
+  return (
+    <Box w="60px" h="6px" bg="gray.100" borderRadius="full" overflow="hidden" flexShrink={0}>
+      <Box h="full" w={`${pct}%`} bg={`${color}.400`} borderRadius="full" />
+    </Box>
+  );
+}
+
+// ─── Types ──────────────────────────────────────────────────────────
+
+interface StandardsTabProps {
+  scholarId: string;
+  readingLevel?: string | null;
+}
+
+// Mastery observation row (with linked standardIds), as returned by
+// masteryObservations.withStandardsByScholar.
+type MasteryObs = Doc<"masteryObservations">;
+
+interface StandardNode {
+  _id: Id<"standards">;
+  asnId: string;
+  notation?: string;
+  description: string;
+  gradeLevels: string[];
+  subject: string;
+  statementLabel: string;
+  isLeaf: boolean;
+  parentId?: Id<"standards">;
+  documentId: Id<"standardsDocuments">;
+}
+
+// ─── Seed Action Form ───────────────────────────────────────────────
+
+function SeedForm({
+  node,
+  scholarId,
+  onClose,
+}: {
+  node: StandardNode;
+  scholarId: string;
+  onClose: () => void;
+}) {
+  const createSeed = useMutation(api.seeds.create);
+  const [seedType, setSeedType] = useState<"assess" | "teach">("assess");
+  const [isCreating, setIsCreating] = useState(false);
+  const [created, setCreated] = useState(false);
+
+  const label = node.notation
+    ? `${node.notation}: ${node.description}`
+    : node.description;
+
+  const handleCreate = async () => {
+    setIsCreating(true);
+    try {
+      const isAssess = seedType === "assess";
+      await createSeed({
+        scholarId: scholarId as Id<"users">,
+        topic: label,
+        domain: node.subject,
+        rationale: isAssess
+          ? `Assess whether scholar can demonstrate: ${node.description}. Look for evidence without explicitly teaching.`
+          : `Guide scholar toward mastery of: ${node.description}. Build understanding through exploration and practice.`,
+        approachHint: isAssess
+          ? "Weave a natural question or scenario into conversation that requires this skill. Observe without prompting."
+          : "Find a natural entry point to explore this concept. Use concrete examples and build toward abstract understanding.",
+      });
+      setCreated(true);
+      setTimeout(() => onClose(), 1200);
+    } catch (error) {
+      console.error("Error creating seed:", error);
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  if (created) {
+    return (
+      <Box bg="green.50" borderRadius="md" p={3} mt={1} mb={2} ml={6}>
+        <Text fontSize="sm" color="green.700" fontFamily="heading">
+          Seed created — it will appear in the tutor&apos;s next conversation.
+        </Text>
+      </Box>
+    );
+  }
+
+  return (
+    <Box bg="violet.50" borderRadius="md" p={3} mt={1} mb={2} ml={6}>
+      <Text fontSize="xs" fontWeight="600" color="navy.500" fontFamily="heading" mb={2}>
+        {label}
+      </Text>
+
+      <VStack gap={2} align="stretch">
+        {/* Assess option */}
+        <HStack
+          as="label"
+          gap={2}
+          cursor="pointer"
+          p={2}
+          borderRadius="md"
+          bg={seedType === "assess" ? "white" : "transparent"}
+          border="1px solid"
+          borderColor={seedType === "assess" ? "violet.300" : "transparent"}
+          onClick={() => setSeedType("assess")}
+        >
+          <Box
+            w="14px"
+            h="14px"
+            borderRadius="full"
+            border="2px solid"
+            borderColor={seedType === "assess" ? "violet.500" : "charcoal.300"}
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            flexShrink={0}
+          >
+            {seedType === "assess" && (
+              <Box w="6px" h="6px" borderRadius="full" bg="violet.500" />
+            )}
+          </Box>
+          <VStack gap={0} align="start">
+            <Text fontSize="sm" fontWeight="600" fontFamily="heading" color="navy.500">
+              Assess
+            </Text>
+            <Text fontSize="xs" color="charcoal.400" fontFamily="body">
+              Probe whether scholar can do this (doesn&apos;t teach, just surfaces what they know)
+            </Text>
+          </VStack>
+        </HStack>
+
+        {/* Teach option */}
+        <HStack
+          as="label"
+          gap={2}
+          cursor="pointer"
+          p={2}
+          borderRadius="md"
+          bg={seedType === "teach" ? "white" : "transparent"}
+          border="1px solid"
+          borderColor={seedType === "teach" ? "violet.300" : "transparent"}
+          onClick={() => setSeedType("teach")}
+        >
+          <Box
+            w="14px"
+            h="14px"
+            borderRadius="full"
+            border="2px solid"
+            borderColor={seedType === "teach" ? "violet.500" : "charcoal.300"}
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            flexShrink={0}
+          >
+            {seedType === "teach" && (
+              <Box w="6px" h="6px" borderRadius="full" bg="violet.500" />
+            )}
+          </Box>
+          <VStack gap={0} align="start">
+            <Text fontSize="sm" fontWeight="600" fontFamily="heading" color="navy.500">
+              Teach
+            </Text>
+            <Text fontSize="xs" color="charcoal.400" fontFamily="body">
+              Guide scholar toward mastery of this standard
+            </Text>
+          </VStack>
+        </HStack>
+      </VStack>
+
+      <HStack gap={2} mt={3} justify="flex-end">
+        <Button
+          size="xs"
+          variant="ghost"
+          color="charcoal.400"
+          fontFamily="heading"
+          onClick={onClose}
+        >
+          Cancel
+        </Button>
+        <Button
+          size="xs"
+          bg="violet.500"
+          color="white"
+          fontFamily="heading"
+          _hover={{ bg: "violet.600" }}
+          onClick={handleCreate}
+          disabled={isCreating}
+        >
+          {isCreating ? <Spinner size="xs" /> : "Create Seed"}
+        </Button>
+      </HStack>
+    </Box>
+  );
+}
+
+// ─── Recursive Tree Node ────────────────────────────────────────────
+
+function StandardTreeNode({
+  node,
+  scholarId,
+  expandedNodes,
+  toggleExpanded,
+  observationsByStandard,
+  expandedLeaf,
+  setExpandedLeaf,
+  seedFormId,
+  setSeedFormId,
+}: {
+  node: StandardNode;
+  scholarId: string;
+  expandedNodes: Set<string>;
+  toggleExpanded: (id: string) => void;
+  observationsByStandard: Map<string, MasteryObs[]>;
+  expandedLeaf: string | null;
+  setExpandedLeaf: (id: string | null) => void;
+  seedFormId: string | null;
+  setSeedFormId: (id: string | null) => void;
+}) {
+  const isExpanded = expandedNodes.has(node._id);
+  const children = useQuery(
+    api.standardsTree.getChildren,
+    isExpanded ? { parentId: node._id } : "skip"
+  );
+  const coverage = useQuery(
+    api.standardsTree.getSubtreeCoverage,
+    !node.isLeaf
+      ? { standardId: node._id, scholarId: scholarId as Id<"users"> }
+      : "skip"
+  );
+
+  const obs = observationsByStandard.get(node._id) ?? [];
+  const bestObs = obs.length > 0
+    ? obs.reduce((best, o) => (o.masteryLevel > best.masteryLevel ? o : best))
+    : null;
+
+  const isLeafExpanded = expandedLeaf === node._id;
+  const isSeedOpen = seedFormId === node._id;
+
+  if (node.isLeaf) {
+    return (
+      <Box>
+        <HStack
+          gap={2}
+          py={1.5}
+          px={2}
+          mx={-2}
+          borderRadius="md"
+          cursor={bestObs ? "pointer" : "default"}
+          _hover={{ bg: "gray.50" }}
+          onClick={() => {
+            if (bestObs) setExpandedLeaf(isLeafExpanded ? null : node._id);
+          }}
+          role="group"
+        >
+          <Text fontSize="sm" color="charcoal.300" flexShrink={0} w="14px" textAlign="center">
+            {bestObs ? "\u25CF" : "\u25CB"}
+          </Text>
+          {node.notation && (
+            <Badge
+              bg="gray.100"
+              color="charcoal.600"
+              fontSize="xs"
+              fontFamily="heading"
+              flexShrink={0}
+            >
+              {node.notation}
+            </Badge>
+          )}
+          <Text
+            fontSize="sm"
+            color={bestObs ? "charcoal.600" : "charcoal.400"}
+            fontFamily="body"
+            flex={1}
+            lineHeight="1.3"
+            lineClamp={2}
+          >
+            {node.description}
+          </Text>
+          {bestObs ? (
+            <>
+              <BloomBar level={bestObs.masteryLevel} />
+              <Badge
+                bg={`${bloomColor(bestObs.masteryLevel)}.100`}
+                color={`${bloomColor(bestObs.masteryLevel)}.700`}
+                fontSize="xs"
+                flexShrink={0}
+                minW="80px"
+                textAlign="center"
+              >
+                {bloomLabel(bestObs.masteryLevel)} ({bestObs.masteryLevel.toFixed(1)})
+              </Badge>
+            </>
+          ) : (
+            <Text fontSize="xs" color="charcoal.300" fontFamily="heading" flexShrink={0}>
+              no evidence
+            </Text>
+          )}
+          {/* Seed action button */}
+          <Box
+            as="button"
+            onClick={(e: React.MouseEvent) => {
+              e.stopPropagation();
+              setSeedFormId(isSeedOpen ? null : node._id);
+            }}
+            p={1}
+            borderRadius="sm"
+            color={isSeedOpen ? "violet.600" : "charcoal.300"}
+            _hover={{ color: "violet.500", bg: "violet.50" }}
+            _groupHover={{ opacity: 1 }}
+            opacity={isSeedOpen ? 1 : 0.3}
+            transition="opacity 0.15s"
+            flexShrink={0}
+          >
+            {isSeedOpen ? <X size={14} /> : <Plus size={14} />}
+          </Box>
+        </HStack>
+
+        {/* Seed creation form */}
+        {isSeedOpen && (
+          <SeedForm
+            node={node}
+            scholarId={scholarId}
+            onClose={() => setSeedFormId(null)}
+          />
+        )}
+
+        {/* Expanded inline detail for mapped leaves */}
+        {isLeafExpanded && obs.length > 0 && (
+          <Box bg="gray.50" borderRadius="md" p={3} ml={6} mt={1} mb={2}>
+            <VStack gap={2} align="stretch">
+              {obs.map((o) => (
+                <Box key={o._id}>
+                  <HStack gap={2} mb={1}>
+                    <Badge
+                      bg={`${bloomColor(o.masteryLevel)}.100`}
+                      color={`${bloomColor(o.masteryLevel)}.700`}
+                      fontSize="xs"
+                    >
+                      {bloomLabel(o.masteryLevel)} ({o.masteryLevel.toFixed(1)})
+                    </Badge>
+                    <Text fontSize="xs" color="charcoal.400" fontFamily="heading">
+                      {formatTimeAgo(o.observedAt)}
+                    </Text>
+                    <Text fontSize="xs" color="charcoal.400" fontFamily="heading">
+                      conf {(o.confidenceScore * 100).toFixed(0)}%
+                    </Text>
+                  </HStack>
+                  <Text fontSize="sm" color="charcoal.600" fontFamily="body" lineHeight="1.4" mb={1}>
+                    {o.evidenceSummary}
+                  </Text>
+                  {o.transcriptExcerpt && (
+                    <Box bg="white" borderWidth="1px" borderColor="violet.200" pl={3} py={2} borderRadius="sm">
+                      <Text fontSize="xs" color="charcoal.500" fontFamily="body" lineHeight="1.4" whiteSpace="pre-wrap">
+                        {o.transcriptExcerpt}
+                      </Text>
+                    </Box>
+                  )}
+                </Box>
+              ))}
+            </VStack>
+          </Box>
+        )}
+      </Box>
+    );
+  }
+
+  // Folder node — compact display with assessed/total pill
+  return (
+    <Box>
+      <HStack
+        gap={2}
+        py={2}
+        px={2}
+        mx={-2}
+        cursor="pointer"
+        borderRadius="md"
+        _hover={{ bg: "gray.50" }}
+        onClick={() => toggleExpanded(node._id)}
+      >
+        {isExpanded ? (
+          <CaretDown color="#666" style={{ flexShrink: 0 }} />
+        ) : (
+          <CaretRight color="#666" style={{ flexShrink: 0 }} />
+        )}
+        {node.notation && (
+          <Badge
+            bg="violet.50"
+            color="violet.700"
+            fontSize="xs"
+            fontFamily="heading"
+            flexShrink={0}
+          >
+            {node.notation}
+          </Badge>
+        )}
+        <Text
+          fontSize="sm"
+          fontWeight="600"
+          color="navy.500"
+          fontFamily="heading"
+          flex={1}
+          lineHeight="1.3"
+          lineClamp={1}
+        >
+          {node.description}
+        </Text>
+        {coverage && (
+          <Badge
+            bg={coverage.assessed > 0 ? "green.100" : "gray.100"}
+            color={coverage.assessed > 0 ? "green.700" : "charcoal.400"}
+            fontSize="xs"
+            fontFamily="heading"
+            flexShrink={0}
+          >
+            {coverage.assessed}/{coverage.total}
+          </Badge>
+        )}
+      </HStack>
+
+      {isExpanded && (
+        <Box pl={5} borderLeft="1px solid" borderColor="gray.200" ml={2}>
+          {children === undefined ? (
+            <Flex py={2} pl={2}>
+              <Spinner size="xs" color="violet.400" />
+            </Flex>
+          ) : children.length === 0 ? (
+            <Text fontSize="xs" color="charcoal.300" fontFamily="heading" pl={2} py={1}>
+              No child standards
+            </Text>
+          ) : (
+            children.map((child: StandardNode) => (
+              <StandardTreeNode
+                key={child._id}
+                node={child}
+                scholarId={scholarId}
+                expandedNodes={expandedNodes}
+                toggleExpanded={toggleExpanded}
+                observationsByStandard={observationsByStandard}
+                expandedLeaf={expandedLeaf}
+                setExpandedLeaf={setExpandedLeaf}
+                seedFormId={seedFormId}
+                setSeedFormId={setSeedFormId}
+              />
+            ))
+          )}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+// ─── Evidence-Only View ─────────────────────────────────────────────
+
+interface StandardDetail {
+  _id: string;
+  notation?: string;
+  description: string;
+  gradeLevels: string[];
+  subject: string;
+}
+
+function EvidenceOnlyView({
+  observationsByStandard,
+  standardsLookup,
+  selectedGrade,
+  selectedSubject,
+}: {
+  observationsByStandard: Map<string, MasteryObs[]>;
+  standardsLookup: Map<string, StandardDetail>;
+  selectedGrade: string;
+  selectedSubject: string;
+}) {
+  // Filter to standards matching the selected grade + subject, then group by observation
+  const filteredObservations = useMemo(() => {
+    // Collect unique observations that have at least one standard matching grade + subject
+    const obsMap = new Map<string, { obs: MasteryObs; standards: StandardDetail[] }>();
+
+    for (const [standardId, obsList] of Array.from(observationsByStandard.entries())) {
+      const std = standardsLookup.get(standardId);
+      if (!std) continue;
+      if (std.subject !== selectedSubject) continue;
+      if (!std.gradeLevels.includes(selectedGrade)) continue;
+
+      for (const obs of obsList) {
+        const existing = obsMap.get(obs._id);
+        if (existing) {
+          existing.standards.push(std);
+        } else {
+          obsMap.set(obs._id, { obs, standards: [std] });
+        }
+      }
+    }
+
+    return Array.from(obsMap.values()).sort(
+      (a, b) => b.obs.masteryLevel - a.obs.masteryLevel
+    );
+  }, [observationsByStandard, standardsLookup, selectedGrade, selectedSubject]);
+
+  if (filteredObservations.length === 0) {
+    return (
+      <Box bg="white" borderRadius="lg" shadow="xs" p={6} textAlign="center">
+        <Text fontSize="sm" color="charcoal.400" fontFamily="body" lineHeight="1.5">
+          No standards-linked evidence for grade {selectedGrade} {selectedSubject} yet.
+          As the scholar works with the AI tutor, observations will automatically map to curriculum standards.
+        </Text>
+      </Box>
+    );
+  }
+
+  return (
+    <Box bg="white" borderRadius="lg" shadow="xs" p={4}>
+      <VStack gap={2} align="stretch">
+        {filteredObservations.map(({ obs, standards }) => (
+          <Box key={obs._id} py={2} borderBottom="1px solid" borderColor="gray.100" _last={{ borderBottom: "none" }}>
+            <HStack gap={2} mb={1}>
+              <BloomBar level={obs.masteryLevel} />
+              <Badge
+                bg={`${bloomColor(obs.masteryLevel)}.100`}
+                color={`${bloomColor(obs.masteryLevel)}.700`}
+                fontSize="xs"
+              >
+                {bloomLabel(obs.masteryLevel)} ({obs.masteryLevel.toFixed(1)})
+              </Badge>
+              <Text fontSize="xs" color="charcoal.400" fontFamily="heading">
+                {formatTimeAgo(obs.observedAt)}
+              </Text>
+            </HStack>
+            <Text fontSize="sm" fontWeight="600" color="charcoal.600" fontFamily="heading" lineHeight="1.4">
+              {obs.conceptLabel}
+            </Text>
+            {obs.evidenceSummary && (
+              <Text fontSize="xs" color="charcoal.400" fontFamily="body" mt={1} lineHeight="1.3">
+                {obs.evidenceSummary}
+              </Text>
+            )}
+            {/* Show linked standards */}
+            <HStack gap={1} mt={2} flexWrap="wrap">
+              {standards.map((std) => (
+                <Badge
+                  key={std._id}
+                  bg="violet.50"
+                  color="violet.700"
+                  fontSize="xs"
+                  fontFamily="heading"
+                >
+                  {std.notation || std.description.slice(0, 30)}
+                </Badge>
+              ))}
+            </HStack>
+          </Box>
+        ))}
+      </VStack>
+    </Box>
+  );
+}
+
+// ─── Root-level tree loader (grade-filtered) ────────────────────────
+
+function StandardsTreeRoot({
+  documentId,
+  grade,
+  scholarId,
+  expandedNodes,
+  toggleExpanded,
+  observationsByStandard,
+  expandedLeaf,
+  setExpandedLeaf,
+  seedFormId,
+  setSeedFormId,
+}: {
+  documentId: Id<"standardsDocuments">;
+  grade: string;
+  scholarId: string;
+  expandedNodes: Set<string>;
+  toggleExpanded: (id: string) => void;
+  observationsByStandard: Map<string, MasteryObs[]>;
+  expandedLeaf: string | null;
+  setExpandedLeaf: (id: string | null) => void;
+  seedFormId: string | null;
+  setSeedFormId: (id: string | null) => void;
+}) {
+  const roots = useQuery(api.standardsTree.getRootsByGrade, { documentId, grade });
+  const summary = useQuery(api.standardsTree.gradeSummary, {
+    documentId,
+    grade,
+    scholarId: scholarId as Id<"users">,
+  });
+
+  if (roots === undefined) {
+    return (
+      <Flex justify="center" py={4}>
+        <Spinner size="sm" color="violet.500" />
+      </Flex>
+    );
+  }
+
+  if (roots.length === 0) {
+    return (
+      <Text fontSize="sm" color="charcoal.300" fontFamily="heading" textAlign="center" py={4}>
+        No standards found for this grade.
+      </Text>
+    );
+  }
+
+  return (
+    <VStack gap={3} align="stretch">
+      {/* Summary bar */}
+      {summary && (
+        <Text fontSize="xs" color="charcoal.400" fontFamily="heading">
+          {summary.assessedLeaves} of {summary.totalLeaves} standards assessed
+        </Text>
+      )}
+
+      <Box bg="white" borderRadius="lg" shadow="xs" p={4}>
+        <VStack gap={0} align="stretch">
+          {roots.map((node: StandardNode) => (
+            <StandardTreeNode
+              key={node._id}
+              node={node}
+              scholarId={scholarId}
+              expandedNodes={expandedNodes}
+              toggleExpanded={toggleExpanded}
+              observationsByStandard={observationsByStandard}
+              expandedLeaf={expandedLeaf}
+              setExpandedLeaf={setExpandedLeaf}
+              seedFormId={seedFormId}
+              setSeedFormId={setSeedFormId}
+            />
+          ))}
+        </VStack>
+      </Box>
+    </VStack>
+  );
+}
+
+// ─── Main Component ─────────────────────────────────────────────────
+
+export function StandardsTab({ scholarId, readingLevel }: StandardsTabProps) {
+  const documents = useQuery(api.standardsTree.listDocuments);
+  const linkedObs = useQuery(api.masteryObservations.withStandardsByScholar, {
+    scholarId: scholarId as Id<"users">,
+  });
+
+  const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
+  const [selectedGrade, setSelectedGrade] = useState<string | null>(null);
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
+  const [expandedLeaf, setExpandedLeaf] = useState<string | null>(null);
+  const [seedFormId, setSeedFormId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"all" | "evidence">("evidence");
+
+  // Build observation lookup: standardId → observations[]
+  const observationsByStandard = useMemo(() => {
+    const map = new Map<string, MasteryObs[]>();
+    if (!linkedObs) return map;
+
+    for (const obs of linkedObs) {
+      if (obs.standardIds) {
+        for (const sid of obs.standardIds) {
+          if (!map.has(sid)) map.set(sid, []);
+          map.get(sid)!.push(obs);
+        }
+      }
+    }
+    return map;
+  }, [linkedObs]);
+
+  // Collect all unique standard IDs from observations for detail lookup
+  const allStandardIds = useMemo(
+    () => Array.from(observationsByStandard.keys()) as Id<"standards">[],
+    [observationsByStandard]
+  );
+
+  const standardDetails = useQuery(
+    api.standardsTree.getByIds,
+    allStandardIds.length > 0 ? { ids: allStandardIds } : "skip"
+  );
+
+  // Build standards lookup: standardId → StandardDetail
+  const standardsLookup = useMemo(() => {
+    const map = new Map<string, StandardDetail>();
+    if (!standardDetails) return map;
+    for (const std of standardDetails) {
+      map.set(std._id, std);
+    }
+    return map;
+  }, [standardDetails]);
+
+  const toggleExpanded = (id: string) => {
+    setExpandedNodes((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  if (documents === undefined) {
+    return (
+      <Flex justify="center" py={8}>
+        <Spinner size="md" color="violet.500" />
+      </Flex>
+    );
+  }
+
+  if (documents.length === 0) {
+    return (
+      <Text fontSize="sm" color="charcoal.300" fontFamily="heading" textAlign="center" py={8}>
+        No standards imported yet. Run the import commands to load curriculum standards.
+      </Text>
+    );
+  }
+
+  // Auto-select first subject
+  const activeSubject = selectedSubject ?? documents[0]?.subject;
+  const activeDoc = documents.find((d) => d.subject === activeSubject);
+  const grades = activeDoc?.grades ?? [];
+
+  // Default grade: scholar's readingLevel if it exists in grades, else first grade
+  const activeGrade = selectedGrade && grades.includes(selectedGrade)
+    ? selectedGrade
+    : readingLevel && grades.includes(readingLevel)
+      ? readingLevel
+      : grades[0] ?? "K";
+
+  return (
+    <VStack gap={3} align="stretch" maxW="900px">
+      {/* Subject — the SAME SubNav idiom as the Progress sub-sections, so
+          subject selection reads as one consistent level rather than a
+          second, louder solid-violet bar. */}
+      <SubNav
+        items={documents.map((doc) => ({ value: doc.subject, label: doc.subject }))}
+        value={activeSubject}
+        mb={0}
+        onChange={(subject) => {
+          setSelectedSubject(subject);
+          setSelectedGrade(null);
+          setExpandedNodes(new Set());
+          setExpandedLeaf(null);
+          setSeedFormId(null);
+        }}
+      />
+
+      {/* One compact toolbar — grade dropdown + view toggle — collapses the
+          old 13-button grade strip and the separate toggle row into a single
+          line (fewer nav levels, nothing pushed down). */}
+      <Flex justify="space-between" align="center" gap={3} flexWrap="wrap">
+        <HStack gap={2} minW={0}>
+          {grades.length > 0 && (
+            <FieldSelect
+              w="150px"
+              size="xs"
+              value={activeGrade}
+              onChange={(g) => {
+                setSelectedGrade(g);
+                setExpandedNodes(new Set());
+                setExpandedLeaf(null);
+                setSeedFormId(null);
+              }}
+              fieldProps={{ "aria-label": "Grade" }}
+            >
+              {grades.map((g) => (
+                <option key={g} value={g}>
+                  {g === "K" ? "Kindergarten" : `Grade ${g}`}
+                </option>
+              ))}
+            </FieldSelect>
+          )}
+          <Text fontSize="xs" color="charcoal.400" fontFamily="heading" lineClamp={1}>
+            {activeDoc?.title}
+          </Text>
+        </HStack>
+        <HStack gap={0} bg="gray.100" borderRadius="md" p={0.5}>
+          <Button
+            size="xs"
+            variant="ghost"
+            bg={viewMode === "all" ? "white" : "transparent"}
+            color={viewMode === "all" ? "navy.500" : "charcoal.400"}
+            fontFamily="heading"
+            fontSize="xs"
+            shadow={viewMode === "all" ? "xs" : "none"}
+            borderRadius="sm"
+            _hover={{ color: "navy.500" }}
+            onClick={() => setViewMode("all")}
+          >
+            All Standards
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            bg={viewMode === "evidence" ? "white" : "transparent"}
+            color={viewMode === "evidence" ? "navy.500" : "charcoal.400"}
+            fontFamily="heading"
+            fontSize="xs"
+            shadow={viewMode === "evidence" ? "xs" : "none"}
+            borderRadius="sm"
+            _hover={{ color: "navy.500" }}
+            onClick={() => setViewMode("evidence")}
+          >
+            With Evidence
+          </Button>
+        </HStack>
+      </Flex>
+
+      {/* Content */}
+      {viewMode === "evidence" ? (
+        <EvidenceOnlyView
+          observationsByStandard={observationsByStandard}
+          standardsLookup={standardsLookup}
+          selectedGrade={activeGrade}
+          selectedSubject={activeSubject}
+        />
+      ) : (
+        activeDoc && (
+          <StandardsTreeRoot
+            documentId={activeDoc._id}
+            grade={activeGrade}
+            scholarId={scholarId}
+            expandedNodes={expandedNodes}
+            toggleExpanded={toggleExpanded}
+            observationsByStandard={observationsByStandard}
+            expandedLeaf={expandedLeaf}
+            setExpandedLeaf={setExpandedLeaf}
+            seedFormId={seedFormId}
+            setSeedFormId={setSeedFormId}
+          />
+        )
+      )}
+    </VStack>
+  );
+}

@@ -1,0 +1,21 @@
+{
+  "description": "A sequence stall where asking for one difference can collapse the inference into a tutor-selected route.",
+  "scholar": { "name": "Sam", "readingLevel": "Grade 4" },
+  "anchor": {
+    "unitTitle": "Growing Patterns",
+    "lessonTitle": "Describe the rule",
+    "activityTitle": "3, 7, 11, 15",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "The pattern is 3, 7, 11, 15. What is it doing?"
+    },
+    {
+      "role": "assistant",
+      "content": "Look across the whole pattern. What stays regular from one number to the next?"
+    },
+    { "role": "user", "content": "I don't know." }
+  ]
+}

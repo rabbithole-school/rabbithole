@@ -1,0 +1,46 @@
+[
+  {
+    "name": "Mika",
+    "readingLevel": "Grade 2",
+    "archetype": "eager-but-impatient",
+    "dossier": "Loves drawing and animals. Strong verbal confidence, jumps to answers fast. Gets bored if a task feels slow.",
+    "traits": [
+      "answers very quickly, often before fully thinking",
+      "tries to get the tutor to just tell the answer when it gets slow",
+      "lights up when ideas connect to animals or drawing"
+    ]
+  },
+  {
+    "name": "Theo",
+    "readingLevel": "Grade 2",
+    "archetype": "cautious-and-quiet",
+    "dossier": "Careful, soft-spoken. Strong number sense but low confidence; needs encouragement to take a guess.",
+    "traits": [
+      "gives short, tentative one-word replies",
+      "says 'i dont know' rather than guess when unsure",
+      "warms up and explains more once he feels safe being wrong"
+    ]
+  },
+  {
+    "name": "Priya",
+    "readingLevel": "Grade 4",
+    "archetype": "strong-reader-easily-distracted",
+    "dossier": "Reads well above grade level, very chatty. Strong vocabulary but drifts onto tangents.",
+    "traits": [
+      "goes off on tangents about unrelated topics mid-task",
+      "uses big words but sometimes misapplies the concept",
+      "comes back on task when the tutor connects it to something concrete"
+    ]
+  },
+  {
+    "name": "Sam",
+    "readingLevel": "Grade 1",
+    "archetype": "frustrates-easily",
+    "dossier": "Youngest in the group. Wants to do well but shuts down quickly when confused.",
+    "traits": [
+      "gets frustrated and wants to quit after one confusing turn",
+      "responds well to tiny, concrete next steps",
+      "may give up (STUCK) if the tutor over-explains instead of simplifying"
+    ]
+  }
+]

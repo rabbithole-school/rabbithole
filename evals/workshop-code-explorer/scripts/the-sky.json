@@ -1,0 +1,15 @@
+{
+  "scenario": "the-sky",
+  "firstName": "Milo",
+  "readingLevel": "grade 6",
+  "todaySessions": [
+    { "title": "What makes a good question", "activityTitle": "Exploring the Sky" }
+  ],
+  "messages": [
+    "<start>",
+    "how does the star map actualy get drawn",
+    "show me the real code for it",
+    "i know a lil python, how diffrent is this",
+    "which line makes the stars twinkle"
+  ]
+}

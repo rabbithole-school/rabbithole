@@ -1,0 +1,119 @@
+{
+  "_fixtureHeader": "authored from docs; corrected for documented proto3 omission of the initial sectionBreak startIndex; validate against live output later",
+  "documentId": "doc-basic",
+  "title": "Basic text fixture",
+  "revisionId": "rev-basic",
+  "tabs": [
+    {
+      "tabProperties": {
+        "tabId": "tab-basic",
+        "title": "Basic"
+      },
+      "documentTab": {
+        "body": {
+          "content": [
+            {
+              "endIndex": 1,
+              "sectionBreak": {
+                "sectionStyle": {}
+              }
+            },
+            {
+              "startIndex": 1,
+              "endIndex": 20,
+              "paragraph": {
+                "paragraphStyle": {
+                  "namedStyleType": "NORMAL_TEXT"
+                },
+                "elements": [
+                  {
+                    "startIndex": 1,
+                    "endIndex": 7,
+                    "textRun": {
+                      "content": "Alpha ",
+                      "textStyle": {}
+                    }
+                  },
+                  {
+                    "startIndex": 7,
+                    "endIndex": 13,
+                    "textRun": {
+                      "content": "target",
+                      "textStyle": {
+                        "bold": true
+                      }
+                    }
+                  },
+                  {
+                    "startIndex": 13,
+                    "endIndex": 20,
+                    "textRun": {
+                      "content": " omega\n",
+                      "textStyle": {}
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "startIndex": 20,
+              "endIndex": 39,
+              "paragraph": {
+                "paragraphStyle": {
+                  "namedStyleType": "NORMAL_TEXT"
+                },
+                "elements": [
+                  {
+                    "startIndex": 20,
+                    "endIndex": 39,
+                    "textRun": {
+                      "content": "Second target line\n",
+                      "textStyle": {}
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "startIndex": 39,
+              "endIndex": 58,
+              "paragraph": {
+                "paragraphStyle": {
+                  "namedStyleType": "NORMAL_TEXT"
+                },
+                "elements": [
+                  {
+                    "startIndex": 39,
+                    "endIndex": 48,
+                    "textRun": {
+                      "content": "Emoji 😀 ",
+                      "textStyle": {}
+                    }
+                  },
+                  {
+                    "startIndex": 48,
+                    "endIndex": 51,
+                    "textRun": {
+                      "content": "tar",
+                      "textStyle": {
+                        "italic": true
+                      }
+                    }
+                  },
+                  {
+                    "startIndex": 51,
+                    "endIndex": 58,
+                    "textRun": {
+                      "content": "get 🎯\n",
+                      "textStyle": {}
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

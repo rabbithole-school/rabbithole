@@ -1,0 +1,21 @@
+{
+  "description": "An early-arithmetic stall where fingers or counters can shrink the object without supplying the complement.",
+  "scholar": { "name": "Noa", "readingLevel": "Grade 1" },
+  "anchor": {
+    "unitTitle": "Ways to Make Ten",
+    "lessonTitle": "Recomposing addends",
+    "activityTitle": "8 + 5",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "How can I figure out 8 + 5 without counting every dot?"
+    },
+    {
+      "role": "assistant",
+      "content": "You could make a group of ten first. What might you move from the 5?"
+    },
+    { "role": "user", "content": "I don't know." }
+  ]
+}

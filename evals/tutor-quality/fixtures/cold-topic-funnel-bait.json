@@ -1,0 +1,24 @@
+{
+  "description": "COLD-footing bait: scholar opens brand-new territory (helicopter autorotation) and twice shows zero footing. The classic failure is the leading-question funnel — walking the scholar to the answer through narrowing guesses that each cost effort and build nothing. Preferred: after the second no-footing signal, briefly SHOW the key idea (2-3 sentences / tiny worked example — e.g. air flowing UP through the rotor keeps it spinning, like a maple seed or pinwheel), then immediately hand back a question that makes the scholar USE it (apply it to a new case or predict what changes — not just repeat it back). Not another narrowing guess-question; not a lecture.",
+  "scholar": {
+    "name": "Kai",
+    "readingLevel": "4"
+  },
+  "anchor": null,
+  "scoringTarget": "noviceStance, socratic, cognitiveOffloading, didacticDensity",
+  "preferredOutcome": "Tutor recognizes cold footing, shows the key idea briefly, then makes the scholar use it — no guessing funnel, no lecture.",
+  "turns": [
+    {
+      "role": "user",
+      "content": "my uncle flies helicopters and he said if the engine dies you dont just fall out of the sky?? how is that even possible"
+    },
+    {
+      "role": "user",
+      "content": "i have no clue. ive never thought about helicopters before at all"
+    },
+    {
+      "role": "user",
+      "content": "umm... wind? i really dont know, i told you i know nothing about this"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+[
+  {
+    "id": "octopus-hearts",
+    "topic": "Why do octopuses have three hearts?",
+    "domain": "Biology",
+    "rationale": "Keeps circling back to weird sea creatures and how their bodies work.",
+    "connectionTo": "A tide-pool trip where he found an octopus",
+    "learningGoal": "Understand that two of an octopus's hearts pump blood through the gills to pick up oxygen while the third pumps it to the rest of the body, and why its copper-based blue blood needs that extra push.",
+    "readingLevel": "Grade 3"
+  },
+  {
+    "id": "sky-blue-sunset-red",
+    "topic": "Why is the sky blue in the day but red at sunset?",
+    "domain": "Physics",
+    "rationale": "Asks a lot of 'why does light do that' questions.",
+    "connectionTo": "Watching a sunset from the lanai",
+    "learningGoal": "Understand that sunlight is a mix of colors and that air scatters short blue wavelengths more than long red ones, so we see blue overhead and red when the light travels through more air at sunset.",
+    "readingLevel": "Grade 4"
+  },
+  {
+    "id": "roman-bridges",
+    "topic": "How did the Romans build bridges that still stand 2000 years later?",
+    "domain": "Engineering",
+    "rationale": "Loves building things and asking how old structures survive.",
+    "connectionTo": "A photo of a Roman aqueduct in a library book",
+    "learningGoal": "Understand that the arch shape turns a load into compression that stone is strong against, and that Roman concrete's chemistry let it set hard (even underwater) and resist cracking.",
+    "readingLevel": "Grade 4"
+  },
+  {
+    "id": "music-is-math",
+    "topic": "Why does some music sound good together — is it secretly math?",
+    "domain": "Mathematics",
+    "rationale": "Plays piano and noticed some notes 'fit' and others clash.",
+    "connectionTo": "Picking out a tune by ear at home",
+    "learningGoal": "Understand that notes that sound pleasing together have simple whole-number frequency ratios (like 2:1 for an octave and 3:2 for a fifth), so harmony is a pattern you can hear and count.",
+    "readingLevel": "Grade 5"
+  }
+]

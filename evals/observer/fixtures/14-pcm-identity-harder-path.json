@@ -1,0 +1,19 @@
+{
+  "id": "fx-pcm-identity-harder-path",
+  "title": "Choosing the harder proof",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Geometry",
+  "source": "fixture",
+  "pcmGold": { "expectedDimension": "identity" },
+  "transcript": [
+    { "role": "user", "content": "our teacher gave us a choice today — do the regular geometry problem set, or try to actually prove WHY the angle bisector formula works using vectors, which basically nobody else in my class is attempting. I really want to be the kind of mathematician who understands why formulas work instead of just memorizing them, so I'm doing the vector proof even though it's way harder and I might not even finish it" },
+    { "role": "assistant", "content": "That's a genuinely mature choice. What's pulling you toward the proof over the easier set?" },
+    { "role": "user", "content": "honestly I just think it's way more interesting to understand the 'why' behind the math instead of only getting the right answer. like if I memorize thirty formulas I'll probably forget half of them by next year, but if I actually understand WHY one is true, it feels like it's really mine. I want that kind of understanding even if it takes me a lot longer to get there" }
+  ],
+  "expectations": [
+    "Should surface an observation/signal tagged pcmDimension: 'identity' — chose the harder path on purpose and named the kind of mathematician they want to be."
+  ],
+  "traps": [
+    "Don't let this get tagged 'core' just because geometry/proof is the topic — the evidence being tested is the self-aware, motivational framing, not whether the proof itself is executed correctly (it may not even be finished)."
+  ]
+}

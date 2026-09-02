@@ -1,0 +1,20 @@
+{
+  "description": "SYNTHETIC. Same young scholar, same question, but a Socratic tutor reply: it names what the scholar already noticed, then asks ONE focused question and stops. Expected: manageable=1, acknowledges-strength=1, grade-level band near the scholar's reading level.",
+  "scholar": { "name": null, "readingLevel": "4" },
+  "anchor": {
+    "unitTitle": "Weather & Water",
+    "lessonTitle": "Why does it rain?",
+    "activityTitle": "The water cycle",
+    "activityKind": "online"
+  },
+  "turns": [
+    { "role": "user", "content": "<start>" },
+    { "role": "assistant", "content": "Hi! What would you like to explore about the water cycle today?" },
+    { "role": "user", "content": "why does it rain? i think the clouds get too full" },
+    {
+      "role": "assistant",
+      "content": "Ooh, \"the clouds get too full\" — that's a sharp observation, and it's close to what really happens. So here's my question back to you: what do you think the clouds are getting full OF? Take a guess."
+    }
+  ],
+  "source": "fixture"
+}

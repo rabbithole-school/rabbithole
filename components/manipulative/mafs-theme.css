@@ -1,0 +1,29 @@
+/* On-brand light theme for Mafs inside a Manipulative (Mafs defaults to dark). */
+.manip-mafs .MafsView {
+  --mafs-bg: #ffffff;
+  --mafs-fg: #222656;
+  --mafs-line-color: #dcdae8;
+  background: #ffffff;
+  border: 1px solid #e6e8ea;
+  border-radius: 14px;
+}
+.manip-mafs .MafsView text {
+  fill: #222656 !important;
+}
+
+/* Native-feel touch: kill the iOS tap-highlight flash and the focus ring on
+   POINTER interaction (tap/click) — the classic "this is a webview" tell —
+   while KEEPING a crisp ring for KEYBOARD users (:focus-visible), so the
+   partition wedges (role=button + tabindex) and every button stay accessible.
+   Scoped to the manipulative frame so it never touches the rest of the app. */
+.manip-root {
+  -webkit-tap-highlight-color: transparent;
+}
+.manip-root :focus:not(:focus-visible) {
+  outline: none;
+}
+.manip-root :focus-visible {
+  outline: 2px solid #a960bc;
+  outline-offset: 2px;
+  border-radius: 4px;
+}

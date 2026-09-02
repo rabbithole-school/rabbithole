@@ -1,0 +1,14 @@
+{
+  "scenario": "could-i-code-here",
+  "firstName": "Iris",
+  "readingLevel": "grade 4",
+  "todaySessions": [
+    { "title": "Tide pool field notes", "activityTitle": "Observing Closely" }
+  ],
+  "messages": [
+    "<start>",
+    "could i write code for rabbithole one day",
+    "whats the easyest file a kid could understand",
+    "if i wanted the sky to have shooting stars where would that go"
+  ]
+}

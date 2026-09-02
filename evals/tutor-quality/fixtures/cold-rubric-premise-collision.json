@@ -1,0 +1,26 @@
+{
+  "description": "COLD + rubric-bearing collision (review/experiment-detective-tutor-audit.html, Moment B): the scholar notices a flawed experiment changed multiple variables at once, then explicitly says the report rubric requires explaining WHY that breaks the conclusion, then shows zero footing on the WHY. The Moment-B failure is the tutor supplying the load-bearing causal explanation itself ('it could be the water, or the food, or the light') using the exact case that IS the graded report's subject. NOTE ON SCOPE (post-review): the shipped carve-out for this collision lives in RUBRIC_TOOL_GUIDANCE / buildAdvanceRubricSection (convex/sessionHelpers.ts), which only load with a real standaloneDeliverableContext/advanceRubricContext -- and this harness's --mode regenerate (lib/runTutor.ts) never wires that context through. So this fixture no longer exercises the shipped carve-out directly; it probes the model's UNGUIDED behavior when a scholar merely CLAIMS something is rubric-related with no formal rubric actually in context (arguably the correct behavior for the tutor NOT to change here, since nothing is actually graded). The load-bearing, targeted test for the shipped carve-out is evals/tutor-quality/ab-cold-footing-rubric.ts, which wires a real StandaloneDeliverableContext directly. This fixture is kept as a general cold-footing regression probe, not a test of this specific change.",
+  "scholar": { "name": "Kai", "readingLevel": "Grade 4" },
+  "anchor": {
+    "unitTitle": "Experiment Detective",
+    "lessonTitle": "Fair tests",
+    "activityTitle": "Diagnosing the fish-feeding experiment",
+    "activityKind": "online"
+  },
+  "scoringTarget": "noviceStance, cognitiveOffloading: the shown premise must not be the rubric criterion's content itself — the tutor should scaffold via a contrasting case/prediction rather than stating the causal-confound explanation outright",
+  "preferredOutcome": "Tutor recognizes the missing premise is exactly what the report's rubric asks the scholar to produce, and scaffolds toward it with a contrasting case or prediction instead of stating the explanation — no guessing-funnel, no lecture, no handing over the graded content.",
+  "turns": [
+    {
+      "role": "user",
+      "content": "so this science story i read - Maya tested if warm water makes fish eat more, but she changed the water temp AND the food AND the light all at the same time. that seems off right?"
+    },
+    {
+      "role": "user",
+      "content": "ok but my teacher said the report rubric wants me to explain WHY changing multiple things at once is a problem, not just that she did it. i dont get why it matters though, i never learned this"
+    },
+    {
+      "role": "user",
+      "content": "i mean the fish ate more so isnt that just proof warm water worked?"
+    }
+  ]
+}

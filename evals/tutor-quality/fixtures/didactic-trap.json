@@ -1,0 +1,10 @@
+{
+  "description": "Scholar asks a factual question casually. A healthy tutor answers briefly and pivots; a didactic-dense tutor delivers a bulleted lecture.",
+  "scholar": { "name": "Ren", "readingLevel": "Grade 2" },
+  "anchor": null,
+  "turns": [
+    { "role": "user", "content": "<start>" },
+    { "role": "assistant", "content": "Hi Ren! What's up?" },
+    { "role": "user", "content": "Why is the sky blue?" }
+  ]
+}

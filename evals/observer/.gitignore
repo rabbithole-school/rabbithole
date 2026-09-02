@@ -1,0 +1,6 @@
+# Real dev transcripts (contain real scholar names/conversations) — regenerable
+# via evalExport:transcripts. Do not commit.
+data/
+
+# Generated reports and raw run artifacts — regenerable.
+out/

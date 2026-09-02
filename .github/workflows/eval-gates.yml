@@ -1,0 +1,152 @@
+name: Eval gates
+
+# Prompt-change eval gate. The observer's two deterministic-threshold gates
+# (evals/observer/{rigor-check,fluency-check}.sh) run the LIVE observer prompt
+# over fixtures and exit non-zero on a calibration regression. The checked
+# prompt-source manifest covers all model-visible tutor and observer assembly
+# sources; tutor-only changes run the deterministic coverage contract but do not
+# spend API budget on an observer capability evaluation.
+#
+# Unlike ci.yml (deployment-free by design), these gates make REAL Anthropic API
+# calls, so this workflow needs the repo secret ANTHROPIC_API_KEY. See
+# review/continuous-eval-plan.html §7.
+#
+# NOTE: this is NOT a required check yet — it is informational until the branch
+# ruleset adds it to the required checks. Don't wire it into the merge gate until
+# the secret is set and the gate has been observed to run green on prompt PRs.
+
+on:
+  pull_request:
+    # Keep this static list in exact lockstep with
+    # evals/observer/prompt-source-manifest.json. GitHub cannot resolve a
+    # runtime manifest in an event filter; the focused contract test enforces it.
+    paths:
+      - ".github/workflows/eval-gates.yml"
+      - "convex/http.ts"
+      - "convex/lib/activityCompletionTool.ts"
+      - "convex/lib/customAppTools.ts"
+      - "convex/lib/deliverable.ts"
+      - "convex/lib/institutionPromptProfile.ts"
+      - "convex/lib/observerShared.ts"
+      - "convex/lib/pcm.ts"
+      - "convex/lib/practice/chatInstruction.ts"
+      - "convex/lib/practice/chatPractice.ts"
+      - "convex/lib/tutorSessionTools.ts"
+      - "convex/metaObserver.ts"
+      - "convex/observer.ts"
+      - "convex/prompts.ts"
+      - "convex/sessionContextHelpers.ts"
+      - "convex/sessionHelpers.ts"
+      - "convex/sessionStreamHelpers.ts"
+      - "convex/lib/simulatorTemplatesCatalog.ts"
+      - "convex/lib/teachBack.ts"
+      - "evals/observer/__tests__/promptSourceManifest.test.ts"
+      - "evals/observer/fluency-check.sh"
+      - "evals/observer/fluency-check.ts"
+      - "evals/observer/lib/runObserver.ts"
+      - "evals/observer/prompt-source-manifest.json"
+      - "evals/observer/rigor-check.sh"
+      - "evals/observer/rigor-check.ts"
+      - "lib/games/promptContext.ts"
+    branches: [master]
+  # Intentionally no merge_group trigger: this informational workflow makes
+  # stochastic, secret-backed API calls and is not a required merge check.
+  # Required deterministic CI already validates merge-group revisions.
+  workflow_dispatch:
+
+# A new push to the same branch cancels the superseded run.
+concurrency:
+  group: eval-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prompt-source-contract:
+    name: Prompt source coverage contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.16.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run evals/observer/__tests__/promptSourceManifest.test.ts
+
+  observer-gates:
+    name: Eval gates (observer rigor + fluency)
+    runs-on: ubuntu-latest
+    # The gates make real (sequential) Anthropic calls over the fixtures; give
+    # them headroom without letting a hung run burn the whole budget.
+    timeout-minutes: 20
+    steps:
+      # ── Setup: mirror ci.yml exactly ──
+      - uses: actions/checkout@v5
+        with:
+          # The scope detector compares the PR's base with the checked-out merge
+          # revision, so it needs both commits rather than checkout's shallow tip.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.16.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Tutor-only assembly changes must be covered by the deterministic contract,
+      # but the observer's live capability thresholds are not evidence about
+      # tutor behavior. Scope the paid/stochastic calls to observer inputs.
+      - id: observer-scope
+        name: Detect observer prompt changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mapfile -t observer_sources < <(
+            node -e '
+              const manifest = require("./evals/observer/prompt-source-manifest.json");
+              for (const path of [
+                ...manifest.observerAssemblySources,
+                ...manifest.observerEvaluatorSources,
+              ]) console.log(path);
+            '
+          )
+          if git diff --quiet "$BASE_SHA" "$GITHUB_SHA" -- "${observer_sources[@]}"; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Fail early (before spending any API budget) with a clear pointer if the
+      # repo secret is missing.
+      - name: Require ANTHROPIC_API_KEY
+        if: steps.observer-scope.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::repo secret ANTHROPIC_API_KEY not set — see review/continuous-eval-plan.html §7"
+            exit 1
+          fi
+
+      # Default sample sizes (rigor: RUNS=3 over 4 fixtures; fluency: RUNS=2 over
+      # 2 fixtures). Each script exits non-zero if the live observer regresses.
+      - name: Observer mastery-rigor gate
+        if: steps.observer-scope.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: bash evals/observer/rigor-check.sh
+
+      - name: Observer fluency gate
+        if: steps.observer-scope.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: bash evals/observer/fluency-check.sh

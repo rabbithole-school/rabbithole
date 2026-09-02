@@ -1,0 +1,29 @@
+{
+  "id": "fx-misconception-gravity",
+  "title": "Why do things fall?",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Forces and Motion",
+  "source": "fixture",
+  "transcript": [
+    { "role": "user", "content": "we did a thing in class where you drop stuff. i think heavier things fall faster cause theyre heavier" },
+    { "role": "assistant", "content": "That's a really common idea! Let's test your thinking. Imagine I drop a bowling ball and a basketball from the same height at the same moment. What do you predict?" },
+    { "role": "user", "content": "the bowling ball hits first for sure. its way heavier so gravity pulls it down harder and faster" },
+    { "role": "assistant", "content": "You're right that gravity pulls harder on the bowling ball — it does have more weight. But here's the twist: heavier things are also harder to get moving. Those two effects cancel out. Want to think about why a feather falls slower then?" },
+    { "role": "user", "content": "the feather is just lighter so it falls slow. so lighter = slower, heavier = faster, thats my rule" },
+    { "role": "assistant", "content": "The feather is actually a special case — air pushes against it a lot because it's wide and light. If we dropped the feather in a tube with no air, it would fall exactly as fast as the bowling ball. On the moon astronauts proved this!" },
+    { "role": "user", "content": "no way. i still think the heavy one wins. the feather thing is just weird. heavy falls faster, thats how it works" },
+    { "role": "assistant", "content": "I love that you're holding onto your reasoning until you see proof — that's exactly what a scientist does. Next class let's actually drop two different cans and time them. For now, what would convince you?" },
+    { "role": "user", "content": "if the cans hit at the same time even tho one is heavier then ok maybe. but i bet they dont" }
+  ],
+  "expectations": [
+    "Captures the misconception 'heavier objects fall faster' as an observation with evidenceType misconception_signal, named precisely (e.g. 'Misconception: weight determines fall speed').",
+    "Rates that misconception around Remember (~1.0) with HIGH confidence — the student stated it clearly and repeatedly held it.",
+    "Does NOT rate the student as having mastered gravity/free-fall at a high Bloom's level — they rejected the correct model.",
+    "May note productive_struggle or a healthy skepticism / demand-for-evidence signal (the kid wants proof), which is genuinely present.",
+    "Concept domain should be Physics, not a micro-domain."
+  ],
+  "traps": [
+    "Mistaking the tutor's correct explanation for the student's understanding (the student never accepted it).",
+    "Rating 'gravity' or 'free fall' at Apply/Analyze when the student explicitly rejected the correct idea."
+  ]
+}

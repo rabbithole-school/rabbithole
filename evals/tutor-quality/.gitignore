@@ -1,0 +1,4 @@
+out/
+out-*/
+# Real shipped transcripts cached locally — never commit (kid data).
+fixtures/prod-*.json

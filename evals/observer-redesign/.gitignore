@@ -1,0 +1,3 @@
+# Real prod transcripts (PII) and generated reports — never commit.
+data/
+out/

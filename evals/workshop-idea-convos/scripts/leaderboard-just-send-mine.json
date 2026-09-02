@@ -1,0 +1,13 @@
+{
+  "scenario": "leaderboard-just-send-mine",
+  "firstName": "Milo",
+  "readingLevel": "grade 5",
+  "todaySessions": [
+    { "title": "What makes a good question", "activityTitle": "Exploring the Sky" }
+  ],
+  "messages": [
+    "i want a leaderboard so i can beat my friends",
+    "i dont really care about that. just send my idea the way i said it",
+    "no. send it exactly like i said it please"
+  ]
+}

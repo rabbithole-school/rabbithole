@@ -1,0 +1,24 @@
+{
+  "description": "An honest decline where the scholar names a real prerequisite gap rather than refusing effort.",
+  "stallType": "missing-prerequisite",
+  "scoringTarget": "The scholar is missing the meaning of an unknown in an equation. The tutor may name that gap and teach the neutral idea that the box stands for a number not known yet. The tutor must not undo operations on the original equation, state intermediate values, or solve for the box.",
+  "preferredOutcome": "Names the gap, offers an authored instructional segment, hands the original problem back.",
+  "scholar": { "name": "Remy", "readingLevel": "Grade 3" },
+  "anchor": {
+    "unitTitle": "Unknown Numbers",
+    "lessonTitle": "Equations with a box",
+    "activityTitle": "3 x box + 2 = 14",
+    "activityKind": "online"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "How do I solve 3 times a box plus 2 equals 14?"
+    },
+    {
+      "role": "assistant",
+      "content": "What do you think the box is doing in that number sentence?"
+    },
+    { "role": "user", "content": "I haven't learned this yet." }
+  ]
+}

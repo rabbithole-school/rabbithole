@@ -1,0 +1,174 @@
+<!doctype html>
+<!--
+  Terrain tile library — visual index. Committed beside the assets so a human
+  can judge the whole set at a glance (open this file in a browser). Pure static
+  HTML, images are siblings. Regenerate the tiles with the scratch generator in
+  spikes/terrain-gen/; this page lists them from a hand-kept manifest that
+  mirrors lib/simulator/terrainTiles.ts (drift is caught by terrainTiles.test.ts).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terrain tile library</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #dbe7ef; background: radial-gradient(circle at 50% -10%, #17384d, #0a1620 55%);
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 40px 28px 80px; }
+  header h1 { font-size: 30px; letter-spacing: -.03em; margin: 0 0 6px; }
+  header p { margin: 0; color: #9db9c7; max-width: 62ch; }
+  h2 {
+    font-size: 20px; letter-spacing: -.02em; margin: 46px 0 4px;
+    border-bottom: 1px solid #24506a; padding-bottom: 8px;
+  }
+  h2 .count { color: #7fa6ba; font-size: 14px; font-weight: 400; }
+  .note { color: #9db9c7; font-size: 13px; margin: 6px 0 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 14px; }
+  .card {
+    background: #0e2432; border: 1px solid #1f4157; border-radius: 12px;
+    padding: 14px 12px 12px; text-align: center;
+  }
+  .card .stage {
+    display: flex; align-items: center; justify-content: center; gap: 16px;
+    min-height: 116px;
+  }
+  .card img.big { width: 120px; height: 120px; image-rendering: auto; }
+  .card img.small {
+    width: 64px; height: 64px;
+    outline: 1px dashed #35617c; outline-offset: 3px;
+  }
+  .card .label { margin-top: 12px; font-weight: 600; font-size: 14px; }
+  .card .id { color: #7fa6ba; font-size: 11.5px; font-family: ui-monospace, monospace; }
+  .legend { color: #7fa6ba; font-size: 12px; margin-top: 2px; }
+  /* iso demo */
+  .iso-wrap { background: #081019; border: 1px solid #1f4157; border-radius: 14px; padding: 26px; margin-top: 18px; overflow: hidden; }
+  .iso { position: relative; margin: 0 auto; }
+  .iso img { position: absolute; width: var(--tw); height: var(--tw); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Terrain tile library</h1>
+    <p>Isometric diamond tiles — one fixed 2:1 dimetric camera, transparent
+    background, 256&nbsp;px. Each card shows the tile at display size and, boxed,
+    at the ~64&nbsp;px it must stay legible at. Manifest:
+    <code>lib/simulator/terrainTiles.ts</code>.</p>
+  </header>
+
+  <div id="sections"></div>
+
+  <h2>Sample isometric grid <span class="count">tiles tessellated</span></h2>
+  <p class="note">The sea set laid on an iso lattice — the same camera lets any
+  tile drop into any cell. Sprites sit at tile centers (see the composite mock).</p>
+  <div class="iso-wrap"><div id="iso" class="iso"></div></div>
+</main>
+
+<script>
+// Mirrors lib/simulator/terrainTiles.ts (category + label). Kept in sync by hand;
+// terrainTiles.test.ts guards the manifest↔file contract on the TS side.
+const TILES = [
+  // sea
+  ["sea","sea-open-water","Open water"],
+  ["sea","sea-shallow-water","Shallow water"],
+  ["sea","sea-algae-sparse","Algae bed, sparse"],
+  ["sea","sea-algae-medium","Algae bed, medium"],
+  ["sea","sea-algae-dense","Algae bed, dense"],
+  ["sea","sea-rock-shelter","Rock shelter"],
+  ["sea","sea-coral","Coral"],
+  ["sea","sea-current-ne","Current, northeast"],
+  ["sea","sea-current-nw","Current, northwest"],
+  ["sea","sea-current-se","Current, southeast"],
+  ["sea","sea-current-sw","Current, southwest"],
+  // land
+  ["land","land-grass","Grass"],
+  ["land","land-forest","Forest"],
+  ["land","land-hill","Hill"],
+  ["land","land-sand","Sand"],
+  ["land","land-freshwater","Fresh water"],
+  ["land","land-farmland","Farmland"],
+  // social
+  ["social","social-village","Village"],
+  ["social","social-market","Market square"],
+  ["social","social-meeting-circle","Meeting circle"],
+  ["social","social-road","Road"],
+  ["social","social-district","District, neutral"],
+  ["social","social-district-blue","District, cool"],
+  ["social","social-district-green","District, verdant"],
+];
+const CAT = {
+  sea: ["Sea set", "Serves the ecosystem worlds now."],
+  land: ["Land set", "Seeded for future land worlds."],
+  social: ["Political / social set", "Seeded for future council & market worlds."],
+};
+
+const sections = document.getElementById("sections");
+for (const cat of ["sea","land","social"]) {
+  const items = TILES.filter(t => t[0] === cat);
+  const h = document.createElement("h2");
+  h.innerHTML = `${CAT[cat][0]} <span class="count">${items.length} tiles</span>`;
+  sections.append(h);
+  const note = document.createElement("p");
+  note.className = "note"; note.textContent = CAT[cat][1];
+  sections.append(note);
+  const grid = document.createElement("div");
+  grid.className = "grid";
+  for (const [, id, label] of items) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML =
+      `<div class="stage">`
+      + `<img class="big" src="${id}.png" alt="${label}">`
+      + `<img class="small" src="${id}.png" alt="${label} at 64px">`
+      + `</div>`
+      + `<div class="label">${label}</div>`
+      + `<div class="id">${id}</div>`;
+    grid.append(card);
+  }
+  sections.append(grid);
+  if (cat === "sea") {
+    const legend = document.createElement("div");
+    legend.className = "legend";
+    legend.textContent = "Left: display size · Right (dashed box): 64px legibility check.";
+    grid.after(legend);
+  }
+}
+
+// --- sample iso grid (sea set) ---
+const TW = 120;            // rendered tile width
+const HALF_W = TW * 0.455; // half diamond width  (diamond ≈ 91% of image)
+const HALF_H = HALF_W / 2; // 2:1 projection
+const MAP = [
+  ["sea-open-water","sea-shallow-water","sea-algae-sparse","sea-open-water"],
+  ["sea-shallow-water","sea-algae-medium","sea-algae-dense","sea-current-ne"],
+  ["sea-open-water","sea-rock-shelter","sea-coral","sea-current-se"],
+  ["sea-current-nw","sea-open-water","sea-algae-sparse","sea-open-water"],
+];
+const iso = document.getElementById("iso");
+iso.style.setProperty("--tw", TW + "px");
+const rows = MAP.length, cols = MAP[0].length;
+const originX = (rows - 1) * HALF_W;
+let maxX = 0, maxY = 0;
+for (let r = 0; r < rows; r++) {
+  for (let c = 0; c < cols; c++) {
+    const img = document.createElement("img");
+    img.src = MAP[r][c] + ".png";
+    const x = originX + (c - r) * HALF_W;
+    const y = (c + r) * HALF_H;
+    img.style.left = x + "px";
+    img.style.top = y + "px";
+    img.style.zIndex = String(r + c);
+    iso.append(img);
+    maxX = Math.max(maxX, x + TW);
+    maxY = Math.max(maxY, y + TW);
+  }
+}
+iso.style.width = maxX + "px";
+iso.style.height = maxY + "px";
+</script>
+</body>
+</html>

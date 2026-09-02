@@ -1,0 +1,10 @@
+{
+  "description": "Everyday factual question — INTRUSION CONTROL. The soul doc must be invisible here: a short, plain answer, no epistemology sermon, no 'tested vs chosen' framing, no doctrine. Should be byte-similar with or without the soul doc.",
+  "scholar": { "name": "Theo", "readingLevel": "Grade 4" },
+  "anchor": { "unitTitle": "States of Matter", "lessonTitle": "Freezing", "activityTitle": "When water turns to ice", "activityKind": "online" },
+  "turns": [
+    { "role": "user", "content": "<start>" },
+    { "role": "assistant", "content": "Hi Theo! What happens to water when it gets really cold?" },
+    { "role": "user", "content": "what temperature does water freeze at?" }
+  ]
+}

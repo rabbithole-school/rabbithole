@@ -1,0 +1,15 @@
+{
+  "description": "WARM-footing negative control: the injected mastery context plus the scholar's own structured reasoning show real footing in fractions. The scholar then asks a causal WHY question. Preferred: the tutor KEEPS the probe-first default — the cold-footing rule must NOT bleed into explain-first here. An unprompted explanation of what this scholar could construct is over-scaffolding.",
+  "scholar": { "name": "Noa", "readingLevel": "5" },
+  "anchor": null,
+  "masteryContext": [
+    { "concept": "Equivalent fractions", "domain": "Mathematics", "level": 3.1, "confidence": 0.8, "evidence": "Generated equivalent fraction pairs and explained the doubling pattern unprompted", "studentInitiated": true },
+    { "concept": "Fraction as division of a whole", "domain": "Mathematics", "level": 2.8, "confidence": 0.7, "evidence": "Explained denominators as piece-size in own words", "studentInitiated": false }
+  ],
+  "practiceSkillsContext": { "domain": "fraction-arithmetic", "fluentLabels": ["Compare fractions with like denominators", "Write equivalent fractions"], "advancedLabels": [], "frontierLabels": ["Add fractions with unlike denominators"], "dueLabels": [] },
+  "scoringTarget": "noviceStance, overScaffolding, socratic",
+  "preferredOutcome": "Probe first — e.g. what does doubling do to the SIZE of each piece vs the NUMBER of pieces — not an immediate explanation.",
+  "turns": [
+    { "role": "user", "content": "i noticed 3/4 and 6/8 are the same because you just double the top and the bottom. but WHY does doubling both keep it the same amount?? that seems like it should make it bigger" }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "id": "fx-fact-not-mastery",
+  "title": "Cool animal facts",
+  "scholarName": "Test Scholar",
+  "unitTitle": "Animals of the World",
+  "source": "fixture",
+  "transcript": [
+    { "role": "user", "content": "tell me a cool animal fact" },
+    { "role": "assistant", "content": "Here's one: stoats turn white in winter! Their brown summer coat changes to white so they blend into the snow. The white winter coat even has a special name — ermine." },
+    { "role": "user", "content": "whoa they turn white?? thats so cool. so a stoat is white in winter and brown in summer" },
+    { "role": "assistant", "content": "Exactly! Why do you think turning white in winter might help a stoat?" },
+    { "role": "user", "content": "idk maybe its just what they do. tell me another animal fact!" },
+    { "role": "assistant", "content": "Octopuses have three hearts and blue blood! Two hearts pump blood to the gills, one to the body." },
+    { "role": "user", "content": "three hearts!! ok and the blood is blue. thats awesome. whats another one" },
+    { "role": "assistant", "content": "Wombats make cube-shaped poop! It helps the poop stay in place to mark territory without rolling away." },
+    { "role": "user", "content": "haha cube poop. ok i gotta tell my brother all these. stoats white, octopus 3 hearts, wombat square poop" }
+  ],
+  "rigorGold": { "maxObservations": 2, "maxMastery": 2.0, "requireMisconception": false },
+  "expectations": [
+    "Recognizes this is fact-collection, NOT concept mastery. The student recalls facts but never reasons about WHY (when asked why stoats turn white, they say 'idk maybe its just what they do').",
+    "Should produce ZERO or near-zero mastery observations — at most a low-confidence Remember-level note, NOT an Analyze/Evaluate observation about adaptation or camouflage.",
+    "An interest_signal observation or a frontier seed ('explore WHY animals camouflage / natural selection') would be appropriate and excellent.",
+    "Engagement can be high (kid is excited) but complexityLevel should be LOW — there is no intellectual depth, just enthusiasm."
+  ],
+  "traps": [
+    "Writing an observation like 'Evolutionary adaptations' at Bloom's 3-4 when the student explicitly declined to reason about why.",
+    "Conflating excitement/engagement with conceptual complexity."
+  ]
+}

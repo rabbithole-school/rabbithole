@@ -1,0 +1,42 @@
+{
+  "activityTitle": "Experiment Detective: the fish-feeding case",
+  "deliverablePrompt": "Write a short report diagnosing Maya's fish-feeding experiment: name the flaw, explain why it breaks her conclusion, propose a one-variable fix, describe exactly how you'd measure the result, and say how you'd make sure it isn't a fluke. Before they write, probe their understanding of each part Socratically — especially how they'd actually measure the outcome — don't just accept a claim at face value.",
+  "criteria": [
+    {
+      "id": "flaw-id",
+      "label": "Identifies the flaw",
+      "description": "Names that changing more than one variable at once (water temperature, food, and sunlight) makes it impossible to tell which change caused the fish to eat more."
+    },
+    {
+      "id": "causal-explain",
+      "label": "Explains why it breaks the conclusion",
+      "description": "Explains, in their own words, why changing multiple things at once means no single change can be credited for the result — even if only one of the three actually mattered, Maya's setup can't reveal which one."
+    },
+    {
+      "id": "redesign",
+      "label": "Proposes a one-variable fix",
+      "description": "Describes changing ONLY one variable (e.g. water temperature) while holding the others constant."
+    },
+    {
+      "id": "measurement",
+      "label": "Describes how to measure the outcome",
+      "description": "Describes a concrete, specific way to measure or count how much the fish ate, rather than just guessing or eyeballing it."
+    },
+    {
+      "id": "repetition",
+      "label": "Proposes repeating the test",
+      "description": "Proposes running the test more than once, over multiple days, to rule out a one-off fluke."
+    }
+  ],
+  "probedCriterionId": "measurement",
+  "script": [
+    "Maya changed the water temperature, the food, AND the sunlight all at once. That's the real problem — even if only ONE of those three things actually caused the fish to eat more, her setup can't tell us which one, since she changed them all together at the same time. She'd end up crediting the wrong thing, or all three, with no way to check.",
+    "I think to measure it properly, she should count how many food pellets are left after exactly 5 minutes each day, so it's an actual number instead of just eyeballing it.",
+    "And to actually test it, she should only change the water temperature this time, and keep the food and the sunlight exactly the same as before — that way, if the fish eat differently, we'll know it's because of the temperature and nothing else.",
+    "Here's my report: Maya's mistake was changing three things at once — water temperature, food, and sunlight. Even if only one of them was the real cause, her setup can't tell which one, since all three changed together — she'd end up crediting the wrong variable with no way to check. The fix is to change ONLY the water temperature and keep the food and sunlight exactly the same as before, so if the fish's eating changes, we know it's because of the temperature and nothing else. To measure the result, count the number of food pellets left over exactly 5 minutes after feeding, each day. Repeat the test for at least 5 days in a row so one weird day doesn't throw off the result."
+  ],
+  "artifactVisibleFromTurn": 3,
+  "finalArtifactContent": "Maya's mistake was changing three things at once — water temperature, food, and sunlight. Even if only one of them was the real cause, her setup can't tell which one, since all three changed together — she'd end up crediting the wrong variable with no way to check. The fix is to change ONLY the water temperature and keep the food and sunlight exactly the same as before, so if the fish's eating changes, we know it's because of the temperature and nothing else. To measure the result, count the number of food pellets left over exactly 5 minutes after feeding, each day. Repeat the test for at least 5 days in a row so one weird day doesn't throw off the result.",
+  "expectation": "should-be-full",
+  "note": "Regression guard: unlike hollow-complete.json, the scholar genuinely works out and states EVERY criterion herself in conversation before submitting a matching report — the causal-attribution nuance (turn 0), the measurement approach (turn 1, the probed criterion), and the one-variable redesign (turn 2) — leaving the tutor no legitimate unanswered thread to hold open. The unanswered-probe guidance must not make the tutor overly conservative: every criterion, including the previously-probed 'measurement', should legitimately earn full credit, and the document review must still receive a substantive response."
+}

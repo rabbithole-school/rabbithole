@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "output_schema.json",
+  "title": "GradeLevelAppropriatenessOutput",
+  "description": "Faithful JSON-Schema transcription of Learning Commons' TypeScript SDK Zod schema (sdks/typescript/src/schemas/grade-level-appropriateness.ts). Not present as a standalone file upstream; transcribed here so the vendored prompt can drive a structured tool call. See ATTRIBUTION.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reasoning", "grade", "alternative_grade", "scaffolding_needed"],
+  "properties": {
+    "reasoning": {
+      "type": "string",
+      "description": "Your reasoning for your answer in numbered bullet points for 4 steps with a 4th bullet point for synthesis."
+    },
+    "grade": {
+      "type": "string",
+      "enum": ["K-1", "2-3", "4-5", "6-8", "9-10", "11-CCR"],
+      "description": "The appropriate grade level for the text"
+    },
+    "alternative_grade": {
+      "type": "string",
+      "enum": ["K-1", "2-3", "4-5", "6-8", "9-10", "11-CCR"],
+      "description": "An alternative grade level for the text"
+    },
+    "scaffolding_needed": {
+      "type": "string",
+      "description": "Scaffolding needed for the text to be appropriate for the alternative grade"
+    }
+  }
+}
