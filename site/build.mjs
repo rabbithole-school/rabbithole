@@ -11,7 +11,9 @@ const dist = path.join(here, "dist");
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
 
-let commit = process.env.VERCEL_GIT_COMMIT_SHA || "";
+// A Git-linked Vercel build sets VERCEL_GIT_COMMIT_SHA; a CLI deploy passes
+// --build-env DRINK_ME_COMMIT=$(git rev-parse HEAD) instead.
+let commit = process.env.VERCEL_GIT_COMMIT_SHA || process.env.DRINK_ME_COMMIT || "";
 if (!commit) {
   try {
     commit = execSync("git rev-parse HEAD", { cwd: here, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();

@@ -65,7 +65,7 @@ if [ "${1:-}" = "--report" ]; then
   for log in install convex next; do
     [ -f "$STATE/$log.log" ] || continue
     say "  --- last lines of .kit/$log.log"
-    tail -n 12 "$STATE/$log.log" | sed -E 's/(SECRET|KEY|TOKEN)([=: ]+)[^ ]+/\1\2[hidden]/g; s/^/    /'
+    tail -n 12 "$STATE/$log.log" | sed -E 's/([A-Z_]*(SECRET|KEY|TOKEN))=[^[:space:]]+/\1=[hidden]/g; s/sk-ant-[A-Za-z0-9_-]+/[hidden]/g; s/^/    /'
   done
 fi
 

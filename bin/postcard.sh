@@ -4,6 +4,7 @@
 # you press the button yourself.
 #   bin/postcard.sh --who parent --got "signed in as the pretend teacher" \
 #     --agent "Claude Code" --minutes 12 --note "anything else"
+# Sending it needs a GitHub account.
 set -euo pipefail
 . "$(dirname "$0")/../lib/common.sh"
 who="" got="" agent="" minutes="" note=""
@@ -32,7 +33,8 @@ const body = [
   "",
   "_Sent with the drink-me kit's bin/postcard.sh. Please leave out names or details about any real child._",
 ].join("\n");
-const title = `drink-me postcard: ${who || "someone"} · ${got || "tried it"}`.slice(0, 120);
+let title = `drink-me postcard: ${who || "someone"} · ${got || "tried it"}`;
+if (title.length > 110) title = title.slice(0, 110).replace(/\s+\S*$/, "") + "…";
 const q = new URLSearchParams({ title, body });
 console.log(`https://github.com/rabbithole-school/rabbithole/issues/new?${q}`);
 JS

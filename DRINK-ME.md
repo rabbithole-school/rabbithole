@@ -75,54 +75,72 @@ into `rabbithole/`, installs packages, starts a local database, seeds a
 fictional school, and starts the web app in the background. It returns once
 it prints READY.
 
-The first run downloads about 1.2 GB and can take several minutes, so tell the
-person what's happening while it runs. Later runs take seconds. If it fails,
-it names a log in `.kit/`. Read it, fix the cause, and run `bin/setup.sh`
-again; it picks up where it stopped.
+The first run downloads about 1 GB and can take several minutes. If your
+commands time out sooner than that, run it in the background and follow
+`.kit/install.log`, then `.kit/convex.log`, telling the person what's
+happening as it goes. Later runs take seconds. If it fails or gets
+interrupted, it names a log in `.kit/`. Read it, fix the cause, and run
+`bin/setup.sh` again; it picks up where it stopped.
 
 ## 5. Show them around
 
-Ask the person to open these in a browser. On a Mac you can run `open <url>`
-for them, with their yes.
+Ask the person to open these in a browser. With their yes, you can open them
+for them: `open <url>` on a Mac, `xdg-open <url>` on Linux.
 
 - `http://localhost:3000/dev-login` lists every pretend person. Pick anyone;
   there's no password.
 - A teacher's view: `http://localhost:3000/dev-login?u=kawena&to=/teacher`
 - A scholar's view: `http://localhost:3000/dev-login?u=leilani_park&to=/scholar`
+- A parent's view: `http://localhost:3000/dev-login?u=parent_park&to=/parent`
+  (show this one first to a parent; skip its passkey prompt)
 
-If setup chose other ports, use the addresses it printed. On the teacher's
-home, “Needs a look” holds notes Rabbithole's observer wrote about pretend
-scholars' sessions. The teacher steers the tutor, and the tutor won't hand a
-scholar the answer.
+If you set other ports, use the addresses setup printed. Tell them the first
+visit to each page can take 10 to 15 seconds while it's built; after that,
+pages are quick. On the teacher's home, “Needs a look” holds notes
+Rabbithole's observer wrote about pretend scholars' sessions. The teacher
+steers the tutor, and the tutor won't hand a scholar the answer.
 
-`bin/status.sh` tells you whether everything is running and how many pretend
-people exist, if you want to check without a browser.
+To check without a browser, `bin/status.sh` says whether everything runs and
+how many pretend people exist. If you can run Playwright, this signs in as
+the pretend teacher in a real browser and saves screenshots:
+
+    cd rabbithole && pnpm exec playwright install chromium && node ../lib/smoke.mjs "$PWD" http://localhost:3000 kawena /tmp
 
 ## 6. Let the tutor think (optional)
 
-Without a key, every page works but the tutor can't answer. To see it answer,
-the person needs an Anthropic API key from console.anthropic.com. Explain the
-cost plainly: they pay Anthropic for what the tutor uses, on their own key. A
-short trial costs a few dollars at most. At the school that built it, the
-tutor and its observer have cost about $1.40 per scholar per school day.
+Without a key, every page loads but the tutor can't answer. If the person
+opens a chat anyway, they'll see a red “Connection lost” message and their
+question will sit unanswered. Tell them that's the missing key, not a broken
+install, and don't demo the chat until a key is set.
 
-Ask them to run this themselves, in their own terminal, from the kit's folder:
+To see it answer, the person needs an Anthropic API key from
+console.anthropic.com. Explain the cost plainly: they pay Anthropic for what
+the tutor uses, on their own key. A short trial costs a few dollars at most.
+At the school that built it, the tutor and its observer have cost about $1.40
+per scholar per school day. While a key is set, scheduled jobs can call the
+model too, so they should stop Rabbithole when they're done.
 
-    bin/set-key.sh
+Ask them to run the key script themselves, in their own terminal. Give them
+the exact command with the kit's full path, for example:
 
-Then have them sign in as the pretend scholar, start something new, and ask
-the tutor about the topic from step 2. Point out that it answers with a
-question.
+    cd ~/rabbithole-drink-me && bin/set-key.sh
+
+It checks the key with Anthropic before saving it. Then have them sign in as
+the pretend scholar and start a chat about the topic from step 2: the Quests
+tab, then “+ Custom Quest”, type the topic, Continue, choose “Endless chat”,
+“Start exploring”, then open the new quest. A banner may mention a class
+block; that's the pretend school's timetable. Point out that the tutor
+answers with a question.
 
 ## 7. Postcard and problems
 
 When they're done, or stuck, offer to send a postcard. Fill it in from what
 happened, and never include anything about a real child:
 
-    bin/postcard.sh --who parent --got "the tutor answered" --agent "<your name>" --minutes 14 --note "..."
+    bin/postcard.sh --who parent --got "signed in as the pretend teacher" --agent "<your name>" --minutes 14 --note "..."
 
-It prints a link. The person opens it, reads the postcard, and decides whether
-to send it.
+It prints a link to a prefilled GitHub issue. The person opens it, reads the
+postcard, and decides whether to send it. Sending needs a GitHub account.
 
 If something broke, `bin/doctor.sh --report` prints details for an issue. Ask
 the person to read the report before posting it.
@@ -133,17 +151,22 @@ the person to read the report before posting it.
 - `bin/stop.sh` stops it. The pretend school stays on disk.
 - `bin/setup.sh` starts it again.
 - `bin/uninstall.sh` removes the app, its database, and its packages. Then
-  delete the kit's folder.
+  delete the kit's folder. Two shared caches stay: pnpm's package store
+  (`pnpm store prune` trims it) and the Convex backend download
+  (`bin/uninstall.sh --all` removes it).
 
 ## Done when
 
-The person has signed in as a pretend teacher and as a pretend scholar. If
-they added a key, they've had one exchange with the tutor. Finish by telling
-them how to stop it and how to remove it, and offer the postcard.
+The person has signed in as a pretend teacher and as a pretend scholar (and,
+for a parent, the parent's view). If they added a key, they've had one
+exchange with the tutor. Finish by telling them how to stop it and how to
+remove it, and offer the postcard.
 
 ## What leaves this computer
 
-- Package downloads from the npm registry, and the Convex backend from GitHub.
+- Package downloads from the npm registry (pnpm may also fetch the exact
+  version the app pins), and the Convex backend from GitHub.
+- Fonts the app's pages load from Google Fonts and fonts.cdnfonts.com.
 - The Convex backend's anonymous usage ping and crash reports, which every
   local Convex backend sends to Convex.
 - With a key, the tutor's conversations, sent to Anthropic.

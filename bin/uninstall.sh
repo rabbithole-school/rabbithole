@@ -14,3 +14,4 @@ if [ "${1:-}" = "--all" ]; then
   done
 fi
 say "To finish, delete this folder: rm -rf \"$KIT\""
+say "Shared caches stay: pnpm's package store (pnpm store prune trims it) and, unless you passed --all, the Convex backend download."

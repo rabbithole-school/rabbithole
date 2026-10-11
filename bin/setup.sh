@@ -28,7 +28,7 @@ if pid_alive next && pid_alive convex; then
 fi
 stop_all
 for p in "$CLOUD_PORT" "$SITE_PORT" "$WEB_PORT"; do
-  if port_busy "$p"; then
+  if ! wait_port_free "$p"; then
     die "port $p is already in use by another program.
   Stop it, or choose free ports, for example:
     CLOUD_PORT=3310 SITE_PORT=3311 WEB_PORT=3100 bin/setup.sh"
@@ -50,7 +50,11 @@ fi
 [ "$(git -C "$APP" rev-parse HEAD)" = "$COMMIT" ] || die "the checkout isn't at the pinned commit $COMMIT"
 cd "$APP"
 
-step "2/6  Install the web app's packages (the first run downloads about 1 GB and can take several minutes)"
+if [ -d node_modules ]; then
+  step "2/6  Check the web app's packages"
+else
+  step "2/6  Install the web app's packages (about 1 GB; this first time can take several minutes)"
+fi
 # --filter skips the iPad app's packages, which a web-only trial doesn't need.
 if ! pnpm install --frozen-lockfile --filter rabbithole >"$STATE/install.log" 2>&1; then
   tail -n 20 "$STATE/install.log" >&2
@@ -96,7 +100,7 @@ if ! backend_ready; then
   # download and leave the backend holding the port. One clean retry fixes it.
   say "  the backend didn't come up; retrying once"
   stop_all
-  sleep 2
+  wait_port_free "$CLOUD_PORT" || true
   start_backend
   backend_ready || {
     say ""
@@ -144,8 +148,10 @@ for i in $(seq 1 120); do
   pid_alive next || { tail -n 20 "$STATE/next.log" >&2; die "the web app didn't start. The log is in .kit/next.log"; }
   sleep 1
 done
-# Compile the sign-in page once, so the first click isn't a long wait.
+# Compile the sign-in page now, and the main pages in the background, so the
+# first clicks don't wait 10-15 seconds each for the dev server to build them.
 curl -s -o /dev/null --max-time 120 "http://localhost:$WEB_PORT/dev-login" || true
+(for p in /teacher /scholar /parent; do curl -s -o /dev/null --max-time 120 "http://localhost:$WEB_PORT$p"; done) >/dev/null 2>&1 &
 
 step "READY"
 cat <<EOF
@@ -155,6 +161,7 @@ cat <<EOF
   Pick a pretend person:  http://localhost:$WEB_PORT/dev-login
   A teacher's view:       http://localhost:$WEB_PORT/dev-login?u=kawena&to=/teacher
   A scholar's view:       http://localhost:$WEB_PORT/dev-login?u=leilani_park&to=/scholar
+  A parent's view:        http://localhost:$WEB_PORT/dev-login?u=parent_park&to=/parent
 
   Let the tutor answer:   bin/set-key.sh   (run it yourself; it asks for an Anthropic key)
   Stop:                   bin/stop.sh      Start again: bin/setup.sh

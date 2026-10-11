@@ -47,6 +47,13 @@ guard_no_cloud() {
 
 pid_alive() { [ -f "$STATE/$1.pid" ] && kill -0 "$(cat "$STATE/$1.pid")" 2>/dev/null; }
 
+# After stopping, a port can stay busy for a few seconds. Wait up to 15s.
+wait_port_free() {
+  local i
+  for i in $(seq 1 15); do port_busy "$1" || return 0; sleep 1; done
+  return 1
+}
+
 # Stop only what this kit started: its own process groups, and a backend whose
 # storage lives inside this kit's checkout.
 stop_all() {

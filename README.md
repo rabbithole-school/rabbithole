@@ -45,7 +45,8 @@ with a pretend school. It shows you each command before it runs it.
   run inside another git repository.
 - It sends nothing to the people who make Rabbithole. What does leave your computer: package
   downloads, the Convex backend download, that backend's anonymous usage ping
-  and crash reports, and, if you add a key, tutor conversations to Anthropic.
+  and crash reports, web fonts the app's pages load (Google Fonts and
+  fonts.cdnfonts.com), and, if you add a key, tutor conversations to Anthropic.
 
 ## Commands
 
@@ -64,6 +65,12 @@ Ports default to 3000 (web), 3210 and 3211 (backend). Override them with
 
 ## Known gaps in this pilot
 
+- Without an Anthropic key, opening a chat shows a red “Connection lost”
+  message. That's the missing key. `bin/set-key.sh` fixes it.
+- The first visit to each page takes 10 to 15 seconds in this dev-server
+  setup; after that, pages are quick.
+- `bin/uninstall.sh` leaves pnpm's shared package store, and the Convex
+  backend download unless you pass `--all`.
 - Web only. The iPad app isn't part of it.
 - Times and “today” assume Hawaii in places, because the snapshot hardcodes
   `Pacific/Honolulu`.
@@ -79,7 +86,8 @@ Ports default to 3000 (web), 3210 and 3211 (backend). Override them with
 `site/` is the page at drink-me.rabbithole.school: the line to copy for
 people, and `/drink-me` for agents. `site/build.mjs` writes the commit it was
 built from into `/drink-me`, so the page always points at the kit version
-deployed with it. Vercel builds it from this branch only (`vercel.json`).
+deployed with it. Vercel builds it from this branch only (`vercel.json`); a
+CLI deploy passes the commit as `--build-env DRINK_ME_COMMIT=$(git rev-parse HEAD)`.
 
 ## Where this comes from
 
