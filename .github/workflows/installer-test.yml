@@ -25,6 +25,13 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 10.33.0
+      # A stock Mac runs the kit's scripts with /bin/bash 3.2. The runner
+      # image puts Homebrew's bash 5 first, which would hide 3.2 problems.
+      - name: Use the bash a stock Mac has
+        if: runner.os == 'macOS'
+        run: echo /bin >> "$GITHUB_PATH"
+      - name: Which bash runs the kit
+        run: command -v bash && bash --version | head -n 1
       - name: Doctor
         run: bin/doctor.sh
       - name: Set up and start
