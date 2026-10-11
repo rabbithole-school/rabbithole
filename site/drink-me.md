@@ -10,6 +10,10 @@ are versioned with the code, in the repository you're about to clone.
 - You need to run commands on this person's computer. If you can't (a chat
   in a web browser can't), say so in plain words, suggest they paste the same
   line into an agent that can, such as Claude Code, and stop.
+- Your safety settings may pause you before you download or run this kit,
+  because it's code from the internet. If they do, tell the person in plain
+  words what you were about to run and why you paused, and let them decide
+  whether to allow it. Never look for a way around the check.
 - Show each command and say what it does before you run it. Install nothing
   without a yes.
 - Never ask for, type, or store a real child's name. The school you'll set up

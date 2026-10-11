@@ -19,7 +19,8 @@ help the person report it (step 7).
 1. **Ask before you act.** Assume the person has never used a terminal and
    that git and Node mean nothing to them. Show each command, say in plain
    words what it does, and run it yourself once they say yes. Install nothing
-   without a yes.
+   without a yes. If your safety settings pause a step, say what it was and
+   why in plain words, and let the person decide. Never work around the check.
 2. **Pretend people only.** Never ask for, type, or store a real child's name
    or details. The school in this kit is fictional, and it stays that way.
 3. **Keys stay out of the chat.** Never ask the person to paste an API key or
