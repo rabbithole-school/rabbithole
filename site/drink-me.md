@@ -7,6 +7,9 @@ are versioned with the code, in the repository you're about to clone.
 
 ## Before anything else
 
+- You need to run commands on this person's computer. If you can't (a chat
+  in a web browser can't), say so in plain words, suggest they paste the same
+  line into an agent that can, such as Claude Code, and stop.
 - Show each command and say what it does before you run it. Install nothing
   without a yes.
 - Never ask for, type, or store a real child's name. The school you'll set up

@@ -5,15 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
 <title>Rabbithole · Drink me</title>
-<meta name="description" content="Paste one line into your coding agent to set up Rabbithole, a Socratic AI tutor for gifted kids, on your own computer with a pretend school.">
+<meta name="description" content="Paste one line into an AI agent on your computer and go down the rabbit hole.">
 <link rel="alternate" type="text/markdown" href="/drink-me" title="Instructions for agents">
 <style>
-  /* One screen at night: the brand's purple-to-black sky, the rabbit on its
-     moon to the right, and the single line to copy on the left. */
+  /* One screen at night: the rabbit on its moon, and the one line to copy.
+     The agent explains everything else, so the page says almost nothing. */
   :root {
     color-scheme: dark;
     --sky-1: #3B2E7E; --sky-2: #221A4D; --sky-3: #0C0A18;
-    --ink: #F3F0FF; --soft: #CFC8F2; --dim: #A99FD8; --link: #BFB3FF;
+    --ink: #F3F0FF; --dim: #A99FD8;
     --tag: #F4E9C8; --tag-ink: #2A1C05; --go: #63D5C8; --go-ink: #072421;
     --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hanken Grotesk", system-ui, sans-serif;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -24,31 +24,21 @@
     background: var(--sky-3) linear-gradient(150deg, var(--sky-1) 0%, var(--sky-2) 42%, var(--sky-3) 100%) fixed;
     color: var(--ink); font: 17px/1.55 var(--font);
   }
-  a { color: var(--link); }
-  a:focus-visible, button:focus-visible { outline: 2px solid var(--go); outline-offset: 3px; border-radius: 4px; }
-  .hero { position: relative; overflow: hidden; }
-  .hero img.art {
+  button:focus-visible { outline: 2px solid var(--go); outline-offset: 3px; }
+  main { position: relative; min-height: 100vh; min-height: 100svh; display: flex; align-items: center; overflow: hidden; }
+  img.art {
     position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 78% 40%;
-    opacity: .95; pointer-events: none;
+    pointer-events: none;
   }
-  .hero::after { /* keep the copy readable over the art */
+  main::after { /* keep the line readable over the art */
     content: ""; position: absolute; inset: 0;
-    background: linear-gradient(90deg, rgba(12,10,24,.92) 0%, rgba(12,10,24,.75) 45%, rgba(12,10,24,0) 75%);
+    background: linear-gradient(90deg, rgba(12,10,24,.9) 0%, rgba(12,10,24,.6) 42%, rgba(12,10,24,0) 70%);
   }
-  .wrap { position: relative; z-index: 1; max-width: 72rem; margin: 0 auto; padding: 4.5rem 20px 4rem; }
-  @media (max-width: 720px) { /* on a phone the rabbit gets its own band above the copy */
-    .hero img.art { position: static; display: block; height: 220px; object-position: 82% 38%; opacity: 1;
-      -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
-    .hero::after { display: none; }
-    .wrap { padding-top: .5rem; }
-  }
-  .copy { max-width: 36rem; }
-  .eyebrow { font-size: .74rem; font-weight: 650; letter-spacing: .16em; text-transform: uppercase; color: var(--dim); }
-  h1 { font-size: clamp(2.6rem, 2rem + 3vw, 4rem); line-height: 1.05; margin: .5rem 0 0; letter-spacing: -.02em; }
-  .tagline { font-size: 1.25rem; color: var(--soft); margin: .4rem 0 0; }
-  .lede { color: var(--soft); margin: 1.2rem 0 0; }
+  .door { position: relative; z-index: 1; width: 100%; max-width: 72rem; margin: 0 auto; padding: 3rem 20px; }
+  .door > * { max-width: 35rem; }
+  h1 { font-size: clamp(2.6rem, 2rem + 3vw, 4rem); line-height: 1.05; margin: 0; letter-spacing: -.02em; }
   .bottle {
-    position: relative; margin-top: 2.4rem; background: rgba(11,9,24,.82); border: 1px solid rgba(255,255,255,.16);
+    position: relative; margin-top: 2.6rem; background: rgba(11,9,24,.82); border: 1px solid rgba(255,255,255,.16);
     border-radius: 14px; padding: 1.6rem .7rem .7rem 1rem; display: grid; grid-template-columns: 1fr auto; gap: .6rem; align-items: center;
   }
   .bottle .tagpaper {
@@ -58,74 +48,38 @@
   }
   .bottle .tagpaper::before { content: ""; position: absolute; left: .48rem; top: 50%; width: .4rem; height: .4rem; margin-top: -.2rem; border-radius: 50%; background: #0B0918; }
   .bottle code { font: 1rem/1.5 var(--mono); color: var(--ink); overflow-wrap: anywhere; }
+  .bottle code .url { white-space: nowrap; } /* never split the address at "drink-" */
   button.copy-btn {
     font: 700 .85rem var(--font); letter-spacing: .03em; border: 0; border-radius: 10px; cursor: pointer;
     padding: .7rem 1.05rem; background: var(--go); color: var(--go-ink); min-width: 6.5rem;
   }
   button.copy-btn:hover { filter: brightness(1.08); }
-  @media (max-width: 560px) { .bottle { grid-template-columns: 1fr; } button.copy-btn { justify-self: start; } }
-  .how { color: var(--soft); font-size: .95rem; margin: 1rem 0 0; }
-  .agents { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .9rem; }
-  .agents span { font-size: .74rem; border: 1px solid rgba(255,255,255,.2); border-radius: 999px; padding: .15rem .65rem; color: #DCD5FF; }
-  .below { position: relative; z-index: 1; max-width: 72rem; margin: 0 auto; padding: 0 20px 4rem; }
-  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; }
-  .card { border: 1px solid rgba(255,255,255,.12); border-radius: 12px; padding: 1rem 1.1rem; background: rgba(11,9,24,.55); }
-  .card h2 { font-size: .78rem; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); margin: 0 0 .4rem; }
-  .card p, .card li { color: var(--soft); font-size: .93rem; margin: 0; }
-  .card ul { margin: 0; padding-left: 1.1rem; }
-  .card li + li { margin-top: .3rem; }
-  footer { max-width: 72rem; margin: 0 auto; padding: 0 20px 3rem; color: var(--dim); font-size: .82rem; }
-  footer p { margin: .35rem 0; max-width: 46rem; }
+  .hint { color: var(--dim); font-size: .95rem; margin: 1rem 0 0; }
+  @media (max-width: 720px) { /* on a phone the rabbit gets its own band above the line */
+    main { display: block; }
+    img.art { position: static; display: block; height: 300px; object-position: 82% 38%;
+      -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+    main::after { display: none; }
+    .door { padding-top: .5rem; }
+  }
+  @media (max-width: 560px) { .bottle { grid-template-columns: 1fr; } .bottle code { font-size: .8125rem; } button.copy-btn { justify-self: start; } }
+  @media (max-width: 359px) { .bottle code .url { white-space: normal; } }
   @media (prefers-reduced-motion: no-preference) { .bottle { animation: rise .6s ease-out both; } @keyframes rise { from { transform: translateY(6px); opacity: .6; } to { transform: none; opacity: 1; } } }
 </style>
 </head>
 <body>
-  <section class="hero">
+  <main>
     <img class="art" src="/hero.webp" alt="" width="1600" height="855">
-    <div class="wrap">
-      <div class="copy">
-        <div class="eyebrow">Preview · not yet announced</div>
-        <h1>Rabbithole</h1>
-        <p class="tagline">AI that makes you think harder.</p>
-        <p class="lede">A Socratic tutor for gifted kids, made by a school. It asks questions instead of handing out answers, and a teacher stays in charge of it.</p>
-        <div class="bottle">
-          <span class="tagpaper">Drink me</span>
-          <code id="line">Read drink-me.rabbithole.school/drink-me and take me down the rabbit hole.</code>
-          <button class="copy-btn" type="button" id="copy">Copy</button>
-        </div>
-        <p class="how">Paste the line into a coding agent that can use a terminal. It asks who you are, then sets up Rabbithole on your own computer with a pretend school. It shows you each command before it runs it, and you can stop at any step.</p>
-        <div class="agents" aria-label="Works with"><span>Claude Code</span><span>Codex</span><span>Cursor</span><span>Copilot</span><span>Gemini CLI</span></div>
+    <div class="door">
+      <h1>Rabbithole</h1>
+      <div class="bottle">
+        <span class="tagpaper">Drink me</span>
+        <code id="line">Read <span class="url">drink-me.rabbithole.school/drink-me</span> and take me down the rabbit hole.</code>
+        <button class="copy-btn" type="button" id="copy">Copy</button>
       </div>
+      <p class="hint">Paste it into Claude Code, or any AI agent on your computer.</p>
     </div>
-  </section>
-  <section class="below">
-    <div class="cols">
-      <div class="card">
-        <h2>You'll need</h2>
-        <ul>
-          <li>A Mac or a Linux computer, with about 3.5 GB free</li>
-          <li>git, Node 22, and pnpm (the agent will help you install them)</li>
-          <li>Optional: an Anthropic API key, so the tutor can answer</li>
-        </ul>
-      </div>
-      <div class="card">
-        <h2>You'll get</h2>
-        <p>Rabbithole running on your computer with a fictional school: a teacher's dashboard, scholars' homes, and the tutor. You can sign in as anyone in the pretend school.</p>
-      </div>
-      <div class="card">
-        <h2>It won't</h2>
-        <ul>
-          <li>create any account for you</li>
-          <li>touch any real school's data</li>
-          <li>send anything to us</li>
-        </ul>
-      </div>
-    </div>
-  </section>
-  <footer>
-    <p>Made by a small nonprofit school for gifted kids. This preview runs the public Rabbithole snapshot published September 2, 2026. It's a test, so please don't share the link yet.</p>
-    <p>If you're an agent reading this page, your instructions are at <a href="/drink-me">/drink-me</a>. The kit itself lives on the <a href="https://github.com/rabbithole-school/rabbithole/tree/drink-me">drink-me branch</a>.</p>
-  </footer>
+  </main>
   <script>
     (function () {
       var btn = document.getElementById("copy"), line = document.getElementById("line");

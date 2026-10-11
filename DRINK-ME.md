@@ -16,8 +16,10 @@ help the person report it (step 7).
 
 ## Rules
 
-1. **Ask before you act.** Show each command and say in one sentence what it
-   does before you run it. Install nothing without a yes.
+1. **Ask before you act.** Assume the person has never used a terminal and
+   that git and Node mean nothing to them. Show each command, say in plain
+   words what it does, and run it yourself once they say yes. Install nothing
+   without a yes.
 2. **Pretend people only.** Never ask for, type, or store a real child's name
    or details. The school in this kit is fictional, and it stays that way.
 3. **Keys stay out of the chat.** Never ask the person to paste an API key or
@@ -124,6 +126,11 @@ Ask them to run the key script themselves, in their own terminal. Give them
 the exact command with the kit's full path, for example:
 
     cd ~/rabbithole-drink-me && bin/set-key.sh
+
+If they've never used a terminal, open one for them in the kit's folder (on
+a Mac, `open -a Terminal ~/rabbithole-drink-me`). Tell them to type
+`bin/set-key.sh`, press Return, and paste the key when it asks. Nothing
+shows while they paste; that's on purpose.
 
 It checks the key with Anthropic before saving it. Then have them sign in as
 the pretend scholar and start a chat about the topic from step 2: the Quests
