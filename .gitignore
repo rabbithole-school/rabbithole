@@ -4,5 +4,6 @@
 /.kit/
 .DS_Store
 
-# The front door build output
+# The front door build output, and the Vercel CLI's link to its project
 /site/dist/
+.vercel

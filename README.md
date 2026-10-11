@@ -88,6 +88,8 @@ people, and `/drink-me` for agents. `site/build.mjs` writes the commit it was
 built from into `/drink-me`, so the page always points at the kit version
 deployed with it. Vercel builds it from this branch only (`vercel.json`); a
 CLI deploy passes the commit as `--build-env DRINK_ME_COMMIT=$(git rev-parse HEAD)`.
+`.vercelignore` uploads only `site/` and `vercel.json`, so a deploy from a
+clone where `bin/setup.sh` ran never ships the app or its local database.
 
 ## Where this comes from
 

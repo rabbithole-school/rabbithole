@@ -1,0 +1,7 @@
+# Vercel builds only the front door in site/, so upload nothing else. A deploy
+# from a clone where bin/setup.sh ran must never ship rabbithole/ (the app and
+# its local database) or .kit/ (logs).
+/*
+!/site
+!/vercel.json
+/site/dist
