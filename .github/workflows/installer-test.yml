@@ -1,0 +1,50 @@
+name: installer test
+
+# Does a clean machine get from nothing to a signed-in pretend teacher?
+# Runs on every push to this branch, on Linux and macOS.
+on:
+  push:
+    branches: [drink-me]
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - name: Doctor
+        run: bin/doctor.sh
+      - name: Set up and start
+        run: bin/setup.sh
+      - name: Status
+        run: bin/status.sh
+      - name: Sign in as a pretend teacher in a real browser
+        working-directory: rabbithole
+        run: |
+          pnpm exec playwright install --with-deps chromium
+          node ../lib/smoke.mjs "$PWD" http://localhost:3000 kawena "$RUNNER_TEMP"
+      - name: Stop
+        if: always()
+        run: bin/stop.sh
+      - name: Keep the logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-test-${{ matrix.os }}
+          path: |
+            .kit/*.log
+            ${{ runner.temp }}/*.png
+          if-no-files-found: ignore
