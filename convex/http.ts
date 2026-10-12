@@ -103,6 +103,7 @@ import { assembleProjectStreamApiMessages } from "./lib/projectStreamMessages";
 import {
   STAY_SILENT_TOOL_NAME,
   appUpdateInstruction,
+  heldTextFateAtTool,
 } from "./lib/appUpdateTools";
 import { buildCharacterOnStageSection } from "./sessionHelpers";
 import { buildUnitDesignerResponse } from "./unitDesignerStream";
@@ -1426,8 +1427,14 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                       ).name;
                       if (holdingText) {
                         holdingText = false;
-                        if (toolName === STAY_SILENT_TOOL_NAME) heldText = "";
-                        else releaseHeldText();
+                        if (
+                          heldTextFateAtTool(toolName, {
+                            quietAppUpdate: offerStaySilent,
+                            directorToolNames: CHARACTER_DIRECTOR_TOOL_NAMES,
+                          }) === "drop"
+                        ) {
+                          heldText = "";
+                        } else releaseHeldText();
                       }
                       flushSafeText();
                       if (toolName === MARK_ACTIVITY_COMPLETE_TOOL_NAME) {

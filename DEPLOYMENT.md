@@ -62,6 +62,14 @@ Set these deployment-specific items before you rely on the related features.
 - **While unset:** Magic-link email is not sent; the sign-in URL is only logged. Optional if you do not use email sign-in.
 - **Set it:** Set AUTH_RESEND_KEY in the Convex deployment's environment.
 
+### Dev sign-in secret (backend)
+
+- **Variable:** `DEV_TEST_LOGIN_SECRET`
+- **What it is:** The shared secret the backend requires before /dev-login signs anyone in or lists the seeded users.
+- **Published as:** Not present. Secrets are never published.
+- **While unset:** /dev-login is disabled even when RABBITHOLE_ALLOW_DEV_LOGIN is true.
+- **Set it:** Generate a random string and set it as DEV_TEST_LOGIN_SECRET in the Convex deployment's environment, and the same value as NEXT_PUBLIC_DEV_LOGIN_SECRET in the web app's environment.
+
 ### Drive webhook base URL
 
 - **Variable:** `DRIVE_WEBHOOK_BASE_URL`
@@ -166,6 +174,14 @@ Set these deployment-specific items before you rely on the related features.
 - **While unset:** The web app has no backend to talk to and fails to start.
 - **Set it:** Set both to your Convex deployment's .convex.cloud and .convex.site URLs before building the web app.
 
+### Dev sign-in secret (web)
+
+- **Variable:** `NEXT_PUBLIC_DEV_LOGIN_SECRET`
+- **What it is:** The web app's copy of DEV_TEST_LOGIN_SECRET, which the /dev-login page sends to the backend. It is compiled into the web bundle, so it is visible to anyone who can load the page.
+- **Published as:** Not present. Secrets are never published.
+- **While unset:** The /dev-login page cannot sign anyone in.
+- **Set it:** Set NEXT_PUBLIC_DEV_LOGIN_SECRET in .env.local (or the web host's build environment) to the same value as DEV_TEST_LOGIN_SECRET. Set it only on local or throwaway deployments.
+
 ### Google Picker API key
 
 - **Variable:** `NEXT_PUBLIC_GOOGLE_API_KEY`
@@ -253,6 +269,22 @@ Set these deployment-specific items before you rely on the related features.
 - **Published as:** Not present. The code defaults to 'Rabbithole'.
 - **While unset:** The passkey prompt shows 'Rabbithole' instead of your school's name.
 - **Set it:** Set PASSKEY_RP_NAME in the Convex deployment's environment.
+
+### Dev fixture switch
+
+- **Variable:** `RABBITHOLE_ALLOW_DEV_FIXTURES`
+- **What it is:** Lets development fixtures write to a deployment that Convex hosts or runs locally: the seed gives its fictional people the usernames /dev-login signs in by, and demo fixtures (sample skill progress, sample app logins) may run.
+- **Published as:** Not present. Fixtures are refused unless this is exactly 'true'.
+- **While unset:** The seed still creates the fictional school, but its people get no usernames, so /dev-login has no one to sign in as; demo fixtures refuse to run.
+- **Set it:** For a local or throwaway trial only, set RABBITHOLE_ALLOW_DEV_FIXTURES to true in the Convex deployment's environment before seeding. Never set it where real children have records.
+
+### Dev sign-in switch
+
+- **Variable:** `RABBITHOLE_ALLOW_DEV_LOGIN`
+- **What it is:** Turns on /dev-login, the no-password sign-in for seeded fictional users, on a deployment that Convex hosts or runs locally. It works only together with DEV_TEST_LOGIN_SECRET and NEXT_PUBLIC_DEV_LOGIN_SECRET.
+- **Published as:** Not present. /dev-login is off unless this is exactly 'true'.
+- **While unset:** /dev-login refuses every sign-in and lists no users. This is the right setting for any deployment with real people in it.
+- **Set it:** For a local or throwaway trial only, set RABBITHOLE_ALLOW_DEV_LOGIN to true in the Convex deployment's environment. Never set it where real children have accounts.
 
 ### Resend receiving key
 
@@ -494,6 +526,8 @@ Set these deployment-specific items before you rely on the related features.
 - `convex/seed/physicalEnvironment.ts` — Development seed data. Published for local development; not a configuration point.
 - `convex/seedData.ts` — Development seed data. Private records removed; not a configuration point.
 - `convex/seeds.ts` — Development seed data. Private records removed; not a configuration point.
+- `convex/sessionHelpers.ts` — Session runtime with a first-party reading-program lookup removed. No adopter action required.
+- `convex/sessions.ts` — Session runtime with a first-party reading-program lookup removed. No adopter action required.
 - `convex/simplemdm.ts` — SimpleMDM device-management module. Published and inert unless SIMPLEMDM_API_KEY is set (see the environment entry).
 - `convex/simulator.ts` — Curriculum simulator with a private-deployment detection branch removed. No adopter action required.
 - `convex/slackBot.ts` — Slack bot module. Published and inert unless the SLACK_* variables are set (see the environment entries).

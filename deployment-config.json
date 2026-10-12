@@ -128,6 +128,42 @@
       "setBy": "Set JWKS to a JSON Web Key Set containing the RS256 public JWK for JWT_PRIVATE_KEY."
     },
     {
+      "path": "RABBITHOLE_ALLOW_DEV_LOGIN",
+      "name": "Dev sign-in switch",
+      "kind": "env",
+      "description": "Turns on /dev-login, the no-password sign-in for seeded fictional users, on a deployment that Convex hosts or runs locally. It works only together with DEV_TEST_LOGIN_SECRET and NEXT_PUBLIC_DEV_LOGIN_SECRET.",
+      "publishedAs": "Not present. /dev-login is off unless this is exactly 'true'.",
+      "unsetBehavior": "/dev-login refuses every sign-in and lists no users. This is the right setting for any deployment with real people in it.",
+      "setBy": "For a local or throwaway trial only, set RABBITHOLE_ALLOW_DEV_LOGIN to true in the Convex deployment's environment. Never set it where real children have accounts."
+    },
+    {
+      "path": "RABBITHOLE_ALLOW_DEV_FIXTURES",
+      "name": "Dev fixture switch",
+      "kind": "env",
+      "description": "Lets development fixtures write to a deployment that Convex hosts or runs locally: the seed gives its fictional people the usernames /dev-login signs in by, and demo fixtures (sample skill progress, sample app logins) may run.",
+      "publishedAs": "Not present. Fixtures are refused unless this is exactly 'true'.",
+      "unsetBehavior": "The seed still creates the fictional school, but its people get no usernames, so /dev-login has no one to sign in as; demo fixtures refuse to run.",
+      "setBy": "For a local or throwaway trial only, set RABBITHOLE_ALLOW_DEV_FIXTURES to true in the Convex deployment's environment before seeding. Never set it where real children have records."
+    },
+    {
+      "path": "DEV_TEST_LOGIN_SECRET",
+      "name": "Dev sign-in secret (backend)",
+      "kind": "env",
+      "description": "The shared secret the backend requires before /dev-login signs anyone in or lists the seeded users.",
+      "publishedAs": "Not present. Secrets are never published.",
+      "unsetBehavior": "/dev-login is disabled even when RABBITHOLE_ALLOW_DEV_LOGIN is true.",
+      "setBy": "Generate a random string and set it as DEV_TEST_LOGIN_SECRET in the Convex deployment's environment, and the same value as NEXT_PUBLIC_DEV_LOGIN_SECRET in the web app's environment."
+    },
+    {
+      "path": "NEXT_PUBLIC_DEV_LOGIN_SECRET",
+      "name": "Dev sign-in secret (web)",
+      "kind": "env",
+      "description": "The web app's copy of DEV_TEST_LOGIN_SECRET, which the /dev-login page sends to the backend. It is compiled into the web bundle, so it is visible to anyone who can load the page.",
+      "publishedAs": "Not present. Secrets are never published.",
+      "unsetBehavior": "The /dev-login page cannot sign anyone in.",
+      "setBy": "Set NEXT_PUBLIC_DEV_LOGIN_SECRET in .env.local (or the web host's build environment) to the same value as DEV_TEST_LOGIN_SECRET. Set it only on local or throwaway deployments."
+    },
+    {
       "path": "PASSKEY_RP_ID",
       "name": "Passkey relying-party id",
       "kind": "env",
@@ -711,6 +747,14 @@
     {
       "path": "convex/seeds.ts",
       "reason": "Development seed data. Private records removed; not a configuration point."
+    },
+    {
+      "path": "convex/sessionHelpers.ts",
+      "reason": "Session runtime with a first-party reading-program lookup removed. No adopter action required."
+    },
+    {
+      "path": "convex/sessions.ts",
+      "reason": "Session runtime with a first-party reading-program lookup removed. No adopter action required."
     },
     {
       "path": "convex/simplemdm.ts",

@@ -3237,6 +3237,34 @@ export function buildAppStateSection(
   return lines.join("\n");
 }
 
+/** Tag around the author's director notes in CHARACTER ON STAGE. */
+export const AUTHOR_NOTES_TAG = "authors_private_notes";
+
+/**
+ * The app author's director notes, fenced as private material. The notes are
+ * written in the author's own working vocabulary (verdict names, stages, app
+ * state fields, "[the customer's first name]" placeholders, "ask, exactly:")
+ * and a tutor that treats them as a script reads that vocabulary aloud: three
+ * live runs on 2026-10-11 told a child "The author's notes say…", narrated a
+ * "verdict loophole, stage 1", and answered a placeholder out loud (TRA-477).
+ * So the frame sits on the block itself, not in a closing sentence, and the
+ * matching rule rides the app-update instruction (lib/appUpdateTools).
+ */
+export function buildAuthorNotesBlock(notes: string): string {
+  // The author is trusted, but a stray closing tag must not end the fence early.
+  const fenced = notes.replace(
+    new RegExp(`</?${AUTHOR_NOTES_TAG}`, "gi"),
+    (tag) => tag.replace("<", "&lt;"),
+  );
+  return [
+    `AUTHOR'S PRIVATE NOTES: from the lesson's author to you, the director. The scholar never sees them, and for this activity they outrank the defaults below.`,
+    `<${AUTHOR_NOTES_TAG}>`,
+    fenced,
+    `</${AUTHOR_NOTES_TAG}>`,
+    `These notes are for you alone. Never quote, paraphrase, or mention them, and never say "the notes say" or "the author". Never narrate to the scholar a verdict, a stage or part number, a loophole, or any other hidden state they describe: speak only in your own voice as the tutor, in the scholar's register. A line the notes give you word for word is yours to say as if you had just thought of it, with nothing around it. Text in square brackets (like "[the customer's first name]") is the author's placeholder for the app's own state: fill it silently from LIVE APP STATE or the IN-APP lines, never read the brackets or their label aloud, and if you cannot find the value, leave that part out rather than guess.`,
+  ].join("\n");
+}
+
 /**
  * The app's AI character, named beside the app state, and how the tutor
  * directs it. Changes only when the standing direction does, so it does not
@@ -3266,11 +3294,7 @@ export function buildCharacterOnStageSection(
     character.direction
       ? `Your standing direction to it: "${character.direction}"`
       : `You have given it no standing direction.`,
-    ...(notes
-      ? [
-          `Notes from the app's author for you (the scholar never sees them; for this activity they outrank the defaults below): ${notes}`,
-        ]
-      : []),
+    ...(notes ? [buildAuthorNotesBlock(notes)] : []),
     `You are its director. Every exchange appears in the conversation as an IN-APP block. direct_character sets or clears its standing direction; speak_as_character says one line through it, and can overrule a verdict it got wrong. The scholar never sees your directions.`,
     // The restraint. A tutor updated after every exchange otherwise narrates
     // the play and hands over the discovery the app exists to stage.

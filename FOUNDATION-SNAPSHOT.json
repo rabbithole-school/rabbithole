@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "c011861a1ccc14ca66c3a2dcf9a132aee4ecbb68",
+  "sourceCommit": "c6aa95887d74e437f3d385bb2c6d7a075ced399f",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -24,7 +24,7 @@
     },
     {
       "path": "AGENTS.md",
-      "sha256": "1716b0b65705cd65265c5792694dd2e883c34e5a6547d80f9d7cc3f3643789c9",
+      "sha256": "f1038ee6fec9d4a927679d0cc2ed8fd0bfaaa6601fadc0182dbe19cb01f8a424",
       "mode": "100644"
     },
     {
@@ -34,7 +34,7 @@
     },
     {
       "path": "DEPLOYMENT.md",
-      "sha256": "e5b3247d858b0bbb86282617dfdab8f7e03c45f68fe12e687acb58b6f3e77b24",
+      "sha256": "2e7edfe530712d25f03ad150f8576354ce0b659e42b49470bdf1789f7a23b8ca",
       "mode": "100644"
     },
     {
@@ -49,7 +49,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "d0ed2c2925cf1b1807f833283c601344136fa39e44df16ad40b7f784122c6c40",
+      "sha256": "7e89f9425d95970f413dab66b8fab1ce43740a58b7952eceae90bdbeb6d5e987",
       "mode": "100644"
     },
     {
@@ -4779,7 +4779,7 @@
     },
     {
       "path": "convex/__tests__/appUpdateTools.test.ts",
-      "sha256": "84829edc183e9d227c8bb934d7e70df4cef071453c88aafd06fb248a85f33791",
+      "sha256": "fe7ae55f06be7c9d0a0c9d82c1e0c7a85d9b46c7dd4bffc9a13ca33bfeb61b12",
       "mode": "100644"
     },
     {
@@ -7724,7 +7724,7 @@
     },
     {
       "path": "convex/http.ts",
-      "sha256": "1b68a3fa9f39d73739b47b05faaf09cc28988982eec3eee73edd6477a7d02db5",
+      "sha256": "0e6d5cfd6695c682f4a879740af974cd096775c48aac39c298308bbe88eee7a5",
       "mode": "100644"
     },
     {
@@ -8564,7 +8564,7 @@
     },
     {
       "path": "convex/lib/appUpdateTools.ts",
-      "sha256": "892aa27a35803af41a8bfcdf9c08d295c6feb26826dc8da1509f93b14865182f",
+      "sha256": "3cc1f4be899d777f9c7dc58892905c38c19415580fde02545049a87347dda71b",
       "mode": "100644"
     },
     {
@@ -11249,7 +11249,7 @@
     },
     {
       "path": "convex/sessionHelpers.ts",
-      "sha256": "3990874e82b6fc9c84ad35ccbead4aa93f78c2e3f2fb2c485101ff5a4820c69e",
+      "sha256": "0bf7244af304acd61acf06601ab79a1977aa474e10818a2f45fbec4dd222bad4",
       "mode": "100644"
     },
     {
@@ -11589,7 +11589,7 @@
     },
     {
       "path": "deployment-config.json",
-      "sha256": "c6f3149372717a560913104f2e14744bcc907beca84b312fcf6528b3cb050945",
+      "sha256": "ee8fa2d69f43e80a8ee04333aa2b94e7fd6c26c78ae20d5311deaef75f6d7e20",
       "mode": "100644"
     },
     {
@@ -19149,7 +19149,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "9b748939f3ca6eb5e488494661838cb719911968427721b85bde57ad1fe83980",
+      "sha256": "9001dc0d200794e71b3a6437134dd9d518c7d76cf37d0c3ea0bba03c1fed8c55",
       "mode": "100644"
     },
     {
@@ -21163,5 +21163,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "0c6c9cb45b13e41b2267f63d2889ac2abed77642d01c7daf331b15879f9458fe"
+  "treeHash": "78a7a5c0ed2c7b3941f8fd018a829c9909805b9e7aaaf65627b2d748ac380a70"
 }

@@ -44,6 +44,12 @@ list of every value that was removed and what you must do about each one.
 otherwise.** Do not guess a value from a comment or a variable name; the file
 tells you what breaks or silently does nothing when a value is unset.
 
+## Trying it first
+
+`pnpm local:setup` runs this checkout on one computer with a local Convex
+backend, a seeded fictional school, and no accounts or keys. It is the fastest
+way to see the product before standing up a deployment; see `README.md`.
+
 ## Stand-up order
 
 1. **Install.** `pnpm install --frozen-lockfile`. Use pnpm, not npm or yarn.
