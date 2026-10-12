@@ -28,6 +28,7 @@ import { CaretLeft, CaretRight, Check, ShareNetwork } from "@phosphor-icons/reac
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { toaster } from "@/lib/toaster";
+import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { Surface } from "@/components/ui/Surface";
 import { PaneTabs } from "@/components/ui/PaneTabs";
 import { RubricSlider } from "@/components/ui/RubricSlider";
@@ -93,6 +94,7 @@ export function NarrativeComposer({
   rosterHref?: string;
 }) {
   const narrative = useQuery(api.courseNarratives.get, { narrativeId });
+  const { hrefWithActiveInstitution } = useActiveInstitution();
   const derivedUnits = useQuery(
     api.courseNarratives.derivedUnits,
     narrative
@@ -294,6 +296,11 @@ export function NarrativeComposer({
     );
   }
 
+  // Keep the period and the active school (?inst=) when stepping between
+  // scholars, so the breadcrumbs lead back to the same school's roster.
+  const siblingHref = (id: Id<"courseNarratives">) =>
+    hrefWithActiveInstitution(`/teacher/report?n=${String(id)}&period=${String(narrative.periodId)}`);
+
   return (
     <ReportShell
       crumbs={[
@@ -306,7 +313,7 @@ export function NarrativeComposer({
         <HStack gap={1}>
           {prevId && (
             <Button asChild size="sm" variant="outline" fontFamily="heading">
-              <Link href={`/teacher/report?n=${String(prevId)}`} aria-label="Previous scholar">
+              <Link href={siblingHref(prevId)} aria-label="Previous scholar">
                 <CaretLeft />
               </Link>
             </Button>
@@ -318,7 +325,7 @@ export function NarrativeComposer({
           )}
           {nextId && (
             <Button asChild size="sm" variant="outline" fontFamily="heading">
-              <Link href={`/teacher/report?n=${String(nextId)}`} aria-label="Next scholar">
+              <Link href={siblingHref(nextId)} aria-label="Next scholar">
                 <CaretRight />
               </Link>
             </Button>

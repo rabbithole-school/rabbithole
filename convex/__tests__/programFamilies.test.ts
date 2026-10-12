@@ -1,7 +1,8 @@
-import { convexTest } from "convex-test";
+import { convexTest, type TestConvex } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { internal } from "../_generated/api";
+import { makeScholar, makeWorld } from "./factories/world";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -34,28 +35,39 @@ function args(overrides: Record<string, unknown> = {}) {
   };
 }
 
-async function setup(t: ReturnType<typeof convexTest>, ownerHasMembership = true) {
-  return await t.run(async (ctx) => {
-    const institutionId = await ctx.db.insert("institutions", {
-      name: "Test primary",
-      slug: "test-primary",
-      kind: "school",
-      isPrimary: true,
-    });
-    const ownerId = await ctx.db.insert("users", {
+async function setup(t: TestConvex<typeof schema>, ownerHasMembership = true) {
+  const world = await makeWorld(t, {
+    schools: 2,
+    scholarsPerSchool: 0,
+    parentsPerSchool: 0,
+    includePlatformAdmin: false,
+  });
+  const institution = world.schools[0];
+  const foreignInstitution = world.schools[1];
+
+  await t.run(async (ctx) => {
+    await ctx.db.patch(institution.teacher.id, {
       name: "Test owner",
       email: OWNER_EMAIL,
-      role: "teacher",
     });
-    if (ownerHasMembership) {
-      await ctx.db.insert("memberships", {
-        userId: ownerId,
-        role: "teacher",
-        institutionId,
-      });
+    if (!ownerHasMembership) {
+      const membership = await ctx.db
+        .query("memberships")
+        .withIndex("by_user_role", (q) =>
+          q.eq("userId", institution.teacher.id).eq("role", "teacher"),
+        )
+        .unique();
+      if (membership) {
+        await ctx.db.delete(membership._id);
+      }
     }
-    return { institutionId, ownerId };
   });
+
+  return {
+    institutionId: institution.id,
+    foreignInstitutionId: foreignInstitution.id,
+    ownerId: institution.teacher.id,
+  };
 }
 
 describe("seedProgramFamilies", () => {
@@ -218,14 +230,10 @@ describe("seedProgramFamilies", () => {
   test("updates a matching group without dropping its existing members", async () => {
     const t = convexTest(schema, modules);
     const { institutionId, ownerId } = await setup(t);
-    const enrolledScholarId = await t.run((ctx) =>
-      ctx.db.insert("users", {
-        name: "Existing scholar",
-        role: "scholar",
-        institutionId,
-        enrollmentStanding: "enrolled",
-      }),
-    );
+    const enrolledScholarId = await makeScholar(t, institutionId, {
+      name: "Existing scholar",
+      enrollmentStanding: "enrolled",
+    });
     const groupId = await t.run((ctx) =>
       ctx.db.insert("scholarGroups", {
         teacherId: ownerId,
@@ -234,7 +242,7 @@ describe("seedProgramFamilies", () => {
         name: "Test program group",
         type: "other",
         participation: "enrolled_only",
-        scholarIds: [enrolledScholarId],
+        scholarIds: [enrolledScholarId.id],
       }),
     );
 
@@ -248,22 +256,18 @@ describe("seedProgramFamilies", () => {
     const group = await t.run((ctx) => ctx.db.get(groupId));
     expect(group?.participation).toBe("includes_program_guests");
     expect(group?.ownerId).toBe(ownerId);
-    expect(group?.scholarIds).toContain(enrolledScholarId);
+    expect(group?.scholarIds).toContain(enrolledScholarId.id);
     expect(group?.scholarIds).toHaveLength(2);
   });
 
   test("rejects a matched enrolled scholar rather than downgrading it", async () => {
     const t = convexTest(schema, modules);
     const { institutionId } = await setup(t);
-    await t.run((ctx) =>
-      ctx.db.insert("users", {
-        name: FAMILY.scholar.name,
-        role: "scholar",
-        institutionId,
-        enrollmentStanding: "enrolled",
-        dateOfBirth: FAMILY.scholar.dateOfBirth,
-      }),
-    );
+    await makeScholar(t, institutionId, {
+      name: FAMILY.scholar.name,
+      enrollmentStanding: "enrolled",
+      dateOfBirth: FAMILY.scholar.dateOfBirth,
+    });
 
     await expect(
       t.run((ctx) =>
@@ -279,23 +283,12 @@ describe("seedProgramFamilies", () => {
 
   test("rejects a same-name-and-DOB guest at another institution", async () => {
     const t = convexTest(schema, modules);
-    await setup(t);
-    const foreignInstitutionId = await t.run((ctx) =>
-      ctx.db.insert("institutions", {
-        name: "Foreign school",
-        slug: "foreign-school",
-        kind: "school",
-      }),
-    );
-    const foreignGuestId = await t.run((ctx) =>
-      ctx.db.insert("users", {
-        name: FAMILY.scholar.name,
-        role: "scholar",
-        institutionId: foreignInstitutionId,
-        enrollmentStanding: "program_guest",
-        dateOfBirth: FAMILY.scholar.dateOfBirth,
-      }),
-    );
+    const { foreignInstitutionId } = await setup(t);
+    const foreignGuest = await makeScholar(t, foreignInstitutionId, {
+      name: FAMILY.scholar.name,
+      enrollmentStanding: "program_guest",
+      dateOfBirth: FAMILY.scholar.dateOfBirth,
+    });
 
     await expect(
       t.run((ctx) =>
@@ -306,7 +299,7 @@ describe("seedProgramFamilies", () => {
       ),
     ).rejects.toThrow(/another institution/i);
     expect(
-      await t.run((ctx) => ctx.db.get(foreignGuestId)),
+      await t.run((ctx) => ctx.db.get(foreignGuest.id)),
     ).toMatchObject({ institutionId: foreignInstitutionId });
     expect(await t.run((ctx) => ctx.db.query("scholarGroups").collect())).toEqual([]);
   });

@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Archive / Restore / Delete actions for a curriculum Unit. Shared by
+ * Publish / Archive / Restore / Delete actions for a curriculum Unit. Shared by
  * the Curriculum unit-preview pane (`variant="buttons"`) and the Unit
  * Designer toolbar (`variant="menu"`) so the lifecycle policy lives in
  * one place.
@@ -13,17 +13,24 @@
  * reason is surfaced inline (buttons) / in the menu (menu) and the
  * caller is steered to Archive instead.
  *
+ * Publish (TRA-490): a new unit is teachers-only until a teacher publishes
+ * or assigns it. While unpublished, every variant shows an "Unpublished"
+ * badge, and the control flips it either way. Independent Study units are
+ * private to their scholar and have no publication control.
+ *
  * `onDeleted` fires after a successful hard delete so the host can
  * navigate away from the now-gone unit.
  */
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
-import { Box, Button, HStack, IconButton, Menu, Portal, Stack, Text } from "@chakra-ui/react";
+import { Badge, Box, Button, HStack, IconButton, Menu, Portal, Stack, Text } from "@chakra-ui/react";
 import {
   Archive,
   ArrowCounterClockwise,
   Copy,
   DotsThreeVertical,
+  ArrowLineDown,
+  ArrowLineUp,
   Trash,
 } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
@@ -63,11 +70,53 @@ export function UnitLifecycleActions({
   const reactivateUnit = useMutation(api.units.reactivate);
   const removeUnit = useMutation(api.units.remove);
   const duplicateUnit = useMutation(api.units.duplicate);
+  const publishUnit = useMutation(api.units.publish);
+  const unpublishUnit = useMutation(api.units.unpublish);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [duplicating, setDuplicating] = useState(false);
 
   const isActive = impact?.isActive ?? true;
   const canDelete = !!impact?.canDelete;
+  // Archived units are off every scholar surface already, so publication
+  // is moot until they are restored.
+  const hasPublication =
+    !!impact && !impact.isIndependentStudy && impact.isActive;
+  const unpublished = hasPublication && !!impact?.unpublished;
+
+  const handleTogglePublished = async () => {
+    try {
+      if (unpublished) {
+        await publishUnit({ id: unitId });
+        toaster.success({
+          title: "Unit published",
+          description: "Scholars can now find and start it.",
+        });
+      } else {
+        await unpublishUnit({ id: unitId });
+        toaster.success({
+          title: "Unit unpublished",
+          description: "Only teachers see it now. Assigned work stays assigned.",
+        });
+      }
+    } catch (err) {
+      toaster.error({
+        title: unpublished ? "Publish failed" : "Unpublish failed",
+        description: errMessage(err),
+      });
+    }
+  };
+
+  const unpublishedBadge = unpublished ? (
+    <Badge
+      size="sm"
+      variant="subtle"
+      colorPalette="orange"
+      fontFamily="heading"
+      title="Scholars can't see this unit until you publish or assign it."
+    >
+      Unpublished
+    </Badge>
+  ) : null;
 
   const handleArchive = async () => {
     try {
@@ -144,6 +193,8 @@ export function UnitLifecycleActions({
   return (
     <>
       {variant === "menu" ? (
+        <HStack gap={2}>
+        {unpublishedBadge}
         <Menu.Root positioning={{ placement: "bottom-end" }}>
           <Menu.Trigger asChild>
             <Box
@@ -164,6 +215,23 @@ export function UnitLifecycleActions({
           <Portal>
             <Menu.Positioner>
               <Menu.Content minW="200px">
+                {hasPublication && (
+                  <Menu.Item
+                    value="publish"
+                    cursor="pointer"
+                    onClick={() => void handleTogglePublished()}
+                  >
+                    {unpublished ? (
+                      <>
+                        <ArrowLineUp /> Publish unit
+                      </>
+                    ) : (
+                      <>
+                        <ArrowLineDown /> Unpublish unit
+                      </>
+                    )}
+                  </Menu.Item>
+                )}
                 {isActive ? (
                   <Menu.Item
                     value="archive"
@@ -217,8 +285,23 @@ export function UnitLifecycleActions({
             </Menu.Positioner>
           </Portal>
         </Menu.Root>
+        </HStack>
       ) : variant === "icons" ? (
         <HStack gap={1}>
+          {unpublishedBadge}
+          {hasPublication && (
+            <IconButton
+              aria-label={unpublished ? "Publish unit" : "Unpublish unit"}
+              title={unpublished ? "Publish unit" : "Unpublish unit"}
+              variant="ghost"
+              size="sm"
+              color="charcoal.500"
+              _hover={{ bg: "gray.100" }}
+              onClick={() => void handleTogglePublished()}
+            >
+              {unpublished ? <ArrowLineUp size={18} /> : <ArrowLineDown size={18} />}
+            </IconButton>
+          )}
           {isActive ? (
             <IconButton
               aria-label="Archive unit"
@@ -273,6 +356,28 @@ export function UnitLifecycleActions({
       ) : (
         <Stack gap={1.5} alignItems="flex-start">
           <HStack gap={2}>
+            {unpublishedBadge}
+            {hasPublication && (
+              <Button
+                size="sm"
+                variant="ghost"
+                color="charcoal.500"
+                fontFamily="heading"
+                fontWeight="600"
+                _hover={{ bg: "gray.100" }}
+                onClick={() => void handleTogglePublished()}
+              >
+                {unpublished ? (
+                  <>
+                    <ArrowLineUp /> Publish
+                  </>
+                ) : (
+                  <>
+                    <ArrowLineDown /> Unpublish
+                  </>
+                )}
+              </Button>
+            )}
             {isActive ? (
               <Button
                 size="sm"

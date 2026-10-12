@@ -6,7 +6,7 @@ import { internal } from "../_generated/api";
 import { isScholarAdminRole, isStaffRole, isTeacherRole, isPlatformAdminRole, isSchoolAdminRole } from "./roles";
 import { isImpersonationEnabled, isOverlayExpired } from "./impersonationConfig";
 import { assertInstitutionActive } from "./access";
-import { canUserAccessScholar } from "./access";
+import { canReadScholarAsTeacher, canUserAccessScholar } from "./access";
 import {
   hasAnySchoolOperationsAccess,
   schoolOperationsInstitutionIds,
@@ -161,6 +161,47 @@ export async function assertNotImpersonating(
   }
 }
 
+export const READ_ONLY_ACCOUNT_ERROR =
+  "This account is read-only — it can run queries but cannot make changes.";
+
+/**
+ * Throw if the REAL session owner is a read-only identity (`users.readOnly`,
+ * the prod service account agents use for prod reads — TRA-494). Checks the
+ * session owner rather than the effective user, so the flag is about who holds
+ * the credentials, not whose data is on screen.
+ */
+export async function assertNotReadOnly(
+  ctx: QueryCtx | MutationCtx,
+): Promise<void> {
+  const owner = await getSessionOwner(ctx);
+  if (owner?.readOnly) throw new Error(READ_ONLY_ACCOUNT_ERROR);
+}
+
+/**
+ * The write gate for every user-facing mutation wrapper
+ * (convex/lib/customFunctions.ts): refuses a read-only identity and an active
+ * impersonation overlay. Call it from any raw `mutation` that authenticates a
+ * user and writes on their behalf.
+ */
+export async function assertCanWrite(ctx: MutationCtx): Promise<void> {
+  await assertNotReadOnly(ctx);
+  await assertNotImpersonating(ctx);
+}
+
+/**
+ * Action-side counterpart to assertCanWrite's read-only half. Actions have no
+ * db, so this reads the session owner through an internal query. Called by
+ * every action auth helper below and the authedAction/staffAction wrappers;
+ * call it directly from a raw `action` that authenticates and then writes.
+ */
+export async function assertWritableAction(
+  ctx: GenericActionCtx<DataModel>,
+): Promise<void> {
+  if (await ctx.runQuery(internal.users.isSessionOwnerReadOnly, {})) {
+    throw new Error(READ_ONLY_ACCOUNT_ERROR);
+  }
+}
+
 /**
  * Require teacher-equivalent role: teacher, school_admin, or platform_admin.
  * The scholar/curriculum EXECUTION gate.
@@ -239,6 +280,43 @@ export async function requireGuardianOf(
     throw new Error("Forbidden: not a guardian of this scholar");
   }
   return user;
+}
+
+/**
+ * The parent-portal READ gate: a guardian of `scholarId`, OR a TEACHER who
+ * can already read this scholar's learning record through one of their
+ * teacher-role memberships (`canReadScholarAsTeacher`; platform admins are
+ * global), previewing the family's view of that scholar ("View as parent" on
+ * the teacher dashboard, `/parent?remote=<scholarId>`).
+ *
+ * Teacher-role, not any staff: an operations-only staffer (`school:operations`)
+ * administers accounts and portfolio but may not read the learning record —
+ * mastery, signals, seeds, session summaries, narratives — and the parent
+ * portal is exactly that record in family form. `canUserAccessScholar` would
+ * let them through, so this deliberately uses the teacher-membership check.
+ *
+ * Only the non-sensitive parent reads take this gate — the same summaries,
+ * mastery/signals/seeds, shared narratives, family-visible portfolio and
+ * school calendar a teacher can already read on their own dashboard. Every
+ * WRITE (photo, messages, forms) and every sensitive guardian read (health
+ * record, physical exam, library credentials, guardian forms) stays on
+ * `requireGuardianOf`: a staff preview never touches or reveals what only the
+ * family should. A parent-role or scholar account never passes the staff
+ * branch.
+ */
+export async function requireGuardianOrStaffPreview(
+  ctx: QueryCtx | MutationCtx,
+  scholarId: Id<"users">,
+): Promise<Doc<"users">> {
+  const user = await requireUser(ctx);
+  if (await isGuardianOf(ctx, user._id, scholarId)) return user;
+  if (
+    isTeacherRole(user.role) &&
+    (await canReadScholarAsTeacher(ctx, user, scholarId))
+  ) {
+    return user;
+  }
+  throw new Error("Forbidden: not a guardian of this scholar");
 }
 
 /**
@@ -422,7 +500,7 @@ export function requireTeacherOrSelf(
 
 /**
  * Project-access policy for the streaming / observer HTTP endpoints
- * (`/project-stream`, `/analyze`): a caller may touch a project if they
+ * (`/session-stream`, `/analyze`): a caller may touch a project if they
  * OWN it (project.userId) or they're a teacher/admin (remote view-as,
  * test-drive, observer triggering). Pure so it's unit-testable without
  * convex-test; mirrors the gate in `projects.get` / `getWithMessages`.
@@ -485,6 +563,7 @@ export async function requireCurriculumAccessAction(
 ): Promise<Id<"users">> {
   const userId = await getAuthUserId(ctx);
   if (!userId) throw new Error("Not signed in");
+  await assertWritableAction(ctx);
   const hasAccess = await ctx.runQuery(internal.users.hasCurriculumAccessInternal, {
     id: userId,
   });
@@ -505,6 +584,7 @@ export async function requireTeacherOrAdminAction(
 ): Promise<Id<"users">> {
   const userId = await getAuthUserId(ctx);
   if (!userId) throw new Error("Not signed in");
+  await assertWritableAction(ctx);
   const user = await ctx.runQuery(internal.users.getByIdInternal, {
     id: userId,
   });
@@ -527,6 +607,7 @@ export async function requireScholarAdminAction(
 ): Promise<Id<"users">> {
   const userId = await getAuthUserId(ctx);
   if (!userId) throw new Error("Not signed in");
+  await assertWritableAction(ctx);
   const user = await ctx.runQuery(internal.users.getByIdInternal, {
     id: userId,
   });
@@ -559,6 +640,7 @@ export async function requireStaffAction(
 ): Promise<Id<"users">> {
   const userId = await getAuthUserId(ctx);
   if (!userId) throw new Error("Not signed in");
+  await assertWritableAction(ctx);
   const user = await ctx.runQuery(internal.users.getByIdInternal, {
     id: userId,
   });
@@ -585,6 +667,7 @@ export async function requireSchoolAdminAction(
 ): Promise<Id<"users">> {
   const userId = await getAuthUserId(ctx);
   if (!userId) throw new Error("Not signed in");
+  await assertWritableAction(ctx);
   const user = await ctx.runQuery(internal.users.getByIdInternal, {
     id: userId,
   });

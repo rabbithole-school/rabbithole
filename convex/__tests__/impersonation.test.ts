@@ -108,6 +108,33 @@ describe("impersonation overlay — start + escalation guard", () => {
     ).rejects.toThrow(/platform admin/i);
   });
 
+  test("a demoted admin's stale platform_admin membership can't keep switching targets (TRA-375)", async () => {
+    const t = convexTest(schema, modules);
+    // Demoted to teacher mid-overlay: the overlay and a stale platform_admin
+    // membership row are left behind.
+    const exAdmin = await seedUser(t, "teacher", "former-admin");
+    const scholar = await seedUser(t, "scholar", "kai");
+    const other = await seedUser(t, "scholar", "noe");
+    await t.run(async (ctx) =>
+      ctx.db.insert("memberships", { userId: exAdmin, role: "platform_admin" }),
+    );
+    const { as, sessionId } = await withUserSession(t, exAdmin);
+    await t.run(async (ctx) =>
+      ctx.db.insert("impersonationOverlays", {
+        adminUserId: exAdmin,
+        adminSessionId: sessionId,
+        targetUserId: other,
+        startedAt: Date.now(),
+        active: true,
+      }),
+    );
+    await expect(
+      as.mutation(api.impersonation.switchImpersonationTarget, {
+        targetUserId: scholar,
+      }),
+    ).rejects.toThrow("Platform admin access required");
+  });
+
   test("rejects self and non-admin callers", async () => {
     const t = convexTest(schema, modules);
     const admin = await seedUser(t, "platform_admin", "avery");

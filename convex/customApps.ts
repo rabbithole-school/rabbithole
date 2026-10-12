@@ -1,7 +1,8 @@
-// Custom Apps — the install/finalize/resolve backend for bot-installable
-// classroom apps (schema.ts `customApps`). Three shapes, ONE launcher PATH
+// Custom Apps — the install/finalize/resolve backend for classroom apps
+// (schema.ts `customApps`). A row can exist without a catalog tile or grants;
+// vibecode activity starters use that state. Installed apps use ONE launcher PATH
 // (/custom-apps?token=<token>, resolved against whatever origin the client is
-// on — dev, preview, or prod) and ONE grant system:
+// on — dev, preview, or prod) and ONE separate grant system:
 //
 //   • installExistingUrlApp  — a teacher pasted a URL for a real website;
 //     dedupe/create its `externalApps` catalog row and grant it. (No custom
@@ -35,11 +36,16 @@ import {
   internalQuery,
   query,
 } from "./_generated/server";
-import type { MutationCtx } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { appBaseUrl } from "./lib/deploymentConfig";
 import { ROLES } from "./lib/roles";
 import { externalAppWithinLens } from "./lib/externalAppReach";
+import { requestedAppAssetIds } from "../shared/appAssets";
+import { customAppPath } from "../shared/appKind";
+import { auditManagedClaim } from "./lib/managedDeviceClaimState";
+import { audienceInstitutionId } from "./lib/auditLog";
+import { coreAddToScholar } from "./scholarApps";
 
 /** This deployment's configured app origin, trailing slash stripped. */
 function siteOrigin(): string {
@@ -51,17 +57,13 @@ function siteOrigin(): string {
  * the domain-agnostic path below, so the tile resolves against whatever origin
  * the client is on. */
 export function customAppUrl(token: string): string {
-  return `${siteOrigin()}/custom-apps?token=${token}`;
+  return `${siteOrigin()}${customAppPath(token)}`;
 }
 
-/** The domain-agnostic launcher PATH a custom-app token resolves to — this is
- * what's stored as the catalog `webUrl`. The web launcher opens it relative to
- * the current origin (window.open), and the native host resolves it against the
- * configured Rabbithole web origin (rabbitholeWebUrl), so one install works on
- * dev, preview, and prod without baking in a domain. */
-export function customAppPath(token: string): string {
-  return `/custom-apps?token=${token}`;
-}
+/** Re-export the domain-agnostic launcher PATH generator (defined once in
+ * shared/appKind.ts, alongside the `isCustomAppUrl` classifier it must stay in
+ * lockstep with) so existing convex/ callers and tests keep their import. */
+export { customAppPath };
 
 /** A random, unguessable hex token (192 bits) for the ?token= url — same
  * shape/strength as the proposal sketch tokens (introspectionTools). */
@@ -122,10 +124,21 @@ async function assertTargetsWithinLens(
  * to reject oversize content with a clear message before it reaches here. */
 export const MAX_STATIC_HTML_BYTES = 700 * 1024;
 
+function assertNoUnownedAppAssetRefs(html: string) {
+  if (requestedAppAssetIds(html).length > 0) {
+    throw new Error(
+      "App assets must be copied from a vibecode rehearsal before this app can be installed.",
+    );
+  }
+}
+
 /**
  * Grant an external app to a set of scholars (direct `scholarApps` rows) and/or
  * groups (`appAudiences` grants). Idempotent: an existing link/grant is
  * re-enabled rather than duplicated. Shared by every install path here.
+ * A scholar gets the same direct add as the Apps panel (`coreAddToScholar`),
+ * so a login parked on a group-grant row is promoted rather than mistaken
+ * for an install (TRA-437).
  */
 async function installGrants(
   ctx: MutationCtx,
@@ -133,28 +146,39 @@ async function installGrants(
   scholarIds: Id<"users">[] | undefined,
   groupIds: Id<"scholarGroups">[] | undefined,
   addedBy: Id<"users"> | undefined,
+  via: "aide" | "slack" | "merge-webhook",
 ): Promise<{ scholars: number; groups: number }> {
+  // A grant row is audited only when there is an actor to attribute it to.
+  // `customApps.createdBy` is optional, and the merge-webhook finalize path
+  // has no human to retry a hard failure, so a creator-less legacy app must
+  // still finalize; it just leaves no audit row.
+  const audit = async (
+    action: "app-grant.audience-assigned",
+    targetUserId: Id<"users">,
+    detail: object,
+    institutionId: Id<"institutions"> | null,
+  ) => {
+    if (!addedBy) return;
+    await auditManagedClaim(
+      ctx,
+      addedBy,
+      action,
+      targetUserId,
+      JSON.stringify(detail),
+      institutionId,
+    );
+  };
   let scholars = 0;
   let groups = 0;
   for (const scholarId of scholarIds ?? []) {
-    const existing = await ctx.db
-      .query("scholarApps")
-      .withIndex("by_scholar_app", (q) =>
-        q.eq("scholarId", scholarId).eq("appId", appId),
-      )
-      .first();
-    if (existing) {
-      if (!existing.enabled) await ctx.db.patch(existing._id, { enabled: true });
-    } else {
-      await ctx.db.insert("scholarApps", {
-        scholarId,
-        appId,
-        enabled: true,
-        source: "manual",
-        addedBy,
-      });
-      scholars++;
-    }
+    const { added } = await coreAddToScholar(
+      ctx,
+      scholarId,
+      appId,
+      addedBy,
+      via,
+    );
+    if (added) scholars++;
   }
   for (const groupId of groupIds ?? []) {
     const existing = await ctx.db
@@ -165,7 +189,17 @@ async function installGrants(
       .filter((q) => q.eq(q.field("appId"), appId))
       .first();
     if (existing) {
-      if (!existing.enabled) await ctx.db.patch(existing._id, { enabled: true });
+      if (!existing.enabled) {
+        await ctx.db.patch(existing._id, { enabled: true });
+        if (addedBy) await audit("app-grant.audience-assigned", addedBy, {
+            appId,
+            audienceKind: "group",
+            audienceId: groupId,
+            previousEnabled: false,
+            newEnabled: true,
+            via,
+          }, await audienceInstitutionId(ctx, "group", String(groupId)));
+      }
     } else {
       await ctx.db.insert("appAudiences", {
         appId,
@@ -174,6 +208,14 @@ async function installGrants(
         enabled: true,
         addedBy,
       });
+      if (addedBy) await audit("app-grant.audience-assigned", addedBy, {
+          appId,
+          audienceKind: "group",
+          audienceId: groupId,
+          previousEnabled: null,
+          newEnabled: true,
+          via,
+        }, await audienceInstitutionId(ctx, "group", String(groupId)));
       groups++;
     }
   }
@@ -196,6 +238,7 @@ export const installExistingUrlApp = internalMutation({
     groupIds: v.array(v.id("scholarGroups")),
     allowedScholarIds: v.optional(v.array(v.id("users"))),
     scholarLensResolved: v.optional(v.boolean()),
+    via: v.optional(v.union(v.literal("aide"), v.literal("slack"))),
   },
   handler: async (ctx, args) => {
     await assertTargetsWithinLens(
@@ -241,6 +284,7 @@ export const installExistingUrlApp = internalMutation({
       args.scholarIds,
       args.groupIds,
       args.callerUserId,
+      args.via ?? "aide",
     );
     return { appId, webUrl, name, ...grants };
   },
@@ -262,6 +306,7 @@ export const createStaticApp = internalMutation({
     groupIds: v.array(v.id("scholarGroups")),
     allowedScholarIds: v.optional(v.array(v.id("users"))),
     scholarLensResolved: v.optional(v.boolean()),
+    via: v.optional(v.union(v.literal("aide"), v.literal("slack"))),
   },
   handler: async (ctx, args) => {
     await assertTargetsWithinLens(
@@ -273,6 +318,7 @@ export const createStaticApp = internalMutation({
     );
     const name = args.name.trim();
     if (!name) throw new Error("Name is required");
+    assertNoUnownedAppAssetRefs(args.html);
     const bytes = new TextEncoder().encode(args.html).length;
     if (bytes > MAX_STATIC_HTML_BYTES) {
       throw new Error(
@@ -299,6 +345,7 @@ export const createStaticApp = internalMutation({
       installScholarIds: args.scholarIds,
       installGroupIds: args.groupIds,
       createdBy: args.callerUserId,
+      updatedAt: Date.now(),
     });
     const grants = await installGrants(
       ctx,
@@ -306,6 +353,7 @@ export const createStaticApp = internalMutation({
       args.scholarIds,
       args.groupIds,
       args.callerUserId,
+      args.via ?? "aide",
     );
     return {
       customAppId,
@@ -325,7 +373,7 @@ export const createStaticApp = internalMutation({
  * `allowed === undefined` means the lens was resolved and found the caller
  * unrestricted (a platform admin). */
 async function appIsWithinLens(
-  ctx: MutationCtx,
+  ctx: { db: QueryCtx["db"] },
   app: Doc<"customApps">,
   callerUserId: Id<"users">,
   allowed: Set<Id<"users">> | undefined,
@@ -338,6 +386,65 @@ async function appIsWithinLens(
     allowed,
   );
 }
+
+/** Resolve the static app a teacher wants to turn into a coached activity.
+ * Name matching and lens containment mirror updateStaticApp, but starter-origin
+ * rows are intentionally eligible because a teacher may reuse a rehearsal app.
+ */
+export const resolveStaticAppForCoachedActivity = internalQuery({
+  args: {
+    name: v.string(),
+    callerUserId: v.id("users"),
+    allowedScholarIds: v.optional(v.array(v.id("users"))),
+    scholarLensResolved: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const name = args.name.trim();
+    if (!name) return { kind: "not_found" as const };
+    if (
+      args.allowedScholarIds === undefined &&
+      args.scholarLensResolved !== true
+    ) {
+      throw new Error(
+        "Refusing to resolve app: no institution scholar lens was resolved for this caller.",
+      );
+    }
+    const allowed = args.allowedScholarIds
+      ? new Set(args.allowedScholarIds)
+      : undefined;
+    const named = (await ctx.db.query("customApps").collect()).filter(
+      (app) => app.name.trim().toLowerCase() === name.toLowerCase(),
+    );
+    const matches: Doc<"customApps">[] = [];
+    for (const app of named) {
+      if (await appIsWithinLens(ctx, app, args.callerUserId, allowed)) {
+        matches.push(app);
+      }
+    }
+    if (matches.length === 0) return { kind: "not_found" as const };
+    if (matches.length > 1) return { kind: "ambiguous" as const };
+    const app = matches[0];
+    if (app.kind !== "static") {
+      return { kind: "wrong_kind" as const, name: app.name };
+    }
+    if (app.status !== "live") {
+      return {
+        kind: "not_live" as const,
+        name: app.name,
+        status: app.status,
+      };
+    }
+    if (!app.html?.trim()) {
+      return { kind: "missing_html" as const, name: app.name };
+    }
+    return {
+      kind: "resolved" as const,
+      customAppId: app._id,
+      name: app.name,
+      url: customAppUrl(app.token),
+    };
+  },
+});
 
 /** Replace a STATIC app's HTML without changing any launcher or grant state.
  * Tenant-scoped: only apps within the caller's institution lens are eligible
@@ -353,6 +460,7 @@ export const updateStaticApp = internalMutation({
   handler: async (ctx, args) => {
     const name = args.name.trim();
     if (!name) throw new Error("Name is required");
+    assertNoUnownedAppAssetRefs(args.html);
     const bytes = new TextEncoder().encode(args.html).length;
     if (bytes > MAX_STATIC_HTML_BYTES) {
       throw new Error(
@@ -373,7 +481,9 @@ export const updateStaticApp = internalMutation({
       ? new Set(args.allowedScholarIds)
       : undefined;
     const named = (await ctx.db.query("customApps").collect()).filter(
-      (app) => app.name.trim().toLowerCase() === name.toLowerCase(),
+      (app) =>
+        app.origin !== "starter" &&
+        app.name.trim().toLowerCase() === name.toLowerCase(),
     );
     // Restrict to apps the caller's lens can see BEFORE the count checks, so a
     // same-named app at another school is neither overwritable nor a source of
@@ -390,7 +500,10 @@ export const updateStaticApp = internalMutation({
     if (app.kind !== "static") {
       return { kind: "wrong_kind" as const, name: app.name };
     }
-    await ctx.db.patch(app._id, { html: args.html });
+    await ctx.db.patch(app._id, {
+      html: args.html,
+      updatedAt: Date.now(),
+    });
     return {
       kind: "updated" as const,
       customAppId: app._id,
@@ -492,6 +605,7 @@ export const finalizeCodedApp = internalMutation({
       app.installScholarIds,
       app.installGroupIds,
       app.createdBy,
+      "merge-webhook",
     );
     return { appId, token: app.token, url, name: app.name, ...grants };
   },
@@ -515,12 +629,17 @@ export const resolveByToken = query({
       .withIndex("by_token", (q) => q.eq("token", token))
       .first();
     if (!row || row.status === "archived") return null;
+    const thumbnailUrl = row.thumbnailStorageId
+      ? await ctx.storage.getUrl(row.thumbnailStorageId)
+      : null;
     if (row.kind === "static") {
       return {
         kind: "static" as const,
         name: row.name,
         status: row.status,
         html: row.status === "live" ? (row.html ?? "") : null,
+        origin: row.origin ?? null,
+        thumbnailUrl,
       };
     }
     return {
@@ -528,6 +647,8 @@ export const resolveByToken = query({
       name: row.name,
       status: row.status,
       routePath: row.status === "live" ? (row.routePath ?? null) : null,
+      origin: row.origin ?? null,
+      thumbnailUrl,
     };
   },
 });

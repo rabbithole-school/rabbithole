@@ -13,8 +13,13 @@ ships.
 
 ```bash
 ANTHROPIC_API_KEY=... PATH="$HOME/.nvm/versions/node/v22.16.0/bin:$PATH" \
-  npx tsx evals/non-human-intro/run.ts --samples 4
+  node --conditions=import --import tsx evals/non-human-intro/run.ts --samples 4
 ```
+
+(`--conditions=import` is needed because `convex/sessionHelpers.ts` pulls in
+`@convex-dev/auth/server`, which exports only an ESM entry; plain `npx tsx`
+loads this untyped repo's `.ts` as CJS and fails with
+`ERR_PACKAGE_PATH_NOT_EXPORTED`.)
 
 Flags: `--samples N` (per case, default 4), `--out DIR`. Output: `out/report.md`,
 `out/runs.json` (gitignored).
@@ -51,3 +56,13 @@ One tone observation (not a defect): the K-reading-level first-ever intro scored
 partner" that skew a bit old for kindergarten. PR #38 explicitly flags its two
 tone examples (`buildNonHumanIntroSection`) for Carl's review; simplifying the
 younger-child example is the natural lever if he wants it tighter.
+
+## Re-run (TRA-234 — turn-invariant cached prefix)
+
+The FIRST MESSAGE primacy line and the returning/same-sitting opening
+directive moved out of the prompt-cached stable prefix into a dynamic
+`buildOpeningTurnSection` at the head of the tail (so turn 2 of a session no
+longer misses the cache). Model-visible wording changed, so this eval was
+re-run: **36/36 disclosure correctness** (9 cases × 4 samples), time gap
+acknowledged 8/8, "are you real?" answered honestly 4/4. Warmth/age-fit/
+on-task in line with the baseline above; no behavioral change.

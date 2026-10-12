@@ -99,22 +99,6 @@ describe("normalizeSegments", () => {
     expect(out[2].rotationDegrees).toBe(270);
   });
 
-  test("normalizes each segment's printed heading", () => {
-    const [segment] = normalizeSegments(
-      [
-        {
-          startPage: 1,
-          endPage: 1,
-          documentHeading: `  ${"Learning Print ".repeat(10)}  `,
-        },
-      ],
-      1,
-    );
-    expect(segment.documentHeading).toBe(
-      "Learning Print ".repeat(10).trim().slice(0, 80),
-    );
-  });
-
   test("overlaps are resolved (later start bumped past previous end)", () => {
     const out = normalizeSegments(
       [

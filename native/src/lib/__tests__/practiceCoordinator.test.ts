@@ -223,6 +223,42 @@ describe("ordering domains", () => {
     expect(seen).toEqual(["submit:a", "ui:1", "submit:b"]);
   });
 
+  // TRA-377: the reducer's lane gate (the top of `practiceReduce`) assumes a
+  // lane-opening command can never overtake an in-flight submit/hint result.
+  // That only holds because `executeAll` drains one emitted batch strictly
+  // one command at a time — the SECOND command's `run` must not even start
+  // until the first's promise settles — REGARDLESS of domain. "lets different
+  // domains proceed concurrently" above shows `execute()` alone lets two
+  // different domains overlap; this pins that `executeAll` does not inherit
+  // that concurrency. See the `CommandDomain` doc comment in
+  // `shared/practiceMachine.ts` for the contract this test guards.
+  it("runs commands from different domains strictly sequentially inside executeAll", async () => {
+    const c = acquirePracticeCoordinator(SCHOLAR);
+    const order: string[] = [];
+    const resume: PracticeCommand = {
+      kind: "saveResume",
+      id: `resume-save:${SCHOLAR}`,
+      domain: `resume:${SCHOLAR}`,
+      version: 1,
+      resumeIdx: 1,
+    };
+    const run = async (command: PracticeCommand) => {
+      order.push(`start:${command.kind}`);
+      await new Promise((r) => setTimeout(r, 5));
+      order.push(`end:${command.kind}`);
+    };
+    // submitCommand's domain (`outbox:${SCHOLAR}`) and resume's domain
+    // (`resume:${SCHOLAR}`) are different, so nothing in the ordering-domain
+    // mutex alone would stop them overlapping.
+    await c.executeAll([submitCommand("submit:a"), resume], run);
+    expect(order).toEqual([
+      "start:submitAnswer",
+      "end:submitAnswer",
+      "start:saveResume",
+      "end:saveResume",
+    ]);
+  });
+
   it("collapses a Strict Mode duplicate within one committed batch", async () => {
     const c = acquirePracticeCoordinator(SCHOLAR);
     const seen: string[] = [];

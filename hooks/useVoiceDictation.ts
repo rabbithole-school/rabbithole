@@ -6,6 +6,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { haptic } from "@/lib/native";
 import { voiceMark } from "@/lib/voicePerf";
+import { claimMic, releaseMic, useIsMicBusy } from "@/hooks/micOwner";
 
 type DictationState = "idle" | "recording" | "transcribing";
 
@@ -39,6 +40,11 @@ function getSupportedMimeType(): string {
   return "";
 }
 
+// ── Single-owner microphone ─────────────────────────────────────────────
+// The claim/release/isMicBusy registry lives in @/hooks/micOwner so it is
+// shared with the WebRTC composer path (useStreamingDictation), not just the
+// useVoiceDictation instances.
+
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -60,6 +66,12 @@ export function useVoiceDictation(
   const [error, setError] = useState<string | null>(null);
   const [isTooLoud, setIsTooLoud] = useState(false);
   const [hasSpeech, setHasSpeech] = useState(false);
+  // Stable per-instance token identifying this recorder to the shared mic
+  // registry.
+  const [micToken] = useState<symbol>(() => Symbol("voiceDictation"));
+  // True only when a DIFFERENT instance holds the mic — lets a paired button
+  // (DictationMicButton) disable itself while the other recorder is live.
+  const isMicBusy = useIsMicBusy(micToken);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const cancelledRef = useRef(false);
@@ -78,6 +90,10 @@ export function useVoiceDictation(
   // mid-dictation). The async onstop/transcription path checks this before
   // touching state or emitting a transcript.
   const mountedRef = useRef(true);
+  // True from the synchronous start of startRecording until the recorder has
+  // actually started (or bailed). Guards the getUserMedia await against a
+  // double-click firing two starts on the same token.
+  const startingRef = useRef(false);
 
   const transcribe = useAction(api.audioActions.transcribe);
 
@@ -90,6 +106,7 @@ export function useVoiceDictation(
     return () => {
       mountedRef.current = false;
       cancelledRef.current = true;
+      releaseMic(micToken);
       const recorder = recorderRef.current;
       if (recorder) {
         recorder.stream.getTracks().forEach((t) => t.stop());
@@ -106,7 +123,7 @@ export function useVoiceDictation(
       if (loudTimerRef.current) clearTimeout(loudTimerRef.current);
       audioContextRef.current?.close().catch(() => {});
     };
-  }, []);
+  }, [micToken]);
 
   /** Start monitoring audio levels via AnalyserNode. */
   const startLevelMonitor = useCallback((stream: MediaStream) => {
@@ -210,6 +227,12 @@ export function useVoiceDictation(
 
   const startRecording = useCallback(async (opts?: { latched?: boolean }) => {
     if (state !== "idle") return;
+    // Re-entrancy guard: a double-click can fire two startRecording calls
+    // before the first getUserMedia resolves; without this both would claim
+    // the same token and spin up two recorders. Set synchronously before the
+    // await; cleared on every exit below.
+    if (startingRef.current) return;
+    startingRef.current = true;
 
     latchedRef.current = !!opts?.latched;
     spokeRef.current = false;
@@ -219,6 +242,7 @@ export function useVoiceDictation(
     const mimeType = getSupportedMimeType();
     if (!mimeType) {
       setError("Your browser does not support audio recording.");
+      startingRef.current = false;
       return;
     }
 
@@ -227,6 +251,24 @@ export function useVoiceDictation(
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
       setError("Microphone access denied.");
+      startingRef.current = false;
+      return;
+    }
+
+    // Unmounted while the permission prompt was open: the component is gone,
+    // so release the stream and bail without claiming.
+    if (!mountedRef.current) {
+      stream.getTracks().forEach((t) => t.stop());
+      startingRef.current = false;
+      return;
+    }
+
+    // One recorder at a time: if another instance already holds the mic, bail
+    // silently (no toast) — that mic is visibly recording, so a warning would
+    // just be noise. Release the stream we just opened.
+    if (!claimMic(micToken)) {
+      stream.getTracks().forEach((t) => t.stop());
+      startingRef.current = false;
       return;
     }
 
@@ -236,68 +278,85 @@ export function useVoiceDictation(
     startLevelMonitor(stream);
 
     chunksRef.current = [];
-    const recorder = new MediaRecorder(stream, { mimeType });
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, { mimeType });
 
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunksRef.current.push(e.data);
-    };
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
 
-    recorder.onstop = async () => {
-      voiceMark("micClosed");
-      // Release mic + stop monitoring (idempotent — unmount cleanup may have
-      // already stopped the tracks).
+      recorder.onstop = async () => {
+        voiceMark("micClosed");
+        // Release mic + stop monitoring (idempotent — unmount cleanup may have
+        // already stopped the tracks). Drop the single-owner claim too so
+        // another instance can record.
+        stream.getTracks().forEach((t) => t.stop());
+        stopLevelMonitor();
+        releaseMic(micToken);
+
+        // Unmounted mid-recording (surface closed): the mic is already released;
+        // never set state or emit a transcript for a gone component.
+        if (!mountedRef.current) {
+          cancelledRef.current = false;
+          return;
+        }
+
+        // If cancelled, discard audio and return to idle
+        if (cancelledRef.current) {
+          cancelledRef.current = false;
+          setState("idle");
+          return;
+        }
+
+        const blob = new Blob(chunksRef.current, { type: mimeType });
+        if (blob.size === 0) {
+          setState("idle");
+          return;
+        }
+
+        // Skip transcription if the recording was mostly silence/background noise
+        if (peakDbRef.current < SILENCE_THRESHOLD_DB) {
+          setState("idle");
+          return;
+        }
+
+        setState("transcribing");
+        try {
+          const audioBase64 = await blobToBase64(blob);
+          const result = await transcribe({ audioBase64, mimeType, sessionId });
+          // The transcribe round-trip is async — the consumer may have unmounted
+          // while it was in flight; don't emit into a gone input.
+          if (result.text && mountedRef.current) {
+            voiceMark("transcript");
+            onTranscript(result.text);
+          }
+        } catch {
+          if (mountedRef.current) setError("Transcription failed. Please try again.");
+        } finally {
+          if (mountedRef.current) setState("idle");
+        }
+      };
+
+      recorderRef.current = recorder;
+      cancelledRef.current = false;
+      recorder.start();
+    } catch {
+      // MediaRecorder construction/start can throw on some browsers even after
+      // the mimeType check — release the mic + monitor and surface an error.
       stream.getTracks().forEach((t) => t.stop());
       stopLevelMonitor();
+      releaseMic(micToken);
+      recorderRef.current = null;
+      setError("Your browser does not support audio recording.");
+      startingRef.current = false;
+      return;
+    }
 
-      // Unmounted mid-recording (surface closed): the mic is already released;
-      // never set state or emit a transcript for a gone component.
-      if (!mountedRef.current) {
-        cancelledRef.current = false;
-        return;
-      }
-
-      // If cancelled, discard audio and return to idle
-      if (cancelledRef.current) {
-        cancelledRef.current = false;
-        setState("idle");
-        return;
-      }
-
-      const blob = new Blob(chunksRef.current, { type: mimeType });
-      if (blob.size === 0) {
-        setState("idle");
-        return;
-      }
-
-      // Skip transcription if the recording was mostly silence/background noise
-      if (peakDbRef.current < SILENCE_THRESHOLD_DB) {
-        setState("idle");
-        return;
-      }
-
-      setState("transcribing");
-      try {
-        const audioBase64 = await blobToBase64(blob);
-        const result = await transcribe({ audioBase64, mimeType, sessionId });
-        // The transcribe round-trip is async — the consumer may have unmounted
-        // while it was in flight; don't emit into a gone input.
-        if (result.text && mountedRef.current) {
-          voiceMark("transcript");
-          onTranscript(result.text);
-        }
-      } catch {
-        if (mountedRef.current) setError("Transcription failed. Please try again.");
-      } finally {
-        if (mountedRef.current) setState("idle");
-      }
-    };
-
-    recorderRef.current = recorder;
-    cancelledRef.current = false;
-    recorder.start();
     setState("recording");
+    startingRef.current = false;
     haptic("light"); // recording started — matters most eyes-free (Tab-to-talk)
-  }, [state, onTranscript, transcribe, sessionId, startLevelMonitor, stopLevelMonitor]);
+  }, [state, onTranscript, transcribe, sessionId, micToken, startLevelMonitor, stopLevelMonitor]);
 
   const stopRecording = useCallback(() => {
     if (state === "recording" && recorderRef.current) {
@@ -328,5 +387,5 @@ export function useVoiceDictation(
     }
   }, [state, startRecording, stopRecording]);
 
-  return { state, error, isTooLoud, hasSpeech, toggleRecording, startRecording, stopRecording, cancelRecording };
+  return { state, error, isTooLoud, hasSpeech, isMicBusy, toggleRecording, startRecording, stopRecording, cancelRecording };
 }

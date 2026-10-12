@@ -9,8 +9,8 @@
  * query agreement; the pure aggregation itself is unit-tested in
  * convex/lib/practice/calibration.test.ts.
  */
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { grantInstitutionMembership, seedTestInstitution } from "./institutionTestHelpers";
 import { api, internal } from "../_generated/api";
@@ -23,8 +23,25 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
+
 async function seedUser(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   role: "scholar" | "teacher" = "scholar",
   username = `test${role}`,
 ) {
@@ -40,7 +57,7 @@ async function seedUser(
   return userId;
 }
 
-async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function withUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) =>
     ctx.db.insert("authSessions", {
       userId,
@@ -55,7 +72,7 @@ async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 
 /** Insert a stored generated item on a real seeded skill (answer "1"). */
 async function seedItem(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   skillKey = "count_to_10",
 ) {
   const id = await t.run(async (ctx) =>
@@ -75,7 +92,7 @@ async function seedItem(
 /** Submit `n` predicted attempts for a scholar, alternating right/wrong so the
  * band lands somewhere non-trivial (exact band isn't the point of this file). */
 async function submitPredictions(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   asScholar: Awaited<ReturnType<typeof withUser>>,
   scholar: Id<"users">,
   n: number,
@@ -94,8 +111,7 @@ async function submitPredictions(
 
 describe("calibrationForSelf — self access", () => {
   test("a scholar can read their own calibration mirror", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedUser(t, "scholar", "mirror-self");
     const asScholar = await withUser(t, scholar);
 
@@ -119,8 +135,7 @@ describe("calibrationForSelf — self access", () => {
 
 describe("calibrationForSelf — another scholar is denied", () => {
   test("a scholar cannot read a peer's calibration mirror", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarA = await seedUser(t, "scholar", "mirror-a");
     const scholarB = await seedUser(t, "scholar", "mirror-b");
     const asA = await withUser(t, scholarA);
@@ -131,8 +146,7 @@ describe("calibrationForSelf — another scholar is denied", () => {
   });
 
   test("a teacher CAN read a scholar's mirror (self-or-teacher gate)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedUser(t, "scholar", "mirror-c");
     const teacher = await seedUser(t, "teacher", "mirror-teacher");
     const asScholar = await withUser(t, scholar);
@@ -150,8 +164,7 @@ describe("calibrationForSelf — another scholar is denied", () => {
 
 describe("calibrationForSelf — minimum data gate", () => {
   test("returns null below CALIBRATION_MIN_N — no nag, just nothing", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedUser(t, "scholar", "mirror-thin");
     const asScholar = await withUser(t, scholar);
 
@@ -164,8 +177,7 @@ describe("calibrationForSelf — minimum data gate", () => {
   });
 
   test("zero predictions also returns null", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedUser(t, "scholar", "mirror-empty");
     const asScholar = await withUser(t, scholar);
 
@@ -178,8 +190,7 @@ describe("calibrationForSelf — minimum data gate", () => {
 
 describe("calibrationForSelf — reconciles with calibrationForScholar on the same data", () => {
   test("both queries agree on n and on band-derived direction (shared pure core)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedUser(t, "scholar", "mirror-reconcile");
     const teacher = await seedUser(t, "teacher", "mirror-reconcile-teacher");
     const asScholar = await withUser(t, scholar);

@@ -21,9 +21,15 @@ const modules = (
 ).glob("../**/*.ts");
 
 const STATISTICS_SKILLS = PROBABILITY_SKILLS.filter(
-  (skill) => skill.strand === "data-displays" || skill.strand === "center-spread",
+  (skill) =>
+    skill.strand === "data-displays"
+    || skill.strand === "center-spread"
+    || skill.strand === "sampling-inference",
 );
 const STATISTICS_KEYS = STATISTICS_SKILLS.map((skill) => skill.skillKey);
+const SAMPLING_INFERENCE_KEYS = STATISTICS_SKILLS
+  .filter((skill) => skill.strand === "sampling-inference")
+  .map((skill) => skill.skillKey);
 
 function requiredItem(skillKey: string, seed: number): PracticeItem {
   const item = generateItem(skillKey, seed);
@@ -45,6 +51,15 @@ function graderSubmission(item: PracticeItem): string {
     : formatAnswer(item.answer);
 }
 
+function selectedChoice(item: PracticeItem): string {
+  if (item.answer.type !== "multipleChoice") {
+    throw new Error(`${item.skillKey} does not have a multiple-choice answer`);
+  }
+  const choice = item.choices?.[item.answer.choiceIndex];
+  if (!choice) throw new Error(`${item.skillKey} is missing its correct choice`);
+  return choice;
+}
+
 function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
@@ -55,23 +70,34 @@ function median(values: number[]): number {
 
 describe("probability statistics-strand deterministic templates", () => {
   test("every curated statistics node has exactly one registered template", () => {
-    expect(STATISTICS_KEYS).toHaveLength(17);
-    expect(new Set(STATISTICS_KEYS).size).toBe(17);
+    expect(STATISTICS_KEYS).toHaveLength(23);
+    expect(new Set(STATISTICS_KEYS).size).toBe(23);
     expect(STATISTICS_SKILLS.filter((skill) => skill.strand === "data-displays")).toHaveLength(7);
     expect(STATISTICS_SKILLS.filter((skill) => skill.strand === "center-spread")).toHaveLength(10);
+    expect(SAMPLING_INFERENCE_KEYS).toHaveLength(6);
     for (const skillKey of STATISTICS_KEYS) {
       expect(hasTemplate(skillKey), skillKey).toBe(true);
     }
   });
 
-  test("the statistics extension contributes 23 edges, including two cross-domain bridges", () => {
+  test("the statistics extension has 31 edges, with two foreign and one probability-strand prerequisite", () => {
     const statisticsKeys = new Set(STATISTICS_KEYS);
     const statisticsEdges = PROBABILITY_EDGES.filter((edge) => statisticsKeys.has(edge.toKey));
-    expect(statisticsEdges).toHaveLength(23);
+    expect(statisticsEdges).toHaveLength(31);
     expect(statisticsEdges.filter((edge) => !statisticsKeys.has(edge.fromKey))).toEqual([
       { fromKey: "fraction_number_line", toKey: "read_fractional_line_plot" },
       { fromKey: "division_as_sharing", toKey: "mean" },
+      { fromKey: "probability_as_fraction", toKey: "estimate_population_from_sample" },
     ]);
+    expect(PROBABILITY_EDGES).not.toContainEqual({
+      fromKey: "expected_frequency",
+      toKey: "estimate_population_from_sample",
+    });
+    expect(
+      PROBABILITY_SKILLS.find(
+        (skill) => skill.skillKey === "compare_populations_from_samples",
+      )?.ccCodes,
+    ).toEqual(["7.SP.B.4"]);
   });
 
   test("generateItem is deterministic for every skill and seed", () => {
@@ -280,6 +306,141 @@ describe("probability statistics-strand deterministic templates", () => {
       expect(collection.choices?.[collection.answer.choiceIndex]).toBe(
         "Measure every pencil end to end in centimeters.",
       );
+    }
+  });
+
+  test("sampling and inference items encode the intended population reasoning", () => {
+    const comparisonWinners = new Set<string>();
+    const variabilityModes = new Set<string>();
+    const variabilityPhrasings = new Map<string, Set<string>>([
+      ["justified", new Set()],
+      ["population-change", new Set()],
+      ["largest-only", new Set()],
+      ["random-failed", new Set()],
+    ]);
+    const variabilityFamily = (choice: string): string => {
+      if (
+        choice.includes("Different random samples")
+        || choice.includes("sample-to-sample variation")
+        || choice.includes("need not give identical estimates")
+      ) return "justified";
+      if (
+        choice.includes("population must have changed")
+        || choice.includes("population changed")
+        || choice.includes("population could not have stayed the same")
+      ) return "population-change";
+      if (choice.includes("largest") || choice.includes("greatest percentage")) {
+        return "largest-only";
+      }
+      if (
+        choice.includes("Random sampling failed")
+        || choice.includes("proper random sample")
+        || choice.includes("none of the samples was random")
+      ) return "random-failed";
+      throw new Error(`Unknown sampling-variability choice: ${choice}`);
+    };
+
+    for (let seed = 1; seed <= 300; seed++) {
+      const population = requiredItem("population_vs_sample", seed);
+      expect(selectedChoice(population), population.stem).toMatch(
+        /^Population: .+; sample: .+\.$/,
+      );
+      expect(population.stem).not.toContain(selectedChoice(population));
+      expect(population.choices).toHaveLength(4);
+      for (const choice of population.choices ?? []) {
+        expect(choice, population.stem).toMatch(/^Population: .+; sample: .+\.$/);
+        expect(choice, population.stem).not.toContain("survey questions");
+        expect(choice, population.stem).not.toContain("everyone who answers favorably");
+      }
+
+      const representative = requiredItem("representative_random_sample", seed);
+      expect(selectedChoice(representative), representative.stem).toMatch(
+        /random number generator|Randomly select/,
+      );
+      expect(representative.stem).not.toContain(selectedChoice(representative));
+
+      const estimate = requiredItem("estimate_population_from_sample", seed);
+      const estimateNumbers = estimate.stem.match(/\d+/g)?.map(Number) ?? [];
+      expect(estimateNumbers, estimate.stem).toHaveLength(3);
+      const [sampleSize, successes, populationSize] = estimateNumbers;
+      expect(numericAnswer(estimate), estimate.stem).toBeCloseTo(
+        (successes / sampleSize) * populationSize,
+        12,
+      );
+      expect(estimateNumbers, estimate.stem).not.toContain(numericAnswer(estimate));
+
+      const variability = requiredItem("sampling_variability", seed);
+      const inverted = variability.stem.includes("NOT justified");
+      variabilityModes.add(inverted ? "inverted" : "direct");
+      const selectedVariabilityFamily = variabilityFamily(selectedChoice(variability));
+      if (inverted) {
+        expect(selectedVariabilityFamily, variability.stem).not.toBe("justified");
+      } else {
+        expect(selectedVariabilityFamily, variability.stem).toBe("justified");
+      }
+      const nonSelectedChoices = (variability.choices ?? []).filter(
+        (_, index) => index !== (
+          variability.answer.type === "multipleChoice"
+            ? variability.answer.choiceIndex
+            : -1
+        ),
+      );
+      expect(
+        nonSelectedChoices.map(variabilityFamily),
+        variability.stem,
+      ).toEqual(
+        inverted
+          ? ["justified", "justified", "justified"]
+          : expect.arrayContaining(["population-change", "largest-only", "random-failed"]),
+      );
+      for (const choice of variability.choices ?? []) {
+        variabilityPhrasings.get(variabilityFamily(choice))?.add(choice);
+      }
+      expect(variability.stem).not.toContain(selectedChoice(variability));
+
+      const comparison = requiredItem("compare_populations_from_samples", seed);
+      const match = comparison.stem.match(
+        /Sample A: ([\d, ]+)\. Sample B: ([\d, ]+)\./,
+      );
+      expect(match, comparison.stem).not.toBeNull();
+      if (!match) continue;
+      const sampleA = match[1].split(", ").map(Number);
+      const sampleB = match[2].split(", ").map(Number);
+      const meanA = sampleA.reduce((sum, value) => sum + value, 0) / sampleA.length;
+      const meanB = sampleB.reduce((sum, value) => sum + value, 0) / sampleB.length;
+      const rangeA = Math.max(...sampleA) - Math.min(...sampleA);
+      const rangeB = Math.max(...sampleB) - Math.min(...sampleB);
+      expect(Math.abs(meanA - meanB), comparison.stem).toBeGreaterThanOrEqual(
+        2 * Math.max(rangeA, rangeB),
+      );
+      const higherLabel = meanA > meanB ? "A" : "B";
+      const higherRange = higherLabel === "A" ? rangeA : rangeB;
+      const lowerRange = higherLabel === "A" ? rangeB : rangeA;
+      const expected = `Population ${higherLabel} likely has a higher typical value and ${higherRange > lowerRange ? "more" : "less"} variability.`;
+      expect(selectedChoice(comparison), comparison.stem).toBe(expected);
+      expect(comparison.stem).not.toContain(selectedChoice(comparison));
+      comparisonWinners.add(higherLabel);
+
+      const margin = requiredItem("margin_of_error_range", seed);
+      const marginNumbers = margin.stem.match(/\d+/g)?.map(Number) ?? [];
+      expect(marginNumbers, margin.stem).toHaveLength(2);
+      const [pointEstimate, marginSize] = marginNumbers;
+      const selectedPercent = Number(selectedChoice(margin).replace("%", ""));
+      expect(selectedPercent, margin.stem).toBeGreaterThanOrEqual(pointEstimate - marginSize);
+      expect(selectedPercent, margin.stem).toBeLessThanOrEqual(pointEstimate + marginSize);
+      const choicePercents = (margin.choices ?? []).map((choice) =>
+        Number(choice.replace("%", "")));
+      expect(choicePercents.filter(
+        (value) => value >= pointEstimate - marginSize && value <= pointEstimate + marginSize,
+      ), margin.stem).toEqual([selectedPercent]);
+      expect(choicePercents.some((value) => value < pointEstimate - marginSize), margin.stem).toBe(true);
+      expect(choicePercents.some((value) => value > pointEstimate + marginSize), margin.stem).toBe(true);
+      expect(margin.stem).not.toContain(selectedChoice(margin));
+    }
+    expect(comparisonWinners).toEqual(new Set(["A", "B"]));
+    expect(variabilityModes).toEqual(new Set(["direct", "inverted"]));
+    for (const [family, phrasings] of variabilityPhrasings) {
+      expect(phrasings.size, family).toBeGreaterThanOrEqual(2);
     }
   });
 });

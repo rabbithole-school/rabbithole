@@ -18,9 +18,13 @@ import {
   isTeacherRole,
   isGloballyPrivilegedMembership,
   isGloballyPrivilegedRole,
+  isStaffRole,
+  type Role,
 } from "./roles";
 import {
   hasActiveInstitutionCapability,
+  hasActiveStaffMembershipAtInstitution,
+  hasSchoolOperationsAccessAtInstitution,
   schoolOperationsInstitutionIds,
 } from "./staffCapabilities";
 import {
@@ -29,6 +33,7 @@ import {
   scholarIdsForInstitution,
   scholarInstitutionId,
 } from "./scholarEnrollment";
+import { primaryInstitutionId } from "./primaryInstitution";
 
 // The non-alarming message a suspended member sees. Kept here (the enforcement
 // home) so the server throw and the client paused-screen use one string.
@@ -44,6 +49,19 @@ export type ActiveMembership = Pick<
 >;
 
 /**
+ * Platform-admin standing comes from `users.role` alone (TRA-375). A
+ * platform_admin MEMBERSHIP whose user no longer holds the role — a stale row
+ * a role change didn't retire — confers nothing.
+ */
+async function holdsPlatformAdminRole(
+  ctx: QueryCtx,
+  membership: ActiveMembership,
+): Promise<boolean> {
+  const user = await ctx.db.get(membership.userId);
+  return !!user && isPlatformAdminRole(user.role);
+}
+
+/**
  * The set of scholar user-ids the given membership may access.
  *
  *   platform_admin                         → every scholar (global)
@@ -57,7 +75,9 @@ export async function accessibleScholarIds(
   membership: ActiveMembership,
 ): Promise<Set<Id<"users">>> {
   if (isPlatformAdminRole(membership.role)) {
-    return await allScholarIds(ctx);
+    return (await holdsPlatformAdminRole(ctx, membership))
+      ? await allScholarIds(ctx)
+      : new Set();
   }
 
   if (membership.role === ROLES.PARENT) {
@@ -109,6 +129,7 @@ export async function canAccessScholar(
   scholarId: Id<"users">,
 ): Promise<boolean> {
   if (isPlatformAdminRole(membership.role)) {
+    if (!(await holdsPlatformAdminRole(ctx, membership))) return false;
     const s = await ctx.db.get(scholarId);
     return !!s && (await hasScholarMembership(ctx, scholarId));
   }
@@ -335,6 +356,192 @@ export async function requireGroupScholarAccess(
   return group;
 }
 
+/**
+ * The institution boundary for a resolved Master Schedule row. Placements and
+ * group-specific blocks are checked against their own group, and every row is
+ * also checked against its reporting period. Legacy unstamped periods belong
+ * to the primary institution, matching the schedule aide boundary; missing
+ * periods or deployments without a primary institution fail closed.
+ * The period-keyed aide* internal mutations touched by TRA-260 use this scope.
+ */
+export async function requireScheduleScopeAccessible(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  scope: {
+    periodId: Id<"reportingPeriods">;
+    groupId?: Id<"scholarGroups">;
+  },
+): Promise<void> {
+  if (scope.groupId) {
+    const group = await requireGroupScholarAccess(ctx, user, scope.groupId);
+    if (group?.institutionId) {
+      await assertCuratableInstitution(ctx, user, group.institutionId);
+    }
+  }
+  const period = await ctx.db.get(scope.periodId);
+  if (!period) throw new Error("Reporting period not found");
+  const institutionId =
+    period.institutionId ?? (await primaryInstitutionId(ctx));
+  if (!institutionId) {
+    throw new Error("Forbidden: reporting period is not in your current context");
+  }
+  await assertCuratableInstitution(ctx, user, institutionId);
+}
+
+/**
+ * The STAFF-side twin of the scholar-roster boundary above. A group/planning
+ * handler that also takes a client-supplied `teacherId` as a write key (e.g.
+ * "reassign this block to teacher X") is a tenancy question exactly like a
+ * scholarId is: the caller must not be able to name a staffer at a school
+ * they have no standing in. Naming yourself is always fine (mirrors the
+ * `user._id === scholarId` self-bypass on `canUserAccessScholar` above).
+ * Otherwise throws unless `staffId` holds an active staff membership at some
+ * institution the caller may act in (or the caller is platform_admin, which
+ * acts everywhere). Composed from the `schoolOperationsInstitutionIds` /
+ * `hasActiveStaffMembershipAtInstitution` primitives in staffCapabilities.ts —
+ * no new policy, just the intersection.
+ */
+export async function requireStaffAccessible(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  staffId: Id<"users">,
+): Promise<void> {
+  if (user._id === staffId) return;
+  const scope = await schoolOperationsInstitutionIds(ctx, user);
+  if (scope === "all") return;
+  for (const institutionId of scope) {
+    if (await hasActiveStaffMembershipAtInstitution(ctx, staffId, institutionId)) {
+      return;
+    }
+  }
+  throw new Error("Forbidden: staff member is not in your current context");
+}
+
+/**
+ * Resolve every institution an assignment's group/unit/roster signals touch
+ * — the traversal behind `requireAssignmentAccessible` below, kept as a Set
+ * (not a single institution-or-null) because that guard needs to tell
+ * "nothing resolves" apart from "resolves to more than one," which call for
+ * opposite policies on the schedule-write boundary. Checked in priority
+ * order: the immutable `scholarGroupId` provenance link (most authoritative
+ * — set once at publish and never widened), then the unit's own
+ * institution, then every distinct institution across the roster. Private
+ * to this schedule-write boundary — `portfolio.ts`'s own, unrelated
+ * `canManageAssignment` keeps its own simpler, stricter-by-default resolver
+ * rather than share this one; don't widen this into a shared primitive
+ * without re-auditing that caller too.
+ */
+async function resolvedAssignmentInstitutionIds(
+  ctx: QueryCtx,
+  assignment: Doc<"assignments">,
+): Promise<Set<Id<"institutions">>> {
+  if (assignment.scholarGroupId) {
+    const group = await ctx.db.get(assignment.scholarGroupId);
+    if (group?.institutionId) return new Set([group.institutionId]);
+  }
+  if (assignment.unitId) {
+    const unit = await ctx.db.get(assignment.unitId);
+    if (unit) {
+      if (unit.authorScholarId) {
+        // Independent Study units belong to their AUTHOR scholar, not a
+        // stamped/primary catalog institution — mirrors the dedicated IS
+        // branch in `requireUnitAccessForUser` (convex/lib/unitAccess.ts).
+        // Falling through to the catalog rule below would wrongly hand a
+        // scholar-owned unit to whichever school happens to be primary.
+        const authorInstitutionId = await scholarInstitutionId(
+          ctx,
+          unit.authorScholarId,
+        );
+        if (authorInstitutionId) return new Set([authorInstitutionId]);
+      } else {
+        // Mirrors `requireUnitAccessForUser`'s catalog-unit rule: a stamped
+        // unit belongs to its own institution, but a LEGACY UNSTAMPED unit
+        // belongs to the PRIMARY institution — it is not institution-less.
+        // Falling through to "no signal" here would let a non-primary
+        // teacher cascade the primary school's legacy curriculum (see
+        // "legacy unstamped units belong to the primary institution" in
+        // convex/__tests__/unitPrivacy.test.ts). Only treat it as
+        // unresolved when there's no primary institution row at all yet
+        // (the pre-migration single-tenant world unitAccess.ts preserves).
+        const unitInstitutionId =
+          unit.institutionId ?? (await primaryInstitutionId(ctx)) ?? undefined;
+        if (unitInstitutionId) return new Set([unitInstitutionId]);
+      }
+    }
+  }
+  // Uses the same widen-phase resolver as everywhere else a scholar's
+  // institution is read (`scholarEnrollment.ts`'s `scholarInstitutionId`) —
+  // NOT a bare `scholar.institutionId` field read. A scholar whose
+  // institution is carried only by their `memberships` row (e.g. an adult
+  // learner account, or a scholar mid-migration) has no `users.institutionId`
+  // at all; reading the field directly would silently drop them out of the
+  // roster resolution and misroute a real foreign-roster assignment into the
+  // weaker owner-only fallback below.
+  const institutionIds = await Promise.all(
+    assignment.scholarIds.map((scholarId) => scholarInstitutionId(ctx, scholarId)),
+  );
+  return new Set(
+    institutionIds.flatMap((institutionId) =>
+      institutionId ? [institutionId] : [],
+    ),
+  );
+}
+
+/**
+ * The institution boundary for an ASSIGNMENT-keyed schedule write: a
+ * client-supplied `assignmentId` a teacher links onto a placement (or
+ * cascades a unit from) via `masterSchedule.ts`. That surface deliberately
+ * supports scheduling a COLLEAGUE's assignment (a group's roster and the
+ * assignment's own teacher need not match), so this checks institution
+ * standing — same as `requireStaffAccessible` — not ownership; do not
+ * replace this with `assignments.ts`'s stricter `requireOwnedAssignment`,
+ * which would break that legitimate case.
+ *
+ * A missing assignment resolves to null without throwing — the caller
+ * already has (or the core it delegates to already throws) its own
+ * "assignment not found" message, and duplicating that here would produce a
+ * second, contradictory error.
+ *
+ * An assignment with NO resolvable institution signal from its group/unit/
+ * roster (no `scholarGroupId`, no `unitId` — or a unit predating the
+ * institution rollout — and no scholar with an `institutionId`) falls back
+ * to the STAFF boundary on its own `teacherId` (`requireStaffAccessible`,
+ * which self-bypasses when the caller names their own assignment). This is
+ * NOT a no-op read: `reconcilePlacementById` → `applyScheduleActivity`
+ * `ctx.db.patch`es the linked assignment's own `activitySchedule` as soon as
+ * the placement materializes, even with an empty roster — so the ASSIGNMENT
+ * itself, not just its roster, is the protected mutable resource, and its
+ * `teacherId` is the remaining ownership signal once group/unit/roster are
+ * silent. A roster that resolves to MORE than one institution (a genuine
+ * anomaly: real scholars from different schools on one assignment) fails
+ * closed instead, since real cross-tenant data is actually in play there.
+ */
+export async function requireAssignmentAccessible(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  assignmentId: Id<"assignments">,
+): Promise<Doc<"assignments"> | null> {
+  const assignment = await ctx.db.get(assignmentId);
+  if (!assignment) return null;
+  if (isPlatformAdminRole(user.role)) return assignment;
+  const institutionIds = await resolvedAssignmentInstitutionIds(ctx, assignment);
+  if (institutionIds.size === 0) {
+    await requireStaffAccessible(ctx, user, assignment.teacherId);
+    return assignment;
+  }
+  if (
+    institutionIds.size > 1 ||
+    !(await hasSchoolOperationsAccessAtInstitution(
+      ctx,
+      user,
+      [...institutionIds][0],
+    ))
+  ) {
+    throw new Error("Forbidden: assignment is not in your current context");
+  }
+  return assignment;
+}
+
 // ── Institution curation scope (school-level resources) ───────────────
 //
 // "Which institutions may this staffer curate school-level resources for"
@@ -342,12 +549,19 @@ export async function requireGroupScholarAccess(
 // boundary above (this is about the school's own config, not per-scholar data):
 // a staffer editing another school's inventory is a plain authorization error.
 //
-//   platform_admin / curriculum_designer  → every institution (global roles)
+//   platform_admin (by users.role only — TRA-375) → "all", suspended
+//     schools included
+//   curriculum_designer → every LIVE institution (a global role by
+//     users.role, or an unscoped membership whose role is global AND staff —
+//     never lifelong_learner, which is global for lifecycle only)
 //   teacher / operations staff / school_admin     → their staff-membership institutions
 //   (institution-scoped staffer with no membership yet → the primary school,
 //    matching institutions.listForStaff + physicalEnvAide.resolveActorInstitution)
+//   A suspended institution is never curatable except by a platform admin:
+//   not in a scoped set (even for a staffer whose other school keeps them
+//   working), and not in a curriculum designer's global set.
 
-/** The set of institutions the staffer may curate, or "all" for a global role. */
+/** The set of institutions the staffer may curate, or "all" for a platform admin. */
 export async function curatableInstitutionIds(
   ctx: QueryCtx,
   user: Doc<"users">,
@@ -359,9 +573,24 @@ export async function curatableInstitutionIds(
     .collect();
   if (
     user.role === ROLES.CURRICULUM_DESIGNER ||
-    memberships.some(isGloballyPrivilegedMembership)
+    // Global standing needs a role that is deployment-wide AND staff: an
+    // unscoped lifelong_learner membership is global for lifecycle only, and
+    // must not turn a teacher at one school into a curator of every school
+    // (the same leak 90f1b8c closed in the staff directory).
+    memberships.some(
+      (m) =>
+        isGloballyPrivilegedMembership(m) &&
+        isStaffRole(m.role as Role) &&
+        // platform_admin standing is users.role alone (TRA-375).
+        !isPlatformAdminRole(m.role),
+    )
   ) {
-    return "all";
+    // Every LIVE school. A suspended school's resources are frozen for
+    // everyone but the operator, so a global curator skips it too.
+    const live = (await ctx.db.query("institutions").collect()).filter(
+      (i) => i.disabledAt === undefined,
+    );
+    return new Set(live.map((i) => i._id));
   }
   const ids = new Set<Id<"institutions">>();
   for (const m of memberships) {
@@ -385,6 +614,11 @@ export async function curatableInstitutionIds(
     );
     if (primary) ids.add(primary._id);
   }
+  // A suspended school's members cannot use the app, so a staffer who also
+  // belongs to an active school must not keep curating the paused one —
+  // matching accessibleScholarIds, which drops suspended schools the same way.
+  const suspended = await suspendedInstitutionIds(ctx);
+  for (const id of suspended) ids.delete(id);
   return ids;
 }
 

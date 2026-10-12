@@ -1,37 +1,36 @@
 "use client";
 
-import { HStack, Text } from "@chakra-ui/react";
+import { Box } from "@chakra-ui/react";
 
 interface AppLogoProps {
-  /** "light" for dark backgrounds (white text), "dark" for light backgrounds (navy text) */
+  /** Kept for call-site compatibility. The mark is a full-colour image now, so
+   *  it reads on either ground and the variant no longer changes anything. */
   variant?: "light" | "dark";
-  /** Logo image size in px (default 40) */
+  /** Logo size in px (default 40) */
   size?: number;
 }
 
-export function AppLogo({ variant = "dark", size = 40 }: AppLogoProps) {
-  const textColor = variant === "light" ? "gray.100" : "gray.800";
-
+/**
+ * The Rabbithole mark: the astronaut-rabbit artwork, squircle-cropped.
+ *
+ * It used to be two emoji (🐇 + 🕳️) side by side, which rendered differently
+ * on every platform and read as a placeholder next to real artwork. One image
+ * here updates every surface that shows the mark.
+ */
+export function AppLogo({ size = 40 }: AppLogoProps) {
   return (
-    <HStack gap={1} aria-label="Rabbithole" userSelect="none">
-      <Text
-        as="span"
-        color={textColor}
-        fontSize={`${size * 0.7}px`}
-        lineHeight="1"
-        display="inline-block"
-        transform="scaleX(-1)"
-      >
-        🐇
-      </Text>
-      <Text
-        as="span"
-        color={textColor}
-        fontSize={`${size * 0.7}px`}
-        lineHeight="1"
-      >
-        🕳️
-      </Text>
-    </HStack>
+    <Box
+      w={`${size}px`}
+      h={`${size}px`}
+      flexShrink={0}
+      borderRadius="28%"
+      overflow="hidden"
+      backgroundImage="url('/rh-logo.png')"
+      backgroundSize="cover"
+      backgroundPosition="center"
+      userSelect="none"
+      role="img"
+      aria-label="Rabbithole"
+    />
   );
 }

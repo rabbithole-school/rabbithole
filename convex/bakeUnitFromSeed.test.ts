@@ -25,36 +25,6 @@ describe("buildBakeInstruction", () => {
     const instruction = buildBakeInstruction(spec("The room that ate speech"));
 
     expect(instruction).toContain("Verified discovery anchor");
-    expect(instruction).toContain(
-      "room volume relative to sound absorption",
-    );
-    expect(instruction).toContain("earned payoff, not the opening move");
-    expect(instruction).toContain("phone voice recorder");
-    expect(instruction).toContain("controlled blanket before-and-after result");
-    expect(instruction).toContain(
-      'auto deliverable with kind:"artifact"',
-    );
-    expect(instruction).toContain(
-      "rank repeated recordings from longest to shortest",
-    );
-    expect(instruction).toContain(
-      "never force a size pattern the evidence does not show",
-    );
-    expect(instruction).toContain(
-      "Do not add an explainer video, slides, or another medium merely to look multimodal.",
-    );
-    expect(instruction).toContain(
-      "Private steering — calibrate to it, don't read it back to the scholar.",
-    );
-    expect(instruction).toContain(
-      "created in the exact learner-facing sequence they should appear",
-    );
-    expect(instruction).toContain(
-      "[bake-stage:commit]",
-    );
-    expect(instruction).toContain(
-      "runtime will also normalize this order from the private markers",
-    );
   });
 
   test("leaves uncatalogued topics on the existing generic bake path", () => {

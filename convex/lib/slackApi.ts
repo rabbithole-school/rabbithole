@@ -14,7 +14,11 @@
 // (e.g. the workspace/app combination rejects startStream).
 
 import { quipHtmlToMarkdown } from "./canvasHtml";
-export { escapeSlackText } from "./slackText";
+export {
+  escapeSlackText,
+  escapeSlackInline,
+  slackMention,
+} from "./slackText";
 
 const SLACK_API = "https://slack.com/api";
 
@@ -235,10 +239,24 @@ export async function postMessage(
      * the unfurl_links/unfurl_media note on the body below.
      */
     unfurl?: boolean;
+    /**
+     * Block Kit blocks. `text` then becomes the notification fallback, sent as
+     * plain `text` (Slack rejects `markdown_text` beside `blocks`).
+     */
+    blocks?: unknown[];
   },
 ): Promise<{
   ok: boolean;
   ts?: string;
+  /**
+   * The conversation Slack actually posted into, echoed back from its own
+   * response. This is NOT always the `channel` we passed: posting to a user id
+   * (`U…`) opens that person's IM implicitly and resolves to its `D…` id.
+   * Callers that need to address the message afterwards MUST use this — a user
+   * id is not a conversation id, and `chat.getPermalink` rejects one with
+   * `channel_not_found` (probed live 2026-09-17).
+   */
+  channel?: string;
   error?: string;
   retryAfterMs?: number;
   /**
@@ -263,7 +281,10 @@ export async function postMessage(
     unfurl_links: args.unfurl ?? false,
     unfurl_media: args.unfurl ?? false,
   };
-  if (args.markdown) {
+  if (args.blocks) {
+    body.text = args.text;
+    body.blocks = args.blocks;
+  } else if (args.markdown) {
     body.markdown_text = normalizeSlackMarkdown(args.text);
   } else {
     body.text = args.text;
@@ -276,6 +297,7 @@ export async function postMessage(
   return {
     ok: res.ok,
     ts: res.ts as string | undefined,
+    channel: res.channel as string | undefined,
     error,
     retryAfterMs: res.retryAfterMs,
     ambiguous:
@@ -427,6 +449,74 @@ export async function updateContext(
     ],
   });
   return { ok: res.ok };
+}
+
+/** Post a Block Kit message (`text` is the notification/accessibility fallback). */
+export async function postBlocks(
+  token: string,
+  args: { channel: string; text: string; blocks: unknown[]; threadTs?: string },
+): Promise<{ ok: boolean; ts?: string; channel?: string; error?: string }> {
+  const res = await slackCall(token, "chat.postMessage", {
+    channel: args.channel,
+    ...(args.threadTs ? { thread_ts: args.threadTs } : {}),
+    text: args.text,
+    blocks: args.blocks,
+    unfurl_links: false,
+    unfurl_media: false,
+  });
+  return {
+    ok: res.ok,
+    ts: res.ts as string | undefined,
+    channel: res.channel as string | undefined,
+    error: res.error as string | undefined,
+  };
+}
+
+/**
+ * Reply to an interaction privately via its `response_url`. The URL is
+ * Slack-provided and signature-covered; the host is still pinned.
+ */
+export async function respondEphemeral(
+  responseUrl: string | undefined,
+  text: string,
+): Promise<void> {
+  if (!responseUrl) return;
+  try {
+    if (new URL(responseUrl).hostname !== "hooks.slack.com") return;
+    await fetch(responseUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ response_type: "ephemeral", replace_original: false, text }),
+    });
+  } catch (error) {
+    console.error("Slack ephemeral reply failed:", error);
+  }
+}
+
+/** Open a modal. `triggerId` expires after 3 seconds. */
+export async function openView(
+  token: string,
+  args: { triggerId: string; view: unknown },
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await slackCall(token, "views.open", {
+    trigger_id: args.triggerId,
+    view: args.view,
+  });
+  return { ok: res.ok, error: res.error as string | undefined };
+}
+
+/** Rewrite a message in place with arbitrary blocks (chat.update). */
+export async function updateBlocks(
+  token: string,
+  args: { channel: string; ts: string; text: string; blocks: unknown[] },
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await slackCall(token, "chat.update", {
+    channel: args.channel,
+    ts: args.ts,
+    text: args.text,
+    blocks: args.blocks,
+  });
+  return { ok: res.ok, error: res.error as string | undefined };
 }
 
 /** Delete one of the bot's own messages (`chat:write`, no extra scope). Used to
@@ -755,15 +845,35 @@ export async function fetchConversationKind(
   token: string,
   channel: string,
 ): Promise<"dm" | "mpim" | "channel" | null> {
+  return (await fetchConversationShape(token, channel))?.kind ?? null;
+}
+
+/**
+ * `fetchConversationKind` plus, for a channel, whether Slack says it is
+ * private (`is_private`). Same single conversations.info call. `privacy` is
+ * null for a DM or group DM, and null when Slack omits the flag, so a caller
+ * never reads a missing flag as "public".
+ */
+export async function fetchConversationShape(
+  token: string,
+  channel: string,
+): Promise<{
+  kind: "dm" | "mpim" | "channel";
+  privacy: "private" | "public" | null;
+} | null> {
   const res = await slackCallForm(token, "conversations.info", { channel });
   if (!res.ok) return null;
   const info = res.channel as
-    | { is_im?: boolean; is_mpim?: boolean }
+    | { is_im?: boolean; is_mpim?: boolean; is_private?: boolean }
     | undefined;
   if (!info) return null;
-  if (info.is_im) return "dm";
-  if (info.is_mpim) return "mpim";
-  return "channel";
+  if (info.is_im) return { kind: "dm", privacy: null };
+  if (info.is_mpim) return { kind: "mpim", privacy: null };
+  return {
+    kind: "channel",
+    privacy:
+      info.is_private === true ? "private" : info.is_private === false ? "public" : null,
+  };
 }
 
 /** Archive URL for one message — the "Copy link" permalink, resolved by
@@ -1438,6 +1548,7 @@ export class SlackStreamer {
   private fullText = "";
   private sentAnything = false;
   private discarded = false;
+  private finalize?: (text: string) => string;
   private lastFlush = 0;
   private inFlight: Promise<void> = Promise.resolve();
   /** Optional ordering gate: the stream won't open (and thus won't claim its
@@ -1463,6 +1574,8 @@ export class SlackStreamer {
       recipientUserId?: string;
       /** See `startGate`: delays the first chat.startStream until resolved. */
       startGate?: Promise<unknown>;
+      /** Last-mile rewrite applied once to the complete reply before Slack normalization. */
+      finalize?: (text: string) => string;
     },
   ) {
     this.token = token;
@@ -1471,6 +1584,7 @@ export class SlackStreamer {
     this.recipientTeamId = args.recipientTeamId;
     this.recipientUserId = args.recipientUserId;
     this.startGate = args.startGate;
+    this.finalize = args.finalize;
   }
 
   /** Open the stream NOW so Slack renders the reply container before any
@@ -1610,7 +1724,8 @@ export class SlackStreamer {
         ts: this.streamTs,
       });
       const finalText = this.fullText.trim() || fallbackText;
-      const normalized = normalizeSlackMarkdown(finalText);
+      const finalized = this.finalize?.(finalText) ?? finalText;
+      const normalized = normalizeSlackMarkdown(finalized);
       if (normalized !== finalText) {
         await slackCall(this.token, "chat.update", {
           channel: this.channel,
@@ -1621,7 +1736,8 @@ export class SlackStreamer {
       return;
     }
     // Fallback: single message.
-    const text = this.fullText.trim() || fallbackText;
+    const finalText = this.fullText.trim() || fallbackText;
+    const text = this.finalize?.(finalText) ?? finalText;
     this.buffer = "";
     await postMessage(this.token, {
       channel: this.channel,

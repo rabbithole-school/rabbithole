@@ -4,7 +4,7 @@ import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useQuery, useMutation } from "convex/react";
-import { Box, HStack, Text, Button, Menu } from "@chakra-ui/react";
+import { Box, HStack, Text, Button, Menu, VisuallyHidden } from "@chakra-ui/react";
 import {
   SignOut,
   Gear,
@@ -18,10 +18,12 @@ import {
   Wrench,
   Plugs,
   Bug,
+  ChatsCircle,
 } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { withInstitutionScope } from "@/lib/institutionLinks";
+import { messagingSchoolSlug } from "@/lib/messagingScope";
 import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { isPlatformAdminRole, isStaffRole, type Role } from "@/convex/lib/roles";
@@ -153,6 +155,13 @@ function buildContexts(
 
 interface AccountMenuProps {
   onSignOut: () => void;
+  /**
+   * Applicant-only parent (no linked child yet). Drops the parent-context and
+   * enrolled-family entries: the context switcher, the parent-view links and
+   * "How it works" (which explains the learning tools their child does not
+   * use yet). Account details, bug report and sign out stay.
+   */
+  applicantMode?: boolean;
 }
 
 /**
@@ -207,12 +216,17 @@ function waitForAccountMenuGone(
 
 export function AccountMenu({
   onSignOut,
+  applicantMode = false,
 }: AccountMenuProps) {
   const { user } = useCurrentUser();
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { activeInstitution, scopeParam } = useActiveInstitution(!!user);
+  const { activeInstitution, scopeParam, requestedScope } =
+    useActiveInstitution(!!user);
+  // On Messages, a mentor-only school the generic lens folds back into the
+  // home school is still the school in view — mark THAT one active.
+  const messagingSlug = messagingSchoolSlug(pathname, requestedScope);
 
   const [showProfile, setShowProfile] = useState(false);
   const [showBugReport, setShowBugReport] = useState(false);
@@ -271,6 +285,15 @@ export function AccountMenu({
   const isParentRole = role === "parent";
   // Gates the staff-only "Connect an AI assistant" entry.
   const isStaff = role === "staff" || isStaffRole(role as Role | undefined);
+  // Scholar Messages (mentor + Workshop conversations). The entry exists only
+  // once an adult has opened a conversation or an idea has a thread — never an
+  // empty door — and carries the unread count.
+  const scholarThreads = useQuery(
+    api.scholarMessages.listThreads,
+    isScholar ? {} : "skip",
+  );
+  const showScholarMessages = (scholarThreads?.threads.length ?? 0) > 0;
+  const scholarUnread = scholarThreads?.unreadCount ?? 0;
   const userName = user?.name ?? "User";
   const userUsername = user?.username;
   const userImage = user?.image;
@@ -280,8 +303,10 @@ export function AccountMenu({
   const hasParentContext =
     useQuery(api.parents.hasParentContext, user ? {} : "skip") ?? false;
   const isOnParentPage = pathname?.startsWith("/parent");
-  const showParentEntry = hasParentContext && !isParentRole && !isOnParentPage;
-  const showExitParent = hasParentContext && !isParentRole && isOnParentPage;
+  const showParentEntry =
+    !applicantMode && hasParentContext && !isParentRole && !isOnParentPage;
+  const showExitParent =
+    !applicantMode && hasParentContext && !isParentRole && isOnParentPage;
 
   // Persona/context switcher: the user's (role, institution) memberships. Shown
   // when they wear ≥2 hats (e.g. operations staff + parent). When present it supersedes
@@ -296,14 +321,17 @@ export function AccountMenu({
       buildContexts(
         memberships,
         pathname ?? "",
-        activeInstitution?.scope === "institution"
-          ? activeInstitution.institutionSlug
-          : null,
+        messagingSlug &&
+          memberships.some((m) => m.institutionSlug === messagingSlug)
+          ? messagingSlug
+          : activeInstitution?.scope === "institution"
+            ? activeInstitution.institutionSlug
+            : null,
         activeInstitution?.homeInstitutionSlug ?? null,
       ),
-    [memberships, pathname, activeInstitution],
+    [memberships, pathname, activeInstitution, messagingSlug],
   );
-  const showContextSwitcher = contexts.length >= 2;
+  const showContextSwitcher = !applicantMode && contexts.length >= 2;
 
   // Institution LENS (platform admins only). The School shell also renders a
   // convenient selector above its navigation rail; both controls write the same
@@ -340,9 +368,12 @@ export function AccountMenu({
       ? pathname
       : "/" + (pathname ?? "/teacher").split("/").filter(Boolean).slice(0, 2).join("/");
     const activeSlug =
-      activeInstitution?.scope === "institution"
-        ? activeInstitution.institutionSlug
-        : null;
+      messagingSlug &&
+      adminInstitutions.some((inst) => inst.slug === messagingSlug)
+        ? messagingSlug
+        : activeInstitution?.scope === "institution"
+          ? activeInstitution.institutionSlug
+          : null;
     const isAll = scopeParam === "all";
     return {
       rows: adminInstitutions.map((inst) => ({
@@ -359,7 +390,7 @@ export function AccountMenu({
       showAll: !pathname?.startsWith("/school"),
       totalScholars: adminInstitutions.reduce((n, i) => n + i.scholarCount, 0),
     };
-  }, [isAdmin, onInstitutionLensSurface, adminInstitutions, pathname, activeInstitution, scopeParam]);
+  }, [isAdmin, onInstitutionLensSurface, adminInstitutions, pathname, activeInstitution, scopeParam, messagingSlug]);
 
   // Remote-mode awareness — when a teacher's looking at a scholar's
   // surface via `?remote=<scholarId>`, the avatar chip swaps to the
@@ -411,7 +442,7 @@ export function AccountMenu({
     <Menu.Root positioning={{ placement: "bottom-end" }}>
       <Menu.Trigger asChild>
         <Button
-          aria-label={`Account menu for ${userName}`}
+          aria-label={`Account menu for ${userName}${isScholar && scholarUnread > 0 ? `, ${scholarUnread} unread ${scholarUnread === 1 ? "message" : "messages"}` : ""}`}
           variant="ghost"
           size="sm"
           px={2}
@@ -424,6 +455,21 @@ export function AccountMenu({
             {/* Teacher avatar (always — anchors "who is signed in") */}
             <Box position="relative" display="inline-flex">
               <Avatar size="xs" name={userName} src={userImage} colorKey={user?._id} />
+              {/* The badge lives inside the menu; this dot is how a closed
+                  menu says there's something new in Messages. */}
+              {isScholar && scholarUnread > 0 && (
+                <Box
+                  position="absolute"
+                  top="-1px"
+                  right="-1px"
+                  w={2.5}
+                  h={2.5}
+                  borderRadius="full"
+                  bg="violet.500"
+                  boxShadow="0 0 0 1.5px white"
+                  aria-hidden="true"
+                />
+              )}
             </Box>
             {/* Remote-mode pill: "Viewing as [scholarAvatar] scholarName" */}
             {isRemoteMode && (
@@ -632,6 +678,33 @@ export function AccountMenu({
               </Link>
             </Menu.Item>
           )}
+          {isScholar && showScholarMessages && (
+            <Menu.Item value="messages" cursor="pointer" asChild>
+              <Link href="/scholar/messages" style={{ textDecoration: "none", color: "inherit" }}>
+                <ChatsCircle />
+                Messages
+                {scholarUnread > 0 && (
+                  <Box
+                    as="span"
+                    ml="auto"
+                    minW={5}
+                    px={1.5}
+                    borderRadius="full"
+                    bg="violet.500"
+                    color="white"
+                    fontFamily="heading"
+                    fontSize="2xs"
+                    fontWeight="700"
+                    lineHeight="1.25rem"
+                    textAlign="center"
+                  >
+                    {scholarUnread}
+                    <VisuallyHidden> unread</VisuallyHidden>
+                  </Box>
+                )}
+              </Link>
+            </Menu.Item>
+          )}
           {/* The Workshop — the scholar's ideas for Rabbithole itself, a
               STANDING place reachable anytime (not only during Scholar's
               Prep). Opens the board directly. Scholar surfaces only; no
@@ -646,7 +719,7 @@ export function AccountMenu({
           )}
           {/* Scholars reach How it works through The Workshop. Adult audiences
               keep their direct, audience-aware transparency entry. */}
-          {!isScholar && (
+          {!isScholar && !applicantMode && (
             <Menu.Item value="how-it-works" cursor="pointer" asChild>
               <Link href="/how-it-works" style={{ textDecoration: "none", color: "inherit" }}>
                 <Eye />

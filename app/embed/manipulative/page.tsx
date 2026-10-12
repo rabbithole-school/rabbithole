@@ -128,6 +128,7 @@ function ManipulativeEmbed() {
     [item],
   );
   const itemRenderAtRef = useRef<number | null>(null);
+  const firstInteractionAtRef = useRef<number | null>(null);
   const clientEventReceiptRef = useRef<PayloadClientEventReceipt | null>(null);
 
   useEffect(() => {
@@ -135,6 +136,11 @@ function ManipulativeEmbed() {
       itemRenderAtRef.current = Date.now();
     }
   }, [spec]);
+
+  // First tap/drag on the stage = the manipulative's "first keystroke" (TRA-221).
+  const onInteractionStart = useCallback(() => {
+    if (firstInteractionAtRef.current === null) firstInteractionAtRef.current = Date.now();
+  }, []);
 
   const onCommit = useCallback(
     async (stateJson: string) => {
@@ -150,7 +156,7 @@ function ManipulativeEmbed() {
                 firstAttempt: true,
                 nowMs: Date.now(),
                 renderAtMs: itemRenderAtRef.current,
-                firstKeyAtMs: null,
+                firstKeyAtMs: firstInteractionAtRef.current,
               });
         const payloadKey = JSON.stringify({ itemId, answer: stateJson });
         const receipt = payloadClientEventReceipt(
@@ -222,7 +228,7 @@ function ManipulativeEmbed() {
   return (
     <Center h="100dvh" bg="bg.subtle" p={{ base: 3, md: 6 }}>
       <VStack gap={3}>
-        <Manipulative spec={spec} onCommit={onCommit} />
+        <Manipulative spec={spec} onCommit={onCommit} onInteractionStart={onInteractionStart} />
         {error && (
           <Text fontSize="13px" color="red.600" fontWeight="600">
             {error}

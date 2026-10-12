@@ -288,6 +288,57 @@ describe("teachBacks.recordGrade", () => {
   });
 });
 
+describe("teachBacks.getForGrading", () => {
+  test("labels app turns without attributing them to the scholar", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedUser(t, "scholar");
+    const sessionId = await seedSession(t, scholar);
+    const teachBackId = await t.run(async (ctx) =>
+      ctx.runMutation(internal.teachBacks.start, {
+        sessionId,
+        scholarId: scholar,
+        conceptLabel: "orbital motion",
+      }),
+    );
+    await t.run(async (ctx) => {
+      await ctx.db.insert("messages", {
+        sessionId,
+        role: "user",
+        content: "The planet keeps moving sideways.",
+        inputModality: "typed",
+        flagged: false,
+      });
+      await ctx.db.insert("messages", {
+        sessionId,
+        role: "user",
+        content: "Check the orbit display.",
+        inputModality: "app",
+        flagged: false,
+      });
+      await ctx.db.insert("messages", {
+        sessionId,
+        role: "assistant",
+        content: "What changes when you increase the speed?",
+        flagged: false,
+      });
+    });
+
+    const result = await t.run(async (ctx) =>
+      ctx.runQuery(internal.teachBacks.getForGrading, { teachBackId }),
+    );
+
+    expect(result?.transcript).toContain(
+      "Scholar: The planet keeps moving sideways.",
+    );
+    expect(result?.transcript).toContain(
+      "App (not scholar speech): Check the orbit display.",
+    );
+    expect(result?.transcript).not.toContain(
+      "Scholar: Check the orbit display.",
+    );
+  });
+});
+
 // ── Teacher-gated reads (the rubric is TEACHER-ONLY) ─────────────────────────
 
 describe("teachBacks.listForSession — teacher-gated", () => {

@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { internalMutation } from "./_generated/server";
 import { staffQuery, staffMutation } from "./lib/customFunctions";
 import { requireActiveScholarAccess } from "./lib/access";
+import { requirePeriodForScholar } from "./reportingPeriods";
 
 /**
  * Whole Child inputs, stored as category-tagged observations
@@ -60,6 +61,7 @@ export const add = staffMutation({
   },
   handler: async (ctx, args) => {
     await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
+    await requirePeriodForScholar(ctx, args.periodId, args.scholarId);
     const note = args.note.trim();
     if (!note) throw new Error("Whole-child input needs a note");
     const id = await ctx.db.insert("observations", {
@@ -97,6 +99,7 @@ export const addInternal = internalMutation({
     note: v.string(),
   },
   handler: async (ctx, args) => {
+    await requirePeriodForScholar(ctx, args.periodId, args.scholarId);
     const note = args.note.trim();
     if (!note) throw new Error("Whole-child input needs a note");
     return await ctx.db.insert("observations", {

@@ -1,6 +1,7 @@
 import { randomToken } from "./oauthCrypto";
 import type { Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
+import { writeAuditLog } from "./auditLog";
 
 /**
  * Clear a claim's scholar assignment. `previousGeneration` is the claim's
@@ -67,13 +68,14 @@ export function revokedManagedClaimPatch(
 }
 
 /**
- * A single, plain `auditLog` insert shared by every managed-claim state
- * transition (assign/rotate/unassign/revoke/remove and the managed-device
- * remote sign-out decommission in devicePairing.ts). Kept in this neutral
- * module — not in managedDeviceClaims.ts or devicePairing.ts — because those
- * two files import from each other in one direction (managedDeviceClaims.ts
- * → devicePairing.ts) and a shared decommission helper needs to be callable
- * from both without introducing a cycle.
+ * The `auditLog` write shared by every managed-claim state transition
+ * (assign/rotate/unassign/revoke/remove) and every app-grant change. Kept in
+ * this neutral module — not in managedDeviceClaims.ts or devicePairing.ts —
+ * because those two files import from each other in one direction
+ * (managedDeviceClaims.ts → devicePairing.ts) and a shared decommission helper
+ * needs to be callable from both without introducing a cycle. The
+ * `institutionId` is the tenant the caller authorized against (TRA-362; see
+ * lib/auditLog.ts for what `null` means).
  */
 export async function auditManagedClaim(
   ctx: MutationCtx,
@@ -81,12 +83,13 @@ export async function auditManagedClaim(
   action: string,
   targetUserId: Id<"users">,
   detail: string,
+  institutionId: Id<"institutions"> | null,
 ): Promise<void> {
-  await ctx.db.insert("auditLog", {
+  await writeAuditLog(ctx, {
     actorUserId,
     action,
     targetUserId,
-    at: Date.now(),
     detail,
+    institutionId,
   });
 }

@@ -398,10 +398,16 @@ export const reconcileBlockSchedule = internalMutation({
         await ctx.db.patch(group._id, { institutionId });
       }
     }
-    const teacherMemberships = (await ctx.db
+    // `by_institution_role`, not `by_institution` + a role filter: a school's
+    // memberships are dominated by its SCHOLARS, so the filtered form read the
+    // whole enrollment to find a handful of teachers. Same rows, same order
+    // (the index is `_creationTime`-ordered for a fixed institution+role).
+    const teacherMemberships = await ctx.db
       .query("memberships")
-      .withIndex("by_institution", (q) => q.eq("institutionId", institutionId))
-      .collect()).filter((membership) => membership.role === ROLES.TEACHER);
+      .withIndex("by_institution_role", (q) =>
+        q.eq("institutionId", institutionId).eq("role", ROLES.TEACHER),
+      )
+      .collect();
     const teacherIds = new Map<string, Id<"users">>();
     for (const membership of teacherMemberships) {
       teacherIds.set(String(membership.userId), membership.userId);

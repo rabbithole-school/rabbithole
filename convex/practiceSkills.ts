@@ -53,6 +53,7 @@ import {
   desiredRetentionTargets,
   HALFLIFE_LAPSE,
   MIN_HALFLIFE_DAYS,
+  CHALLENGE_OVERFLOW_CAP,
   type GraphEdge,
   type SkillState,
   type NextPracticeOptions,
@@ -65,6 +66,7 @@ import {
   buildTemplateServable,
   buildStoredServable,
   gradeSubmission,
+  manipulativeQuestionOf,
   PRACTICE_POLICY,
   PLACEMENT_POLICY,
   GRADE_ONLY_POLICY,
@@ -110,6 +112,9 @@ import {
   type InstructionAtom,
   type InstructionEntry,
   selectRunLaunchpad,
+  isFrameableLane,
+  hasTeachingStep,
+  compactMoveAtoms,
   type InstructionEventLike,
   type RunItemLike,
 } from "./lib/practice/instructionEntries";
@@ -202,6 +207,7 @@ import { RATIO_PROPORTION_PERCENT_DOMAIN } from "./seed/ratioProportionPercentGr
 import { EARLY_ALGEBRA_DOMAIN } from "./seed/earlyAlgebraGraph";
 import { INTEGERS_COORDINATES_DOMAIN } from "./seed/integersCoordinatesGraph";
 import { ALGEBRA_1_DOMAIN } from "./seed/algebra1Graph";
+import { DISCRETE_MATH_DOMAIN } from "./seed/discreteMathGraph";
 import {
   rebuildPracticeNodes,
   REGISTERED_PRACTICE_DOMAINS,
@@ -267,6 +273,7 @@ import {
   resolvePracticeScope,
   type PracticeScope,
 } from "./lib/practice/mathPlan";
+import { allEligibleDomainsMapped } from "./lib/practice/mapMarker";
 // The Quick Facts sentinel is shared with the client's resume validation, so
 // the stamp the server writes and the key the client compares against can
 // never drift apart.
@@ -743,6 +750,38 @@ function isRequiredPracticeAttempt(row: Doc<"practiceAttempts">, domain: string)
   return row.lane !== "placement" && row.lane !== "reprobe" && row.lane !== "tuneup";
 }
 
+/**
+ * Whether the scholar has any required (non-diagnostic) attempt in `domain`.
+ * Walks only this domain's slice of the attempt log and stops at the first
+ * hit. The home chooser asks this once per practice domain, so collecting the
+ * scholar's whole cross-domain history here re-read it about eight times per
+ * query and pushed heavy practicers toward Convex's read limit (TRA-467).
+ * Rows written before `domain` was stamped count as whole-number arithmetic,
+ * matching `isRequiredPracticeAttempt`.
+ */
+async function hasRequiredPracticeAttempt(
+  ctx: QueryCtx | MutationCtx,
+  scholarId: Id<"users">,
+  domain: string,
+): Promise<boolean> {
+  const domainKeys: (string | undefined)[] =
+    domain === WHOLE_NUMBER_ARITHMETIC_DOMAIN ? [domain, undefined] : [domain];
+  for (const domainKey of domainKeys) {
+    const attempts = ctx.db
+      .query("practiceAttempts")
+      .withIndex("by_scholar_domain_createdAt", (q) =>
+        q.eq("scholarId", scholarId).eq("domain", domainKey),
+      )
+      // Newest first: placement probes come before drills, so a scholar who
+      // has drilled matches on the first row or two.
+      .order("desc");
+    for await (const attempt of attempts) {
+      if (isRequiredPracticeAttempt(attempt, domain)) return true;
+    }
+  }
+  return false;
+}
+
 function placedThroughGradeFromMastery(
   mastery: Map<string, Doc<"practiceMastery">>,
   skills: { skillKey: string; grade?: string }[],
@@ -796,11 +835,7 @@ async function firstRequiredBlockScheduling(
     .first();
   if (placement?.status !== "complete") return INACTIVE_FIRST_BLOCK;
 
-  const attempts = await ctx.db
-    .query("practiceAttempts")
-    .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
-    .collect();
-  if (attempts.some((attempt) => isRequiredPracticeAttempt(attempt, domain))) {
+  if (await hasRequiredPracticeAttempt(ctx, scholarId, domain)) {
     return INACTIVE_FIRST_BLOCK;
   }
 
@@ -2083,7 +2118,9 @@ export const playlistForScholar = authedQuery({
     if (
       args.includeMapping &&
       !args.stretchHint &&
-      (await anyUnmappedDomain(ctx, scholarId, practiceScope))
+      (await (strandHint === undefined
+        ? anyUnmappedDomain(ctx, scholarId, practiceScope)
+        : legacyAnyUnmappedDomain(ctx, scholarId, practiceScope, domain)))
     ) {
       const mappingState = await loadMappingState(ctx, scholarId);
       const domainUnmapped = mappingState.ordinarySuppressed.has(domain);
@@ -2124,55 +2161,12 @@ export const playlistForScholar = authedQuery({
       }
     }
 
-    // The Launchpad, resolved for the PREVIEW by the same `resolveRunLaunchpad`
-    // the served run uses (P1). The whole point of this card is to be a faithful
-    // stand-in for what Start serves; before this, Start could open with an
-    // instructional doorway the preview never mentioned, so the set the scholar
-    // was shown and the set they got differed by a whole beat.
-    //
-    // Read-only by construction: resolving is a pure read (no impression claim,
-    // no offerCount bump), so previewing never burns the once-a-day offer — the
-    // claim still happens on mount in-session. Gated to the scholar themself
-    // (a teacher reading the card must not see, or influence, the doorway) and
-    // skipped for the stretch preview, whose rows are challenge-tail items
-    // relabelled `new` — they are NOT new-lane frontier work and must not
-    // qualify. Only display fields are returned; the atoms stay in
-    // `practiceSession`, off this subscribed home query.
+    // No Launchpad in the PREVIEW (2026-10-10). The run's entry no longer
+    // precedes an item — it frames one already listed in `set` ("Can you
+    // already do this?") — and whether an item is framable now depends on the
+    // ITEM (its own teaching step), which these skill-level rows don't carry.
+    // A preview row for it would promise a beat the run never serves.
     const previewRows = (mappingSet ?? set) as PreviewRow[];
-    let launchpadPreview:
-      | { at: number; title: string; subtitle?: string; domain: string; strand: string }
-      | undefined;
-    if (!isTeacher && !args.stretchHint && !needsPlacement) {
-      const resolved = await resolveRunLaunchpad(
-        ctx,
-        true,
-        scholarId,
-        previewRows.map((r) => ({
-          skillKey: r.key,
-          domain,
-          // The preview's row `reason` IS its serving lane, with one mismatch
-          // the type system can't catch: a `mapping` row is a placement probe,
-          // never new frontier work. `selectRunLaunchpad` only admits "new".
-          lane: r.reason,
-        })),
-        {
-          strandByKey,
-          strandsWithMastery: strandsWithMasteryFrom(domain, skills, mastery),
-          fallbackDomain: domain,
-          platform: args.platform ?? "web",
-          masteryByKey: mastery,
-        },
-      );
-      if (resolved) {
-        launchpadPreview = {
-          at: resolved.at,
-          title: resolved.entry.title,
-          subtitle: resolved.entry.subtitle,
-          domain: resolved.entry.target.domain,
-          strand: resolved.entry.target.strand,
-        };
-      }
-    }
 
     return {
       domain,
@@ -2193,136 +2187,111 @@ export const playlistForScholar = authedQuery({
       mappingPreview: mappingSet !== null,
       /** Option D: the previewed run is 100% mapping (nothing else servable). */
       allMapping: previewAllMapping,
-      /** The instructional doorway this run will open with, and the `set` index
-       *  it sits BEFORE — resolved by the served run's own selector, so the card
-       *  lists the same beats Start will serve. Absent when there is none. */
-      launchpad: launchpadPreview,
     };
   },
 });
 
-/** `domain \u0000 strand` for every strand the scholar has ANY mastery row in —
- *  i.e. NOT new territory. Built from the domain's full skill list (not just the
- *  served items), because a strand is only "new" if the scholar has no mastery
- *  ANYWHERE in it; checking only the run's items would call a strand new when
- *  the scholar already has rows on its other skills. */
-export function strandsWithMasteryFrom(
-  domain: string,
-  skills: { skillKey: string; strand?: string }[],
-  mastery: Map<string, unknown>,
-): Set<string> {
-  const out = new Set<string>();
-  for (const s of skills) {
-    const strand = s.strand;
-    if (!strand) continue;
-    if (mastery.has(s.skillKey)) out.add(`${domain}\u0000${strand}`);
-  }
-  return out;
+/** The subset of a mastery row the never-attempted test reads. */
+type AttemptEvidence = { source?: string; lastAttemptAt?: number };
+
+/** True when the scholar has ACTUALLY ATTEMPTED this skill: a recorded practice
+ *  attempt (`lastAttemptAt`, stamped only by `recordAttemptCore`) or a
+ *  demonstrated `source` (covers rows that predate `lastAttemptAt`). Inferred
+ *  placement/reprobe credit alone is NOT an attempt — the exact complement of
+ *  the confirmation lane's `inferredDueCredit`, never `lastPracticedAt`
+ *  (placement inflates it). */
+export function skillAttempted(row: AttemptEvidence | undefined): boolean {
+  if (!row) return false;
+  return row.lastAttemptAt !== undefined || isDemonstratedSource(row.source);
 }
 
 /**
- * Resolve the Launchpad for a COMPOSED run — the entry to show and the item
- * index to show it before — or `undefined`.
+ * Resolve the "Can you already do this?" frame for a COMPOSED run — the entry
+ * and the index of the item it frames — or `undefined`.
  *
- * This is the run-anchored replacement for `instructionForDaily`'s graph-order
- * pick. Everything it decides is derived from the items the run will actually
- * serve, so the Launchpad can only ever introduce work that is present (see
- * `selectRunLaunchpad`'s comment for the defect this closes).
+ * Everything it decides is derived from the items the run will actually serve,
+ * so the frame can only ever sit on work that is present (see
+ * `selectRunLaunchpad`). The move must be about the framed item: the item's own
+ * teaching step first (resolved through the SAME `resolveServableItem` +
+ * `hasTeachingStep` the `teachingStep` query uses), else passed node-grain
+ * content, compacted. Strand content is never the move.
  *
  * Returns the entry as SIBLING data, never as a member of `items`: `items` stays
- * the graded array, which is what keeps `masteryEffect: "none"` structural
- * rather than a trusted flag — an ungraded beat that is not in the graded array
- * cannot be graded by any code path, including a future one.
+ * the graded array, which is what keeps `masteryEffect: "none"` structural.
  */
 async function resolveRunLaunchpad(
   ctx: Parameters<typeof loadMastery>[0],
   /** True only when the SCHOLAR themself is the one practising. A teacher
-   *  reading a scholar's run (or any other viewer) never gets a Launchpad: the
-   *  doorway claims an impression on mount and burns the scholar's once-a-day
-   *  offer, so a remote read would silently spend it. This preserves the guard
-   *  the retired `instructionForDaily` query carried. */
+   *  reading a scholar's run (or any other viewer) never gets a frame: the
+   *  client claims an impression on mount, so a remote read would spend it. */
   isSelf: boolean,
   scholarId: Id<"users">,
-  /** Structurally a `ServedItem[]` at serve time, but deliberately narrowed to
-   *  the three fields selection actually reads so the HOME PREVIEW
-   *  (`playlistForScholar`) can call this SAME resolver over its preview rows.
-   *  One selector, two callers: a second picker here is exactly how the run and
-   *  the doorway came to disagree in the first place. */
-  items: { skillKey: string; domain?: string; lane?: string }[],
+  items: { itemId: string; skillKey: string; skillLabel: string; domain?: string; lane?: string }[],
   opts: {
     strandByKey: Map<string, string | undefined>;
-    strandsWithMastery: Set<string>;
     fallbackDomain: string;
-    /** The requesting client's platform — a Launchpad authored `platforms: ["web"]`
-     *  must never surface on native, and vice versa. Defaults to "web" so every
-     *  pre-existing caller (none of which passed this) is unchanged; today's
-     *  authored content is always `["web", "native"]`, so the default is a
-     *  no-op until content actually diverges by platform. */
+    /** The requesting client's platform — node content authored
+     *  `platforms: ["web"]` must never surface on native, and vice versa. */
     platform?: "web" | "native";
-    /** Node doorway (§4.1): skillKey → the scholar's mastery row, if any — the
-     *  SAME per-skill mastery map every caller already builds for scheduling.
-     *  Optional; a caller that omits it gets strand-only behavior, unchanged
-     *  from pre-§4.1 (the node doorway simply never fires for it). */
-    masteryByKey?: Map<string, unknown>;
+    /** skillKey → the scholar's mastery row, if any (read through
+     *  `skillAttempted` for the never-attempted trigger). */
+    masteryByKey: Map<string, AttemptEvidence>;
+    /** The client renders the question frame (`practiceSession`'s
+     *  `questionFraming`). False = an older build: no `item_steps` frames (its
+     *  card would render no atoms) and the ≤1/day cap stays on. */
+    questionFraming: boolean;
   },
 ): Promise<{ at: number; entry: InstructionEntry } | undefined> {
   if (!isSelf) return undefined;
   if (items.length === 0) return undefined;
 
   const platform = opts.platform ?? "web";
+  const nodeAttempted = (skillKey: string) => skillAttempted(opts.masteryByKey.get(skillKey));
 
-  const runItems: RunItemLike[] = items.map((it) => ({
-    skillKey: it.skillKey,
-    domain: it.domain ?? opts.fallbackDomain,
-    strand: opts.strandByKey.get(it.skillKey),
-    lane: it.lane,
-  }));
-
-  // Content lookup is memoized by key (strand OR node), so a repeated strand
-  // costs one query, not one per item. (The read is a prefetch, not lazy: the
-  // loop below resolves every CANDIDATE up front, because the selector is
-  // deliberately pure/sync and so cannot await a lookup mid-scan.)
-  const contentCache = new Map<string, Doc<"instructionContent"> | null>();
-  const loadEligibleContent = async (key: string) => {
-    const hit = contentCache.get(key);
-    if (hit !== undefined) return hit;
-    const rows = await ctx.db
-      .query("instructionContent")
-      .withIndex("by_key_status", (q) => q.eq("key", key).eq("verifyStatus", "passed"))
-      .collect();
-    // Only rows authored for THIS platform are eligible — the whole point of
-    // the schema's `platforms` field is that a web-only (or native-only)
-    // Launchpad must never surface on the other client.
-    const eligible = rows.filter((r) => (r.platforms ?? []).includes(platform));
-    let best: Doc<"instructionContent"> | null = null;
-    if (eligible.length > 0) {
-      const top = eligible.reduce((a, b) => (b.version > a.version ? b : a));
-      // Defensive: never surface an empty card.
-      if ((top.atoms?.length ?? 0) > 0) best = top;
+  // Pre-resolve, for every item the selector could reach (frameable lane,
+  // stranded, never-attempted node), whether it has its own teaching step and
+  // whether its node has passed content with a non-empty compact move. The
+  // selector is pure/sync, so it cannot await a lookup mid-scan.
+  const runItems: RunItemLike[] = [];
+  const nodeContent = new Map<string, Doc<"instructionContent"> | null>();
+  for (const it of items) {
+    const runItem: RunItemLike = {
+      skillKey: it.skillKey,
+      domain: it.domain ?? opts.fallbackDomain,
+      strand: opts.strandByKey.get(it.skillKey),
+      lane: it.lane,
+    };
+    runItems.push(runItem);
+    if (!isFrameableLane(it.lane) || !runItem.strand || nodeAttempted(it.skillKey)) continue;
+    if (!opts.questionFraming) {
+      // An older client can only render content atoms, so an item's own
+      // teaching step is never its move.
+      runItem.hasTeachingStep = false;
+    } else {
+      try {
+        const servable = await resolveServableItem(ctx, it.itemId, runItem.domain);
+        runItem.hasTeachingStep = hasTeachingStep(servable.prompt.workedSteps);
+      } catch {
+        runItem.hasTeachingStep = false;
+      }
     }
-    contentCache.set(key, best);
-    return best;
-  };
-  const loadContent = (domain: string, strand: string) =>
-    loadEligibleContent(strandInstructionKey(domain, strand));
-  const loadNodeContent = (skillKey: string) => loadEligibleContent(nodeInstructionKey(skillKey));
-
-  // Pre-resolve content for every candidate the selector could reach:
-  //  - STRAND doorway: NEW-lane, stranded items whose whole strand is still
-  //    zero-mastery (unchanged from pre-§4.1);
-  //  - NODE doorway (§4.1): NEW-lane items whose specific NODE is zero-mastery,
-  //    regardless of the strand's mastery state — a hard node inside an
-  //    otherwise-known strand is exactly the case node grain exists for.
-  for (const it of runItems) {
-    if (it.lane !== "new" || !it.strand) continue;
-    if (!opts.strandsWithMastery.has(`${it.domain}\u0000${it.strand}`)) {
-      await loadContent(it.domain, it.strand);
-    }
-    if (opts.masteryByKey && !opts.masteryByKey.has(it.skillKey)) {
-      await loadNodeContent(it.skillKey);
+    if (!runItem.hasTeachingStep && !nodeContent.has(it.skillKey)) {
+      const rows = await ctx.db
+        .query("instructionContent")
+        .withIndex("by_key_status", (q) =>
+          q.eq("key", nodeInstructionKey(it.skillKey)).eq("verifyStatus", "passed"),
+        )
+        .collect();
+      const eligible = rows.filter((r) => (r.platforms ?? []).includes(platform));
+      const top = eligible.length > 0 ? eligible.reduce((a, b) => (b.version > a.version ? b : a)) : null;
+      nodeContent.set(
+        it.skillKey,
+        top && compactMoveAtoms((top.atoms ?? []) as InstructionAtom[]).length > 0 ? top : null,
+      );
     }
   }
-  if ([...contentCache.values()].every((v) => v === null)) return undefined;
+  const anyMove = runItems.some((r) => r.hasTeachingStep) || [...nodeContent.values()].some((v) => v !== null);
+  if (!anyMove) return undefined;
 
   const events = await ctx.db
     .query("instructionEvents")
@@ -2334,40 +2303,42 @@ async function resolveRunLaunchpad(
 
   const chosen = selectRunLaunchpad({
     items: runItems,
-    hasMasteryInStrand: (domain, strand) =>
-      opts.strandsWithMastery.has(`${domain}\u0000${strand}`),
-    hasContent: (domain, strand) =>
-      contentCache.get(strandInstructionKey(domain, strand)) != null,
-    ...(opts.masteryByKey
-      ? {
-          hasMasteryOnNode: (skillKey: string) => opts.masteryByKey!.has(skillKey),
-          hasNodeContent: (skillKey: string) => contentCache.get(nodeInstructionKey(skillKey)) != null,
-        }
-      : {}),
+    hasAttemptOnNode: nodeAttempted,
+    hasNodeContent: (skillKey) => nodeContent.get(skillKey) != null,
     eventByKey,
     dayBucket,
+    // A question-framing client renders the entry as the "Can you already do
+    // this?" pill, which is exempt from the cross-key ≤1/day governor (see the
+    // selector's `dailyCap`). An older installed iPad build (no
+    // `questionFraming`) still mounts the standalone card, so it keeps the cap
+    // here as well as in `claimInstructionShown` (its claim carries no
+    // `framing`).
+    dailyCap: !opts.questionFraming,
   });
   if (!chosen) return undefined;
 
-  const content = contentCache.get(chosen.key);
-  if (!content) return undefined;
+  const content = chosen.move === "node_content" ? nodeContent.get(chosen.nodeKey) ?? null : null;
+  if (chosen.move === "node_content" && !content) return undefined;
+  // Never hand an older client a frame it cannot render (no atoms).
+  if (!opts.questionFraming && chosen.move !== "node_content") return undefined;
+  const label = items[chosen.at]?.skillLabel ?? chosen.nodeKey;
   return {
     at: chosen.at,
     entry: {
-      id: `${chosen.key}:v${content.version}`,
+      id: content ? `${chosen.key}:v${content.version}` : `${chosen.key}:steps`,
       offerId: instructionOfferId(scholarId, chosen.key),
       kind: "launchpad",
-      level: chosen.level,
+      level: "node",
+      move: chosen.move,
       key: chosen.key,
-      target:
-        chosen.level === "node"
-          ? { domain: chosen.domain, strand: chosen.strand, nodeKey: chosen.nodeKey }
-          : { domain: chosen.domain, strand: chosen.strand },
-      title: content.title,
-      subtitle: content.subtitle,
+      target: { domain: chosen.domain, strand: chosen.strand, nodeKey: chosen.nodeKey },
+      title: content?.title ?? label,
+      subtitle: content?.subtitle,
       fork: { tryFirstLabel: TRY_FIRST_LABEL, showMeLabel: SHOW_ME_LABEL },
-      atoms: content.atoms as InstructionAtom[],
-      contentVersion: content.version,
+      // `item_steps` carries no atoms: the client shows the item's own
+      // TeachingStep. `node_content` carries only the compact move.
+      atoms: content ? compactMoveAtoms(content.atoms as InstructionAtom[]) : [],
+      contentVersion: content?.version ?? 0,
       masteryEffect: "none",
     },
   };
@@ -2642,8 +2613,12 @@ async function computeDomainQueue(
       retention: retention(stateOf(q.key), now),
       strand: q.strand,
     }));
+  // The above-band tail is served by `buildChallengeTail` (template generation
+  // only), so it is filtered by `hasTemplate` — the same servability test the
+  // single-domain path applies — not by `runnable` (which also admits stored
+  // items the tail can't serve).
   const challengeEntries = queue
-    .filter((q) => q.reason === "challenge" && runnable.has(q.key))
+    .filter((q) => q.reason === "challenge" && hasTemplate(q.key))
     .map((q) => ({
       key: q.key,
       retention: retention(stateOf(q.key), now),
@@ -2658,6 +2633,40 @@ async function computeDomainQueue(
     firstPostPlacementBlock: firstBlock.active,
     calibrationSkillKeys: firstBlock.calibrationSkillKeys,
   };
+}
+
+/** The OPTIONAL above-band challenge tail (P1e / grade-band §P1b) served
+ *  alongside a whole-graph session — one builder for the single-domain and the
+ *  blended path so both apply the same servability and labeling.
+ *
+ *  `candidates` is already in scheduler order and within the challenge cap (each
+ *  domain's `nextPractice` caps its own tail). A cold-failed skill is dropped
+ *  first: a just-missed skill is not a "challenge" — it re-enters through the
+ *  teach-first path below the band, never the above-band tail. Template items
+ *  only (`buildSession`); a distinct sub-seed keeps them from duplicating item
+ *  #1. Every item is labeled lane "challenge" and stamped with its own domain. */
+function buildChallengeTail(
+  candidates: readonly { key: string; domain: string }[],
+  labelOf: ReadonlyMap<string, string>,
+  seed: number,
+  recentIdentities: ReadonlySet<string>,
+  coldFailedSkillKeys: ReadonlySet<string>,
+): ServedItem[] {
+  const kept = candidates.filter((c) => !coldFailedSkillKeys.has(c.key));
+  if (kept.length === 0) return [];
+  const domainOf = new Map(kept.map((c) => [c.key, c.domain]));
+  const built = buildSession(
+    kept.map((c) => ({ key: c.key, label: labelOf.get(c.key) ?? c.key })),
+    kept.length,
+    ((seed >>> 0) ^ 0x9e3779b9) >>> 0,
+    undefined,
+    recentIdentities,
+  );
+  for (const it of built) {
+    it.lane = "challenge";
+    it.domain = domainOf.get(it.skillKey);
+  }
+  return built;
 }
 
 
@@ -2692,6 +2701,8 @@ type ChoiceCard = {
   sampleSkillLabel: string;
 };
 
+const CHOICE_SET_SIZE = 3;
+
 async function choiceSetForScholar(
   ctx: QueryCtx,
   scholarId: Id<"users">,
@@ -2707,13 +2718,23 @@ async function choiceSetForScholar(
   const selectedDomains = Array.from(new Set(requested)).filter((domain) =>
     registered.has(domain) && practiceScopeAllowsDomain(practiceScope, domain),
   );
-  const perDomain = await Promise.all(
-    selectedDomains.map((domain) =>
-      computeDomainQueue(ctx, scholarId, domain, {}),
-    ),
-  );
+  // `roundRobin(...).slice(0, CHOICE_SET_SIZE)` takes round 0 first, so once
+  // CHOICE_SET_SIZE domains have produced a card, no later domain can reach
+  // the result. Stop there: a full queue per domain is ~1-2 MB of reads, and an
+  // open-scope scholar with deep history across all nine domains blew the 16 MB
+  // per-query limit computing queues whose cards were always sliced away —
+  // which crashed the native Math tab.
+  const perDomainCards: ChoiceCard[][] = [];
+  let domainsWithCards = 0;
+  for (const domain of selectedDomains) {
+    const cards = cardsForDomainQueue(
+      await computeDomainQueue(ctx, scholarId, domain, {}),
+    );
+    perDomainCards.push(cards);
+    if (cards.length > 0 && ++domainsWithCards >= CHOICE_SET_SIZE) break;
+  }
 
-  return roundRobin(perDomain.map(cardsForDomainQueue)).slice(0, 3);
+  return roundRobin(perDomainCards).slice(0, CHOICE_SET_SIZE);
 }
 
 /**
@@ -3292,7 +3313,8 @@ export const practiceSession = authedQuery({
     // stretch block. Mirrors playlistForScholar's stretchHint so the preview
     // exactly matches what Start serves (reviews-first + challenge tail). Empty
     // challenge tail → falls through to the normal session. Ignored for scoped
-    // (skillKeys) and mixed-domain sessions (no challenge tail there).
+    // (skillKeys) and mixed-domain sessions (a blend offers its challenge tail
+    // only through the `challenge` field).
     stretchHint: v.optional(v.boolean()),
     // OPTION D (OPTION_D_RULINGS): fold the `· mapping` band into this playlist —
     // placement probes for unmapped/in-progress domains served AS playlist items
@@ -3324,6 +3346,12 @@ export const practiceSession = authedQuery({
     // (`instructionContent.platforms`) never surfaces on the other. Absent →
     // "web" (every pre-existing caller).
     platform: v.optional(v.union(v.literal("web"), v.literal("native"))),
+    // Capability flag: this client renders the run's entry as the "Can you
+    // already do this?" frame on a real item (any `move`, including
+    // `item_steps` with no atoms). Absent = an older installed iPad build whose
+    // standalone LaunchpadCard renders `atoms` and claims under the ≤1/day cap
+    // — it is only ever served a `node_content` frame, under that cap.
+    questionFraming: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const isTeacher = requireTeacherOrSelf(ctx.user, args.scholarId);
@@ -3448,7 +3476,14 @@ export const practiceSession = authedQuery({
       !!args.includeMapping &&
       !requestedSkillKeys?.length &&
       !args.stretchHint &&
-      (await anyUnmappedDomain(ctx, args.scholarId, practiceScope));
+      (await (args.choiceHint === undefined
+        ? anyUnmappedDomain(ctx, args.scholarId, practiceScope)
+        : legacyAnyUnmappedDomain(
+            ctx,
+            args.scholarId,
+            practiceScope,
+            args.choiceHint.domain,
+          )));
     // ── MIXED-domain playlist: blend ≥2 domains into one interleaved session.
     //    Only the whole-graph (non-scoped) path mixes — a problem set is
     //    inherently one activity's skills, so `skillKeys` short-circuits to the
@@ -3521,8 +3556,8 @@ export const practiceSession = authedQuery({
         preferredDomain: preferredCheckpoint?.domain,
       });
       // Scholar-facing lane (P1e) per key from the per-domain queue reasons, so a
-      // blended session shows "· review" chips too. A blend has no challenge tail
-      // (the grade band is a single-domain frontier notion).
+      // blended session shows "· review" chips too. (The above-band challenge
+      // tail is built separately below — never mixed into the required set.)
       const mixedLaneByKey = new Map<string, "review" | "new" | "challenge">();
       // strand per key, for the playlist-segments composer's "choice" kind
       // (C-4) — a blend's entries already carry `strand` (computeDomainQueue).
@@ -3606,20 +3641,14 @@ export const practiceSession = authedQuery({
       // excluded entirely (the web client passed "skip" for any mixed run), so
       // every scholar practising across domains never saw instruction at all.
       // Resolving it from the composed items removes that special case.
-      const blendStrandsWithMastery = new Set<string>();
-      for (const pd of perDomain) {
-        for (const k of strandsWithMasteryFrom(pd.domain, pd.skills, pd.mastery)) {
-          blendStrandsWithMastery.add(k);
-        }
-      }
       const blendLaunchpad = requestedSkillKeys?.length
         ? undefined
         : await resolveRunLaunchpad(ctx, isSelfPractice, args.scholarId, blendComposed.items, {
             strandByKey: mixedStrandByKey,
-            strandsWithMastery: blendStrandsWithMastery,
             fallbackDomain: domainSet[0],
             platform: args.platform ?? "web",
             masteryByKey,
+            questionFraming: args.questionFraming === true,
           });
       const blendGameBeat = requestedSkillKeys?.length
         ? undefined
@@ -3628,6 +3657,28 @@ export const practiceSession = authedQuery({
             fallbackDomain: domainSet[0],
             canPlayGames: args.canPlayGames === true,
           });
+      // The OPTIONAL above-band challenge tail, TRA-250. The grade band is
+      // computed per domain (computeDomainQueue runs each domain's banded
+      // `nextPractice`), so a blend already WITHHELD every domain's above-band
+      // frontier from its required set; it just never offered it back. Each
+      // domain's tail is exactly what that domain's single-domain session would
+      // offer (same scheduler order, template + cold-failure filters). The
+      // domains are round-robined — the blend's own frontier rule, so one
+      // domain can't crowd out the rest — under the SAME total cap a
+      // single-domain session has.
+      const blendChallenge = buildChallengeTail(
+        roundRobin(
+          perDomain.map((pd) =>
+            pd.challengeEntries
+              .filter((e) => !coldFailedSkillKeys.has(e.key))
+              .map((e) => ({ key: e.key, domain: pd.domain })),
+          ),
+        ).slice(0, CHALLENGE_OVERFLOW_CAP),
+        labelByKey,
+        args.seed,
+        recentIdentities,
+        coldFailedSkillKeys,
+      );
       return {
         domain: scopedDomainSet[0],
         domains: scopedDomainSet,
@@ -3636,9 +3687,9 @@ export const practiceSession = authedQuery({
         launchpad: blendLaunchpad,
         // Sidecar, never a member of `items` — see lib/practice/gameBeats.ts.
         gameBeat: blendGameBeat,
-        challenge: [] as ServedItem[],
-        // A blend has no stretch tail either (fluent-node scan is a
-        // single-domain notion for now; the shape stays uniform).
+        challenge: blendChallenge,
+        // A blend has no stretch tail (fluent-node scan is a single-domain
+        // notion for now; the shape stays uniform).
         stretch: [] as ServedItem[],
         // A blend reports the first post-placement calibration block when ANY of
         // its domains is in one (the post-check-in hand-off lands here), so the
@@ -3815,28 +3866,15 @@ export const practiceSession = authedQuery({
     // The OPTIONAL challenge tail (P1e / grade-band §P1b): above-band frontier
     // nodes the band withheld from the required set, offered as an explicitly
     // labeled, opt-in stretch — never mixed in. Template items only (bounded by
-    // the scheduler's challenge cap); a distinct sub-seed keeps them from
-    // duplicating item #1. Empty on the scoped/mixed paths.
-    const challenge: ServedItem[] = [];
-    if (challengeQueueKeys.length > 0) {
-      // A just-missed skill is not a "challenge" — it re-enters through the
-      // teach-first path below the band, never the above-band tail.
-      const challengeKeys = challengeQueueKeys.filter(
-        (key) => !coldFailedSkillKeys.has(key),
-      );
-      const built = buildSession(
-        challengeKeys.map((k) => ({ key: k, label: labelOf.get(k) ?? k })),
-        challengeKeys.length,
-        ((args.seed >>> 0) ^ 0x9e3779b9) >>> 0,
-        undefined,
-        recentIdentities,
-      );
-      for (const it of built) {
-        it.lane = "challenge";
-        it.domain = domain;
-        challenge.push(it);
-      }
-    }
+    // the scheduler's challenge cap); see buildChallengeTail. Empty on the
+    // scoped path; the blended path builds its own through the same helper.
+    const challenge = buildChallengeTail(
+      challengeQueueKeys.map((key) => ({ key, domain })),
+      labelOf,
+      args.seed,
+      recentIdentities,
+      coldFailedSkillKeys,
+    );
     // Playlist segments v1 (raise-the-ceiling §11 / C-4): composed one layer
     // above serveItems so its golden-equivalence test stays untouched — see
     // lib/practice/segments.ts's file header. `choiceHint` is ignored for a
@@ -3930,10 +3968,10 @@ export const practiceSession = authedQuery({
         ? undefined
         : await resolveRunLaunchpad(ctx, isSelfPractice, args.scholarId, finalComposed.items, {
             strandByKey,
-            strandsWithMastery: strandsWithMasteryFrom(domain, skills, mastery),
             fallbackDomain: domain,
             platform: args.platform ?? "web",
             masteryByKey: mastery,
+            questionFraming: args.questionFraming === true,
           });
     const singleGameBeat =
       requestedSkillKeys?.length || args.stretchHint
@@ -4042,6 +4080,7 @@ async function maybeFireSeeds(
       suggestionType: "cross_domain",
       rationale: seed.rationale,
       scholarInvitation: seed.scholarInvitation,
+      ...(seed.approachHint ? { approachHint: seed.approachHint } : {}),
       connectionTo: seed.connectionTo,
       sourceLens: "math-practice",
       reach: 2,
@@ -4147,6 +4186,11 @@ type RecordAttemptMeta = {
    *  recordAttemptCore to update the per-fact automaticity ledger. */
   factKey?: string;
   lane?: PracticeAttemptLane;
+  /** Client echo of the list the item was SERVED from (TRA-250): "challenge"
+   *  for the opt-in above-band challenge tail, "required" for everything else a
+   *  practice run serves (incl. a scoped problem set). See inferAttemptLane.
+   *  Absent from older clients. */
+  servedLane?: "challenge" | "required";
   explanationReason?: "dont_know" | "miss";
   /** The scholar's sanitized submitted answer, stored on the attempt row so a
    *  miss is diagnosable (the error classifier reads it) and teacher surfaces
@@ -4190,11 +4234,31 @@ function inferAttemptLane(opts: {
   preFrontier: Set<string>;
   scheduling: NextPracticeOptions;
   remediationSkillKey?: string;
+  servedLane?: "challenge" | "required";
 }): PracticeAttemptLane {
   if (isDue(opts.prev, opts.now, opts.scheduling.retentionThresholdOf?.(opts.skillKey))) {
     return opts.scheduling.inferredDueCredit?.(opts.skillKey) ? "confirmation" : "review";
   }
   if (opts.remediationSkillKey === opts.skillKey) return "review";
+  // Updated clients echo which list the item was served from (TRA-250).
+  // Answer-time inference can't reconstruct that: it misses the #735 one-hop
+  // tail, and a scoped problem set can serve an above-band key as REQUIRED work
+  // — so the serve context, not the graph, decides.
+  //  • "challenge" — the opt-in tail. Honored only above the band and never for
+  //    a teacher-pinned skill; such attempts fall outside the spiral breaker's
+  //    counted lanes (a scholar who opts into a stretch may miss without being
+  //    rescued — Andy, 2026-09-26). Otherwise falls through to the inference.
+  //  • "required" — never "challenge": ALL assigned/required work counts
+  //    toward the breaker, even an above-band skill whose prereqs are fluent.
+  //  • absent (older iPads) — the inference below, unchanged.
+  if (opts.servedLane === "required") return "frontier";
+  if (
+    opts.servedLane === "challenge" &&
+    opts.skillKey !== opts.scheduling.focusSkillKey &&
+    isAboveBand(opts.skillKey, opts.scheduling)
+  ) {
+    return "challenge";
+  }
   if (opts.preFrontier.has(opts.skillKey)) {
     // A teacher-pinned skill is band-exempt (nextPractice serves it as normal
     // frontier, not challenge) — classify it the same way it was served.
@@ -4455,6 +4519,7 @@ async function recordAttemptCore(
     preFrontier,
     scheduling,
     remediationSkillKey,
+    servedLane: meta.servedLane,
   });
   const directPrereqs = edges.filter((e) => e.toKey === skillKey).map((e) => e.fromKey);
   const prereqAcceleratedRecently = directPrereqs.some((pk) => {
@@ -4905,19 +4970,6 @@ async function spiralBackOff(
 }
 
 /**
- * Recover the currently live breaker handle after a client loses its local
- * state. It reads the same bounded counted-miss window as `spiralBackOff`;
- * historic and closed episodes deliberately return null.
- *
- * This returns the WHOLE episode, not just a handle, because a resuming client
- * must never re-derive breaker progress from its own memory or timers: `flow`
- * is replayed from durable evidence by `breakerFlowFromLifecycle`,
- * `triggerItemId` names the item the repair rung belongs to, `repairStepIndex`
- * is the rung already served (so re-serving it restores the scholar's place
- * instead of handing out a new hint), and the pinned fresh/easy identities let
- * the client rebuild the exact item the server already committed to.
- */
-/**
  * The CURRENT scope/day fingerprint, without serving a run. A client holding a
  * persisted resume snapshot reads this to decide whether the snapshot is still
  * honorable before restoring it: `practiceSession` stamps the same two values
@@ -4944,8 +4996,31 @@ export const practiceScopeSnapshotKey = authedQuery({
   },
 });
 
+/**
+ * Recover the currently live breaker handle after a client loses its local
+ * state. It reads the same bounded counted-miss window as `spiralBackOff`;
+ * historic and closed episodes deliberately return null.
+ *
+ * This returns the WHOLE episode, not just a handle, because a resuming client
+ * must never re-derive breaker progress from its own memory or timers: `flow`
+ * is replayed from durable evidence by `breakerFlowFromLifecycle`,
+ * `triggerItemId` names the item the repair rung belongs to, `repairStepIndex`
+ * is the rung already served (so re-serving it restores the scholar's place
+ * instead of handing out a new hint), and the pinned fresh/easy identities let
+ * the client rebuild the exact item the server already committed to.
+ */
 export const activeBreakerEpisode = authedQuery({
-  args: { scholarId: v.id("users") },
+  args: {
+    scholarId: v.id("users"),
+    /** Client-passed minute-rounded clock (T11). An intentional reactive
+     *  dependency: Convex re-runs a query when a write touches its read set,
+     *  never because time passed, so without it a subscribed host kept
+     *  reporting an idle episode as live — ahead of the scholar's practice —
+     *  long after `SPIRAL_GAP_MS` closed it. Optional because iPads still on a
+     *  build from before this argument don't send it; they fall back to
+     *  `Date.now()`. */
+    now: v.optional(v.number()),
+  },
   returns: v.union(
     v.null(),
     v.object({
@@ -5037,7 +5112,7 @@ export const activeBreakerEpisode = authedQuery({
     const episode = projectBreakerEpisode(
       trigger.breakerLifecycle,
       latestCountedMissAt,
-      Date.now(),
+      args.now ?? Date.now(),
       easyResult,
     );
     if (episode.status !== "active") return null;
@@ -6033,17 +6108,7 @@ async function serveHintStepCore(
     stepIndex?: number;
   },
 ): Promise<ServedHintStep> {
-  let workedSteps = args.workedSteps;
-  if (hintLadderStepCount(workedSteps) === 0) {
-    const generated = await ctx.db
-      .query("practicePadHints")
-      .withIndex("by_scholar_item_createdAt", (q) =>
-        q.eq("scholarId", args.scholarId).eq("itemId", args.itemId),
-      )
-      .order("desc")
-      .first();
-    workedSteps = generated?.workedSteps;
-  }
+  const workedSteps = args.workedSteps;
   const stepCount = hintLadderStepCount(workedSteps);
   if (stepCount === 0) {
     return { rung: null, hasMore: false, stepCount: 0 };
@@ -6120,36 +6185,6 @@ export const serveHintStep = authedMutation({
   },
 });
 
-export const padHintContext = internalQuery({
-  args: { itemId: v.string() },
-  handler: async (ctx, args) => {
-    const item = await resolveServableItem(
-      ctx,
-      args.itemId,
-      WHOLE_NUMBER_ARITHMETIC_DOMAIN,
-    );
-    const grade = gradeSubmission(
-      item,
-      { kind: "dontKnow" },
-      PLACEMENT_POLICY,
-    );
-    // The hint verifier guards against leaking the bare mathematical result.
-    // A unit belongs in the scholar-facing reveal, but including it here would
-    // let a nudge state the same number without the unit and evade that guard.
-    const answerCanonical =
-      grade.isManipulative || !grade.correctAnswer
-        ? null
-        : grade.correctAnswer;
-    return {
-      stem: item.prompt.stem,
-      answerType: item.prompt.answerType,
-      answerCanonical,
-      hasDeterministicSteps:
-        hintLadderStepCount(item.prompt.workedSteps) > 0,
-    };
-  },
-});
-
 /**
  * The teaching moment for the "I haven't learned this yet" button — the read
  * side of teach-as-action. A young scholar dismisses instructional prose without
@@ -6206,7 +6241,14 @@ export const teachingStep = authedQuery({
 
     // The reveal string for this item (server truth), or undefined for a
     // manipulative (no answer to show). Reused from the shared grade dispatcher.
-    const answer = gradeSubmission(item, { kind: "dontKnow" }, PLACEMENT_POLICY).revealedAnswer ?? null;
+    // A question-first manipulative (a distribute board asking "What is
+    // 6 × 13?") DOES have one number to reveal — the product — and its blank is
+    // checked as an integer, not as an opaque board state.
+    const manipQuestion = manipulativeQuestionOf(item);
+    const answer = manipQuestion
+      ? String(manipQuestion.value)
+      : (gradeSubmission(item, { kind: "dontKnow" }, PLACEMENT_POLICY).revealedAnswer ?? null);
+    const revealAnswerType = manipQuestion ? ("integer" as const) : answerType;
 
     // A single-blank teaching step needs ≥2 worked steps. Both a stored item's
     // authored steps AND a template family's deterministically-generated steps
@@ -6217,7 +6259,9 @@ export const teachingStep = authedQuery({
     let steps = null as ReturnType<typeof applyFade> | null;
     let hint = null as string | null;
     const workedSteps = item.prompt.workedSteps;
-    if (workedSteps && workedSteps.length >= 2) {
+    // `hasTeachingStep` is also what makes an item framable ("Can you already
+    // do this?" → "Not yet" lands HERE), so the two can never disagree.
+    if (workedSteps && hasTeachingStep(workedSteps)) {
       const fade = applyFade(workedSteps, 1);
       if (fade.revealed.length > 0) {
         steps = fade;
@@ -6231,7 +6275,7 @@ export const teachingStep = authedQuery({
         hint = derived && derived !== blankText ? derived : null;
       }
     }
-    return { steps, answer, answerType, hint };
+    return { steps, answer, answerType: revealAnswerType, hint };
   },
 });
 
@@ -6481,16 +6525,50 @@ export const submitStoryThreadApplication = authedMutation({
       throw new Error("Session is not a story thread");
     }
 
-    const eligible = await eligibleStoryApplication(
-      ctx,
-      session.userId,
-      seed.storyFromKey,
-      seed.storyToKey,
-    );
-    const item = eligible?.items.find(
-      (candidate) => candidate.itemId === args.itemId,
-    );
-    if (!item || item.kind === "template") {
+    // The served chat card is durable, so it can be re-submitted after the first
+    // unassisted correct — a reload/reopen re-renders it interactive, and a rapid
+    // double-submit races. Resolve the item by its id directly, NOT through
+    // `eligibleStoryApplication`: offer eligibility disappears the moment the
+    // first `application_success` lands, which would make every later submit of
+    // the same card throw. The seed stays the authority for WHICH edge — the
+    // anti-oracle guard below refuses any id that is not this edge's stored
+    // application item, so this cannot become a grade oracle for another item.
+    const edge = await ctx.db
+      .query("knowledgeNodeEdges")
+      .withIndex("by_from_to", (q) =>
+        q.eq("fromKey", seed.storyFromKey!).eq("toKey", seed.storyToKey!),
+      )
+      .first();
+    if (!edge || edge.story === undefined) {
+      throw new Error("That application is not available for this story thread");
+    }
+    const fromNode = await ctx.db
+      .query("knowledgeNodes")
+      .withIndex("by_nodeKey", (q) => q.eq("nodeKey", seed.storyFromKey!))
+      .first();
+    if (!fromNode) {
+      throw new Error("That application is not available for this story thread");
+    }
+    let item: ServableItem;
+    try {
+      item = await resolveServableItem(ctx, args.itemId, fromNode.domain);
+    } catch {
+      throw new Error("That application is not available for this story thread");
+    }
+    // Anti-oracle: the id must resolve to THIS edge's stored stretch application
+    // (skillKey = the story's from-key, storyToKey = the story's to-key). This is
+    // the same identity `eligibleStoryApplication` enforced, minus the one-shot
+    // offer filter that broke resubmission.
+    if (item.kind === "template") {
+      throw new Error("That application is not available for this story thread");
+    }
+    const storedRow = await ctx.db.get(item.ref);
+    if (
+      !storedRow ||
+      storedRow.skillKey !== seed.storyFromKey ||
+      storedRow.storyToKey !== seed.storyToKey ||
+      storedRow.tier !== "stretch"
+    ) {
       throw new Error("That application is not available for this story thread");
     }
     if (item.prompt.answerType === "dialogue") {
@@ -6507,8 +6585,9 @@ export const submitStoryThreadApplication = authedMutation({
     const grade = gradeSubmission(item, submission, STORY_THREAD_POLICY);
 
     if (grade.correct && !grade.isDontKnow) {
-      const storedRow = await ctx.db.get(item.ref);
-      if (!storedRow) throw new Error("Story application item not found");
+      // Idempotent on resubmit: maybeWriteApplicationDepthObservation returns
+      // early when a non-superseded application_success already exists at this
+      // masteryLevel, so a re-answer of the same card writes no duplicate.
       await maybeWriteOptionalDepthObservation(
         ctx,
         session.userId,
@@ -6604,6 +6683,12 @@ export const submitAnswer = authedMutation({
     predictedConfidence: v.optional(
       v.union(v.literal("sure"), v.literal("think_so"), v.literal("not_sure")),
     ),
+    // Which list the answered item was SERVED from (TRA-250): "challenge" for
+    // the opt-in tail (`practiceSession.challenge`), "required" for everything
+    // else. Updated clients always send it; older iPads omit it. See
+    // inferAttemptLane. Not part of the replay fingerprint: it is fixed per
+    // item, like timings.
+    servedLane: v.optional(v.union(v.literal("challenge"), v.literal("required"))),
   },
   returns: v.object({
     correct: v.boolean(),
@@ -7186,6 +7271,7 @@ export const submitAnswer = authedMutation({
           : grade.lane
             ? { lane: grade.lane as PracticeAttemptLane }
             : {}),
+        ...(args.servedLane ? { servedLane: args.servedLane } : {}),
         breakerEligible:
           !isTeacher && args.replay !== true && args.suppressBreaker !== true,
       },
@@ -8762,8 +8848,9 @@ async function buildServedProbe(
   // serve time only makes the probe unresolvable, and the re-prime would pick
   // the very same row again. Skip such rows at SELECTION so the probe degrades
   // cleanly to a template instead of looping. (Prod held exactly this: two
-  // `factorGame` rows on `factors_and_multiples`/`prime_composite`, the latter's
-  // ONLY manipulative — see migrations:purgeRetiredKindManipulatives.)
+  // `factorGame` rows on `factors_and_multiples` and the retired duplicate prime
+  // node, the latter's ONLY manipulative — see
+  // migrations:purgeRetiredKindManipulatives.)
   const manipCandidates = await ctx.db
     .query("practiceItems")
     .withIndex("by_skill", (q) => q.eq("skillKey", selected.probeKey))
@@ -9577,6 +9664,28 @@ function mixedPerDomainSummary(
 }
 
 /**
+ * Read-only internal projection of the same per-domain placement summaries the
+ * mixed check-in completion surface uses. Staff-aide tools consume this rather
+ * than re-deriving placed-through grades from raw mastery rows.
+ */
+export const placementSummariesForScholarInternal = internalQuery({
+  args: { scholarId: v.id("users") },
+  handler: async (ctx, args) => {
+    const domains = await loadMixedPlacementDomains(ctx);
+    const summaries: ReturnType<typeof mixedPerDomainSummary>[] = [];
+    for (const domain of domains) {
+      const runtime = await readMixedDomainRuntime(
+        ctx,
+        args.scholarId,
+        domain.domain,
+      );
+      summaries.push(mixedPerDomainSummary(domain, runtime));
+    }
+    return summaries;
+  },
+});
+
+/**
  * True when the scholar has automatic placement work available right now — an
  * eligible unmapped domain whose prerequisites have converged, or one with a run
  * already going. Reported from the shared derivation, so a SHADOW-PLACED domain
@@ -9668,14 +9777,28 @@ export const domainMapForScholar = authedQuery({
   handler: async (ctx, args) => {
     const isTeacher = requireTeacherOrSelf(ctx.user, args.scholarId);
     if (isTeacher) await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
-    const { summary } = await loadScholarMapSummary(ctx, args.scholarId);
-    return summary.perDomain.map((d: DomainMapEntry) => ({
-      domain: d.domain,
-      status: d.status,
-      mapped: d.mapped,
-      eligible: d.eligible,
-    }));
+    return await domainMapForScholarCore(ctx, args.scholarId);
   },
+});
+
+async function domainMapForScholarCore(
+  ctx: QueryCtx,
+  scholarId: Id<"users">,
+) {
+  const { summary } = await loadScholarMapSummary(ctx, scholarId);
+  return summary.perDomain.map((d: DomainMapEntry) => ({
+    domain: d.domain,
+    status: d.status,
+    mapped: d.mapped,
+    eligible: d.eligible,
+  }));
+}
+
+/** Internal twin for the already-gated Math-plan aide read. */
+export const domainMapForScholarInternal = internalQuery({
+  args: { scholarId: v.id("users") },
+  handler: async (ctx, args) =>
+    await domainMapForScholarCore(ctx, args.scholarId),
 });
 
 /**
@@ -10185,7 +10308,7 @@ export const submitMixedPlacementAnswer = authedMutation({
         const allCands = withCandidates.flatMap((e) => e.cands);
         // "Confirm before you cap": a slip's confirm (a fresh item on the SAME
         // skill) is served IMMEDIATELY in the interactive check-in, so the
-        // scholar's "I just made a silly mistake" retry lands on that skill. The
+        // scholar's "I just made a mistake" retry lands on that skill. The
         // playlist band deliberately does NOT preempt this way (it stays
         // breadth-first — see `orderMappingCandidates`); the check-in does.
         const pending = allCands.filter((c) => c.pendingConfirm);
@@ -10408,22 +10531,44 @@ type MappingDomainInfo = {
 
 /**
  * Cheap pre-check: does the scholar still have ANY seeded registered domain with
- * no CONVERGED placement run? Indexed reads only — no graph load — so a scholar
- * whose whole map is drawn skips all the mapping machinery below.
+ * no CONVERGED placement run? The structural predicate reads only the scholar
+ * row and that scholar's placements, then uses static registry metadata to let
+ * a fully mapped scholar skip the graph load.
  *
  * The mastery short-circuit this used to open with is gone (finish-the-check-in,
  * founder 2026-08-18): mastery is not a map, so a shadow-placed domain must reach
- * the derivation and be searched. Two consequences worth knowing — the check is
- * now a SUPERSET (a domain outside the scholar's affect-safe ring never converges
- * automatically, so it keeps this true and the graph load happens), and the band
- * then legitimately comes back empty, which `finalizeWithMapping`'s zero-item
- * guard already handles. Under the ruling essentially the whole roster has an
- * incomplete map anyway, so the pre-check was never going to save the hot path.
+ * the derivation and be searched. Eligibility mirrors the full map: grade-ring
+ * domains plus deliberately opened rows, excluding unopened electives.
  */
-async function anyUnmappedDomain(
+export async function anyUnmappedDomain(
   ctx: QueryCtx | MutationCtx,
   scholarId: Id<"users">,
   practiceScope: PracticeScope = { kind: "open" },
+): Promise<boolean> {
+  const [scholar, placements] = await Promise.all([
+    ctx.db.get(scholarId),
+    ctx.db
+      .query("practicePlacements")
+      .withIndex("by_scholar_domain", (q) => q.eq("scholarId", scholarId))
+      .collect(),
+  ]);
+  if (
+    allEligibleDomainsMapped(
+      scholar?.gradeLevel,
+      practiceScope,
+      placements,
+    )
+  ) {
+    return false;
+  }
+  return await legacyAnyUnmappedDomain(ctx, scholarId, practiceScope);
+}
+
+async function legacyAnyUnmappedDomain(
+  ctx: QueryCtx | MutationCtx,
+  scholarId: Id<"users">,
+  practiceScope: PracticeScope,
+  deliberateDomain?: string,
 ): Promise<boolean> {
   for (const domain of REGISTERED_PRACTICE_DOMAINS) {
     if (!practiceScopeAllowsDomain(practiceScope, domain)) continue;
@@ -10435,8 +10580,15 @@ async function anyUnmappedDomain(
     // An UNOPENED elective is not owed mapping — without this, every fully
     // mapped scholar reads "unmapped forever" and the short-circuit's
     // consumers fall through to the full mapping-state load (Sol review
-    // 2026-08-19, finding 3). An opened elective (any placement row) counts.
-    if (ELECTIVE_PRACTICE_DOMAINS.has(domain) && !placement) continue;
+    // 2026-08-19, finding 3). An opened elective (any placement row), or the
+    // registered in-scope domain the scholar deliberately picked, counts.
+    if (
+      ELECTIVE_PRACTICE_DOMAINS.has(domain) &&
+      !placement &&
+      domain !== deliberateDomain
+    ) {
+      continue;
+    }
     // Only count a domain actually seeded on this deployment (one indexed read).
     const anyNode = await ctx.db
       .query("knowledgeNodes")
@@ -12587,6 +12739,37 @@ export const retireAmbiguousCompareManipulative = internalMutation({
  * powers_of_ten). This is the first NEW kind added since the catalog was
  * built; the two self-check shapes (assemble-to-target, shift-to-target) ride
  * the same `isSolved` contract every other kind does.
+ *
+ * **Content-coverage wave 5** (TRA-96, 2026-09): the two secondary domains
+ * that were template-complete but had almost no depth axis — `algebra-1`
+ * (one manipulative node, `lin_fn_interpret_context`'s riemann set) and
+ * `discrete-math` (none). EXISTING kinds only; a node got a manipulative only
+ * where the interaction genuinely IS the skill, not a typed answer in a
+ * costume:
+ *   • `functionMachine` (affine rule) with exactly TWO worked examples —
+ *     that is literally "a line through two points" (`lin_fn_from_two_points`).
+ *   • `coordinatePlane` for the graph-side of linear/quadratic work:
+ *     `slope_intercept_form` (plot three points of y = mx + b),
+ *     `sys_solve_graphing` (both lines drawn as `segments`; drag the point to
+ *     the one place on both), `lin_fn_parallel_perpendicular` (finish a
+ *     perpendicular from a drawn segment), `quad_vertex_form` (place the
+ *     vertex + both x-intercepts of an undrawn vertex-form parabola).
+ *   • `array` where the rectangle IS the idea: `roots_square_cube` (a square
+ *     root is the side of a square — `squareEquals`), `multiplication_principle`
+ *     + `count_organized_count` (a two-attribute outcome grid —
+ *     `sideEqualsWithProduct` so an unrelated factor pair can't pass),
+ *     `nt_parity_classify` (even = splits into two equal rows).
+ *   • `clock` `advanceBy` for `nt_modular_clock` — a 12-hour dial IS mod 12,
+ *     and the landing time is never named (compute-style).
+ * Deliberately SKIPPED, each because no existing kind is honest for it:
+ * multi-term equations (`balance` has one mystery block, so 2x + 3 = x + 7 is
+ * unrepresentable), inequalities (a half-line, not a point), binomial ×
+ * binomial (`distribute` splits once; an area model needs two cuts), every
+ * graph-theory node (no graph kind — and `array` cannot model n(n−1)/2),
+ * pigeonhole, GCD, and all of logic. New kinds were NOT invented for these
+ * (`.claude/rules/necessity-bar.md`); the stretch items in
+ * `convex/seed/stretchItems.ts` carry the depth axis for those nodes instead.
+ * Locked by `convex/__tests__/defaultManipulativeSeedWave5.test.ts`.
  *
  * Run manually with `npx convex run practiceSkills:seedDefaultManipulativePractice`;
  * also wired into `scripts/db-seed.sh`. NOT dev-only: this seeds node-keyed
@@ -15574,6 +15757,233 @@ export const seedDefaultManipulativePractice = internalMutation({
           ],
           goal: { type: "totalEquals", value: 5 },
           source: "Measuring jars (composing measures)",
+        },
+      },
+
+      // ── Content-coverage wave 5 (TRA-96): algebra-1 + discrete-math ──────
+      // algebra-1 / linear-functions ─────────────────────────────────────────
+      {
+        // Two worked examples and nothing else — inferring the affine rule from
+        // exactly two (in, out) pairs IS "write the line through two points".
+        // The slope is not a unit step (3 per 3 in), so the kid must actually
+        // divide rise by run rather than read a +k pattern off adjacent rows.
+        domain: ALGEBRA_1_DOMAIN,
+        skillKey: "lin_fn_from_two_points",
+        spec: {
+          kind: "functionMachine",
+          id: "function-machine-line-through-2-7-and-5-16",
+          concept: "A line through two points",
+          prompt: "Only two examples are shown. Work out the machine's rule from them, then predict what comes out when 9 goes in.",
+          rule: { op: "affine", m: 3, b: 1 },
+          examples: [
+            { in: 2, out: 7 },
+            { in: 5, out: 16 },
+          ],
+          queryInput: 9,
+          answer: { value: 28, prompt: "What comes out when 9 goes in?" },
+        },
+      },
+      {
+        // Equation → graph: three points of y = 2x − 3 at stated x-values. The
+        // draggables start on the x-axis so none sits on its target.
+        domain: ALGEBRA_1_DOMAIN,
+        skillKey: "slope_intercept_form",
+        spec: {
+          kind: "coordinatePlane",
+          id: "coordinate-plot-y-equals-2x-minus-3",
+          concept: "Slope-intercept form on the plane",
+          prompt: "Place the three points of y = 2x − 3 whose x-coordinates are −2, 0, and 3.",
+          xMin: -4,
+          xMax: 4,
+          yMin: -8,
+          yMax: 4,
+          gridStep: 1,
+          draggable: [{ start: { x: -2, y: 0 } }, { start: { x: 0, y: 0 } }, { start: { x: 3, y: 0 } }],
+          goal: {
+            type: "placePoints",
+            points: [
+              { x: -2, y: -7 },
+              { x: 0, y: -3 },
+              { x: 3, y: 3 },
+            ],
+          },
+        },
+      },
+      {
+        // Both lines are DRAWN (decorative segments); the scholar drags the
+        // point to the one grid spot on both — the graphing method itself.
+        domain: ALGEBRA_1_DOMAIN,
+        skillKey: "sys_solve_graphing",
+        spec: {
+          kind: "coordinatePlane",
+          id: "coordinate-system-x-plus-1-and-5-minus-x",
+          concept: "Solving a system by graphing",
+          prompt: "The lines y = x + 1 and y = −x + 5 are drawn. Drag the point to the solution of the system — the one spot that is on both lines.",
+          xMin: -1,
+          xMax: 6,
+          yMin: -1,
+          yMax: 7,
+          gridStep: 1,
+          segments: [
+            [
+              { x: -1, y: 0 },
+              { x: 5, y: 6 },
+            ],
+            [
+              { x: -1, y: 6 },
+              { x: 5, y: 0 },
+            ],
+          ],
+          draggable: [{ start: { x: 0, y: 1 } }],
+          goal: { type: "placePoint", x: 2, y: 3 },
+        },
+      },
+      {
+        // Segment AB has slope 2/3. The perpendicular from B has slope −3/2, so
+        // the point with x = 6 lands at (6, 0): three right, and DOWN — the sign
+        // flip a slope-reciprocal-only kid misses.
+        domain: ALGEBRA_1_DOMAIN,
+        skillKey: "lin_fn_parallel_perpendicular",
+        spec: {
+          kind: "coordinatePlane",
+          id: "coordinate-perpendicular-from-ab-slope-2-3",
+          concept: "Perpendicular slopes",
+          prompt: "Segment AB is drawn. Drag the point so that the segment from B to your point is perpendicular to AB and your point has x-coordinate 6.",
+          xMin: 0,
+          xMax: 7,
+          yMin: -1,
+          yMax: 6,
+          gridStep: 1,
+          fixedPoints: [
+            { x: 1, y: 1, label: "A" },
+            { x: 4, y: 3, label: "B" },
+          ],
+          segments: [
+            [
+              { x: 1, y: 1 },
+              { x: 4, y: 3 },
+            ],
+          ],
+          draggable: [{ start: { x: 6, y: 3 } }],
+          goal: { type: "placePoint", x: 6, y: 0 },
+        },
+      },
+      // algebra-1 / quadratics ───────────────────────────────────────────────
+      {
+        // The parabola is NOT drawn — vertex form must be READ: vertex (2, −4),
+        // and x-intercepts where (x − 2)² = 4, i.e. x = 0 and x = 4.
+        domain: ALGEBRA_1_DOMAIN,
+        skillKey: "quad_vertex_form",
+        spec: {
+          kind: "coordinatePlane",
+          id: "coordinate-vertex-form-x-minus-2-sq-minus-4",
+          concept: "Reading vertex form",
+          prompt: "The parabola y = (x − 2)² − 4 is not drawn. Place its vertex and both of its x-intercepts.",
+          xMin: -2,
+          xMax: 6,
+          yMin: -5,
+          yMax: 5,
+          gridStep: 1,
+          draggable: [{ start: { x: -1, y: 4 } }, { start: { x: 3, y: 4 } }, { start: { x: 5, y: 4 } }],
+          goal: {
+            type: "placePoints",
+            points: [
+              { x: 2, y: -4 },
+              { x: 0, y: 0 },
+              { x: 4, y: 0 },
+            ],
+          },
+        },
+      },
+      // algebra-1 / exponents-exponential ────────────────────────────────────
+      {
+        // √169 is the SIDE of a square with area 169 — `squareEquals` rejects
+        // any non-square factor pair (a 1×169 strip proves nothing).
+        domain: ALGEBRA_1_DOMAIN,
+        skillKey: "roots_square_cube",
+        spec: {
+          kind: "array",
+          id: "array-square-root-169",
+          concept: "A square root is a square's side",
+          prompt: "Build a square array with 169 tiles. Its side is √169.",
+          rows: 2,
+          cols: 2,
+          maxRows: 16,
+          maxCols: 16,
+          goal: { type: "squareEquals", value: 169 },
+        },
+      },
+      // discrete-math / counting ─────────────────────────────────────────────
+      {
+        // A two-attribute outcome grid: rows are letters, columns are digits.
+        // `sideEqualsWithProduct` insists one side is the letter count, so a
+        // 1×6 or 2×3 array (right total, wrong structure) does not pass.
+        domain: DISCRETE_MATH_DOMAIN,
+        skillKey: "count_organized_count",
+        spec: {
+          kind: "array",
+          id: "array-codes-3-letters-times-2-digits",
+          concept: "Organized counting",
+          prompt: "A code is one letter from A, B, C followed by one digit from 1, 2. Build an array with one row per letter so every tile is one code.",
+          rows: 1,
+          cols: 1,
+          maxRows: 6,
+          maxCols: 6,
+          goal: { type: "sideEqualsWithProduct", side: 3, product: 6 },
+        },
+      },
+      {
+        // The multiplication principle IS a rectangle of outcomes: 4 colors ×
+        // 3 sizes. Same `sideEqualsWithProduct` guard against 2×6 / 1×12.
+        domain: DISCRETE_MATH_DOMAIN,
+        skillKey: "multiplication_principle",
+        spec: {
+          kind: "array",
+          id: "array-shirts-4-colors-times-3-sizes",
+          concept: "Multiplication principle",
+          prompt: "A shirt comes in 4 colors and 3 sizes. Build an array with one row per color so every tile is one color-and-size choice.",
+          rows: 1,
+          cols: 1,
+          maxRows: 8,
+          maxCols: 8,
+          goal: { type: "sideEqualsWithProduct", side: 4, product: 12 },
+        },
+      },
+      // discrete-math / number-theory ────────────────────────────────────────
+      {
+        // Even = splits into two equal rows. The kid has to build 2×7 (or 7×2);
+        // a 1×14 strip has the right count but does not show the pairing.
+        domain: DISCRETE_MATH_DOMAIN,
+        skillKey: "nt_parity_classify",
+        spec: {
+          kind: "array",
+          id: "array-even-14-two-equal-rows",
+          concept: "Even numbers pair up",
+          prompt: "Show that 14 is even: build an array of 14 tiles with exactly two equal rows.",
+          rows: 1,
+          cols: 1,
+          maxRows: 8,
+          maxCols: 16,
+          goal: { type: "sideEqualsWithProduct", side: 2, product: 14 },
+        },
+      },
+      {
+        // A 12-hour dial IS arithmetic mod 12: from 5:00, 31 hours later is
+        // 36 ≡ 0 (mod 12) → 12:00. Snap to whole hours so the dial is a mod-12
+        // clock, not a minutes puzzle. COMPUTE-STYLE: the landing time is never
+        // named. (`advanceBy` = 1860 minutes, not a multiple of 720.)
+        domain: DISCRETE_MATH_DOMAIN,
+        skillKey: "nt_modular_clock",
+        spec: {
+          kind: "clock",
+          id: "clock-mod-12-from-5-advance-31-hours",
+          concept: "Clock arithmetic (mod 12)",
+          prompt: "It's 5:00. Move the hour hand forward 31 hours — it will go around more than twice. Where does it stop?",
+          startHour: 5,
+          startMinute: 0,
+          snapMinutes: 60,
+          goal: { type: "advanceBy", minutes: 31 * 60 },
+          source: "Clock (a mod-12 dial)",
         },
       },
     ];

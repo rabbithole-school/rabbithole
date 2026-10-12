@@ -1,9 +1,15 @@
 import { convexTest } from "convex-test";
-import { afterEach, describe, expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import { MODELS } from "../lib/models";
-import { resolveAideModel, aideMaxTokens } from "../lib/aideModel";
+import {
+  resolveAideModel,
+  aideMaxTokens,
+  aideEffort,
+  aideRefusalFallback,
+  aideThinking,
+} from "../lib/aideModel";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -14,46 +20,106 @@ const modules = (
 // ── Pure resolver ────────────────────────────────────────────────────────
 
 describe("resolveAideModel", () => {
-  afterEach(() => {
-    delete process.env.AIDE_MODEL;
-  });
-
-  test("no preference → Fable default (teacher reasoning gets the strongest model)", () => {
-    expect(resolveAideModel(undefined)).toBe(MODELS.FABLE);
-    expect(resolveAideModel(null)).toBe(MODELS.FABLE);
+  test("no preference → Opus 5.5 default", () => {
+    expect(resolveAideModel(undefined)).toBe(MODELS.OPUS_5_5);
+    expect(resolveAideModel(null)).toBe(MODELS.OPUS_5_5);
   });
 
   test("sonnet / opus / fable preferences resolve to their models", () => {
     expect(resolveAideModel("sonnet")).toBe(MODELS.SONNET);
-    expect(resolveAideModel("opus")).toBe(MODELS.OPUS);
+    expect(resolveAideModel("opus")).toBe(MODELS.OPUS_5_5);
     expect(resolveAideModel("fable")).toBe(MODELS.FABLE);
   });
 
-  test("AIDE_MODEL env override applies when no user preference (the revert lever)", () => {
+  test("the retired AIDE_MODEL env lever no longer resolves anything", () => {
+    // It used to sit between the pin and the code default — and a pin
+    // outranked it, so the documented "instant fleet revert" could not reach
+    // pinned users. Deleted: the default is a code constant, full stop.
     process.env.AIDE_MODEL = MODELS.SONNET;
-    expect(resolveAideModel(undefined)).toBe(MODELS.SONNET);
+    try {
+      expect(resolveAideModel(undefined)).toBe(MODELS.OPUS_5_5);
+      expect(resolveAideModel("opus")).toBe(MODELS.OPUS_5_5);
+    } finally {
+      delete process.env.AIDE_MODEL;
+    }
+  });
+});
+
+describe("aideRefusalFallback", () => {
+  test("the classifier tiers (Fable, Opus 5.5) fall back to Opus 4.8", () => {
+    expect(aideRefusalFallback(MODELS.FABLE)).toBe(MODELS.OPUS);
+    expect(aideRefusalFallback(MODELS.OPUS_5_5)).toBe(MODELS.OPUS);
   });
 
-  test("user preference beats the env override", () => {
-    process.env.AIDE_MODEL = MODELS.SONNET;
-    expect(resolveAideModel("opus")).toBe(MODELS.OPUS);
+  test("every other model has no fallback — a refusal there is a real decline", () => {
+    expect(aideRefusalFallback(MODELS.OPUS)).toBeNull();
+    expect(aideRefusalFallback(MODELS.SONNET)).toBeNull();
+    expect(aideRefusalFallback(MODELS.HAIKU)).toBeNull();
+    // A retired Fable slug must not opt into the retry either — the policy
+    // follows the CURRENT model constant.
+    expect(aideRefusalFallback("claude-fable-5")).toBeNull();
   });
 
-  test("an unknown AIDE_MODEL value is ignored (fail-open to the Fable default)", () => {
-    process.env.AIDE_MODEL = "claude-nonsense-9";
-    expect(resolveAideModel(undefined)).toBe(MODELS.FABLE);
+  test("the fallback is never the model that just refused (no retry loop)", () => {
+    const fallback = aideRefusalFallback(MODELS.FABLE);
+    expect(fallback).not.toBe(MODELS.FABLE);
+    // …and the fallback itself doesn't chain into another retry.
+    expect(aideRefusalFallback(fallback as string)).toBeNull();
   });
 });
 
 describe("aideMaxTokens", () => {
-  test("Fable raises the cap (thinking bills as output)", () => {
+  test("Fable and Opus 5.5 raise the cap (thinking bills as output)", () => {
     expect(aideMaxTokens(MODELS.FABLE, 4096)).toBe(16000);
+    expect(aideMaxTokens(MODELS.OPUS_5_5, 4096)).toBe(16000);
     expect(aideMaxTokens(MODELS.FABLE, 20000)).toBe(20000);
   });
 
   test("non-Fable models keep the caller's base", () => {
     expect(aideMaxTokens(MODELS.SONNET, 4096)).toBe(4096);
     expect(aideMaxTokens(MODELS.OPUS, 2048)).toBe(2048);
+  });
+});
+
+describe("aideEffort", () => {
+  test("Fable asks for medium (5.1's frontier shift, not the API default)", () => {
+    expect(aideEffort(MODELS.FABLE)).toBe("medium");
+  });
+
+  test("Opus 5.5 asks for high (its API default is medium)", () => {
+    expect(aideEffort(MODELS.OPUS_5_5)).toBe("high");
+  });
+
+  test("every other model sends no output_config at all", () => {
+    expect(aideEffort(MODELS.OPUS)).toBeUndefined();
+    expect(aideEffort(MODELS.SONNET)).toBeUndefined();
+    expect(aideEffort(MODELS.HAIKU)).toBeUndefined();
+    // Including a retired Fable id — the dial follows the CURRENT model
+    // constant, never a stale slug that could still be in flight.
+    expect(aideEffort("claude-fable-5")).toBeUndefined();
+  });
+});
+
+describe("aideThinking", () => {
+  test("staff surface on Fable or Opus 5.5 asks for summarized adaptive thinking", () => {
+    for (const model of [MODELS.FABLE, MODELS.OPUS_5_5]) {
+      expect(aideThinking(model, true)).toEqual({
+        type: "adaptive",
+        display: "summarized",
+      });
+    }
+  });
+
+  test("non-staff surfaces never send a thinking param", () => {
+    expect(aideThinking(MODELS.FABLE, false)).toBeUndefined();
+    expect(aideThinking(MODELS.FABLE, undefined)).toBeUndefined();
+    expect(aideThinking(MODELS.OPUS_5_5, false)).toBeUndefined();
+  });
+
+  test("other models stay at the API default (Opus 4.8 would switch thinking ON)", () => {
+    expect(aideThinking(MODELS.OPUS, true)).toBeUndefined();
+    expect(aideThinking(MODELS.SONNET, true)).toBeUndefined();
+    expect(aideThinking("claude-fable-5", true)).toBeUndefined();
   });
 });
 
@@ -101,7 +167,7 @@ describe("users.setAideModel", () => {
     ).toBe("fable");
 
     // Sonnet is now an explicit pin (not a "clear"), since absent = the
-    // Fable fleet default.
+    // Opus 5.5 fleet default.
     await asTeacher.mutation(api.users.setAideModel, { model: "sonnet" });
     expect(
       (await t.run(async (ctx) => ctx.db.get(teacherId)))?.aideModel,

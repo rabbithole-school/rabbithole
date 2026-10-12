@@ -5,8 +5,8 @@
  * by a parallel lane) — these tests only exercise the public submitAnswer
  * surface + direct reads of the practiceMastery row.
  */
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -14,13 +14,31 @@ import { gradeTemplateItem } from "../lib/practice/session";
 
 const modules = (import.meta as ImportMeta & { glob: (p: string) => Record<string, () => Promise<unknown>> }).glob("../**/*.ts");
 
-async function seedScholar(t: ReturnType<typeof convexTest>, username = "latencyscholar") {
+let sharedT: TestConvex<typeof schema>;
+let scholarCounter = 0;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
+
+async function seedScholar(t: TestConvex<typeof schema>, username = `latencyscholar_${++scholarCounter}`) {
   return await t.run(async (ctx) =>
     ctx.db.insert("users", { name: "Latency Scholar", username, role: "scholar" }),
   );
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -31,12 +49,12 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
   return t.withIdentity({ subject: `${userId}|${sessionId}`, issuer: "https://convex.dev" });
 }
 
-async function masteryRow(t: ReturnType<typeof convexTest>, scholar: Id<"users">, skillKey: string) {
+async function masteryRow(t: TestConvex<typeof schema>, scholar: Id<"users">, skillKey: string) {
   const rows = await t.run(async (ctx) => ctx.db.query("practiceMastery").collect());
   return rows.find((r) => r.scholarId === scholar && r.skillKey === skillKey) ?? null;
 }
 
-async function attemptRow(t: ReturnType<typeof convexTest>, itemId: string) {
+async function attemptRow(t: TestConvex<typeof schema>, itemId: string) {
   const rows = await t.run(async (ctx) => ctx.db.query("practiceAttempts").collect());
   return rows.find((row) => row.itemId === itemId) ?? null;
 }
@@ -44,7 +62,7 @@ async function attemptRow(t: ReturnType<typeof convexTest>, itemId: string) {
 /** Submit a correct answer to a fresh session item, with the given first-key
  * latency reading. Returns the graded result. */
 async function submitCorrectWithLatency(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   asScholar: Awaited<ReturnType<typeof asUser>>,
   scholar: Id<"users">,
   seed: number,
@@ -65,8 +83,7 @@ async function submitCorrectWithLatency(
 
 describe("practiceMastery — self-relative latency baseline (B5)", () => {
   test("a valid firstKeyMs populates the ring buffer + median + spread", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -80,8 +97,7 @@ describe("practiceMastery — self-relative latency baseline (B5)", () => {
   });
 
   test("out-of-range firstKeyMs is ignored — no sample stored", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -117,8 +133,7 @@ describe("practiceMastery — self-relative latency baseline (B5)", () => {
   });
 
   test("the ring buffer caps at 10 samples — oldest dropped", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -154,8 +169,7 @@ describe("practiceMastery — self-relative latency baseline (B5)", () => {
   });
 
   test("a record:false retry does NOT add a latency sample", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -191,8 +205,7 @@ describe("practiceMastery — self-relative latency baseline (B5)", () => {
   });
 
   test("median + MAD are computed correctly on a known sample set", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const skillKey = "count_to_10";

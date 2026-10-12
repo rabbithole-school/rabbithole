@@ -12,6 +12,7 @@ import { internalMutation, internalQuery, type MutationCtx } from "./_generated/
 import type { Id } from "./_generated/dataModel";
 import { requireUnitEditAccess } from "./lib/auth";
 import { requireUnitAccess } from "./lib/unitAccess";
+import { markUnitBuiltInSession } from "./lib/independentStudy";
 import { activityHasScholarWork, deleteActivityCascade } from "./lib/activityCascade";
 import {
   duplicateActivitiesIntoLesson,
@@ -398,7 +399,7 @@ export const moveToUnit = authedMutation({
 
 /**
  * Internal: lesson-create variant invoked by the scholar IS planning
- * tutor (called from convex/http.ts /project-stream tool runner).
+ * tutor (called from convex/http.ts /session-stream tool runner).
  * Verifies the scholar is the unit's IS author before writing —
  * defense in depth even though the http action only exposes this
  * when project.unitContext.isOwnIsUnit is true.
@@ -412,6 +413,8 @@ export const aiCreateForIsUnit = internalMutation({
       v.literal("core"), v.literal("connections"),
       v.literal("practice"), v.literal("identity")
     )),
+    // The planning session whose tutor is building the unit (TRA-464).
+    sessionId: v.optional(v.id("sessions")),
   },
   handler: async (ctx, args) => {
     const unit = await ctx.db.get(args.unitId);
@@ -424,12 +427,18 @@ export const aiCreateForIsUnit = internalMutation({
       .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
       .collect();
     const maxOrder = existing.reduce((m, l) => Math.max(m, l.order), -1);
-    return await ctx.db.insert("lessons", {
+    const lessonId = await ctx.db.insert("lessons", {
       unitId: args.unitId,
       title: args.title.trim() || "New lesson",
       strand: args.strand,
       order: maxOrder + 1,
     });
+    await markUnitBuiltInSession(ctx, {
+      sessionId: args.sessionId,
+      scholarId: args.scholarId,
+      unitId: args.unitId,
+    });
+    return lessonId;
   },
 });
 

@@ -60,6 +60,9 @@ export function Providers({ children }: { children: React.ReactNode }) {
                       <Toast.Description>{toast.description}</Toast.Description>
                     )}
                   </Stack>
+                  {toast.action && (
+                    <Toast.ActionTrigger>{toast.action.label}</Toast.ActionTrigger>
+                  )}
                   <Toast.CloseTrigger />
                 </Toast.Root>
               )}

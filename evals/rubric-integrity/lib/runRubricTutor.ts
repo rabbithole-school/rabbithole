@@ -150,14 +150,38 @@ export function assembleTutorPrompt(
   );
 }
 
+/**
+ * ONE accepted `update_rubric_score` call — i.e. one tool round the real
+ * mutation would have applied. A single tutor turn can produce several
+ * (the model corrects its own first verdict set before its final text), and
+ * production mints flair on EACH of them, so they are kept apart rather than
+ * collapsed to the last one.
+ */
+export type AcceptedRubricCall = {
+  /** 0-based tool round within this turn — the order production applied them. */
+  roundIndex: number;
+  /** Sanitized verdicts (production's scoreRubricVerdicts), criteria order. */
+  verdicts: { criterionId: string; level: "not" | "half" | "full" }[];
+  overall: "not" | "half" | "full";
+};
+
 export type TutorTurn = {
   /** Scholar-visible text for this turn (post-tool-result, when called). */
   text: string;
-  /** update_rubric_score was called this turn. */
-  called: boolean;
-  /** Sanitized verdicts (production's scoreRubricVerdicts), or null if not called. */
-  verdicts: { criterionId: string; level: "not" | "half" | "full" }[] | null;
-  overall: "not" | "half" | "full" | null;
+  /**
+   * EVERY `update_rubric_score` call this turn made that production would have
+   * ACCEPTED, in tool-round order. Calls the real mutation rejects (a document
+   * rubric scored before any document exists) never enter this list.
+   *
+   * This used to be a single collapsed `{ called, verdicts, overall }` holding
+   * only the LATEST round's verdicts. That was the same undercount this eval's
+   * driver had at turn granularity: a turn that scores `full` and then corrects
+   * itself to `half` before replying has already minted flair in production
+   * (`applyRubricScoreFromTool` appends to `flairEarned` on the FIRST call and
+   * never removes), and the collapsed shape made that first call — and the
+   * in-turn downgrade — invisible to every scorer downstream.
+   */
+  calls: AcceptedRubricCall[];
 };
 
 function textOf(res: Anthropic.Messages.Message): string {
@@ -192,14 +216,23 @@ const MAX_TOOL_ROUNDS = 4;
  * until the model responds without a tool call or the round cap is hit — a
  * fixed one-shot "call then get follow-up text" pattern under-counted a
  * legitimate second tool call within the same turn as an empty response.
- * Returns the LATEST verdicts/overall (a later call in the same turn
- * supersedes an earlier one) and every scholar-visible text block, in order.
+ * Returns EVERY accepted call from this turn, in round order (not just the
+ * latest — production applies each one, and flair minted by an earlier round
+ * is never revoked by a later one), plus every scholar-visible text block.
+ *
+ * `earnedFlair` carries the criterion ids already flaired, and is owned by the
+ * CALLER so it spans the whole session. Production seeds `earnedCriterionIds`
+ * from the deliverable row's existing `flairEarned`
+ * (convex/deliverables.ts), so a criterion re-scored `full` on a later turn is
+ * NOT announced as newly earned. A per-turn set re-announced it every turn,
+ * feeding the model a "just earned" line production would never send.
  */
 export async function generateTutorTurn(
   testCase: RubricCase,
   documentContent: string | null,
   turns: RubricTurn[],
   offline = false,
+  earnedFlair: Set<string> = new Set(),
 ): Promise<TutorTurn> {
   if (offline) return stubTutor(testCase, documentContent);
 
@@ -211,38 +244,15 @@ export async function generateTutorTurn(
     messages.push({ role: "user", content: "(start)" });
   }
 
-  let called = false;
-  let verdicts: { criterionId: string; level: "not" | "half" | "full" }[] | null =
-    null;
-  let overall: "not" | "half" | "full" | null = null;
+  const calls: AcceptedRubricCall[] = [];
   const textParts: string[] = [];
-  const earnedFlair = new Set<string>();
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const res = await anthropic.messages.create({
-      model: tutorModel,
-      // Matches the real streaming call's budget (convex/http.ts) — a lower
-      // cap here truncated some responses mid-extended-thinking before any
-      // text or tool_use ever appeared, which this harness misread as an
-      // empty/degenerate turn rather than a token-budget artifact.
-      max_tokens: 4096,
-      system,
-      tools: [RUBRIC_SCORE_TOOL],
-      messages,
-    });
-    accrue(res);
-    const toolUse = res.content.find(
-      (b): b is Anthropic.ToolUseBlock =>
-        b.type === "tool_use" && b.name === RUBRIC_SCORE_TOOL.name,
-    );
-    const text = textOf(res);
-    if (text) textParts.push(text);
 
-    if (!toolUse) {
-      // No tool call this round — the model's final word for this turn.
-      return { text: textParts.join("\n\n"), called, verdicts, overall };
-    }
-
-    called = true;
+  /**
+   * Apply ONE `update_rubric_score` call and return the tool_result string
+   * production would have sent back. Hoisted out of the loop because a single
+   * response can carry SEVERAL tool_use blocks and each needs its own result.
+   */
+  const applyRubricCall = (toolUse: Anthropic.ToolUseBlock): string => {
     const rawInput = toolUse.input as {
       artifact_id?: string;
       verdicts?: { criterion_id: string; level: "not" | "half" | "full" }[];
@@ -261,23 +271,7 @@ export async function generateTutorTurn(
     // flagged `is_error` — production's try/catch returns a plain string,
     // never an uncaught exception the SDK would mark as a tool error.
     if (!documentContent) {
-      called = false;
-      messages = [
-        ...messages,
-        { role: "assistant", content: res.content },
-        {
-          role: "user",
-          content: [
-            {
-              type: "tool_result",
-              tool_use_id: toolUse.id,
-              content:
-                "Failed to record verdicts: Pass artifact_id to score the document rubric.",
-            },
-          ],
-        },
-      ];
-      continue;
+      return "Failed to record verdicts: Pass artifact_id to score the document rubric.";
     }
 
     const rawVerdicts = (rawInput.verdicts ?? []).map((v) => ({
@@ -286,8 +280,14 @@ export async function generateTutorTurn(
     }));
     const scored = scoreRubricVerdicts(testCase.criteria, rawVerdicts);
 
-    verdicts = scored.verdicts;
-    overall = scored.overall;
+    calls.push({
+      // A running sequence, not the API round: two parallel tool_use blocks in
+      // ONE response are two applied calls, and production would mint flair for
+      // each, so they must not collapse onto the same roundIndex.
+      roundIndex: calls.length,
+      verdicts: scored.verdicts,
+      overall: scored.overall,
+    });
     const newlyEarnedFlairLabels = scored.verdicts.flatMap((verdict) => {
       if (verdict.level !== "full" || earnedFlair.has(verdict.criterionId)) {
         return [];
@@ -300,30 +300,64 @@ export async function generateTutorTurn(
     });
     const flairGuidance = rubricScoreFlairGuidance(newlyEarnedFlairLabels);
 
-    const toolResultContent = !scored.passed
+    return !scored.passed
       ? `Updated ${scored.verdicts.length} verdicts. Overall: ${scored.overall}.${flairGuidance} ${RUBRIC_SCORE_BELOW_FULL_GUIDANCE}`
       : `Updated ${scored.verdicts.length} verdicts. Overall: ${scored.overall}.${flairGuidance} ${RUBRIC_SCORE_DOCUMENT_FULL_GUIDANCE}`;
+  };
+
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const res = await anthropic.messages.create({
+      model: tutorModel,
+      // Matches the real streaming call's budget (convex/http.ts) — a lower
+      // cap here truncated some responses mid-extended-thinking before any
+      // text or tool_use ever appeared, which this harness misread as an
+      // empty/degenerate turn rather than a token-budget artifact.
+      max_tokens: 4096,
+      system,
+      tools: [RUBRIC_SCORE_TOOL],
+      messages,
+    });
+    accrue(res);
+    // EVERY tool_use block in the response, not just the first. The Messages
+    // API rejects the NEXT request outright ("`tool_use` ids were found
+    // without `tool_result` blocks immediately after") when any block goes
+    // unanswered, and the model does sometimes emit two `update_rubric_score`
+    // blocks in one response. Answering only the first killed a whole live run
+    // mid-flight (2026-09-11, during the goalpost A/B) — this is a protocol
+    // obligation, not a behavior choice.
+    const toolUses = res.content.filter(
+      (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+    );
+    const text = textOf(res);
+    if (text) textParts.push(text);
+
+    if (toolUses.length === 0) {
+      // No tool call this round — the model's final word for this turn.
+      return { text: textParts.join("\n\n"), calls };
+    }
+
+    const toolResults: Anthropic.ToolResultBlockParam[] = toolUses.map(
+      (toolUse) => ({
+        type: "tool_result" as const,
+        tool_use_id: toolUse.id,
+        content:
+          toolUse.name === RUBRIC_SCORE_TOOL.name
+            ? applyRubricCall(toolUse)
+            : `Unknown tool '${toolUse.name}'.`,
+      }),
+    );
 
     messages = [
       ...messages,
       { role: "assistant", content: res.content },
-      {
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            tool_use_id: toolUse.id,
-            content: toolResultContent,
-          },
-        ],
-      },
+      { role: "user", content: toolResults },
     ];
   }
 
   // Hit the round cap while the model kept calling the tool with no final
   // text-only response. Report what was actually observed rather than
   // silently treating a stuck loop as a clean pass.
-  return { text: textParts.join("\n\n"), called, verdicts, overall };
+  return { text: textParts.join("\n\n"), calls };
 }
 
 /**
@@ -337,12 +371,7 @@ function stubTutor(
   documentContent: string | null,
 ): TutorTurn {
   if (!documentContent) {
-    return {
-      text: "Tell me what you think is going on here.",
-      called: false,
-      verdicts: null,
-      overall: null,
-    };
+    return { text: "Tell me what you think is going on here.", calls: [] };
   }
   const verdicts = testCase.criteria.map((c) => ({
     criterionId: c.id,
@@ -350,8 +379,6 @@ function stubTutor(
   }));
   return {
     text: "That wraps this activity — you worked through the report end to end.",
-    called: true,
-    verdicts,
-    overall: "full",
+    calls: [{ roundIndex: 0, verdicts, overall: "full" }],
   };
 }

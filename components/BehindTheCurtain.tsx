@@ -23,11 +23,11 @@ import {
 import type { FunctionReturnType } from "convex/server";
 import { api } from "@/convex/_generated/api";
 import {
-  MODELS,
   MODEL_DISPLAY,
   MODEL_MAKER,
   TUTOR_KNOWLEDGE_CUTOFF,
 } from "@/convex/lib/models";
+import { TUTOR_DEFAULT_MODEL } from "@/convex/lib/tutorModel";
 import { KID_SAFE_PRINCIPLES } from "@/lib/kidSafePrinciples";
 import { openExternal } from "@/lib/native";
 
@@ -173,7 +173,7 @@ export function BehindTheCurtain({
   // are GLOBAL (from convex/lib/models.ts), never per-scholar, so they add no
   // redaction surface; voiced in the third person so the AI stays a thing, not
   // a someone. Register adapts: kids get plain words, parents/staff an adult tone.
-  const modelLabel = MODEL_DISPLAY[MODELS.SONNET];
+  const modelLabel = MODEL_DISPLAY[TUTOR_DEFAULT_MODEL];
   const cutoff = TUTOR_KNOWLEDGE_CUTOFF;
   const facts: { label: string; body: string }[] = isScholar
     ? [

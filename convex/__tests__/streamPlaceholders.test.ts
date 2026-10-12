@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
+import { MAGIC_REDRAW_TOOL_ACTION } from "../lib/magicAnnotations";
 
 // Regression coverage for orphaned stream placeholders. An interrupted tutor
 // stream (client disconnect / action timeout) can leave an assistant message
@@ -300,6 +301,48 @@ describe("getSessionContext: generated-image visibility", () => {
     expect(c?.isFirstTurn).toBe(false);
   });
 
+  test("an existing Magic Corners redraw row is flagged as not the tutor's", async () => {
+    const t = convexTest(schema, modules);
+    const userId = await seedUser(t);
+    const sessionId = await seedSession(t, userId);
+    // The chat path no longer writes these rows, but sessions from before its
+    // removal still hold them: an upload, then the redraw's tool row.
+    const { uploadId, redrawId } = await t.run(async (ctx) => {
+      const uploadId = await ctx.storage.store(new Blob(["notebook-photo"]));
+      const redrawId = await ctx.storage.store(new Blob(["redrawn-page"]));
+      await ctx.db.insert("messages", {
+        sessionId,
+        role: "user",
+        content: "",
+        imageId: uploadId,
+        flagged: false,
+      });
+      await ctx.db.insert("messages", {
+        sessionId,
+        role: "tool",
+        content: "",
+        toolAction: MAGIC_REDRAW_TOOL_ACTION,
+        imageId: redrawId,
+        imagePrompt: "an Arctic food web with a polar bear",
+        flagged: false,
+      });
+      return { uploadId, redrawId };
+    });
+
+    const c = await t.query(internal.sessionHelpers.getSessionContext, {
+      sessionId,
+    });
+    const redraw = c?.chatHistory.find((m) => m.imageId === redrawId);
+    expect(redraw).toMatchObject({
+      generatedImage: true,
+      magicRedraw: true,
+      imagePrompt: "an Arctic food web with a polar bear",
+    });
+    // The scholar's own upload is not mistaken for a redraw.
+    const upload = c?.chatHistory.find((m) => m.imageId === uploadId);
+    expect(upload).not.toHaveProperty("magicRedraw");
+  });
+
   test("a whisper tool row is still dropped from model history", async () => {
     const t = convexTest(schema, modules);
     const userId = await seedUser(t);
@@ -559,6 +602,99 @@ describe("splitStream: empty placeholder guard", () => {
     const prior = await t.run(async (ctx) => ctx.db.get(placeholderId));
     expect(prior?.content).toBe("Here's a diagram of the cell:");
     expect(prior?.streamId).toBeUndefined(); // finalized
+  });
+
+  // The tools-path stream loop in convex/http.ts carries `fullContent` across
+  // toolRunner iterations, and a tool whose run() returns WITHOUT splitting
+  // (mark_activity_complete's structured refusal, the rubric catch /
+  // alreadyComplete / rejectedCompletion early returns) used to leave the next
+  // model message's text appended to the previous message's — one stored row
+  // reading like two glued replies. The backstop in the `message_start` branch
+  // calls splitAfterTool("") when text is still buffered at the start of a new
+  // model message. That loop lives inside an httpAction's ReadableStream around
+  // a live Anthropic tool runner and is not reachable from convex-test, so this
+  // covers the mutation contract the backstop relies on: a BLANK toolAction
+  // finalizes the prior text into its own row and opens a fresh placeholder
+  // while persisting no visible tool chip.
+  test("blank toolAction splits silently: prior text kept, no tool row", async () => {
+    const t = convexTest(schema, modules);
+    const userId = await seedUser(t);
+    const sessionId = await seedSession(t, userId);
+
+    const firstId = await t.run(async (ctx) =>
+      ctx.db.insert("messages", {
+        sessionId,
+        role: "assistant",
+        content: "Here is the summary of the water cycle.",
+        streamId: "glue-guard",
+        flagged: false,
+      }),
+    );
+
+    const secondId = await t.run(async (ctx) =>
+      ctx.runMutation(internal.sessionHelpers.splitStream, {
+        currentMessageId: firstId,
+        sessionId,
+        contentSoFar: "Here is the summary of the water cycle.",
+        toolAction: "",
+      }),
+    );
+
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query("messages")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .collect(),
+    );
+
+    // Two assistant rows, not one glued row — and no tool chip for the split.
+    const assistants = rows.filter((r) => r.role === "assistant");
+    expect(assistants).toHaveLength(2);
+    expect(rows.some((r) => r.role === "tool")).toBe(false);
+
+    const first = assistants.find((r) => r._id === firstId);
+    expect(first?.content).toBe("Here is the summary of the water cycle.");
+    expect(first?.streamId).toBeUndefined(); // finalized
+
+    const second = assistants.find((r) => r._id === secondId);
+    expect(second?.content).toBe(""); // fresh placeholder for the next message
+  });
+
+  test("blank toolAction on an empty placeholder is a no-op split", async () => {
+    const t = convexTest(schema, modules);
+    const userId = await seedUser(t);
+    const sessionId = await seedSession(t, userId);
+
+    const placeholderId = await t.run(async (ctx) =>
+      ctx.db.insert("messages", {
+        sessionId,
+        role: "assistant",
+        content: "",
+        streamId: "glue-guard-empty",
+        flagged: false,
+      }),
+    );
+
+    await t.run(async (ctx) =>
+      ctx.runMutation(internal.sessionHelpers.splitStream, {
+        currentMessageId: placeholderId,
+        sessionId,
+        contentSoFar: "",
+        toolAction: "",
+      }),
+    );
+
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query("messages")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .collect(),
+    );
+    // The empty placeholder is deleted and replaced — never a blank turn, and
+    // still no tool row.
+    expect(rows.filter((r) => r.role === "assistant")).toHaveLength(1);
+    expect(rows.some((r) => r._id === placeholderId)).toBe(false);
+    expect(rows.some((r) => r.role === "tool")).toBe(false);
   });
 
   test("persists the original generated-image prompt separately from alt text", async () => {

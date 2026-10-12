@@ -342,6 +342,9 @@ export const linkBakedUnitToSession = internalMutation({
       unitId: args.unitId,
       lessonId: args.lessonId,
       activityId: args.activityId,
+      // The wait is over: the client stops holding the opening turn and the
+      // activity kickoff opens the session on the real task.
+      questBakeStatus: undefined,
     });
     await ensureSessionActivitySetup(ctx, {
       sessionId: args.sessionId,
@@ -356,6 +359,105 @@ export const linkBakedUnitToSession = internalMutation({
     return { linked: true };
   },
 });
+
+/**
+ * The inverse of `linkBakedUnitToSession`, for repairing an "Endless chat"
+ * session that a bake upgraded in place before that choice stopped doing so
+ * (2026-09-25): detach the baked activity and everything its setup stamped, so
+ * the session reopens as the open chat the scholar picked. Keeps `unitId` —
+ * the chat still lives in their quest. Run by hand against prod. Refuses
+ * anything but an unassigned session in the scholar's own quest with no
+ * submitted work, so it can never strip a teacher-assigned activity or orphan
+ * a deliverable; the only artifact it removes is the untouched empty canvas
+ * the setup seeded under the activity's title.
+ */
+export const reopenBakedSessionAsEndlessChat = internalMutation({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, args): Promise<{ reopened: boolean }> => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session?.activityId || !session.unitId || session.assignmentId) {
+      return { reopened: false };
+    }
+    const unit = await ctx.db.get(session.unitId);
+    if (!unit || unit.authorScholarId !== session.userId) {
+      return { reopened: false };
+    }
+    const deliverable = await ctx.db
+      .query("deliverables")
+      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+      .first();
+    if (deliverable) return { reopened: false };
+    const activity = await ctx.db.get(session.activityId);
+    const artifacts = await ctx.db
+      .query("artifacts")
+      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+      .collect();
+    for (const artifact of artifacts) {
+      if (artifact.content === "" && artifact.title === activity?.title) {
+        await ctx.db.delete(artifact._id);
+      }
+    }
+    await ctx.db.patch(args.sessionId, {
+      activityId: undefined,
+      lessonId: undefined,
+      deliverableCriteria: undefined,
+      deliverableCriteriaStatus: undefined,
+      deliverableCriteriaError: undefined,
+      reflection: undefined,
+      reflectionStatus: undefined,
+      reflectionError: undefined,
+      questBakeStatus: undefined,
+    });
+    return { reopened: true };
+  },
+});
+
+/**
+ * Give up the client's opening-turn hold without attaching an activity.
+ *
+ * Every way a bake can end short of linking routes here, so a scholar's session
+ * opens the old ad-lib way within a scheduler tick instead of sitting on the
+ * "building your quest" state until the client-side cap expires. Only clears
+ * `pending`, so it can never disturb a session another path already resolved.
+ */
+export const releaseQuestBakeHold = internalMutation({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, args): Promise<void> => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session || session.questBakeStatus !== "pending") return;
+    await ctx.db.patch(args.sessionId, { questBakeStatus: undefined });
+  },
+});
+
+/**
+ * Run a bake and guarantee the session never keeps its hold unless the bake
+ * actually attached an activity.
+ *
+ * The bail-outs are the point. Both bakes can end without linking from half a
+ * dozen places — no context, a thrown design loop, `baked: false`, no online
+ * activity, an ownership mismatch — and each one leaves a scholar looking at
+ * "building your quest". A `finally` covers every existing branch and every
+ * branch someone adds later, including a throw, which is exactly the failure a
+ * per-return-site release would eventually miss.
+ */
+async function withQuestBakeHoldReleased<T extends { linked: boolean }>(
+  ctx: ActionCtx,
+  sessionId: Id<"sessions"> | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  let linked = false;
+  try {
+    const result = await run();
+    linked = result.linked;
+    return result;
+  } finally {
+    if (sessionId && !linked) {
+      await ctx.runMutation(internal.bakeUnitFromSeed.releaseQuestBakeHold, {
+        sessionId,
+      });
+    }
+  }
+}
 
 // ── Shared orchestration core (plain helpers over ActionCtx) ──────────────
 
@@ -484,65 +586,77 @@ export const bakeUnitFromSeed = internalAction({
   handler: async (
     ctx,
     args,
-  ): Promise<{ unitId: Id<"units"> | null; linked: boolean }> => {
-    const cx = await ctx.runQuery(internal.bakeUnitFromSeed.loadBakeContextFromSeed, {
-      seedId: args.seedId,
-    });
-    if (!cx) return { unitId: null, linked: false };
-
-    // Structured-seed / already-baked guard: a seed that already points at a
-    // unit was a teacher offer or a prior bake — reuse it, don't redesign.
-    let unitId: Id<"units">;
-    if (cx.alreadyStructuredUnitId) {
-      unitId = cx.alreadyStructuredUnitId;
-    } else {
-      // Create the empty scholar-owned unit (born-Draft; provenance stamped).
-      const created = await ctx.runMutation(internal.teacherAide.createScholarQuest, {
-        scholarId: cx.scholarId,
-        authorId: cx.scholarId,
-        title: deriveUnitTitle(cx.topic),
-        bakedFromSeedId: args.seedId,
-      });
-      unitId = created.unitId;
-
-      let baked = false;
-      try {
-        baked = await ensureUnitBaked(ctx, {
-          scholarId: cx.scholarId,
-          scholarRole: cx.scholarRole,
-          unitId,
-          topic: cx.topic,
-          domain: cx.domain,
-          rationale: cx.rationale,
-          connectionTo: cx.connectionTo,
-          readingLevel: cx.readingLevel,
-          path: args.path ?? null,
-        });
-      } catch (err) {
-        // The unit may be partially built; leave it (Draft) for inspection but
-        // don't stamp the seed or upgrade the session off a broken bake.
-        console.error(`[bake ${unitId}] loop failed:`, err);
-        return { unitId, linked: false };
-      }
-      if (!baked) return { unitId, linked: false };
-
-      // Stamp the seed → flips the star to "structured".
-      await ctx.runMutation(internal.bakeUnitFromSeed.stampSeedUnit, {
-        seedId: args.seedId,
-        unitId,
-      });
-    }
-
-    const linked = args.sessionId
-      ? await upgradeSessionInPlace(ctx, {
-          sessionId: args.sessionId,
-          scholarId: cx.scholarId,
-          unitId,
-        })
-      : false;
-    return { unitId, linked };
-  },
+  ): Promise<{ unitId: Id<"units"> | null; linked: boolean }> =>
+    withQuestBakeHoldReleased(ctx, args.sessionId, () =>
+      runSeedBake(ctx, args),
+    ),
 });
+
+async function runSeedBake(
+  ctx: ActionCtx,
+  args: {
+    seedId: Id<"seeds">;
+    sessionId?: Id<"sessions">;
+    path?: ChosenPath;
+  },
+): Promise<{ unitId: Id<"units"> | null; linked: boolean }> {
+  const cx = await ctx.runQuery(internal.bakeUnitFromSeed.loadBakeContextFromSeed, {
+    seedId: args.seedId,
+  });
+  if (!cx) return { unitId: null, linked: false };
+
+  // Structured-seed / already-baked guard: a seed that already points at a
+  // unit was a teacher offer or a prior bake — reuse it, don't redesign.
+  let unitId: Id<"units">;
+  if (cx.alreadyStructuredUnitId) {
+    unitId = cx.alreadyStructuredUnitId;
+  } else {
+    // Create the empty scholar-owned unit (born-Draft; provenance stamped).
+    const created = await ctx.runMutation(internal.teacherAide.createScholarQuest, {
+      scholarId: cx.scholarId,
+      authorId: cx.scholarId,
+      title: deriveUnitTitle(cx.topic),
+      bakedFromSeedId: args.seedId,
+    });
+    unitId = created.unitId;
+
+    let baked = false;
+    try {
+      baked = await ensureUnitBaked(ctx, {
+        scholarId: cx.scholarId,
+        scholarRole: cx.scholarRole,
+        unitId,
+        topic: cx.topic,
+        domain: cx.domain,
+        rationale: cx.rationale,
+        connectionTo: cx.connectionTo,
+        readingLevel: cx.readingLevel,
+        path: args.path ?? null,
+      });
+    } catch (err) {
+      // The unit may be partially built; leave it (Draft) for inspection but
+      // don't stamp the seed or upgrade the session off a broken bake.
+      console.error(`[bake ${unitId}] loop failed:`, err);
+      return { unitId, linked: false };
+    }
+    if (!baked) return { unitId, linked: false };
+
+    // Stamp the seed → flips the star to "structured".
+    await ctx.runMutation(internal.bakeUnitFromSeed.stampSeedUnit, {
+      seedId: args.seedId,
+      unitId,
+    });
+  }
+
+  const linked = args.sessionId
+    ? await upgradeSessionInPlace(ctx, {
+        sessionId: args.sessionId,
+        scholarId: cx.scholarId,
+        unitId,
+      })
+    : false;
+  return { unitId, linked };
+}
 
 /**
  * Custom-Quest bake. The scholar authored an (empty) independent-study unit via
@@ -560,38 +674,50 @@ export const bakeCustomQuestUnit = internalAction({
   handler: async (
     ctx,
     args,
-  ): Promise<{ unitId: Id<"units">; linked: boolean }> => {
-    const cx = await ctx.runQuery(internal.bakeUnitFromSeed.loadBakeContextFromUnit, {
-      unitId: args.unitId,
-    });
-    if (!cx) return { unitId: args.unitId, linked: false };
-
-    let baked = false;
-    try {
-      baked = await ensureUnitBaked(ctx, {
-        scholarId: cx.scholarId,
-        scholarRole: cx.scholarRole,
-        unitId: args.unitId,
-        topic: cx.topic,
-        domain: cx.domain,
-        rationale: cx.rationale,
-        connectionTo: cx.connectionTo,
-        readingLevel: cx.readingLevel,
-        path: args.path ?? null,
-      });
-    } catch (err) {
-      console.error(`[bake ${args.unitId}] custom-quest loop failed:`, err);
-      return { unitId: args.unitId, linked: false };
-    }
-    if (!baked) return { unitId: args.unitId, linked: false };
-
-    const linked = args.sessionId
-      ? await upgradeSessionInPlace(ctx, {
-          sessionId: args.sessionId,
-          scholarId: cx.scholarId,
-          unitId: args.unitId,
-        })
-      : false;
-    return { unitId: args.unitId, linked };
-  },
+  ): Promise<{ unitId: Id<"units">; linked: boolean }> =>
+    withQuestBakeHoldReleased(ctx, args.sessionId, () =>
+      runCustomQuestBake(ctx, args),
+    ),
 });
+
+async function runCustomQuestBake(
+  ctx: ActionCtx,
+  args: {
+    unitId: Id<"units">;
+    sessionId?: Id<"sessions">;
+    path?: ChosenPath;
+  },
+): Promise<{ unitId: Id<"units">; linked: boolean }> {
+  const cx = await ctx.runQuery(internal.bakeUnitFromSeed.loadBakeContextFromUnit, {
+    unitId: args.unitId,
+  });
+  if (!cx) return { unitId: args.unitId, linked: false };
+
+  let baked = false;
+  try {
+    baked = await ensureUnitBaked(ctx, {
+      scholarId: cx.scholarId,
+      scholarRole: cx.scholarRole,
+      unitId: args.unitId,
+      topic: cx.topic,
+      domain: cx.domain,
+      rationale: cx.rationale,
+      connectionTo: cx.connectionTo,
+      readingLevel: cx.readingLevel,
+      path: args.path ?? null,
+    });
+  } catch (err) {
+    console.error(`[bake ${args.unitId}] custom-quest loop failed:`, err);
+    return { unitId: args.unitId, linked: false };
+  }
+  if (!baked) return { unitId: args.unitId, linked: false };
+
+  const linked = args.sessionId
+    ? await upgradeSessionInPlace(ctx, {
+        sessionId: args.sessionId,
+        scholarId: cx.scholarId,
+        unitId: args.unitId,
+      })
+    : false;
+  return { unitId: args.unitId, linked };
+}

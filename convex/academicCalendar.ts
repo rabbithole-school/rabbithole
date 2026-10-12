@@ -13,7 +13,7 @@
 import { v } from "convex/values";
 import { internalQuery, type QueryCtx } from "./_generated/server";
 import { authedQuery } from "./lib/customFunctions";
-import { requireGuardianOf } from "./lib/auth";
+import { requireGuardianOrStaffPreview } from "./lib/auth";
 import { isProgramGuest } from "./lib/enrollmentStanding";
 import { EXTENDED_EDUCATION_LABEL } from "../shared/scholarGroupRouting";
 import type { Id } from "./_generated/dataModel";
@@ -221,7 +221,8 @@ async function upcomingForInstitutionInner(
 export const upcomingForScholar = authedQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args): Promise<ScholarSchoolCalendar | null> => {
-    await requireGuardianOf(ctx, args.scholarId);
+    // Guardian, or staff previewing the family view ("View as parent").
+    await requireGuardianOrStaffPreview(ctx, args.scholarId);
     const scholar = await ctx.db.get(args.scholarId);
     if (scholar && isProgramGuest(scholar)) {
       throw new Error(

@@ -7,7 +7,7 @@
  * Query: api.scholarApps.listForLauncher — identical to the web launcher.
  */
 
-import { useQuery } from "convex/react";
+import { isUnlockManagedApp } from "@/lib/asam/managedAppSchemes";
 import {
   Pressable,
   StyleSheet,
@@ -20,6 +20,8 @@ import { api, type Id } from "@/lib/convex";
 import { openExternalApp } from "@/lib/externalAppHost";
 import { AppTileMark } from "@/components/AppTileMark";
 import { useNativeAppLauncher } from "@/hooks/useNativeAppLauncher";
+import { useNow } from "@/hooks/useNow";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { colors, fonts } from "@/theme";
 import { useConvexAuth } from "@convex-dev/auth/react";
 
@@ -37,17 +39,38 @@ type LauncherTile = {
   // When set, this catalog app is also launchable as an INSTALLED native iOS
   // app; tapping opens it via URL scheme instead of the locked webview.
   nativeUrlScheme: string | null;
+  // Set instead of a scheme for a managed native app that registers none. The
+  // tile still takes the native path — readiness, allowlist, ASAM release —
+  // and then hands off to the Home Screen. Falling through to the webview here
+  // would open the app's marketing page instead of the app.
+  nativeBundleId: string | null;
 };
 
 // Landscape iPad: 6 columns fits comfortably at the default tile width.
 const TILE_SIZE = 80;
 const TILE_RADIUS = TILE_SIZE * 0.22; // squircle — matches web "borderRadius: 22%"
 
-export function AppLauncher({ scholarId }: { scholarId?: Id<"users"> }) {
+export function AppLauncher({
+  scholarId,
+  minuteNow: minuteNowProp,
+}: {
+  scholarId?: Id<"users">;
+  /** The parent's minute bucket — see the web AppLauncher for why sharing it
+   *  matters (one Convex subscription instead of two drifting ones). */
+  minuteNow?: number;
+}) {
   const { isAuthenticated } = useConvexAuth();
-  const apps = useQuery(
+  // Re-arms the subscription across institution-local midnight, when a live
+  // push stops showing with no database write — see `listForLauncher`.
+  const ownMinuteNow = Math.floor(useNow(60_000) / 60_000) * 60_000;
+  const minuteNow = minuteNowProp ?? ownMinuteNow;
+  const apps = useSmoothedQuery(
     api.scholarApps.listForLauncher,
-    isAuthenticated ? (scholarId ? { scholarId } : {}) : "skip",
+    isAuthenticated
+      ? scholarId
+        ? { scholarId, now: minuteNow }
+        : { now: minuteNow }
+      : "skip",
   ) as LauncherTile[] | undefined;
 
   // Reserve the row's height while the apps query loads, so it doesn't pop in
@@ -73,14 +96,23 @@ function AppTile({ app }: { app: LauncherTile }) {
   const open = () => {
     Haptics.selectionAsync();
     // A catalog app with a native URL scheme opens the INSTALLED native app
-    // (unlocking it with MDM if it's normally blocked, releasing ASAM for the
-    // switch, re-arming on return); otherwise it opens the keep-alive locked
-    // webview overlay (state survives reopen).
-    if (app.nativeUrlScheme) {
+    // (releasing ASAM for the switch, re-arming on return); otherwise it opens
+    // the keep-alive locked webview overlay (state survives reopen).
+    //
+    // The tile does NOT ask for access. On a managed iPad the app's place in
+    // the device allowlist is a projection of the teacher's grant — the same
+    // grant that put this tile on screen — so by the time a scholar can tap it,
+    // the app is normally already open-able. The launcher only waits, briefly,
+    // when the device has not caught up yet.
+    // A bundle id alone routes here only when the backend MANAGES that app.
+    // Gating on "has a bundle id" would send any unknown id down the native
+    // path, where there is nothing to open and no readiness contract.
+    if (app.nativeUrlScheme || isUnlockManagedApp(app)) {
       void launchNativeApp({
-        nativeUrlScheme: app.nativeUrlScheme,
+        nativeUrlScheme: app.nativeUrlScheme ?? null,
+        nativeBundleId: app.nativeBundleId ?? null,
         appName: app.name,
-        appId: app.appId,
+        externalAppId: String(app.appId),
         iconUrl: app.iconUrl,
         iconEmoji: app.iconEmoji,
         color: app.color,

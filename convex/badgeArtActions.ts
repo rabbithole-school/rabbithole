@@ -1,22 +1,22 @@
 "use node";
 
-// Badge-art generation — the one place that talks to the image model AND
-// post-processes the result, so it lives in a "use node" action (PNG decode +
-// chroma-key need Node's zlib via pngjs; the rest of badges.ts is V8-runtime
-// mutations and can't be "use node").
+// Badge-art generation — the one place that talks to the image model, so it
+// lives in a "use node" action (the rest of badges.ts is V8-runtime mutations
+// and can't be "use node").
 //
-// Flow: read the badge → build a topic-true prompt (rendered on a flat
-// chroma-green screen) → call Gemini → strip the green to real transparency
-// (lib/badgeChroma.ts) → store the PNG → patch the row. The image model can't
-// emit alpha itself, which is why we green-screen + key instead.
+// Flow: read the badge → build a topic-true prompt → call GPT-Image-2.5 with
+// `background: "transparent"` → store the PNG → patch the row. The model emits
+// real alpha, so there is no chroma screen to key out — which matters most
+// here: a keyer could never cut a patch's merrowed stitched border or a
+// medallion's specular falloff without fringing the edge that sells the object.
 
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { buildBadgePrompt } from "./lib/badgeArt";
-import { geminiGenerateImage } from "./lib/gemini";
+import { openaiGenerateImage } from "./lib/openaiImage";
+import { openaiImageUsageKey } from "./lib/models";
 import { toStorageBlob } from "./lib/imageBytes";
-import { removeGreenScreen } from "./lib/chromaImage";
 import { recordImageUsage } from "./usage";
 
 export const generateBadgeArt = internalAction({
@@ -24,6 +24,9 @@ export const generateBadgeArt = internalAction({
   handler: async (ctx, { badgeId }): Promise<void> => {
     const data = await ctx.runQuery(internal.badges.getBadgeForArt, { badgeId });
     if (!data) return;
+    // Never paint generative art over a Calculator License badge: its image
+    // is the license card (calculatorLicenseCardActions.ts).
+    if (data.kind === "calculator_license") return;
 
     const prompt = buildBadgePrompt({
       unitTitle: data.unitTitle,
@@ -33,9 +36,9 @@ export const generateBadgeArt = internalAction({
       colorway: data.colorway,
     });
 
-    const image = await geminiGenerateImage([{ text: prompt }], {
-      aspectRatio: "1:1",
-    });
+    // Unlike the tiled charm sprites, a badge is shown LARGE (the award
+    // moment, then the portfolio), so it earns the "medium" tier.
+    const image = await openaiGenerateImage(prompt, { quality: "medium" });
     if (!image) {
       await ctx.runMutation(internal.badges.setBadgeArtStatus, {
         badgeId,
@@ -44,21 +47,14 @@ export const generateBadgeArt = internalAction({
       return;
     }
 
-    void recordImageUsage(ctx, { source: "badge-art", model: image.model });
+    void recordImageUsage(ctx, {
+      source: "badge-art",
+      model: openaiImageUsageKey(image.model, image.quality),
+    });
 
-    // Strip the chroma-green background to real transparency. If decode/key ever
-    // fails, fall back to the raw image — a badge with a green square beats no
-    // badge — so a codec hiccup can't drop the award.
-    let bytes: Uint8Array = image.bytes;
-    let mime = image.mimeType;
-    try {
-      bytes = removeGreenScreen(image.bytes);
-      mime = "image/png";
-    } catch (err) {
-      console.error("[badgeArt] chroma-key failed; storing raw image", err);
-    }
-
-    const imageStorageId = await ctx.storage.store(toStorageBlob(bytes, mime));
+    const imageStorageId = await ctx.storage.store(
+      toStorageBlob(image.bytes, image.mimeType),
+    );
     await ctx.runMutation(internal.badges.setBadgeArt, {
       badgeId,
       imageStorageId,
@@ -68,10 +64,8 @@ export const generateBadgeArt = internalAction({
 });
 
 /**
- * Backfill: re-mint every existing badge's art so it picks up the green-screen
- * prompt + transparent cut. Existing badges were rendered on opaque white /
- * charcoal, which can't be keyed — so this REGENERATES them (new transparent
- * art), one scheduled `generateBadgeArt` per badge. Opt-in (run by hand):
+ * Backfill: re-mint every existing badge's art on the current prompt + model,
+ * one scheduled `generateBadgeArt` per badge. Opt-in (run by hand):
  *   npx convex run badgeArtActions:regenerateAllBadgeArt
  *   npx convex run badgeArtActions:regenerateAllBadgeArt --prod
  */

@@ -43,6 +43,8 @@ import {
   HALFLIFE_GROWTH,
 } from "./lib/practice/scheduler";
 import { PRACTICE_DOMAINS } from "./lib/practice/domains";
+import { isMappedPlacementStatus } from "./lib/practice/domainMapStatus";
+import { WHOLE_NUMBER_ARITHMETIC_DOMAIN } from "./seed/wholeNumberArithmeticGraph";
 import { requireAnthropicApiKey } from "./lib/anthropic";
 import {
   ERROR_FLAG_WINDOW_MS,
@@ -260,20 +262,27 @@ function linkPriorityTopics(
   };
 }
 
+/**
+ * Does this scholar still need to place in `domain`? One classification, shared
+ * with the scholar-facing gate (`practiceSkills.needsPlacement`) and the map
+ * derivation: **mapped = a CONVERGED placement run**, never mastery-row
+ * existence. This used to short-circuit false on any mastery row, so a
+ * SHADOW-PLACED scholar — real practice rows, no run that ever converged — read
+ * as placed in the digest while every other surface counted them unmapped.
+ * See convex/lib/practice/domainMapStatus.ts for the ruling.
+ */
 async function needsPlacementFor(
   ctx: QueryCtx,
   scholarId: Id<"users">,
   domain: string,
-  masteryRows: Doc<"practiceMastery">[],
 ): Promise<boolean> {
-  if (masteryRows.length > 0) return false;
   const placement = await ctx.db
     .query("practicePlacements")
     .withIndex("by_scholar_domain", (q) =>
       q.eq("scholarId", scholarId).eq("domain", domain),
     )
     .first();
-  return placement?.status !== "complete";
+  return !isMappedPlacementStatus(placement?.status);
 }
 
 /**
@@ -418,7 +427,7 @@ async function scholarDigestRow(
     domain,
     name: user?.name ?? user?.username ?? "Scholar",
     username: user?.username ?? null,
-    needsPlacement: await needsPlacementFor(ctx, scholarId, domain, masteryRows),
+    needsPlacement: await needsPlacementFor(ctx, scholarId, domain),
     practicedDays: signals.practicedDays,
     practiceCount,
     mathPracticeCount,
@@ -674,7 +683,13 @@ export const weeklySignalsForScholars = teacherQuery({
           name,
           username,
           domain: null,
-          needsPlacement: await needsPlacementFor(ctx, scholarId, "", allMastery),
+          // No attempted domain to narrate: ask the same question the scholar-facing
+          // gate asks with no domain argument — is the entry domain mapped?
+          needsPlacement: await needsPlacementFor(
+            ctx,
+            scholarId,
+            WHOLE_NUMBER_ARITHMETIC_DOMAIN,
+          ),
           practicedDays: 0,
           lastAttemptAt: null,
           skillsTurnedFluent: 0,
@@ -711,7 +726,7 @@ export const weeklySignalsForScholars = teacherQuery({
         name,
         username,
         domain,
-        needsPlacement: await needsPlacementFor(ctx, scholarId, domain, masteryRows),
+        needsPlacement: await needsPlacementFor(ctx, scholarId, domain),
         practicedDays: signals.practicedDays,
         lastAttemptAt: signals.lastAttemptAt,
         skillsTurnedFluent: signals.skillsTurnedFluent,

@@ -48,7 +48,11 @@ export default function ConnectPage() {
     if (typeof window !== "undefined" && window.history.length > 1) router.back();
     else
       router.push(
-        teacherHomePath(role, user?.hasSchoolOperationsAccess),
+        teacherHomePath(
+          role,
+          user?.hasSchoolOperationsAccess,
+          user?.hasCurriculumAccess,
+        ),
       );
   };
 

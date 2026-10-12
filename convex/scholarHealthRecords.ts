@@ -18,7 +18,7 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import {
-  assertNotImpersonating,
+  assertCanWrite,
   getCurrentUser,
   requireGuardianOf,
   requireUser,
@@ -49,6 +49,7 @@ import {
   type HealthRecordFields,
 } from "./lib/healthRecord";
 import { normalizeEmail } from "./lib/email";
+import { sendMedicationReviewEmail } from "./lib/medicationReviewEmail";
 import { raiseAlert } from "./alerts";
 import {
   scholarPath,
@@ -70,6 +71,8 @@ import {
   type HealthRecordConflictErrorData,
   type HealthRecordValidationErrorData,
 } from "../shared/healthRecordValidation";
+import { writeAuditLog } from "./lib/auditLog";
+import { scholarInstitutionId } from "./lib/scholarEnrollment";
 
 const healthDocumentKindValidator = v.union(
   v.literal("medication_authorization"),
@@ -625,6 +628,9 @@ async function healthDocumentView(
     reviewedAt: file.reviewedAt ?? null,
     reviewNote: file.reviewNote ?? null,
     medicationExpirations: file.medicationExpirations ?? [],
+    // When the "needs_replacement" note was actually delivered to guardians
+    // by email — null until the send succeeds, never optimistic.
+    reviewEmailSentAt: file.reviewEmailSentAt ?? null,
   };
 }
 
@@ -831,7 +837,8 @@ export async function attachStaffHealthDocumentFromStorage(
     record._id,
     healthSlotPatch(healthFieldsFrom(record), args.kind, fileId),
   );
-  await ctx.db.insert("auditLog", {
+  await writeAuditLog(ctx, {
+    institutionId: (await scholarInstitutionId(ctx, args.scholarId)) ?? null,
     actorUserId: args.user._id,
     action: supersededFileId
       ? "health_document.replace"
@@ -1255,7 +1262,7 @@ export const commitStaffHealthDocumentUpload = internalMutation({
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
     const file = await ctx.db.get(args.fileId);
     if (
       !file ||
@@ -1344,7 +1351,8 @@ export const commitStaffHealthDocumentUpload = internalMutation({
       healthSlotPatch(healthFieldsFrom(record), file.kind, file._id),
     );
 
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: (await scholarInstitutionId(ctx, file.scholarId)) ?? null,
       actorUserId: user._id,
       action: supersededFileId
         ? "health_document.replace"
@@ -1406,10 +1414,21 @@ export const setHealthDocumentReviewStatus = authedMutation({
     // Only honored on `medication_authorization`; a non-empty array on any
     // other kind is rejected rather than silently dropped.
     medicationExpirations: v.optional(v.array(medicationExpirationValidator)),
+    // The reviewer's "Email this note to guardians from Rabbithole" checkbox
+    // — only meaningful (and only ever acted on) for a `needs_replacement`
+    // verdict on the medication authorization; ignored everywhere else.
+    emailGuardians: v.optional(v.boolean()),
   },
   handler: async (
     ctx,
-    { fileId, institutionScope, reviewStatus, reviewNote, medicationExpirations },
+    {
+      fileId,
+      institutionScope,
+      reviewStatus,
+      reviewNote,
+      medicationExpirations,
+      emailGuardians,
+    },
   ) => {
     const file = await ctx.db.get(fileId);
     if (!file) throw new Error("Health document not found");
@@ -1450,11 +1469,16 @@ export const setHealthDocumentReviewStatus = authedMutation({
       reviewedAt?: number;
       reviewNote?: string;
       medicationExpirations?: { name: string; expiresAt: number }[];
+      reviewEmailSentAt?: number;
     } = {
       reviewStatus: reviewStatus === "pending" ? undefined : reviewStatus,
       reviewedBy: reviewStatus === "pending" ? undefined : ctx.user._id,
       reviewedAt: reviewStatus === "pending" ? undefined : now,
       reviewNote: reviewStatus === "pending" ? undefined : cleanedNote,
+      // Every new verdict invalidates any earlier email-sent stamp — it
+      // describes THIS review, and a fresh send (below) sets it again once
+      // delivered.
+      reviewEmailSentAt: undefined,
     };
     if (medicationExpirations !== undefined) {
       const cleaned = medicationExpirations
@@ -1469,7 +1493,26 @@ export const setHealthDocumentReviewStatus = authedMutation({
     }
     await ctx.db.patch(file._id, patch);
 
-    await ctx.db.insert("auditLog", {
+    const shouldEmailGuardians =
+      reviewStatus === "needs_replacement" &&
+      emailGuardians === true &&
+      file.kind === "medication_authorization" &&
+      cleanedNote !== undefined;
+    if (shouldEmailGuardians) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.scholarHealthRecords.sendMedicationReviewNoteEmail,
+        {
+          fileId: file._id,
+          scholarId: file.scholarId,
+          note: cleanedNote,
+          reviewedAt: now,
+        },
+      );
+    }
+
+    await writeAuditLog(ctx, {
+      institutionId: (await scholarInstitutionId(ctx, file.scholarId)) ?? null,
       actorUserId: ctx.user._id,
       action: "health_document.review",
       targetUserId: file.scholarId,
@@ -1481,10 +1524,106 @@ export const setHealthDocumentReviewStatus = authedMutation({
         ...(medicationExpirations !== undefined
           ? [`medicationExpirations=${patch.medicationExpirations?.length ?? 0}`]
           : []),
+        ...(shouldEmailGuardians ? ["emailGuardians=true"] : []),
       ].join(" "),
     });
 
     return { ok: true as const, reviewedAt: patch.reviewedAt ?? null };
+  },
+});
+
+// ── Medication review-note guardian email ──────────────────────────────────
+// Sends the "needs_replacement" review note the reviewer wrote (pre-filled
+// from `medicationReplacementNoteTemplate` on the client, but freely edited)
+// to every guardian on file for the scholar, via the same Resend pipeline the
+// bulk form reminders use. Mirrors `sendConfirmationEmail` /
+// `markConfirmationSent` below: an internal action does the network call, an
+// internal mutation stamps the result, and NOTHING here re-derives the note
+// — it only ever sends the exact text staff reviewed and submitted.
+
+type MedicationReviewEmailContext = {
+  childName: string | null;
+  recipients: { email: string; name: string | null }[];
+};
+
+export const getMedicationReviewEmailContextQuery = internalQuery({
+  args: { scholarId: v.id("users") },
+  handler: async (ctx, { scholarId }): Promise<MedicationReviewEmailContext> => {
+    const scholar = await ctx.db.get(scholarId);
+    const links = await ctx.db
+      .query("guardianships")
+      .withIndex("by_scholar", (q) => q.eq("scholarUserId", scholarId))
+      .collect();
+    const guardians = await Promise.all(
+      links.map((link) => ctx.db.get(link.parentUserId)),
+    );
+    const recipients = guardians
+      .filter((g): g is NonNullable<typeof g> => Boolean(g?.email?.trim()))
+      .map((g) => ({ email: g.email!.trim(), name: g.name ?? null }));
+    return { childName: scholar?.name ?? null, recipients };
+  },
+});
+
+export const sendMedicationReviewNoteEmail = internalAction({
+  args: {
+    fileId: v.id("healthRecordFiles"),
+    scholarId: v.id("users"),
+    note: v.string(),
+    // The `reviewedAt` stamp of the verdict this note belongs to, so the
+    // delivered-stamp can't land on a later verdict that raced the send.
+    reviewedAt: v.number(),
+  },
+  handler: async (ctx, { fileId, scholarId, note, reviewedAt }) => {
+    const context: MedicationReviewEmailContext = await ctx.runQuery(
+      internal.scholarHealthRecords.getMedicationReviewEmailContextQuery,
+      { scholarId },
+    );
+    if (context.recipients.length === 0) return null;
+
+    const formUrl = `${siteUrl()}/parent/records?child=${scholarId}`;
+    let sentAny = false;
+    for (const recipient of context.recipients) {
+      try {
+        const sent = await sendMedicationReviewEmail({
+          to: recipient.email,
+          childName: context.childName,
+          note,
+          formUrl,
+        });
+        if (sent) sentAny = true;
+      } catch (error) {
+        console.error(
+          `Failed to send medication review email to ${recipient.email}:`,
+          error,
+        );
+      }
+    }
+    if (sentAny) {
+      await ctx.runMutation(
+        internal.scholarHealthRecords.markMedicationReviewEmailSent,
+        { fileId, reviewedAt },
+      );
+    }
+    return null;
+  },
+});
+
+export const markMedicationReviewEmailSent = internalMutation({
+  args: { fileId: v.id("healthRecordFiles"), reviewedAt: v.number() },
+  handler: async (ctx, { fileId, reviewedAt }) => {
+    const file = await ctx.db.get(fileId);
+    if (!file) return null;
+    // Only stamp the review the email was written for. If staff changed the
+    // verdict while the send was in flight, that newer review was never
+    // emailed and must not say it was.
+    if (
+      file.reviewStatus !== "needs_replacement" ||
+      file.reviewedAt !== reviewedAt
+    ) {
+      return null;
+    }
+    await ctx.db.patch(fileId, { reviewEmailSentAt: Date.now() });
+    return null;
   },
 });
 
@@ -1591,7 +1730,7 @@ export const commitHealthDocumentUpload = internalMutation({
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
     const file = await ctx.db.get(args.fileId);
     if (!file || file.uploadedBy !== user._id || file.storageId) {
       throw new Error("Health document upload is unavailable");
@@ -1649,7 +1788,8 @@ export const commitHealthDocumentUpload = internalMutation({
     // custody of a current physical — log it here, on the same table and in the
     // same shape as every other guardian health write.
     if (file.kind === "physical_exam_document") {
-      await ctx.db.insert("auditLog", {
+      await writeAuditLog(ctx, {
+        institutionId: (await scholarInstitutionId(ctx, file.scholarId)) ?? null,
         actorUserId: user._id,
         action: "physical_exam.upload",
         targetUserId: file.scholarId,
@@ -2040,7 +2180,8 @@ export const saveHealthRecord = authedMutation({
       for (const slot of committedSlots) {
         // A signed legal record changed outside the signature flow. Staff
         // attachments record the same three actions in the same table.
-        await ctx.db.insert("auditLog", {
+        await writeAuditLog(ctx, {
+          institutionId: (await scholarInstitutionId(ctx, args.scholarId)) ?? null,
           actorUserId: ctx.user._id,
           action: !slot.to
             ? "health_document.remove"
@@ -2762,7 +2903,8 @@ export const requestMedicalClearance = authedMutation({
       });
     }
 
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: (await scholarInstitutionId(ctx, scholarId)) ?? null,
       actorUserId: ctx.user._id,
       action: "medical_clearance.request",
       targetUserId: scholarId,
@@ -2898,7 +3040,8 @@ export const attachMedicalClearanceDocument = authedMutation({
       await deleteHealthDocumentIfUnreferenced(ctx, previousDocumentId);
     }
 
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: (await scholarInstitutionId(ctx, request.scholarId)) ?? null,
       actorUserId: ctx.user._id,
       action: "medical_clearance.attach",
       targetUserId: request.scholarId,
@@ -2960,7 +3103,8 @@ export const reviewMedicalClearance = authedMutation({
       updatedAt: now,
     });
 
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: (await scholarInstitutionId(ctx, request.scholarId)) ?? null,
       actorUserId: ctx.user._id,
       action: "medical_clearance.review",
       targetUserId: request.scholarId,
@@ -3003,7 +3147,8 @@ export const cancelMedicalClearance = authedMutation({
       updatedAt: now,
     });
 
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: (await scholarInstitutionId(ctx, request.scholarId)) ?? null,
       actorUserId: ctx.user._id,
       action: "medical_clearance.cancel",
       targetUserId: request.scholarId,

@@ -32,6 +32,22 @@ const breakerHydrationSource = readFileSync(
 );
 
 describe("native practice.tsx machine ownership", () => {
+  // A breaker episode is scholar-WIDE but must only own the run it belongs to.
+  // The screen is keyed without the domain, so a switch re-renders in place:
+  // the host has to hand the reducer an explicit clear BEFORE asking for the
+  // new run, or the stale breaker state refuses every load. Order matters, so
+  // pin it in the source — there is no render harness for this screen.
+  it("clears a non-applicable breaker before asking for a run", () => {
+    expect(source).toContain('type: "hydrate:noBreakerForRun"');
+    const clear = source.indexOf('type: "hydrate:noBreakerForRun"');
+    const load = source.indexOf('type: "run:inputsChanged"', clear);
+    expect(clear).toBeGreaterThanOrEqual(0);
+    expect(load).toBeGreaterThan(clear);
+    // And the decision itself comes from the ONE shared predicate, never a
+    // domain comparison re-derived locally.
+    expect(source).toContain("breakerEpisodeAppliesToRun({");
+  });
+
   it("uses the shared machine as its orchestration boundary", () => {
     expect(source).toContain("usePracticeMachine(");
     expect(source).toContain('type: "run:inputsChanged"');
@@ -235,10 +251,22 @@ describe("native practice.tsx machine ownership", () => {
     const helpUsed = source.slice(start, end);
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
-    expect(helpUsed).toContain("setItems(items.slice(0, lastIdx));");
+    // Both the withdraw-on-undo and append-on-report branches route the
+    // queue mutation through the shared reducer (shared/practice/sessionMachine.ts)
+    // rather than a raw `setItems(...)` slice/splice — that centralization is
+    // the whole point of the extraction, so this guard now pins the dispatch
+    // calls instead of the setState calls they replaced.
+    expect(helpUsed).toContain('dispatchQueue({ type: "lastItemWithdrawn" });');
+    expect(helpUsed).toContain(
+      'dispatchQueue({ type: "itemAppended", item: retry });',
+    );
     expect(helpUsed).toContain(
       'machine.send({ type: "run:itemCountAdjusted", delta: -1 });',
     );
+    expect(helpUsed).toContain(
+      'machine.send({ type: "run:itemCountAdjusted", delta: 1 });',
+    );
+    expect(helpUsed).not.toContain("setItems(");
     expect(helpUsed).not.toContain("let withdrew");
   });
 

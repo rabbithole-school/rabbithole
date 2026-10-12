@@ -6,6 +6,13 @@ import { Box, Button, Text, VStack } from "@chakra-ui/react";
 interface Props {
   children: React.ReactNode;
   fallbackMessage?: string;
+  /**
+   * Render this instead of the full-width "Something went wrong" block — for
+   * wrapping ONE card, where the loud block would read as the page failing.
+   * `null` hides the card outright (right for cards that already hide
+   * themselves when empty). Omit it for the loud default.
+   */
+  fallback?: React.ReactNode;
 }
 
 interface State {
@@ -33,6 +40,8 @@ export class ErrorBoundary extends React.Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
+      // A card-level boundary stays card-sized even while an auth redirect runs.
+      if (this.props.fallback !== undefined) return this.props.fallback;
       const raw = this.state.error?.message ?? "";
       // Auth errors are handled in componentDidCatch by redirecting; show a brief stub while that happens
       if (/not authenticated/i.test(raw)) {

@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
+import { useAuthActions } from "@convex-dev/auth/react";
 import { useMutation, useQuery } from "convex/react";
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -15,15 +17,15 @@ import * as Haptics from "expo-haptics";
 
 import { api } from "@/lib/convex";
 import { leaveAccount } from "@/lib/accountNavigation";
+import { readManagedClaim } from "@/lib/managedClaim";
 import { resolveUserImageUri } from "@/lib/webEmbedConfig";
 import { fonts, palette, useColors } from "@/theme";
 import { AppTextInput } from "@/components/AppTextInput";
-import { useDeviceSignOutPrompt } from "@/hooks/useDeviceSignOut";
 
 // Account Details — the scholar's self-service account screen. Parity with the
 // web ProfileEditModal: identity, email (turns on magic-link sign-in; their
 // username + password keep working), and the reading font (dyslexia-friendly
-// options). Sign Out lives here too.
+// options). Sign Out lives here too on personal devices.
 
 const FONTS: { value: string | null; label: string }[] = [
   { value: null, label: "System default" },
@@ -46,7 +48,8 @@ export default function AccountScreen() {
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const setMyEmail = useMutation(api.users.setMyEmail);
   const updatePreferredFont = useMutation(api.users.updatePreferredFont);
-  const promptSignOut = useDeviceSignOutPrompt();
+  const { signOut } = useAuthActions();
+  const managed = readManagedClaim() !== null;
 
   const sourceEmail = me?.email;
   const [email, setEmail] = useState(() => sourceEmail ?? "");
@@ -121,7 +124,18 @@ export default function AccountScreen() {
 
   const handleSignOut = () => {
     Haptics.selectionAsync();
-    promptSignOut();
+    Alert.alert(
+      "Sign out?",
+      "You'll need your username and password to sign back in.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Sign out",
+          style: "destructive",
+          onPress: () => void signOut(),
+        },
+      ],
+    );
   };
 
   return (
@@ -217,18 +231,19 @@ export default function AccountScreen() {
         </View>
       </View>
 
-      {/* sign out */}
-      <Pressable
-        onPress={handleSignOut}
-        style={({ pressed }) => [styles.signOut, pressed && { opacity: 0.75 }]}
-      >
-        <SymbolView
-          name="rectangle.portrait.and.arrow.right"
-          size={19}
-          tintColor={colors.statusRed}
-        />
-        <Text style={styles.signOutText}>Sign out</Text>
-      </Pressable>
+      {!managed && (
+        <Pressable
+          onPress={handleSignOut}
+          style={({ pressed }) => [styles.signOut, pressed && { opacity: 0.75 }]}
+        >
+          <SymbolView
+            name="rectangle.portrait.and.arrow.right"
+            size={19}
+            tintColor={colors.statusRed}
+          />
+          <Text style={styles.signOutText}>Sign out</Text>
+        </Pressable>
+      )}
       </ScrollView>
     </>
   );

@@ -47,17 +47,11 @@ describe("creditLine (pure)", () => {
     expect(creditLine(["", "  "])).toBeNull();
   });
 
-  test("one credit", () => {
+  test("joins credited names: bare for one, 'and' for two, Oxford comma for three+", () => {
     expect(creditLine(["Kai N."])).toBe("Built from an idea by Kai N. 🌟");
-  });
-
-  test("two credits joined with 'and'", () => {
     expect(creditLine(["Kai N.", "Lani K."])).toBe(
       "Built from an idea by Kai N. and Lani K. 🌟",
     );
-  });
-
-  test("three+ credits use an Oxford-comma list", () => {
     expect(creditLine(["Kai N.", "Lani K.", "Sam T."])).toBe(
       "Built from an idea by Kai N., Lani K., and Sam T. 🌟",
     );
@@ -265,9 +259,10 @@ describe("listRecent — ordering + creditLine shapes", () => {
 });
 
 describe("markCreditDelivered — idempotence", () => {
-  test("stamps once per scholar; a second call is a no-op", async () => {
+  test("stamps once per scholar (a second call is a no-op); does not stamp a scholar who isn't credited", async () => {
     const t = convexTest(schema, modules);
     const kai = await seedUser(t, { username: "kai7" });
+    const other = await seedUser(t, { username: "other8" });
     const entryId = await t.run(async (ctx) =>
       ctx.db.insert("changelogEntries", {
         title: "Night Sky mode",
@@ -289,32 +284,14 @@ describe("markCreditDelivered — idempotence", () => {
       scholarId: kai,
       at: 222,
     });
-
-    const entry = await t.run(async (ctx) => ctx.db.get(entryId));
-    expect(entry?.creditDelivered).toEqual([{ scholarId: kai, at: 111 }]);
-  });
-
-  test("does not stamp a scholar who isn't credited", async () => {
-    const t = convexTest(schema, modules);
-    const kai = await seedUser(t, { username: "kai8" });
-    const other = await seedUser(t, { username: "other8" });
-    const entryId = await t.run(async (ctx) =>
-      ctx.db.insert("changelogEntries", {
-        title: "Night Sky mode",
-        kidBody: "dark sky",
-        creditedScholarIds: [kai],
-        creditDelivered: [],
-        createdByUserId: kai,
-        createdAt: 1,
-      }),
-    );
     await t.mutation(internal.changelog.markCreditDelivered, {
       entryIds: [entryId],
       scholarId: other,
-      at: 111,
+      at: 333,
     });
+
     const entry = await t.run(async (ctx) => ctx.db.get(entryId));
-    expect(entry?.creditDelivered).toEqual([]);
+    expect(entry?.creditDelivered).toEqual([{ scholarId: kai, at: 111 }]);
   });
 });
 

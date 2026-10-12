@@ -4,9 +4,7 @@ import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import {
-  classSubjectKey,
   linkedAssignmentIdsForClass,
-  formatMeetingSummary,
 } from "../lib/classResolver";
 
 /**
@@ -106,12 +104,6 @@ async function seedAssignment(
 // ── Pure helpers ─────────────────────────────────────────────────────────
 
 describe("classResolver pure helpers", () => {
-  test("classSubjectKey trims + lowercases", () => {
-    expect(classSubjectKey("Humanities")).toBe("humanities");
-    expect(classSubjectKey("  Humanities ")).toBe("humanities");
-    expect(classSubjectKey("MATH Workshop")).toBe("math workshop");
-  });
-
   test("linkedAssignmentIdsForClass dedupes, matches subject case-insensitively, filters group", () => {
     const ids = linkedAssignmentIdsForClass({
       placements: [
@@ -132,12 +124,6 @@ describe("classResolver pure helpers", () => {
     });
     // first-seen order, deduped
     expect(ids).toEqual(["a1", "a2"]);
-  });
-
-  test("formatMeetingSummary joins weekday short names", () => {
-    expect(formatMeetingSummary([1, 3, 5])).toBe("Mon · Wed · Fri");
-    expect(formatMeetingSummary([2])).toBe("Tue");
-    expect(formatMeetingSummary([])).toBe("");
   });
 });
 

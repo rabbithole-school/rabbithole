@@ -37,6 +37,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { hasHealthAccessForInstitution } from "@/hooks/useSchoolOperationsAccess";
 import { scholarSlug } from "@/convex/lib/channels";
 import { usernameError } from "@/convex/lib/username";
+import { serverErrorMessage } from "@/lib/serverErrorMessage";
 import {
   DEFAULT_SCHOLAR_PARTICIPATION,
   scholarMatchesParticipation,
@@ -830,7 +831,7 @@ function AddScholarDialog({
       setCreated({ userId, name: cleanName, username: cleanUsername });
       setBusy(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(serverErrorMessage(e, "Couldn't add the scholar. Try again."));
       setBusy(false);
     }
   };
@@ -908,7 +909,9 @@ function AddScholarDialog({
                         fontFamily="body"
                       />
                       <Text fontSize="2xs" color="charcoal.300" mt={1} fontFamily="body">
-                        The name they sign in with — needed to create their password.
+                        What they sign in with, along with a password. Leave it
+                        blank if they only use a school iPad — you can add one
+                        later in their Account details.
                       </Text>
                     </Box>
                     {error && (
@@ -1264,9 +1267,9 @@ function ParentDialog({
 /**
  * Email a parent their "claim your account" Welcome invite (an inert link to
  * the /claim landing page; the parent requests a fresh magic sign-in link
- * there). Backend gate: parents.sendClaimInvite (scholar-admin), which also
- * enforces the family-comms kill-switch + pilot allow-list — so this surfaces a
- * clear error if the recipient isn't enabled for sends yet.
+ * there). Backend gate: parents.sendClaimInvite (scholar-admin, scoped to the
+ * caller's institution lens, with a valid email required) — so this surfaces
+ * a clear error if the parent has no valid email on file.
  */
 function InviteParentButton({
   parentId,

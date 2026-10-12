@@ -36,6 +36,7 @@ export const NATIVE_MANIPULATIVE_KINDS = [
   "clock",
   "liquid",
   "money",
+  "molecule",
 ] as const satisfies readonly ManipulativeKind[];
 
 /**

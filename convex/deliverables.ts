@@ -26,6 +26,10 @@ import {
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { MODELS } from "./lib/models";
+import {
+  WRITING_MECHANICS_CRITERIA_ALLOWED,
+  WRITING_MECHANICS_CRITERIA_FORBIDDEN,
+} from "./lib/writingMechanicsPolicy";
 import { requireAnthropicApiKey } from "./lib/anthropic";
 import { recordAnthropicUsage } from "./usage";
 import { requireActiveScholarAccess } from "./lib/access";
@@ -41,9 +45,12 @@ import { fanOutScholarEvent, scholarDeepLink } from "./slackNotifications";
 import { maybeScheduleArtifactAssessment } from "./granuleAssessment";
 import {
   normalizeDeliverable,
-  renderCriteriaForRubricCheck,
   scoreRubricVerdicts,
 } from "./lib/deliverable";
+import {
+  buildRubricCheckUserMessage,
+  buildRubricSystemPrompt,
+} from "./lib/rubricCheckPrompt";
 import { ensureFlairArtForSession } from "./flairArt";
 import type { Doc, Id } from "./_generated/dataModel";
 import { isTextArtifact } from "../shared/textArtifacts";
@@ -57,6 +64,7 @@ import {
   projectStoredMapForScholar,
 } from "../lib/geomap/stored";
 import { portfolioFamilySharingEligibility } from "./lib/schoolMediaConsent";
+import { assertFreshUpload } from "./lib/freshUpload";
 
 // ── Queries ───────────────────────────────────────────────────────────
 
@@ -86,20 +94,25 @@ export const getForSessionActivity = authedQuery({
       .query("deliverables")
       .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
       .collect();
+    const activityRows = rows.filter((r) => r.activityId === args.activityId);
     const deliverable =
-      rows.find((r) => {
-        if (r.activityId !== args.activityId) return false;
-        if (args.artifactId !== undefined) {
-          return r.artifactId === args.artifactId;
-        }
-        return true;
-      }) ?? null;
-    if (!deliverable || isTeacher || !deliverable.mapContent) {
-      return deliverable;
+      (args.artifactId !== undefined
+        ? activityRows.find((r) => r.artifactId === args.artifactId)
+        : activityRows.find((r) => r.artifactId === undefined) ?? activityRows[0]) ??
+      null;
+    if (!deliverable) return null;
+    // Served behind this query's session gate so clients never mint a URL
+    // from a bare storage id (TRA-389).
+    const fileUrl = deliverable.fileStorageId
+      ? await ctx.storage.getUrl(deliverable.fileStorageId)
+      : null;
+    if (isTeacher || !deliverable.mapContent) {
+      return { ...deliverable, fileUrl };
     }
     const mapContent = projectStoredMapForScholar(deliverable.mapContent);
     return {
       ...deliverable,
+      fileUrl,
       mapContent: mapContent ?? undefined,
     };
   },
@@ -127,6 +140,10 @@ export const submit = authedMutation({
     if (!session) throw new Error("Session not found");
     if (session.userId !== ctx.user._id) throw new Error("Forbidden");
     const scholarId = session.userId;
+    // Free play (TRA-489) is the scholar's own version: no deliverable.
+    if (session.freePlay === true) {
+      throw new Error("Free play has no deliverable");
+    }
 
     const activity = await ctx.db.get(args.activityId);
     if (!activity) throw new Error("Activity not found");
@@ -182,14 +199,6 @@ export const submit = authedMutation({
     ) {
       throw new Error("Add something to your work before sending it");
     }
-    // NOTE (provenance): `fileStorageId` is caller-supplied and not bound to a
-    // verified upload by this scholar. A signed-in scholar who already knows
-    // another valid opaque storage id could attach it here and have the assess
-    // path read it. Binding uploads to their uploader is a separate hardening
-    // follow-up, not fixed here (the resolver layer, files.getUrl/getUrls, now
-    // at least requires auth). Storage ids are opaque and not enumerable
-    // through this path.
-
     // Find-or-insert. Dedupe key: (sessionId, activityId, artifactId).
     const rows = await ctx.db
       .query("deliverables")
@@ -203,6 +212,15 @@ export const submit = authedMutation({
         }
         return r.artifactId === undefined;
       }) ?? null;
+    // `fileUrl` and the assess path serve this blob back, so a newly named file
+    // must be a fresh upload, not a storage id the caller learned (TRA-394). A
+    // re-check of the file already on the row is not a new claim.
+    if (
+      args.fileStorageId !== undefined &&
+      args.fileStorageId !== existing?.fileStorageId
+    ) {
+      await assertFreshUpload(ctx, args.fileStorageId);
+    }
 
     // Slack: submissions ping any group channel this scholar's groups
     // opted into (no-op when nothing is linked).
@@ -211,7 +229,7 @@ export const submit = authedMutation({
       const scholar = await ctx.db.get(scholarId);
       await fanOutScholarEvent(ctx, {
         scholarId,
-        text: `*${scholar?.name ?? "A scholar"}* sent *${activity.title}* — <${scholarDeepLink(scholarId)}|open>`,
+        text: `**${scholar?.name ?? "A scholar"}** sent **${activity.title}** — <${scholarDeepLink(scholarId)}|open>`,
         dedupeKey: `deliverable:${deliverableId}`,
       });
     };
@@ -417,6 +435,53 @@ export async function resolveScorableArtifactId(
   return newest._id;
 }
 
+/**
+ * Flair is permanent: every criterion a check marks `full` that the row has
+ * not already earned is appended with its awarding note; nothing is removed.
+ * Shared by the tutor's document score and the scholar's own Check (photo /
+ * scan / text), so a full criterion pays out the same way whoever graded it.
+ */
+export function mintFlair(
+  existing: Doc<"deliverables">["flairEarned"],
+  verdicts: ReadonlyArray<{
+    criterionId: string;
+    level: "not" | "half" | "full";
+    note?: string;
+    waived?: boolean;
+  }>,
+  earnedAt: number,
+): {
+  flairEarned: NonNullable<Doc<"deliverables">["flairEarned"]>;
+  newlyEarnedIds: string[];
+} {
+  const flairEarned = [...(existing ?? [])];
+  const earnedCriterionIds = new Set(
+    flairEarned.map((flair) => flair.criterionId),
+  );
+  const newlyEarnedIds: string[] = [];
+  for (const verdict of verdicts) {
+    if (
+      verdict.level !== "full" ||
+      // A waived criterion (conventions on an activity that does not assess
+      // them, TRA-502) passes but demonstrated nothing: no flair for it.
+      verdict.waived === true ||
+      earnedCriterionIds.has(verdict.criterionId)
+    ) {
+      continue;
+    }
+    flairEarned.push({
+      criterionId: verdict.criterionId,
+      earnedAt,
+      // Snapshot the awarding note: it is what the scholar reads on the
+      // mark, and re-checks overwrite `verdicts`.
+      ...(verdict.note?.trim() ? { note: verdict.note.trim() } : {}),
+    });
+    earnedCriterionIds.add(verdict.criterionId);
+    newlyEarnedIds.push(verdict.criterionId);
+  }
+  return { flairEarned, newlyEarnedIds };
+}
+
 export const applyRubricScoreFromTool = internalMutation({
   args: {
     sessionId: v.id("sessions"),
@@ -446,6 +511,8 @@ export const applyRubricScoreFromTool = internalMutation({
         // snapshotted onto any flair it earns — it is the only scholar-readable
         // explanation of a mark (a criterion's `description` is grader-facing).
         note: v.optional(v.string()),
+        // A `full` the judge waived under the writing-conventions policy.
+        waived: v.optional(v.boolean()),
       }),
     ),
   },
@@ -453,6 +520,9 @@ export const applyRubricScoreFromTool = internalMutation({
     const session = await ctx.db.get(args.sessionId);
     if (!session || !session.activityId) {
       throw new Error("Project has no activity to score against");
+    }
+    if (session.freePlay === true) {
+      throw new Error("Free play is not scored");
     }
     const activity = await ctx.db.get(session.activityId);
     if (!activity?.deliverable) {
@@ -536,37 +606,17 @@ export const applyRubricScoreFromTool = internalMutation({
         r.artifactId === artifactId,
     );
     const scoreTime = Date.now();
-    const flairEarned = [...(existing?.flairEarned ?? [])];
-    const earnedCriterionIds = new Set(
-      flairEarned.map((flair) => flair.criterionId),
+    const { flairEarned, newlyEarnedIds } = mintFlair(
+      existing?.flairEarned,
+      verdicts,
+      scoreTime,
     );
-    const newlyEarnedFlair: Array<{
-      criterionId: string;
-      label: string;
-    }> = [];
-    for (const verdict of verdicts) {
-      if (
-        verdict.level !== "full" ||
-        earnedCriterionIds.has(verdict.criterionId)
-      ) {
-        continue;
-      }
-      flairEarned.push({
-        criterionId: verdict.criterionId,
-        earnedAt: scoreTime,
-        // Snapshot the awarding note: it is what the scholar reads on the
-        // mark, and re-checks overwrite `verdicts`.
-        ...(verdict.note?.trim() ? { note: verdict.note.trim() } : {}),
-      });
-      earnedCriterionIds.add(verdict.criterionId);
-      const criterion = criteria.find(
-        (candidate) => candidate.id === verdict.criterionId,
-      );
-      newlyEarnedFlair.push({
-        criterionId: verdict.criterionId,
-        label: criterion?.label ?? verdict.criterionId,
-      });
-    }
+    const newlyEarnedFlair = newlyEarnedIds.map((criterionId) => ({
+      criterionId,
+      label:
+        criteria.find((candidate) => candidate.id === criterionId)?.label ??
+        criterionId,
+    }));
 
     let deliverableId: Id<"deliverables">;
     if (existing) {
@@ -691,6 +741,7 @@ export const applyAdvanceRubricScoreFromTool = internalMutation({
         // validator without `note` would reject every conversation rubric.
         // Conversation rubrics mint no flair, so it is only stored, not shown.
         note: v.optional(v.string()),
+        waived: v.optional(v.boolean()),
       }),
     ),
   },
@@ -698,6 +749,9 @@ export const applyAdvanceRubricScoreFromTool = internalMutation({
     const session = await ctx.db.get(args.sessionId);
     if (!session || !session.activityId) {
       throw new Error("Project has no activity to score against");
+    }
+    if (session.freePlay === true) {
+      throw new Error("Free play is not scored");
     }
     const activity = await ctx.db.get(session.activityId);
     if (!activity?.advanceRubric) {
@@ -838,37 +892,6 @@ export const applySetAngleFromTool = internalMutation({
 
 // ── AI rubric check (action) ──────────────────────────────────────────
 
-const buildRubricSystemPrompt = (
-  profile: InstitutionPromptProfile = DEFAULT_INSTITUTION_PROMPT_PROFILE,
-): string => `You evaluate a scholar's deliverable against an explicit rubric. The scholar is a gifted elementary-age child at ${profile.schoolName}. Be DIRECT and HONEST. Do not be sycophantic.
-
-Your job: judge each numbered criterion individually, then give an overall verdict. Critique is the point — when something misses a criterion, say so clearly and specifically. When it lands, acknowledge it concisely and move on.
-
-Per-criterion verdicts:
-- "full"  — the criterion is met as written.
-- "half"  — partially met. Something concrete is still missing or imprecise.
-- "not"   — not met at all, or the submission is off-topic for this criterion.
-
-Overall:
-- "full"  — every criterion is "full". This is a PASS.
-- "half"  — at least one criterion is "half" or "not", but the submission shows real engagement. Scholar should revise.
-- "not"   — the submission doesn't engage with the rubric at all.
-
-Tone:
-- Speak to the scholar in second person.
-- Respectful but not coddling. Bright kids handle — and want — honest feedback.
-- No reflexive praise. Avoid "Great job!", "Nice effort!", "I love that you...", "I appreciate...", or any other empty validation.
-- Specific beats generic. "Your explanation of lift conflates Bernoulli's principle with Newton's third law" beats "Your physics could be clearer."
-- Per-criterion notes are 1 sentence each. The summary is 1–3 short paragraphs.
-
-Calibration:
-- Apply each criterion as written. If a criterion demands specifics, vague answers don't earn "full". If it demands a count (e.g., "3-5 sentences"), enforce it.
-- At the boundary, lean toward "half" with a specific path forward — not "full" with hedging. Re-submission is unlimited; honest "almost, here's what's missing" is more useful than a wishy-washy pass.
-- If the scholar wrote something clever but off-topic for the criterion, that's "not" or "half" — acknowledge the cleverness briefly, redirect to what was asked for.
-- Length isn't quality. A short tight answer can be "full"; a long meandering one can be "half".
-
-You MUST call the report_rubric_check tool with your verdicts. Do not respond with raw text.`;
-
 export const RUBRIC_TOOL = {
   name: "report_rubric_check",
   description:
@@ -893,15 +916,29 @@ export const RUBRIC_TOOL = {
               description:
                 "One sentence — what about the submission earned this level for this criterion. Specific, not generic.",
             },
+            waived: {
+              type: "boolean" as const,
+              description:
+                "Set true ONLY when you gave 'full' because the writing-conventions policy says this activity does not assess that criterion. Omit otherwise.",
+            },
           },
           required: ["criterionId", "level", "note"] as const,
         },
       },
+      // Deliberately NOT required, and ignored whenever a rubric exists: the
+      // aggregate is DERIVED from the per-criterion verdicts via
+      // scoreRubricVerdicts, the same rule the tutor path uses. Asking a model
+      // to also compute it bought two failure modes — it omitted the field on
+      // ~13% of borderline gradings (stop_reason "tool_use", every other field
+      // present), which threw an uncaught ArgumentValidationError and lost the
+      // whole check; and its own definition of "half" disagreed with the tutor
+      // path's, so one column meant two things. Kept only for the holistic
+      // no-rubric case, where there are no criteria to aggregate.
       overall: {
         type: "string" as const,
         enum: ["not", "half", "full"] as const,
         description:
-          "Aggregate verdict. 'full' = every criterion full = PASS. 'half' = needs revision. 'not' = off-topic / no engagement.",
+          "Only when this activity has NO rubric: a holistic verdict for the work as a whole. When a rubric is present, omit it — the aggregate is computed from your per-criterion verdicts.",
       },
       feedback: {
         type: "string" as const,
@@ -930,7 +967,6 @@ export const RUBRIC_TOOL = {
     },
     required: [
       "verdicts",
-      "overall",
       "feedback",
       "conceptLabel",
       "domain",
@@ -945,6 +981,7 @@ interface RubricVerdict {
   criterionId: string;
   level: VerdictLevel;
   note: string;
+  waived?: true;
 }
 interface RubricResult {
   verdicts: RubricVerdict[];
@@ -984,28 +1021,16 @@ export const checkRubric = action({
       );
     }
 
-    // Per-scholar angle (if this activity has hasScholarAngles).
-    const angleLine = angle
-      ? `\n\nThe scholar's chosen angle: ${angle.title} — ${angle.description}`
-      : "";
-
-    const rubricBlock = renderCriteriaForRubricCheck(resolvedCriteria);
-    const readingLevelLine = readingLevel
-      ? `Scholar reading level: ${readingLevel}. CALIBRATE level-dependent criteria (length, mechanics, vocabulary) to this level — but apply level-INDEPENDENT criteria (specificity, structure, engagement, originality) at the same bar regardless of level. Don't grade-inflate.`
-      : null;
-    const userMessage = [
-      `Activity: ${activity.title}${activity.description ? ` — ${activity.description}` : ""}`,
-      `Deliverable prompt: ${activity.deliverable.prompt}`,
-      readingLevelLine,
-      `RUBRIC (numbered criteria — return one verdict per id):`,
-      rubricBlock,
-      angleLine ? angleLine : null,
-      "",
-      "── The scholar's submission ──",
-      deliverable.textContent ?? "(non-text deliverable; see attached content if present)",
-    ]
-      .filter((s) => s !== null)
-      .join("\n");
+    const userMessage = buildRubricCheckUserMessage({
+      activityTitle: activity.title,
+      activityDescription: activity.description,
+      deliverablePrompt: activity.deliverable.prompt,
+      readingLevel,
+      criteria: resolvedCriteria,
+      angle,
+      submissionText: deliverable.textContent,
+      assessesWritingMechanics: activity.assessesWritingMechanics,
+    });
 
     const { default: Anthropic } = await import("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: requireAnthropicApiKey() });
@@ -1036,32 +1061,26 @@ export const checkRubric = action({
         }),
       });
       const raw = toolBlock.input as ToolReturn;
-      const validIds = new Set(resolvedCriteria.map((c) => c.id));
-      const seenIds = new Set<string>();
-      const cleanVerdicts: RubricVerdict[] = [];
-      for (const v of raw.verdicts ?? []) {
-        if (!validIds.has(v.criterionId)) continue;
-        if (seenIds.has(v.criterionId)) continue;
-        seenIds.add(v.criterionId);
-        cleanVerdicts.push({
-          criterionId: v.criterionId,
-          level: v.level,
-          note: v.note,
-        });
-      }
-      for (const c of resolvedCriteria) {
-        if (!seenIds.has(c.id)) {
-          cleanVerdicts.push({
-            criterionId: c.id,
-            level: "not",
-            note: "(no verdict returned by checker)",
-          });
-        }
-      }
+      // Derive the aggregate rather than trusting the model's — one rule
+      // (scoreRubricVerdicts) shared with the tutor path, so `overall` cannot
+      // mean two different things depending on which grader wrote it. This
+      // also normalizes the verdicts (drops unknown ids, dedupes, fills any
+      // criterion the model skipped with "not"), which is exactly what the
+      // hand-rolled block here used to do. No empty-criteria branch: this
+      // handler already threw above when resolvedCriteria is empty, so a
+      // no-rubric fallback here would be dead code masquerading as a policy
+      // (deliverableAssess owns the live no-rubric path).
+      const scored = scoreRubricVerdicts(resolvedCriteria, raw.verdicts ?? []);
       parsed = {
         ...raw,
-        verdicts: cleanVerdicts,
-        passed: raw.overall === "full",
+        verdicts: scored.verdicts.map((v) => ({
+          criterionId: v.criterionId,
+          level: v.level,
+          note: v.note ?? "(no verdict returned by checker)",
+          ...(v.waived ? { waived: true as const } : {}),
+        })),
+        overall: scored.overall,
+        passed: scored.passed,
       };
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1084,6 +1103,7 @@ export const checkRubric = action({
 
     await ctx.runMutation(internal.deliverables.applyCheckResult, {
       deliverableId: args.deliverableId,
+      assessedSubmittedAt: deliverable.submittedAt,
       verdicts: parsed.verdicts,
       overall: parsed.overall,
       feedback: parsed.feedback,
@@ -1255,6 +1275,9 @@ export const getAssessFile = internalQuery({
 export const applyCheckResult = internalMutation({
   args: {
     deliverableId: v.id("deliverables"),
+    // The row's `submittedAt` when the check read it. Required so every
+    // caller has to say which submission its verdicts describe.
+    assessedSubmittedAt: v.number(),
     verdicts: v.array(
       v.object({
         criterionId: v.string(),
@@ -1264,6 +1287,7 @@ export const applyCheckResult = internalMutation({
           v.literal("full"),
         ),
         note: v.optional(v.string()),
+        waived: v.optional(v.boolean()),
       }),
     ),
     overall: v.union(
@@ -1277,18 +1301,31 @@ export const applyCheckResult = internalMutation({
     masteryLevel: v.number(),
     confidence: v.number(),
   },
-  handler: async (ctx, args) => {
+  handler: async (ctx, args): Promise<{ applied: boolean }> => {
     const d = await ctx.db.get(args.deliverableId);
-    if (!d) return;
+    if (!d) return { applied: false };
+    // The check read the work as it stood at `assessedSubmittedAt`. A retake
+    // (or any new submission) advances `submittedAt` while the model is still
+    // reading, and a result that lands after it describes work that is no
+    // longer on the row: its verdicts would be shown against the new photo and
+    // its full criteria would mint flair the new photo never earned. Drop it.
+    if (d.submittedAt !== args.assessedSubmittedAt) return { applied: false };
     const passed = args.overall === "full";
+    const checkedAt = Date.now();
+    const { flairEarned, newlyEarnedIds } = mintFlair(
+      d.flairEarned,
+      args.verdicts,
+      checkedAt,
+    );
     await ctx.db.patch(args.deliverableId, {
       verdicts: args.verdicts,
       overall: args.overall,
       rubricPassed: passed,
       rubricFeedback: args.feedback,
-      rubricCheckedAt: Date.now(),
+      rubricCheckedAt: checkedAt,
       rubricCheckedBy: "ai",
       lastAction: "check",
+      ...(newlyEarnedIds.length > 0 ? { flairEarned } : {}),
     });
 
     // Mastery write-through (DRY with observer). For a scanned deliverable
@@ -1321,7 +1358,7 @@ export const applyCheckResult = internalMutation({
     } catch (err) {
       console.error("[applyCheckResult] mastery write failed", err);
     }
-
+    return { applied: true };
   },
 });
 
@@ -1350,7 +1387,7 @@ async function markActivityCompleted(
   const scholar = await ctx.db.get(scholarId);
   await fanOutScholarEvent(ctx, {
     scholarId,
-    text: `*${scholar?.name ?? "A scholar"}* completed *${activity?.title ?? "an activity"}* (rubric passed) — <${scholarDeepLink(scholarId)}|open>`,
+    text: `**${scholar?.name ?? "A scholar"}** completed **${activity?.title ?? "an activity"}** (rubric passed) — <${scholarDeepLink(scholarId)}|open>`,
   });
 }
 
@@ -1370,17 +1407,17 @@ const buildCriteriaGenSystemPrompt = (
 A scholar is about to work on an activity. Your job: produce 3-5 dimensional rubric criteria that capture the quality bar for THIS scholar, given their reading level and the teacher's intent. The criteria are a private map for the AI tutor, not a scholar checklist and not a completion gate. The tutor later judges each criterion not/half/full. Only a full criterion is revealed to the scholar: its label and description appear together as permanent flair.
 
 CALIBRATION RULES:
-- Level-dependent dimensions (length, mechanics like spelling/capitalization, vocabulary): SCALE to the scholar's reading level. A 6-year-old emerging reader's "Length: full" might be 2 sentences; a 5th grader's might be 6 with varied structure. Don't hold a 1st grader to a 5th grader's bar.
+- Level-dependent dimensions (length, vocabulary): SCALE to the scholar's reading level. A 6-year-old emerging reader's "Length: full" might be 2 sentences; a 5th grader's might be 6 with varied structure. Don't hold a 1st grader to a 5th grader's bar.
 - Level-INDEPENDENT dimensions (specificity, structure, engagement, originality, evidence): use the SAME bar regardless of reading level. "Names a specific person" is the same for a 1st grader and a 5th grader; gifted scholars at any age can engage with content specifically.
 
 CRITERIA SHAPE:
 - 3-5 items. Fewer is fine if the deliverable is small.
 - Each is { label, description }.
-- Label: 1-4 words, plain. E.g. "Specificity", "Mechanics", "Beginning, middle, end".
+- Label: 1-4 words, plain. E.g. "Specificity", "Evidence", "Beginning, middle, end".
 - Description: a single sentence stating concretely what counts as "full" for THIS scholar. Include the failure mode if it makes the bar clearer.
 
 DIMENSIONAL > PROCEDURAL:
-- Make criteria about WHAT'S TRUE OF THE WORK (specificity, structure, mechanics), not about WHAT THE SCHOLAR DID (drafted, revised, brainstormed). Procedural lives in the process pipeline, not the rubric.
+- Make criteria about WHAT'S TRUE OF THE WORK (specificity, structure, evidence), not about WHAT THE SCHOLAR DID (drafted, revised, brainstormed). Procedural lives in the process pipeline, not the rubric.
 
 Don't be sycophantic. Don't pad. Don't restate the deliverable prompt.
 
@@ -1494,6 +1531,8 @@ interface CriteriaGenContext {
   angleTitle: string | null;
   angleDescription: string | null;
   institutionProfile: InstitutionPromptProfile;
+  // The activity's `assessesWritingMechanics` flag (TRA-502).
+  assessesWritingMechanics: boolean;
 }
 
 export const internalGetCriteriaGenContext = internalQuery({
@@ -1564,6 +1603,7 @@ export const internalGetCriteriaGenContext = internalQuery({
         ctx,
         session.testDriveAsScholarId ?? session.userId,
       ),
+      assessesWritingMechanics: activity.assessesWritingMechanics === true,
     };
   },
 });
@@ -1599,6 +1639,37 @@ export const recordCriteriaError = internalMutation({
   },
 });
 
+/**
+ * The user turn the per-scholar criteria generator receives. Pure so a test can
+ * prove the writing-conventions rule reaches it (TRA-502).
+ */
+export function buildCriteriaGenUserMessage(
+  bundle: Omit<CriteriaGenContext, "scholarId" | "institutionProfile">,
+): string {
+  const angleBlock = bundle.angleTitle
+    ? [
+        `Scholar's chosen angle for this activity: ${bundle.angleTitle}${bundle.angleDescription ? ` — ${bundle.angleDescription}` : ""}`,
+        "SPECIALIZE the criteria to that angle — a scholar whose angle is 'Wings' should be judged on wing-specific specifics, not on engines-specific specifics.",
+      ]
+    : [];
+  return [
+    bundle.unitTitle ? `Unit: ${bundle.unitTitle}` : null,
+    bundle.lessonTitle ? `Lesson: ${bundle.lessonTitle}` : null,
+    ...angleBlock,
+    `Activity: ${bundle.activityTitle}${bundle.activityDescription ? ` — ${bundle.activityDescription}` : ""}`,
+    `Deliverable prompt (what the scholar produces): ${bundle.deliverablePrompt}`,
+    `Teacher's notes about quality bar / intent: ${bundle.teacherNotes ?? "(none — infer from the deliverable prompt and unit context)"}`,
+    `Scholar's reading level: ${bundle.readingLevel ?? "(not set — pick a sensible default for elementary)"}`,
+    bundle.assessesWritingMechanics
+      ? WRITING_MECHANICS_CRITERIA_ALLOWED
+      : WRITING_MECHANICS_CRITERIA_FORBIDDEN,
+    "",
+    "Produce 3-5 dimensional criteria calibrated for this scholar. Call report_criteria.",
+  ]
+    .filter((s) => s !== null)
+    .join("\n");
+}
+
 export const generateCriteriaForSession = internalAction({
   args: { sessionId: v.id("sessions") },
   handler: async (ctx, args): Promise<void> => {
@@ -1614,26 +1685,7 @@ export const generateCriteriaForSession = internalAction({
         })
       : null;
 
-    const angleBlock = bundle.angleTitle
-      ? [
-          `Scholar's chosen angle for this activity: ${bundle.angleTitle}${bundle.angleDescription ? ` — ${bundle.angleDescription}` : ""}`,
-          "SPECIALIZE the criteria to that angle — a scholar whose angle is 'Wings' should be judged on wing-specific specifics, not on engines-specific specifics.",
-        ]
-      : [];
-
-    const userMessage = [
-      bundle.unitTitle ? `Unit: ${bundle.unitTitle}` : null,
-      bundle.lessonTitle ? `Lesson: ${bundle.lessonTitle}` : null,
-      ...angleBlock,
-      `Activity: ${bundle.activityTitle}${bundle.activityDescription ? ` — ${bundle.activityDescription}` : ""}`,
-      `Deliverable prompt (what the scholar produces): ${bundle.deliverablePrompt}`,
-      `Teacher's notes about quality bar / intent: ${bundle.teacherNotes ?? "(none — infer from the deliverable prompt and unit context)"}`,
-      `Scholar's reading level: ${bundle.readingLevel ?? "(not set — pick a sensible default for elementary)"}`,
-      "",
-      "Produce 3-5 dimensional criteria calibrated for this scholar. Call report_criteria.",
-    ]
-      .filter((s) => s !== null)
-      .join("\n");
+    const userMessage = buildCriteriaGenUserMessage(bundle);
 
     try {
       const { default: Anthropic } = await import("@anthropic-ai/sdk");

@@ -2,7 +2,7 @@ import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { internal } from "../_generated/api";
-import { buildPreReaderSection } from "../prompts";
+import { buildPreReaderSection, buildYoungReaderTurnRules } from "../prompts";
 import { buildSystemPrompt, buildSystemPromptParts } from "../sessionHelpers";
 import { resolveReadingLevel } from "../sessionContextHelpers";
 import { PRE_READER_LEVEL } from "../lib/readingLevels";
@@ -24,88 +24,6 @@ const modules = (
 // wording ever drifts.
 const generic = (level: string) =>
   `\n\nREADING LEVEL: The scholar's reading level is set to "${level}". Adjust your vocabulary and sentence complexity accordingly. You can still explore advanced topics, but frame explanations at this reading level.`;
-
-// ── buildPreReaderSection — the register rules ───────────────────────
-
-describe("buildPreReaderSection", () => {
-  const s = buildPreReaderSection();
-
-  test("frames output as spoken aloud to a very young child", () => {
-    expect(s).toContain("PRE-READER MODE");
-    expect(s).toContain("read ALOUD");
-    expect(s).toContain("can't read yet");
-  });
-
-  test("one idea / one question, short turns, lists become two turns", () => {
-    expect(s).toContain("ONE idea per turn");
-    expect(s).toContain("at most ONE question");
-    expect(s).toContain("one to three short sentences");
-    expect(s).toContain("two turns, not one");
-  });
-
-  test("instructs oral language — NO markdown structure", () => {
-    expect(s).toMatch(/No headings, no bullet points, no numbered lists/);
-    expect(s).toContain("no bold");
-    expect(s).toContain("parentheses");
-    // The output must carry no markdown structure at all — the whole point.
-    expect(s).toMatch(/read aloud, those are meaningless/i);
-  });
-
-  test("never dumb the ideas down — one grounded new word at a time", () => {
-    expect(s).toContain("Never dumb the ideas down");
-    expect(s).toContain("ONE new one at a time");
-    expect(s).toContain("symmetry — same on both sides");
-  });
-
-  test("real wait time after a genuine question", () => {
-    expect(s).toContain("STOP");
-    expect(s).toMatch(/Don't fill the silence with hints/);
-  });
-
-  test("think-aloud modeling, then hand it back", () => {
-    expect(s).toContain("Think out loud");
-    expect(s).toContain("count first");
-  });
-
-  test("physical + visual probes before verbal; images are first-class", () => {
-    expect(s).toContain("show me with your fingers");
-    expect(s).toContain("stand on one foot");
-    expect(s).toMatch(/generating an image is one of your BEST moves/);
-  });
-
-  test("garbled input → cheerful retry, never shame or a misheard echo", () => {
-    expect(s).toContain('never say "I didn\'t understand"');
-    expect(s).toContain("never scold");
-    expect(s).toMatch(/never repeat a misheard word back as if it were real/);
-    expect(s).toContain("ask something smaller");
-  });
-
-  test("off-topic wonder gets one answer then a gentle bridge; funnel warning", () => {
-    expect(s).toContain("one honest answer");
-    expect(s).toMatch(/gently walk back to the work/);
-    expect(s).toContain("funnel");
-    expect(s).toContain("THEIR idea");
-  });
-
-  test("warmth about thinking — the no-empty-validators rule stays in force", () => {
-    expect(s).toContain("no-empty-validators rule above stays in FULL force");
-    expect(s).toContain('"Great job!"');
-    expect(s).toContain('"Good question!"');
-    expect(s).toContain("THINKING");
-  });
-
-  test("uses singular they instead of assigning a gender to pre-readers", () => {
-    expect(s).toContain("read ALOUD to them");
-    expect(s).toContain("they never see your words");
-    expect(s).not.toMatch(/\b(she|her)\b/i);
-  });
-
-  test("SPOKEN OUTPUT note: spell out numbers/symbols for TTS", () => {
-    expect(s).toContain("SPOKEN OUTPUT");
-    expect(s).toContain("one hundred and two");
-    expect(s).toContain('"plus" not "+"');
-  });
-});
 
 // ── buildSystemPrompt: renders at the tier, absent otherwise ─────────
 
@@ -142,14 +60,17 @@ describe("buildSystemPrompt — pre-reader register wiring", () => {
     expect(graded).toContain(generic("5"));
     expect(pre).toContain(buildPreReaderSection());
     expect(graded.replace(generic("5"), SLOT)).toBe(
-      pre.replace(buildPreReaderSection(), SLOT),
+      pre.replace(buildPreReaderSection() + buildYoungReaderTurnRules(), SLOT),
     );
   });
 });
 
-// ── Cache placement: matches the generic sentence's DYNAMIC tail ─────
+// ── Cache placement: scholar-stable → the CACHED stable prefix ────────
 
-describe("pre-reader register lands in the dynamic tail (like the generic note)", () => {
+describe("pre-reader register lands in the cached stable prefix (like the generic note)", () => {
+  // The reading level is scholar-stable (a per-session override is
+  // session-stable too), so both variants sit ahead of the prompt-cache
+  // breakpoint and are read from cache every turn (TRA-185).
   // Positional call: only scholarName + readingLevel (2nd param) are set;
   // the remaining required leading args are null.
   const parts = (readingLevel: string | null) =>
@@ -162,16 +83,16 @@ describe("pre-reader register lands in the dynamic tail (like the generic note)"
       null, // perspectiveContext
     );
 
-  test("the register is in `dynamic` (not the cached `stable` prefix)", () => {
+  test("the register is in `stable` (cached), not the per-turn `dynamic` tail", () => {
     const { stable, dynamic } = parts(PRE_READER_LEVEL);
-    expect(dynamic).toContain("PRE-READER MODE");
-    expect(stable).not.toContain("PRE-READER MODE");
+    expect(stable).toContain("PRE-READER MODE");
+    expect(dynamic).not.toContain("PRE-READER MODE");
   });
 
-  test("the generic reading-level note is in `dynamic` too — placement matched", () => {
+  test("the generic reading-level note is in `stable` too — placement matched", () => {
     const { stable, dynamic } = parts("5");
-    expect(dynamic).toContain("READING LEVEL:");
-    expect(stable).not.toContain("READING LEVEL:");
+    expect(stable).toContain("READING LEVEL:");
+    expect(dynamic).not.toContain("READING LEVEL:");
   });
 });
 

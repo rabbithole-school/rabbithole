@@ -17,6 +17,10 @@ import { FieldSelect } from "@/components/ui/FieldSelect";
 /**
  * The School shell is always scoped to one institution. Platform admins can
  * pivot that scope here; institution-scoped staff keep their fixed membership.
+ *
+ * The displayed selection is whatever the LENS resolved, never merely what the
+ * URL asked for — `canonicalInstitutionScope` reads `honored` off the server
+ * payload so a scope the lens declined can never be shown as if it were active.
  */
 export function SchoolInstitutionSelect() {
   const pathname = usePathname();
@@ -80,6 +84,11 @@ export function SchoolInstitutionSelect() {
           <option
             key={institution._id}
             value={institution.slug}
+            // A suspended school is filtered out of the lens candidates
+            // entirely (convex/lib/institutionLens.ts), so picking it would
+            // silently leave you on your home school's data. Keep it visible —
+            // it is paused, not deleted — but not pickable.
+            disabled={institution.disabled}
           >
             {institution.emoji ? `${institution.emoji} ` : ""}
             {institution.name}

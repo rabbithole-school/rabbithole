@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import appConfig from "../../../../app.json";
 import {
+  isUnlockManagedApp,
+  MANAGED_APP_BUNDLE_IDS,
   isUnlockManagedScheme,
   MANAGED_APP_QUERY_SCHEMES,
   MANAGED_APP_URL_SCHEMES,
@@ -51,5 +53,57 @@ describe("isUnlockManagedScheme", () => {
   it("does not match a lookalike scheme", () => {
     expect(isUnlockManagedScheme("spike-extra://")).toBe(false);
     expect(isUnlockManagedScheme("googlesheetsx://")).toBe(false);
+    expect(isUnlockManagedScheme("stopmotionstudiox://")).toBe(false);
+  });
+});
+
+describe("isUnlockManagedApp: a managed app need not have a scheme", () => {
+  // Mentava Reading registers no custom URL scheme and no associated domains,
+  // so it is identified by bundle id alone. Gating the launcher on the scheme
+  // would drop it onto the web-view path, which would open a marketing page
+  // instead of doing the readiness + ASAM work the tile exists for.
+  it("accepts a scheme-bearing app", () => {
+    expect(isUnlockManagedApp({ nativeUrlScheme: "googlesheets://" })).toBe(true);
+  });
+
+  it("accepts a scheme-less app by bundle id", () => {
+    expect(isUnlockManagedApp({ nativeBundleId: "com.mentava.learn2read" })).toBe(
+      true,
+    );
+  });
+
+  it("is case- and whitespace-insensitive, like the backend", () => {
+    expect(
+      isUnlockManagedApp({ nativeBundleId: "  COM.Mentava.Learn2Read  " }),
+    ).toBe(true);
+  });
+
+  it("rejects an app naming neither, and an unknown bundle id", () => {
+    expect(isUnlockManagedApp({})).toBe(false);
+    expect(isUnlockManagedApp({ nativeUrlScheme: null, nativeBundleId: null })).toBe(
+      false,
+    );
+    expect(isUnlockManagedApp({ nativeBundleId: "com.example.unknown" })).toBe(
+      false,
+    );
+  });
+});
+
+describe("bundle ids stay OUT of LSApplicationQueriesSchemes", () => {
+  // The plist allowlist is about canOpenURL, which a bundle id can never
+  // answer. Listing one there would be silently meaningless — the kind of
+  // entry that looks like coverage and is not.
+  const declared = appConfig.expo.ios.infoPlist.LSApplicationQueriesSchemes;
+
+  it("declares no bundle id as a query scheme", () => {
+    for (const bundleId of MANAGED_APP_BUNDLE_IDS) {
+      expect(declared).not.toContain(bundleId);
+    }
+  });
+
+  it("keeps the two lists disjoint", () => {
+    for (const bundleId of MANAGED_APP_BUNDLE_IDS) {
+      expect(MANAGED_APP_URL_SCHEMES).not.toContain(bundleId);
+    }
   });
 });

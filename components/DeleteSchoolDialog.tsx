@@ -81,7 +81,8 @@ const FOOTPRINT_ROWS: Array<{
     | "healthRecords"
     | "invites"
     | "usageEvents"
-    | "portfolioItems";
+    | "portfolioItems"
+    | "devices";
   label: string;
 }> = [
   { key: "scholars", label: "Scholars" },
@@ -96,6 +97,7 @@ const FOOTPRINT_ROWS: Array<{
   { key: "invites", label: "Invites" },
   { key: "usageEvents", label: "AI usage events" },
   { key: "portfolioItems", label: "Portfolio items" },
+  { key: "devices", label: "iPads (signed out and unpaired)" },
 ];
 
 export function DeleteSchoolDialog({

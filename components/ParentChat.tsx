@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useMutation } from "convex/react";
 import { Flex, Text, VStack } from "@chakra-ui/react";
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import { useAgentStream } from "@/hooks/useAgentStream";
 import { AideThread } from "./AideThread";
 import { convexSiteUrl } from "@/lib/convexUrls";
@@ -25,14 +26,17 @@ import { convexSiteUrl } from "@/lib/convexUrls";
  * tapped an exact, fully-formed question, so tapping IS the send.
  */
 export function ParentChat({
+  activeChildId,
   seed,
   onSeedConsumed,
 }: {
+  activeChildId?: string | null;
   seed?: { text: string; nonce: number; send?: boolean } | null;
   onSeedConsumed?: () => void;
 } = {}) {
   const messages = useQuery(api.parentChat.listMessages) ?? [];
   const sendMessage = useMutation(api.parentChat.sendMessage);
+  const requestStop = useMutation(api.parentChat.requestStop);
   const {
     streamingContent,
     streamingMsgId,
@@ -40,6 +44,7 @@ export function ParentChat({
     isThinking,
     toolActivity,
     send,
+    stop,
   } = useAgentStream();
   const [input, setInput] = useState("");
   // Bumped when a seed lands so <AideThread> focuses the composer with the
@@ -49,13 +54,38 @@ export function ParentChat({
 
   const sendContent = useCallback(
     async (content: string) => {
-      if (!content || isStreaming) return;
+      if (!content) return;
+      // Steering: sending while a reply streams stops it (server loop +
+      // local fetch) and replaces it with this turn — keep the partial on
+      // screen until the new stream starts.
+      if (isStreaming) {
+        if (streamingMsgId) {
+          void requestStop({ messageId: streamingMsgId as Id<"parentChatMessages"> });
+        }
+        void stop();
+      }
       const { assistantMsgId } = await sendMessage({ content });
       const convexUrl = convexSiteUrl();
-      await send(`${convexUrl}/parent-chat-stream`, { assistantMsgId }, assistantMsgId);
+      // The header's current selection rides along so the aide answers about
+      // that child rather than asking which one. The server re-checks it
+      // against this parent's guardianships before using it.
+      await send(
+        `${convexUrl}/parent-chat-stream`,
+        { assistantMsgId, selectedChildId: activeChildId ?? undefined },
+        assistantMsgId,
+      );
     },
-    [isStreaming, sendMessage, send],
+    [isStreaming, streamingMsgId, requestStop, stop, sendMessage, send, activeChildId],
   );
+
+  // The composer's Stop control: stop the server loop AND abort the local
+  // fetch, keeping the partial text on screen.
+  const handleStop = useCallback(() => {
+    if (streamingMsgId) {
+      void requestStop({ messageId: streamingMsgId as Id<"parentChatMessages"> });
+    }
+    void stop();
+  }, [streamingMsgId, requestStop, stop]);
 
   // The seededNonce guard makes re-runs no-ops. A send-seed leaves any typed
   // draft in the composer untouched.
@@ -75,7 +105,7 @@ export function ParentChat({
 
   const handleSend = async () => {
     const content = input.trim();
-    if (!content || isStreaming) return;
+    if (!content) return;
     setInput("");
     await sendContent(content);
   };
@@ -83,7 +113,7 @@ export function ParentChat({
   return (
     <Flex direction="column" flex={1} minH={0} h="full">
       <AideThread
-        messages={messages.map((m) => ({ _id: String(m._id), role: m.role, content: m.content }))}
+        messages={messages.map((m) => ({ _id: String(m._id), role: m.role, content: m.content, stopRequestedAt: m.stopRequestedAt }))}
         streamingMsgId={streamingMsgId}
         streamingContent={streamingContent}
         isStreaming={isStreaming}
@@ -92,6 +122,7 @@ export function ParentChat({
         input={input}
         onInputChange={setInput}
         onSend={handleSend}
+        onStop={handleStop}
         focusSignal={focusSignal}
         placeholder="Ask about your child's learning…"
         emptyState={

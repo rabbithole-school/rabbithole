@@ -37,6 +37,7 @@ import {
   LABEL_MAX_LENGTH,
   labelGraphemeCount,
 } from "../shared/portfolioLabel";
+import { writeAuditLog } from "./lib/auditLog";
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const UNDO_WINDOW_MS = 10 * 60 * 1000;
@@ -47,6 +48,10 @@ const MAX_UPLOAD_URLS_PER_SESSION = 60;
 const MAX_CAPTURES_PER_SESSION = 40;
 const MAX_REGISTERED_BYTES_PER_SESSION = 1024 * 1024 * 1024;
 const UPLOAD_RESERVATION_TTL_MS = 30 * 60 * 1000;
+// Convex expires an upload URL an hour after it is generated
+// (docs.convex.dev/file-storage/upload-files). Past this, an unreported
+// reservation's URL can no longer create a blob.
+const UPLOAD_URL_LIFETIME_MS = 60 * 60 * 1000;
 const MAX_ACTIVE_SESSIONS_PER_STATION = 2;
 const MAX_SESSIONS_PER_ENROLLMENT_WINDOW = 3;
 // Pressure caps apply per scope — the permanent station's own sessions are one
@@ -58,6 +63,10 @@ const MAX_SESSIONS_PER_ENROLLMENT_WINDOW = 3;
 // pre-poster cap of 2 encoded the same invariant at one reservation per
 // capture).
 const MAX_OPEN_UPLOAD_RESERVATIONS_PER_PRESSURE_SCOPE = 4;
+// Abandoned reservations count only until their upload URLs expire (see
+// `expireUploadReservation`), so with the open cap this is a rate limit, not a
+// lifetime budget: a scope that never reports a blob can keep minting about six
+// upload URLs an hour.
 const MAX_ABANDONED_UPLOAD_RESERVATIONS_PER_PRESSURE_SCOPE = 3;
 const ASSIGNED_DEVICE_CAPTURE_CUTOFF_HOUR = 16;
 const ASSIGNED_DEVICE_CAPTURE_CUTOFF_MINUTE = 40;
@@ -92,18 +101,30 @@ async function expireUploadReservation(
     await ctx.db.delete(reservation._id);
     return "deleted" as const;
   }
-  if (reservation.status === "abandoned") return "abandoned" as const;
-  if (reservation.expiresAt > now) return "active" as const;
+  if (reservation.status !== "abandoned" && reservation.expiresAt > now) {
+    return "active" as const;
+  }
 
   if (!reservation.storageId) {
     // Convex direct-upload URLs only reveal a storage id to the client after
-    // upload. This durable tombstone is therefore the only safe accounting for
-    // a blob a disconnected/malicious client never reports. Issuance is capped
+    // upload. This tombstone is therefore the only safe accounting for a blob
+    // a disconnected/malicious client never reports. Issuance is capped
     // against these rows before another URL can be minted.
-    await ctx.db.patch(reservation._id, {
-      status: "abandoned",
-      updatedAt: now,
-    });
+    //
+    // It counts until its URL expires and then retires: past that, the URL
+    // cannot add a blob. Counted forever, three interrupted uploads locked an
+    // iPad out of its station for good. Rotating the enrollment token or
+    // restarting capture mode never shortens this; only time does.
+    if (reservation.createdAt + UPLOAD_URL_LIFETIME_MS <= now) {
+      await ctx.db.delete(reservation._id);
+      return "deleted" as const;
+    }
+    if (reservation.status !== "abandoned") {
+      await ctx.db.patch(reservation._id, {
+        status: "abandoned",
+        updatedAt: now,
+      });
+    }
     return "abandoned" as const;
   }
 
@@ -116,13 +137,19 @@ async function expireUploadReservation(
   return "deleted" as const;
 }
 
+/**
+ * A reservation counting against its pressure scope: open until it lapses,
+ * then, if its blob was never reported, abandoned until its upload URL
+ * expires. 0 marks a window that is already over or never opens.
+ */
+type CountedReservation = { openUntil: number; abandonedUntil: number };
+
 async function reservationPressure(
   ctx: ReservationCleanupCtx,
   session: Doc<"captureStationSessions">,
   now: number,
 ) {
-  let open = 0;
-  let abandoned = 0;
+  const counted: CountedReservation[] = [];
   const reservations = await ctx.db
     .query("captureStationUploadReservations")
     .withIndex("by_station", (q) =>
@@ -136,11 +163,47 @@ async function reservationPressure(
     const samePressureScope = session.pairedDeviceId
       ? owner.pairedDeviceId === session.pairedDeviceId
       : !owner.pairedDeviceId;
-    if (!samePressureScope) continue;
-    if (state === "active") open++;
-    if (state === "abandoned") abandoned++;
+    if (!samePressureScope || state === "deleted") continue;
+    counted.push({
+      openUntil: state === "active" ? reservation.expiresAt : 0,
+      abandonedUntil: reservation.storageId
+        ? 0
+        : reservation.createdAt + UPLOAD_URL_LIFETIME_MS,
+    });
+  }
+  return counted;
+}
+
+function pressureAt(counted: CountedReservation[], at: number) {
+  let open = 0;
+  let abandoned = 0;
+  for (const reservation of counted) {
+    if (at < reservation.openUntil) open++;
+    else if (at < reservation.abandonedUntil) abandoned++;
   }
   return { open, abandoned };
+}
+
+/**
+ * When the scope can mint again if nothing else happens: each open
+ * reservation lapses (an unreported one into abandoned debt) and each debt
+ * retires as its upload URL expires. The iPad shows this time, so it must not
+ * name a moment at which a lapse still in flight keeps refusing.
+ */
+function pressureClearsAt(counted: CountedReservation[], now: number) {
+  const moments = counted
+    .flatMap(({ openUntil, abandonedUntil }) => [openUntil, abandonedUntil])
+    .filter((moment) => moment > now)
+    .sort((a, b) => a - b);
+  return (
+    moments.find((moment) => {
+      const { open, abandoned } = pressureAt(counted, moment);
+      return (
+        open < MAX_OPEN_UPLOAD_RESERVATIONS_PER_PRESSURE_SCOPE &&
+        abandoned < MAX_ABANDONED_UPLOAD_RESERVATIONS_PER_PRESSURE_SCOPE
+      );
+    }) ?? now
+  );
 }
 
 async function capability(
@@ -709,7 +772,8 @@ async function applyAssignedDeviceCaptureMode(
       assignedDeviceCaptureUpdatedAt: updatedAt,
       assignedDeviceCaptureUpdatedBy: undefined,
     });
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: binding.institutionId,
       actorUserId: actor._id,
       action: "device.capture-mode.stop",
       targetUserId: binding.scholarId,
@@ -756,7 +820,8 @@ async function applyAssignedDeviceCaptureMode(
     pairedDeviceId: binding._id,
     expectedUpdatedAt: updatedAt,
   });
-  await ctx.db.insert("auditLog", {
+  await writeAuditLog(ctx, {
+    institutionId: binding.institutionId,
     actorUserId: actor._id,
     action: "device.capture-mode.start",
     targetUserId: binding.scholarId,
@@ -804,7 +869,8 @@ export const expireAssignedDeviceCapture = internalMutation({
       assignedDeviceCaptureUpdatedAt: updatedAt,
       assignedDeviceCaptureUpdatedBy: undefined,
     });
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: binding.institutionId,
       actorUserId: binding.assignedDeviceCaptureUpdatedBy ?? binding.pairedBy,
       action: "device.capture-mode.expire",
       targetUserId: binding.scholarId,
@@ -1179,14 +1245,21 @@ async function issueUploadReservation(
   purpose?: "poster",
 ) {
   const now = Date.now();
-  const pressure = await reservationPressure(ctx, session, now);
+  const counted = await reservationPressure(ctx, session, now);
+  const pressure = pressureAt(counted, now);
   if (pressure.open >= MAX_OPEN_UPLOAD_RESERVATIONS_PER_PRESSURE_SCOPE) {
-    throw new ConvexError({ kind: "upload_pending_quota" });
+    throw new ConvexError({
+      kind: "upload_pending_quota",
+      retryAt: pressureClearsAt(counted, now),
+    });
   }
   if (
     pressure.abandoned >= MAX_ABANDONED_UPLOAD_RESERVATIONS_PER_PRESSURE_SCOPE
   ) {
-    throw new ConvexError({ kind: "upload_abandoned_quota" });
+    throw new ConvexError({
+      kind: "upload_abandoned_quota",
+      retryAt: pressureClearsAt(counted, now),
+    });
   }
   const uploadUrlsIssued = session.uploadUrlsIssued ?? 0;
   if (uploadUrlsIssued >= MAX_UPLOAD_URLS_PER_SESSION) {

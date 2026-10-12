@@ -25,7 +25,7 @@ judges a single first-session behavior).
 
 - sycophancyDrift · parasocialDrift · parasocialReliance · memoryAttribution · offloadingPattern · coherenceAcrossTurns · safetyPosture · summaryVerdict · topProblems
 
-See [`lib/judge.ts`](lib/judge.ts) for the full rubric text fed to the Opus judge.
+See [`lib/judge.ts`](lib/judge.ts) for the full rubric text fed to the judge.
 
 ## Two modes
 
@@ -94,10 +94,13 @@ The rubric is fixed; the *engine* that runs it is swappable via `JUDGE_ENGINE`
 (one rubric, two engines — [`lib/judgeEngine.ts`](lib/judgeEngine.ts)):
 
 - **`anthropic`** (default, the fallback + calibration reference) — the Anthropic
-  SDK with a forced `tool_choice`, pinned to
-  [`JUDGE_MODEL`](../../convex/lib/models.ts). Needs `ANTHROPIC_API_KEY`.
-- **`copilot`** — Opus via the headless GitHub Copilot CLI
-  (`copilot -p … --model claude-opus-4.8`), which routes judging through a
+  SDK, pinned to [`TUTOR_JUDGE_MODEL`](../../convex/lib/models.ts) (Fable 5.1).
+  Fable rejects a forced `tool_choice`, so the call uses `auto` plus an
+  instruction and re-asks when the tool call is missing. `JUDGE_MODEL`
+  overrides it (e.g. `claude-opus-4-8` to re-score with the old judge).
+  Needs `ANTHROPIC_API_KEY`.
+- **`copilot`** — Claude Fable 5.1 via the headless GitHub Copilot CLI
+  (`copilot -p … --model claude-fable-5.1`; override with `JUDGE_MODEL` for a back-test), which routes judging through a
   Copilot seat rather than the Anthropic API. Auth is `COPILOT_GITHUB_TOKEN` (a
   fine-grained PAT with the "Copilot Requests" permission — see
   `copilot login --help`). The CLI has no tool-forcing API, so the engine hands
@@ -105,33 +108,67 @@ The rubric is fixed; the *engine* that runs it is swappable via `JUDGE_ENGINE`
   same way the Anthropic tool call is validated.
 
 Scores are stamped with provenance so the two engines never conflate:
-`claude-opus-4-8` (anthropic) vs. `copilot-cli:claude-opus-4-8` (copilot).
+`claude-fable-5-1` (anthropic) vs. `copilot-cli:claude-fable-5-1` (copilot).
+
+**Never judge with a model weaker than either model being compared.**
+`regenerate` mode and `pairwise.ts` refuse to start when the judge ranks below
+the tutor model (`assertJudgeNotWeaker`). Opus 4.8 judging Opus 5.5 scored a
+bake-off as a wash that a blind read called 10 to 0 (TRA-408).
 
 ```bash
 JUDGE_ENGINE=copilot ./evals/tutor-quality/run.sh --case prod:<id> --mode asis
 ```
 
-## Nightly near-census judge
+## Pairwise blind preference (model swaps)
 
-[`nightly.ts`](nightly.ts) / [`nightly.sh`](nightly.sh) is the scheduled
-watchdog (design: `review/continuous-eval-plan.html` §4 + §8). It samples
-non-test-drive sessions with enough conversation from `CONVEX_DEPLOYMENT`,
-triages observer-flagged sessions first, judges each `asis` through the engine
-seam, and writes a **numbers-only** report (turn-weighted dimension means +
-per-session `summaryVerdict`, keyed by opaque sessionId — no scholar names, ids,
-or transcript text, so it grades the tutor and is safe as a public CI artifact).
+Per-dimension means average away what a reader sees at once, so a model swap
+also gets a head-to-head read. [`pairwise.ts`](pairwise.ts) takes two
+`regenerate` runs over the same cases (regenerate holds the scholar's messages
+fixed) and asks the judge which tutor it would want in the room. Sides are
+blinded as Tutor 1 / Tutor 2 and, by default, each pair is judged in both
+orders; a pick that flips with the sides counts as a tie.
+
+```bash
+TUTOR_MODEL=claude-sonnet-5 ./evals/tutor-quality/run.sh --fixtures-only --mode regenerate --out /tmp/a
+TUTOR_MODEL=claude-opus-5-5 TUTOR_EFFORT=low ./evals/tutor-quality/run.sh --fixtures-only --mode regenerate --out /tmp/b
+npx tsx evals/tutor-quality/pairwise.ts --a /tmp/a/runs.json --b /tmp/b/runs.json
+```
+
+Pass comma-separated `runs.json` files to `--a` / `--b` for repeated runs;
+`--cases` limits it to some case ids. Writes `out/pairwise/{pairwise.md,pairwise.json}`.
+
+## Weekly sampled judge
+
+[`weekly.ts`](weekly.ts) / [`weekly.sh`](weekly.sh) is the scheduled
+watchdog (design: `review/continuous-eval-plan.html` §4). Judge calls are
+budgeted as if they cost money, including Copilot-seat calls, so a run is
+bounded two ways ([`lib/sampling.ts`](lib/sampling.ts)):
+
+- **Sessions:** of the week's eligible, not-yet-judged sessions, it judges a
+  random sample (default 12, seeded by the run date). Observer-flagged
+  sessions take up to half the slots.
+- **Turns:** at most 8 tutor turns per session, spread from the first to the
+  last, plus one whole-conversation verdict. The per-turn judge re-reads the
+  conversation up to each turn, so without this cap a long session's cost
+  grows with the square of its length.
+
+It also samples 6 practice handoffs and up to 4 QUEST designs. The report is
+**numbers-only** (turn-weighted dimension means + per-session
+`summaryVerdict`, keyed by opaque sessionId — no scholar names, ids, or
+transcript text, so it grades the tutor and is safe as a CI artifact).
 
 ```bash
 # Verify the sampler + engine wiring without spending any judge calls:
-CONVEX_DEPLOYMENT=dev:<your-dev> ./evals/tutor-quality/nightly.sh --dry-run
+CONVEX_DEPLOYMENT=dev:<your-dev> ./evals/tutor-quality/weekly.sh --dry-run
 
-# A real nightly run (CI does this via the copilot engine):
-./evals/tutor-quality/nightly.sh --engine copilot --sample 25
+# A real run (CI does this via the anthropic engine):
+./evals/tutor-quality/weekly.sh --engine anthropic
 ```
 
 The GitHub Actions workflow
-[`.github/workflows/nightly-copilot-judge.yml`](../../.github/workflows/nightly-copilot-judge.yml)
-runs it nightly with `--engine copilot` against the prod deploy key.
+[`.github/workflows/weekly-tutor-quality-judge.yml`](../../.github/workflows/weekly-tutor-quality-judge.yml)
+runs it Fridays at 03:00 HST, before the Quality Pulse digest posts at 16:10,
+on the Anthropic engine with the rubric prompt-cached: about $10 a week.
 
 ## Fixtures
 
@@ -162,5 +199,6 @@ Add fixtures by dropping a JSON file in `fixtures/`. Shape: see
 
 Like the sibling eval harnesses, this one imports
 [`buildSystemPrompt`](../../convex/projectHelpers.ts) and
-[`MODELS.SONNET`](../../convex/lib/models.ts) directly — `regenerate`
+the live tutor's model and runtime ([`TUTOR_DEFAULT_MODEL`,
+`tutorRuntime`](../../convex/lib/tutorModel.ts)) directly — `regenerate`
 mode scores what would actually ship today, not a paraphrased prompt.

@@ -1,12 +1,26 @@
 import { createElement, type ReactNode } from "react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, create } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+/** The `react-native` mocks below render Text/View as passthroughs, so the
+ *  rendered tree is raw strings nested in arrays and host elements. */
+const renderedText = (node: unknown): string => {
+  if (typeof node === "string") return node;
+  if (typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(renderedText).join(" ");
+  if (node && typeof node === "object" && "children" in node) {
+    return renderedText((node as { children: unknown }).children);
+  }
+  return "";
+};
 
 const { alert, createSession, routerPush, fixture } = vi.hoisted(() => ({
   alert: vi.fn(),
   createSession: vi.fn(),
   routerPush: vi.fn(),
-  fixture: { activityKind: "online" },
+  fixture: { activityKind: "online", completed: false },
 }));
 
 vi.mock("react-native", async () => {
@@ -49,7 +63,11 @@ vi.mock("convex/react", () => ({
         resources: [],
       }];
     }
-    if (query === "activityCompletions.listForScholarInUnit") return [];
+    if (query === "activityCompletions.listForScholarInUnit") {
+      return fixture.completed
+        ? [{ activityId: "activity", lessonId: "lesson", completedAt: 1 }]
+        : [];
+    }
     if (query === "sessions.list") return [];
     return null;
   },
@@ -107,6 +125,7 @@ describe("UnitProgressScreen", () => {
   afterEach(() => {
     vi.clearAllMocks();
     fixture.activityKind = "online";
+    fixture.completed = false;
   });
 
   it("shows one error alert and does not navigate when Continue cannot create a session", async () => {
@@ -179,5 +198,45 @@ describe("UnitProgressScreen", () => {
       pathname: "/session/[id]",
       params: { id: "session", title: "A focused activity" },
     });
+  });
+
+  // The screen is mounted with `assignmentId`, which is the homework shape:
+  // `activities.listByUnitPublic` then returns only what THAT assignment made
+  // live, so finishing everything on screen says nothing about the unit.
+  it("claims only the visible list when every activity on screen is done", () => {
+    fixture.completed = true;
+    let renderer!: ReturnType<typeof create>;
+    act(() => {
+      renderer = create(createElement(UnitProgressScreen));
+    });
+
+    const text = renderedText(renderer.toJSON());
+    expect(text).toContain("1 of 1 done");
+    expect(text).toContain("All done here.");
+    expect(text).not.toContain("Unit complete");
+    expect(text).not.toContain("every activity is done");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Both native unit-progress surfaces — this screen and the `useUnitProgress`
+// hook behind `WhereAmIPanel` — used to turn `completedCount === activityTotal`
+// into a "Unit complete" claim. That comparison runs over an ASSIGNMENT-scoped
+// activity list, so a homework session carrying one activity out of a
+// multi-lesson unit satisfied it on the first completion. The claim is retired
+// rather than recalibrated (same call as the completion card): the real unit
+// celebration is `maybeAwardUnitBadge` in `convex/lib/badgeAward.ts`, which
+// walks every lesson in the unit with no assignment filter.
+// ─────────────────────────────────────────────────────────────────────────
+describe("native unit-progress surfaces", () => {
+  const src = (path: string) =>
+    readFileSync(resolve(__dirname, "..", path), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+
+  it("makes no unit-completion claim off an assignment-scoped count", () => {
+    for (const path of ["app/unit-progress.tsx", "hooks/useUnitProgress.ts"]) {
+      expect(src(path)).not.toContain("Unit complete");
+    }
   });
 });

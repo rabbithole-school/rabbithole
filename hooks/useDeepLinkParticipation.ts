@@ -6,12 +6,14 @@ import type { ScholarGroupParticipation } from "@/shared/scholarGroupRouting";
 import { deepLinkIncludesExtendedEducation } from "@/shared/scholarParticipation";
 
 /**
- * Widen the Scholars-tab participation filter to include Extended Education when
- * the URL a visit ARRIVED on already points at a program guest — a deep/shared
- * link into an Extended-Education scholar, or into a guest-inclusive group.
+ * Widen a group-scoped surface's participation filter to include Extended
+ * Education when the URL a visit ARRIVED on already points at a program guest —
+ * a deep/shared link into an Extended-Education scholar, or into a
+ * guest-inclusive group. Used by the Scholars tab (`?group=` + a path slug) and
+ * the Math Skills studio (`?scope=` + `?scholar=`).
  *
  * The enrolled-only default otherwise hides both signals: the roster omits every
- * program guest, so the rail renders empty even though the link named real
+ * program guest, so the surface renders empty even though the link named real
  * people the visitor can access. `useDefaultGroupScope` only covers the
  * auto-default path (it disables the moment the URL carries a group/scholar), so
  * this is its explicit-deep-link twin.

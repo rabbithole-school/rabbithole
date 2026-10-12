@@ -12,9 +12,10 @@ import { internal } from "./_generated/api";
 import { siteUrl } from "./lib/channels";
 import { isPlatformAdminRole } from "./lib/roles";
 import { escapeSlackText, postMessage } from "./lib/slackApi";
+import { messagePlainText } from "../lib/messageLinks";
 
 function quoteForSlack(body: string): string {
-  const escaped = escapeSlackText(body.trim());
+  const escaped = escapeSlackText(messagePlainText(body).trim());
   if (!escaped) return "> (empty message)";
   return escaped
     .split("\n")
@@ -22,11 +23,21 @@ function quoteForSlack(body: string): string {
     .join("\n");
 }
 
-function teacherMessagesUrl(): string {
-  return `${siteUrl()}/teacher/messages`;
+/** The thread itself, not the inbox: the staff inbox opens on Mine, and this
+ *  channel is shared, so a bare inbox link can land a staffer on a list
+ *  without the message they were just alerted to. */
+function teacherThreadUrl(
+  threadId: string,
+  institutionSlug: string | null,
+): string {
+  const params = new URLSearchParams({ kind: "families", thread: threadId });
+  if (institutionSlug) params.set("inst", institutionSlug);
+  return `${siteUrl()}/teacher/messages?${params.toString()}`;
 }
 
 function renderParentNotice(args: {
+  threadId: string;
+  institutionSlug: string | null;
   parentName: string;
   childName: string | null;
   body: string;
@@ -34,15 +45,15 @@ function renderParentNotice(args: {
 }): string {
   const child = args.childName ?? "not specified";
   return [
-    `*Parent message in Rabbithole*`,
-    `*From:* ${escapeSlackText(args.parentName)}`,
-    `*About:* ${escapeSlackText(child)}`,
+    `**Parent message in Rabbithole**`,
+    `**From:** ${escapeSlackText(args.parentName)}`,
+    `**About:** ${escapeSlackText(child)}`,
     "",
     quoteForSlack(args.body),
     ...(args.attachments.length > 0
       ? [
           "",
-          "*Attachments:*",
+          "**Attachments:**",
           ...args.attachments.map((attachment) =>
             attachment.url
               ? `<${attachment.url}|${escapeSlackText(attachment.fileName)}>`
@@ -51,7 +62,7 @@ function renderParentNotice(args: {
         ]
       : []),
     "",
-    `Reply in this Slack thread to send a normal teacher message back to the parent. <${teacherMessagesUrl()}|Open Messages>`,
+    `Reply in this Slack thread to send a normal teacher message back to the parent. <${teacherThreadUrl(args.threadId, args.institutionSlug)}|Open Messages>`,
   ].join("\n");
 }
 
@@ -68,6 +79,8 @@ export const notifyParentMessageChannel = internalAction({
     if (!data) return;
 
     const text = renderParentNotice({
+      threadId: data.threadId,
+      institutionSlug: data.institutionSlug,
       parentName: data.parentName,
       childName: data.childName,
       body: data.body,

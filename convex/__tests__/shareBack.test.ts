@@ -3,8 +3,6 @@ import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
-import { buildShareBackSystemPrompt } from "../shareBackActions";
-import { SCHOLAR_PRONOUN_GUIDANCE } from "../lib/scholarPronouns";
 
 /**
  * Coverage for the Share Back backend (convex/shareBack.ts):
@@ -20,12 +18,6 @@ const modules = (
     glob: (pattern: string) => Record<string, () => Promise<unknown>>;
   }
 ).glob("../**/*.ts");
-
-test("share-back prompt uses the shared scholar-pronoun fallback", () => {
-  expect(buildShareBackSystemPrompt("reflection", null)).toContain(
-    SCHOLAR_PRONOUN_GUIDANCE,
-  );
-});
 
 async function seedUser(
   t: ReturnType<typeof convexTest>,

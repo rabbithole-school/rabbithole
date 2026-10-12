@@ -1,6 +1,6 @@
 /**
- * TEACHER-facing World EXECUTION + DEBRIEF surfaces (plan §8, P2). The DESIGN
- * layer (Edit tab: worldDesign / saveSimulatorSpec) lives in convex/simulator.ts under
+ * TEACHER-facing Simulator EXECUTION + DEBRIEF surfaces (plan §8, P2). The DESIGN
+ * layer (Edit tab: simulatorDesign / saveSimulatorSpec) lives in convex/simulator.ts under
  * the canonical curriculum gate. This file owns only the execution/observation
  * reads the Preflight, Assign, and Debrief tabs need. It never edits the
  * committed engine/bench/run files; it reads the same tables and reuses their

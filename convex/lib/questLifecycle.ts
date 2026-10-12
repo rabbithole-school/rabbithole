@@ -28,6 +28,7 @@ import type { Doc, Id } from "../_generated/dataModel";
 import {
   isSessionActivityComplete,
   questOnlineProgressForScholar,
+  reopenLiveChecker,
 } from "./scholarReads";
 import { isStructurallyDraft } from "./unitMaturity";
 import { granuleTexts } from "./granules";
@@ -233,7 +234,9 @@ export interface ScholarQuest {
 export async function questsForScholar(
   ctx: QueryCtx,
   scholarId: Id<"users">,
+  now: number = Date.now(),
 ): Promise<ScholarQuest[]> {
+  const isReopenLive = reopenLiveChecker(ctx, scholarId, now);
   const authoredUnits = await ctx.db
     .query("units")
     .withIndex("by_authorScholar", (q) => q.eq("authorScholarId", scholarId))
@@ -339,8 +342,9 @@ export async function questsForScholar(
 
       // Completion-skip (mirrors scholarPlate): a session counts as live if its
       // own activity isn't complete, OR the unit still has incomplete work, OR
-      // the scholar explicitly reopened it. Only a session whose activity is
-      // done AND whose unit has nothing left (and wasn't reopened) drops out.
+      // the scholar reopened it today (isReopenLive). Only a session whose
+      // activity is done AND whose unit has nothing left (and isn't a live
+      // reopen) drops out.
       let hasLiveSession = false;
       let lastTouched: number | null = null;
       for (const s of rawSessions) {
@@ -348,7 +352,11 @@ export async function questsForScholar(
         lastTouched = lastTouched == null ? touched : Math.max(lastTouched, touched);
         if (hasLiveSession) continue;
         const currentComplete = await isSessionActivityComplete(ctx, scholarId, s);
-        if (!currentComplete || hasIncompleteOnline || s.reopenedAt != null) {
+        if (
+          !currentComplete ||
+          hasIncompleteOnline ||
+          (await isReopenLive(s))
+        ) {
           hasLiveSession = true;
         }
       }
@@ -426,7 +434,9 @@ export async function questFactsForPair(
   ctx: QueryCtx,
   scholarId: Id<"users">,
   unitId: Id<"units">,
+  now: number = Date.now(),
 ): Promise<QuestFacts | null> {
+  const isReopenLive = reopenLiveChecker(ctx, scholarId, now);
   const unit = await ctx.db.get(unitId);
   if (!unit) return null;
 
@@ -474,11 +484,11 @@ export async function questFactsForPair(
 
   // Completion-skip (mirrors questsForScholar / scholarPlate): a session counts
   // as live if its own activity isn't complete, OR the unit still has work, OR
-  // the scholar explicitly reopened it.
+  // the scholar reopened it today (isReopenLive).
   let hasLiveSession = false;
   for (const s of rawSessions) {
     const currentComplete = await isSessionActivityComplete(ctx, scholarId, s);
-    if (!currentComplete || hasIncompleteOnline || s.reopenedAt != null) {
+    if (!currentComplete || hasIncompleteOnline || (await isReopenLive(s))) {
       hasLiveSession = true;
       break;
     }

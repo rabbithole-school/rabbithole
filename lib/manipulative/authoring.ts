@@ -549,6 +549,8 @@ export function isGradableManipulative(spec: ManipulativeSpec): boolean {
       return liquidGoalIsUsable(spec);
     case "money":
       return moneyGoalIsUsable(spec);
+    case "molecule":
+      return false;
   }
 }
 
@@ -616,6 +618,8 @@ function initialStateFor(spec: ManipulativeSpec): unknown {
       return initialLiquid(spec);
     case "money":
       return initialMoney(spec);
+    case "molecule":
+      return {};
     default: {
       const exhaustive: never = spec;
       throw new Error(`initialStateFor: unhandled manipulative kind "${(exhaustive as ManipulativeSpec).kind}".`);

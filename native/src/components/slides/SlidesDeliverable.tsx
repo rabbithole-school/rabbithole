@@ -24,7 +24,7 @@ import {
   View,
 } from "react-native";
 import Animated from "react-native-reanimated";
-import { useAction, useConvex, useMutation, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 
 import * as ImagePicker from "expo-image-picker";
 import * as Device from "expo-device";
@@ -94,8 +94,7 @@ export function SlidesDeliverable({
   const generateSlideImage = useAction(api.artifacts.scholarGenerateSlideImage);
   const searchWebImages = useAction(api.slidesImageSearch.searchWebImages);
   const pickWebImage = useAction(api.slidesImageSearch.pickWebImage);
-  const exportDeck = useAction(api.slidesExport.exportDeck);
-  const convex = useConvex();
+  const exportDeckFile = useAction(api.slidesExport.exportDeckFile);
   const [error, setError] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -389,7 +388,7 @@ export function SlidesDeliverable({
 
   /**
    * Every media id the deck references, so the URLs resolve in ONE query.
-   * React hooks cannot be called in a loop, so a per-image `files.getUrl` is not
+   * React hooks cannot be called in a loop, so a per-image URL query is not
    * expressible in the renderer.
    */
   const assetIds = useMemo(() => {
@@ -405,8 +404,10 @@ export function SlidesDeliverable({
   }, [deck]);
 
   const assetUrls = useQuery(
-    api.files.getUrls,
-    assetIds.length > 0 ? { storageIds: assetIds } : "skip",
+    api.artifacts.slideAssetUrls,
+    artifact && assetIds.length > 0
+      ? { artifactId: artifact._id, storageIds: assetIds }
+      : "skip",
   );
 
   // Deleting (or adding) an image changes `assetIds`, which changes this query's
@@ -571,9 +572,7 @@ export function SlidesDeliverable({
       try {
         const saved = (await editorRef.current?.commitPendingEdit()) ?? true;
         if (saved) {
-          const storageId = await exportDeck({ artifactId: artifact._id, format });
-          const url = await convex.query(api.files.getUrl, { storageId });
-          if (!url) throw new Error("The exported file could not be opened.");
+          const { url } = await exportDeckFile({ artifactId: artifact._id, format });
           await WebBrowser.openBrowserAsync(url);
         }
       } catch (e) {
@@ -582,7 +581,7 @@ export function SlidesDeliverable({
       exportInFlight.current = false;
       setExporting(false);
     },
-    [exportDeck, convex, artifact],
+    [exportDeckFile, artifact],
   );
 
   const showShareMenu = useCallback(() => {

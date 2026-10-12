@@ -3,26 +3,6 @@ import { PCM_DIMENSIONS, PCM_STRAND_STANCE } from "../lib/pcm";
 import type { LessonContext } from "../sessionHelpers";
 import { buildSystemPrompt } from "../sessionHelpers";
 
-// ── PCM_STRAND_STANCE (pure map) ─────────────────────────────────────
-
-describe("PCM_STRAND_STANCE", () => {
-  test("has a stance for every PCM dimension", () => {
-    for (const dim of PCM_DIMENSIONS) {
-      expect(PCM_STRAND_STANCE[dim]).toBeTruthy();
-      expect(PCM_STRAND_STANCE[dim].length).toBeGreaterThan(20);
-    }
-  });
-
-  test("stances name each parallel's instructional intent", () => {
-    expect(PCM_STRAND_STANCE.core).toContain("Core lesson");
-    expect(PCM_STRAND_STANCE.connections).toContain("Connections lesson");
-    expect(PCM_STRAND_STANCE.connections).toContain("transfer");
-    expect(PCM_STRAND_STANCE.practice).toContain("Practice lesson");
-    expect(PCM_STRAND_STANCE.practice).toContain("practitioner");
-    expect(PCM_STRAND_STANCE.identity).toContain("Identity lesson");
-  });
-});
-
 // ── buildSystemPrompt: strand → stance wiring ────────────────────────
 
 function buildWithLesson(lessonContext: LessonContext | null): string {
@@ -63,14 +43,6 @@ function lesson(strand: string | null): LessonContext {
 }
 
 describe("buildSystemPrompt — PCM strand stance", () => {
-  test("a connections-strand lesson injects the connections stance", () => {
-    const prompt = buildWithLesson(lesson("connections"));
-    // The bare label is still present...
-    expect(prompt).toContain("Strand: connections");
-    // ...and now the instructive stance follows it.
-    expect(prompt).toContain(PCM_STRAND_STANCE.connections);
-  });
-
   test("each strand injects its own stance", () => {
     for (const dim of PCM_DIMENSIONS) {
       const prompt = buildWithLesson(lesson(dim));

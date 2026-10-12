@@ -274,3 +274,76 @@ describe("ad-hoc dispatch is conversation-completable", () => {
     expect(ctxOut?.conversationCompletionContext).toBeNull();
   });
 });
+
+describe("teacher closes lesson-less ad-hoc homework for the group", () => {
+  const markForGroup = (
+    t: TC,
+    callerUserId: Id<"users">,
+    assignmentId: Id<"assignments">,
+    activityId: Id<"activities">,
+  ) =>
+    t.run(async (ctx) =>
+      ctx.runMutation(internal.activityCompletions.aideMarkCompleteForGroup, {
+        callerUserId,
+        assignmentId,
+        activityId,
+      }),
+    );
+
+  test("ad-hoc WEB homework (a video link) can be marked done, stamped to its assignment", async () => {
+    // Nothing the scholar does records a completion for lesson-less web work,
+    // so without this the item stays on their Home until the teacher deletes it.
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const asTeacher = await withUser(t, teacherId);
+    const { assignmentId, activityId } = await asTeacher.mutation(
+      api.assignments.dispatchActivity,
+      {
+        scholarId,
+        title: "Read-aloud: The Tide Pool",
+        activityKind: "web",
+        webUrl: "https://example.test/read-aloud",
+        mode: "homework",
+        dueAt: Date.now() - 86_400_000,
+      },
+    );
+
+    const res = await markForGroup(t, teacherId, assignmentId, activityId);
+    expect(res).toEqual({ marked: 1, created: 1 });
+    const rows = await completionsByAssignment(t, assignmentId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ scholarId, activityId });
+    expect(rows[0].lessonId).toBeUndefined();
+  });
+
+  test("negative: lesson-less web work outside an ad-hoc homework dispatch still refuses", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { activityId, assignmentId } = await t.run(async (ctx) => {
+      const activityId = await ctx.db.insert("activities", {
+        title: "Loose link",
+        kind: "web",
+        order: 0,
+        webUrl: "https://example.test/loose",
+      });
+      const assignmentId = await ctx.db.insert("assignments", {
+        teacherId,
+        scholarIds: [scholarId],
+        title: "Standing",
+        kind: "standing",
+        startedAt: Date.now(),
+        activitySchedule: [
+          { activityId, mode: "homework" as const, setAt: Date.now() },
+        ],
+      });
+      return { activityId, assignmentId };
+    });
+
+    await expect(
+      markForGroup(t, teacherId, assignmentId, activityId),
+    ).rejects.toThrow("lesson-anchored");
+    expect(await completionsByAssignment(t, assignmentId)).toHaveLength(0);
+  });
+});

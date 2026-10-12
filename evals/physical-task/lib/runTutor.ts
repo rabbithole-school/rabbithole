@@ -7,12 +7,17 @@
  * (and use the tool) appropriately, without leaking the result or inventing
  * gear? Same approach as evals/introspection-redirect.
  *
- * The tutor runs on MODELS.SONNET (the live tutor model). The judge runs on Opus.
+ * The tutor uses the live tutor model and runtime. The judge runs on Opus.
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { buildSystemPrompt } from "../../../convex/sessionHelpers";
+import type { AideEffort } from "../../../convex/lib/aideModel";
 import type { PhysicalEnvironmentContext } from "../../../convex/prompts";
-import { MODELS } from "../../../convex/lib/models";
+import type { ModelId } from "../../../convex/lib/models";
+import {
+  TUTOR_DEFAULT_MODEL,
+  tutorRuntime,
+} from "../../../convex/lib/tutorModel";
 
 /** What the scholar's message is probing — reporting buckets only. */
 export type CaseKind = "apt" | "inapt";
@@ -52,6 +57,10 @@ export interface TutorRun {
 }
 
 const anthropic = new Anthropic();
+export const tutorModel = process.env.TUTOR_MODEL || TUTOR_DEFAULT_MODEL;
+const runtime = tutorRuntime(tutorModel as ModelId);
+export const tutorEffort: AideEffort | undefined =
+  (process.env.TUTOR_EFFORT as AideEffort | undefined) || runtime.effort;
 
 /**
  * The fixture inventory injected into EVERY case (so the tutor always has gear
@@ -149,11 +158,12 @@ export async function runTutor(c: TutorCase, sample: number): Promise<TutorRun> 
   ];
   try {
     const response = await anthropic.messages.create({
-      model: MODELS.SONNET,
-      max_tokens: 1024,
+      model: tutorModel,
+      max_tokens: runtime.maxTokens,
       system,
       messages,
       tools: [SUGGEST_TOOL],
+      ...(tutorEffort ? { output_config: { effort: tutorEffort } } : {}),
     });
     const text = response.content
       .filter((b) => b.type === "text")

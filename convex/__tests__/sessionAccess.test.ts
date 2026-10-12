@@ -1,5 +1,5 @@
 // Pure unit tests for canAccessSession — the gate behind the hardened
-// /project-stream and /analyze HTTP endpoints. No convex-test needed:
+// /session-stream and /analyze HTTP endpoints. No convex-test needed:
 // it's a pure (role, callerId, ownerId) → boolean decision. This is the
 // single rule that decides who may stream a tutor session or trigger
 // observer analysis, so pin every role explicitly.

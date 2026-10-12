@@ -455,24 +455,6 @@ describe("applyMetaAnalysis — idea-conversations flag gates the observer's sug
     );
     expect(mastery).toHaveLength(1);
   });
-
-  test("flag OFF (explicit) → observer captures exactly as today", async () => {
-    process.env.WORKSHOP_IDEA_CONVOS_ENABLED = "false";
-    const t = convexTest(schema, modules);
-    const kai = await seedUser(t, "scholar", { username: "kaiFlagOff" });
-    const chatId = await seedChat(t, kai);
-
-    const res = await applyAnalysis(t, {
-      chatId,
-      suggestions: [consented("Captured as before")],
-    });
-    expect(res.captured).toBe(1);
-    const rows = await t.run(async (ctx) =>
-      ctx.db.query("scholarSuggestions").collect(),
-    );
-    expect(rows).toHaveLength(1);
-    expect(rows[0].title).toBe("Captured as before");
-  });
 });
 
 describe("purpose gating and observer serialization", () => {

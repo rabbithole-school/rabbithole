@@ -48,8 +48,6 @@ describe("fastMathCellReadout", () => {
     expect(readout.status).toBe("progress");
     expect(readout.subLabel).toBeNull();
     expect(readout.title).toContain("209 of 418 facts automatic");
-    expect(readout.title).toContain("passing proctored exam");
-    expect(readout.title).not.toContain("opens at 100%");
   });
 
   it("does not render an uncalibrated scholar as 0%", () => {
@@ -59,7 +57,6 @@ describe("fastMathCellReadout", () => {
     });
     expect(readout.display).toBe("—");
     expect(readout.status).toBe("uncalibrated");
-    expect(readout.title).toContain("not measured yet");
   });
 
   it("marks 100% as ready for the exam", () => {

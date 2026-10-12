@@ -38,7 +38,7 @@ export function DictationMicButton({
   borderRadius = "lg",
   ariaLabel = "Start voice dictation",
 }: DictationMicButtonProps) {
-  const { state, error, isTooLoud, toggleRecording } = useVoiceDictation((text) => {
+  const { state, error, isTooLoud, isMicBusy, toggleRecording } = useVoiceDictation((text) => {
     const trimmed = text.trim();
     if (trimmed) onTranscript(trimmed);
   });
@@ -58,7 +58,7 @@ export function DictationMicButton({
         _disabled={{ opacity: 0.4, cursor: "not-allowed" }}
         borderRadius={borderRadius}
         onClick={toggleRecording}
-        disabled={(disabled && !isRecording) || isTranscribing}
+        disabled={(disabled && !isRecording) || isTranscribing || isMicBusy}
         className={isRecording ? "animate-pulse-soft" : undefined}
       >
         {isTranscribing ? <Spinner size="sm" /> : isRecording ? <Square /> : <Microphone />}

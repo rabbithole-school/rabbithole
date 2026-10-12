@@ -39,6 +39,7 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { MODELS } from "./lib/models";
 import { requireAnthropicApiKey } from "./lib/anthropic";
+import { cachedSystem } from "./lib/aideStream";
 import { recordAnthropicUsage } from "./usage";
 import { ROLES } from "./lib/roles";
 import { imageMediaType } from "./lib/ingestMimes";
@@ -689,7 +690,12 @@ export const assess = internalAction({
       const response = await anthropic.messages.create({
         model: MODELS.SONNET,
         max_tokens: 2048,
-        system: OBSERVATION_SYSTEM_PROMPT,
+        // Prompt-cached: the ~10k-token rubric + tool schema are identical
+        // for every scan, and assess runs in bursts — a multi-page scan
+        // ingest fans out one action per page, and sweepUnassessed schedules
+        // the whole backlog at once — so the second page onward reads the
+        // prefix at ~1/10th rate. Only the per-page hints + file are uncached.
+        system: cachedSystem(OBSERVATION_SYSTEM_PROMPT),
         tools: [OBSERVATION_TOOL],
         tool_choice: { type: "tool", name: "report_observations" },
         messages: [

@@ -4,9 +4,8 @@
  * progress meter (completed/total + track) OR a path-meta string (a not-yet-
  * started quest) OR nothing. Mirrors the web UnitGroupBand. Extracted from the
  * scholar-home plate (index.tsx) so PlateCard, ChoiceMenuCard, and
- * SuggestedQuests share ONE DRY band. Pass `onPress` to make it open
- * unit-progress (a unit in progress); omit it for inert identity chrome (a
- * suggested quest — no progress yet).
+ * UnitActivityGroup share ONE DRY band. Pass `onPress` to make it open
+ * unit-progress (a unit in progress); omit it for inert identity chrome.
  */
 
 import { useMemo } from "react";
@@ -24,7 +23,6 @@ export function UnitBand({
   progress,
   meta,
   onPress,
-  raisedAction,
   accessibilityLabel,
 }: {
   emoji?: string | null;
@@ -40,8 +38,6 @@ export function UnitBand({
   meta?: string | null;
   /** When set, the band is a button that opens the unit's "where am I". */
   onPress?: () => void;
-  /** Optional raised action shown beside the band identity/meta. */
-  raisedAction?: React.ReactNode;
   accessibilityLabel?: string;
 }) {
   const colors = useColors();
@@ -108,7 +104,6 @@ export function UnitBand({
       onPress={onPress}
       style={({ pressed }) => [
         styles.unitBandMain,
-        raisedAction ? styles.unitBandMainWithAction : undefined,
         pressed && { backgroundColor: muted },
       ]}
       accessibilityRole="button"
@@ -117,22 +112,12 @@ export function UnitBand({
       {content}
     </Pressable>
   ) : (
-    <View
-      style={[
-        styles.unitBandMain,
-        raisedAction ? styles.unitBandMainWithAction : undefined,
-      ]}
-    >
-      {content}
-    </View>
+    <View style={styles.unitBandMain}>{content}</View>
   );
 
   return (
     <View style={[styles.unitBand, { backgroundColor: subtle }]}>
       {main}
-      {raisedAction ? (
-        <View style={styles.unitBandAction}>{raisedAction}</View>
-      ) : null}
     </View>
   );
 }
@@ -157,7 +142,6 @@ function makeStyles(c: ReturnType<typeof useColors>) {
       justifyContent: "space-between",
       gap: 14,
     },
-    unitBandMainWithAction: { paddingRight: 8 },
     unitBandLeft: {
       flex: 1,
       minWidth: 0,
@@ -213,6 +197,5 @@ function makeStyles(c: ReturnType<typeof useColors>) {
       color: c.charcoalMuted,
       textAlign: "right",
     },
-    unitBandAction: { flexShrink: 0, paddingRight: 10 },
   });
 }

@@ -1,7 +1,9 @@
 import { describe, expect, test, vi } from "vitest";
-import { MODELS } from "../models";
+import { MODELS, MODEL_DISPLAY } from "../models";
 import {
   refusalNotice,
+  refusalNoticeFor,
+  refusalRetryTarget,
   anthropicErrorMessage,
   createToolReportTracker,
 } from "../aideStream";
@@ -10,37 +12,129 @@ import {
   isFailureResult,
 } from "../toolActivityGroups";
 
-// ── Refusal notice (staff-facing guardrail fallback) ─────────────────────
+// ── Refusal handling — retry the REQUEST, never re-pin the PERSON ─────────
+//
+// The 2026-09-03 incident: Fable's classifier false-positived on "show a
+// picture of a fulcrum", the notice told a staff member to switch models and
+// resend, and the only switch available wrote a PERMANENT all-surfaces pin.
+// He never got the next fleet model. These tests pin the new contract: the
+// runner retries once on a fallback, and the notice never prescribes a
+// setting change.
 
-describe("refusalNotice", () => {
-  test("Fable names the concrete fix: switch this chat to Opus via the picker", () => {
-    const notice = refusalNotice(MODELS.FABLE);
-    expect(notice).toMatch(/Opus/);
-    expect(notice).toMatch(/model picker/i);
-    // The old, backwards advice ("switch back to the default", which IS Fable)
-    // must not resurface.
-    expect(notice).not.toMatch(/default/i);
+describe("refusalRetryTarget", () => {
+  const clean = { refused: true, fullContent: "", toolsUsed: false };
+
+  test("a clean Fable refusal retries on Opus", () => {
+    expect(refusalRetryTarget({ ...clean, model: MODELS.FABLE })).toBe(
+      MODELS.OPUS,
+    );
   });
 
-  test("Fable uses the caller's switch hint (e.g. Slack, which has no picker)", () => {
-    const notice = refusalNotice(
-      MODELS.FABLE,
-      'by asking me to switch (e.g. "use Opus")',
+  test("no refusal → no retry", () => {
+    expect(
+      refusalRetryTarget({ ...clean, refused: false, model: MODELS.FABLE }),
+    ).toBeNull();
+  });
+
+  test("never retries once text has streamed (it would duplicate a half-answer)", () => {
+    expect(
+      refusalRetryTarget({
+        ...clean,
+        fullContent: "Here's the first half…",
+        model: MODELS.FABLE,
+      }),
+    ).toBeNull();
+  });
+
+  test("never retries once a tool ran (it would re-fire its side effects)", () => {
+    expect(
+      refusalRetryTarget({ ...clean, toolsUsed: true, model: MODELS.FABLE }),
+    ).toBeNull();
+  });
+
+  test("models without a classifier tier have no fallback to retry onto", () => {
+    for (const model of [MODELS.SONNET, MODELS.OPUS, MODELS.HAIKU]) {
+      expect(refusalRetryTarget({ ...clean, model })).toBeNull();
+    }
+  });
+
+  /**
+   * Fable thinks before it speaks, so on a staff surface a reasoning block is
+   * streamed before essentially every refusal. Reasoning is live-only (see
+   * lib/thinkingStreamState.ts) and never becomes part of the answer, so it is
+   * NOT committed output — adding it to the gate would silently turn this
+   * retry off on the surface the incident happened on. Pinned here because
+   * reviewers keep proposing exactly that.
+   */
+  test("streamed reasoning alone does not block the retry — only answer text does", () => {
+    expect(refusalRetryTarget({ ...clean, model: MODELS.FABLE })).toBe(
+      MODELS.OPUS,
     );
-    expect(notice).toMatch(/Opus/);
-    expect(notice).toMatch(/asking me to switch/);
-    // Must NOT tell a Slack user about a picker that isn't there.
+    expect(
+      refusalRetryTarget({ ...clean, fullContent: " ", model: MODELS.FABLE }),
+    ).toBeNull();
+  });
+});
+
+describe("refusalNoticeFor", () => {
+  test("a clean run says nothing at all", () => {
+    expect(
+      refusalNoticeFor({
+        refusedModel: MODELS.FABLE,
+        retriedOnto: null,
+        stillRefused: false,
+      }),
+    ).toBeNull();
+  });
+
+  test("a successful retry DISCLOSES which model answered and that nothing changed", () => {
+    const notice = refusalNoticeFor({
+      refusedModel: MODELS.FABLE,
+      retriedOnto: MODELS.OPUS,
+      stillRefused: false,
+    });
+    expect(notice).toContain(MODEL_DISPLAY[MODELS.OPUS]);
+    expect(notice).toMatch(/nothing about your settings changed/i);
+    // The whole point: never ask the user to go change a model themselves.
+    expect(notice).not.toMatch(/switch/i);
     expect(notice).not.toMatch(/model picker/i);
   });
 
-  test("non-Fable models just suggest a rephrase (no nonsensical 'switch to Opus')", () => {
-    for (const model of [MODELS.SONNET, MODELS.OPUS, MODELS.HAIKU]) {
-      // Even a stray switch hint is ignored off the Fable branch.
-      const notice = refusalNotice(model, "with the model picker above");
-      expect(notice).toMatch(/rephras/i);
-      expect(notice).not.toMatch(/Opus/);
-      expect(notice).not.toMatch(/model picker/i);
-    }
+  test("a retry that also refused asks for a rephrase, not a model change", () => {
+    const notice = refusalNoticeFor({
+      refusedModel: MODELS.FABLE,
+      retriedOnto: MODELS.OPUS,
+      stillRefused: true,
+    });
+    expect(notice).toMatch(/rephras/i);
+    expect(notice).toContain(MODEL_DISPLAY[MODELS.OPUS]);
+    expect(notice).not.toMatch(/switch/i);
+  });
+
+  test("an unretryable refusal suggests a rephrase and names no other model", () => {
+    const notice = refusalNoticeFor({
+      refusedModel: MODELS.SONNET,
+      retriedOnto: null,
+      stillRefused: true,
+    });
+    expect(notice).toMatch(/rephras/i);
+    expect(notice).not.toMatch(/Opus/);
+    expect(notice).not.toMatch(/switch/i);
+    expect(notice).not.toMatch(/model picker/i);
+  });
+});
+
+describe("refusalNotice", () => {
+  test("names the refusing model by its CURRENT display label, not a hand-written one", () => {
+    // The stale-copy failure mode: "Claude Fable 5" outlived the 5 → 5.1 bump
+    // in the set_aide_model description. Derive, never hand-sync.
+    const notice = refusalNotice(MODELS.FABLE, { kind: "declined" });
+    expect(notice).toContain(MODEL_DISPLAY[MODELS.FABLE]);
+  });
+
+  test("an unknown/retired model id degrades to the raw slug instead of throwing", () => {
+    const notice = refusalNotice("claude-fable-5", { kind: "declined" });
+    expect(notice).toContain("claude-fable-5");
   });
 });
 

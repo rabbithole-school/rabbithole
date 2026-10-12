@@ -71,6 +71,31 @@ export function derivePlaylistDoneness({
   return { allDone, caughtUp, blocked };
 }
 
+/**
+ * Whether the done-screen story/seed card may mount on this wrap.
+ *
+ * The card used to require `caughtUp`, and that starved it: `caughtUp` means
+ * the scheduler's queue is EXHAUSTED, but `playlistForScholar` serves a rolling
+ * window (a handful of rows that refills as items are done today, plus
+ * automatic stretch rows that are never `doneToday`), so a scholar can finish
+ * 10–19 skills in a sitting and still read 4/5 done with a `nextUp`. Probed on
+ * prod 2026-09-11: every scholar who had earned a seed that week was in that
+ * state, and the card had mounted ten times in the product's life (zero seed
+ * offers ever). The 20h offer cooldown already caps the card at one per day, so
+ * gating on a finished plain round is the whole condition.
+ *
+ * Still closed while the doneness query is loading (never flash the payoff
+ * early) and on a scope-blocked wrap (a boundary someone else drew is not a
+ * finished round). `plainPlaylistWrap` — not a tune-up / challenge / bonus /
+ * mapping / stretch / calibration / scoped wrap — stays the caller's call.
+ */
+export function storyCardGateOpen(
+  plainPlaylistWrap: boolean,
+  verdict: PlaylistDoneness | null,
+): boolean {
+  return plainPlaylistWrap && verdict !== null && !verdict.blocked;
+}
+
 /** True only once a resolved playlist still has work for the scholar. A
  *  scope-blocked playlist has none — the boundary is not work. */
 export function hasActionablePlaylist(

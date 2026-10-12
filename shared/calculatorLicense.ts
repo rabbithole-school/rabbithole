@@ -194,3 +194,25 @@ export function calculatorLicenseCardPresentation({
     showCredentialFields: licensed,
   };
 }
+
+// ── The license card as a badge ────────────────────────────────────────────
+
+/**
+ * The `scholarUnitBadges.kind` whose image is the license card itself (a
+ * landscape PNG rendered from the printed card's design), not square
+ * medallion art. Every badge surface draws it at the card's own aspect with
+ * rounded corners — never cropped into a circle or square — and offers no
+ * remix (there is no art to remix).
+ */
+export function isLicenseCardBadge(kind: string | null | undefined): boolean {
+  return kind === "calculator_license";
+}
+
+/** ISO/IEC 7810 ID-1 (CR80) width ÷ height: 3.375 × 2.125 in. Mirrors
+ * CALCULATOR_LICENSE_CARD in convex/cloudPrintingActions.ts (pinned by
+ * calculatorLicensePdf.test.ts). */
+export const LICENSE_CARD_ASPECT = 243 / 153;
+
+/** The card's corner radius as a fraction of its width (1/8 in of 3.375 in),
+ * so a rounded frame around the PNG matches its own transparent corners. */
+export const LICENSE_CARD_CORNER_RATIO = 9 / 243;

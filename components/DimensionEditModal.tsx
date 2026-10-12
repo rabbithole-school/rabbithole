@@ -323,7 +323,7 @@ export function DimensionEditModal({
             youtubeUrl: formData.youtubeUrl || null,
             videoTranscript: formData.videoTranscript || null,
             // personaId intentionally omitted (DEPRECATED — anti-parasocial).
-            // Existing unit→persona links are left untouched. See TODO.html.
+            // Existing unit→persona links are left untouched. See the retired TODO.html.
             perspectiveId: formData.perspectiveId ? formData.perspectiveId as Id<"perspectives"> : null,
             processId: formData.processId ? formData.processId as Id<"processes"> : null,
           });

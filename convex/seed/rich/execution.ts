@@ -141,6 +141,17 @@ export const assignments: SeedAssignment[] = [
         setAgoMinutes: 90,
         dueInDays: 4,
       },
+      {
+        // Photograph your sample space — the seed's only PHOTO deliverable,
+        // deliberately LIVE homework rather than a future push: the point of
+        // the fixture is that a scholar (or an agent) can open it right now
+        // and exercise the camera → submit → check path, which no other
+        // seeded activity reaches.
+        activityKey: "a.probability.photo",
+        mode: "homework",
+        setAgoMinutes: 60, // set an hour ago — open to scholars now
+        dueInDays: 3,
+      },
     ],
   },
 

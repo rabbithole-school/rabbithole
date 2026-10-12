@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "convex/react";
 import { useRouter } from "expo-router";
 import * as Haptics from "expo-haptics";
@@ -27,11 +27,9 @@ import { AppTextInput } from "@/components/AppTextInput";
 export function CreateQuestDialog({
   open,
   onClose,
-  mode = "launch",
 }: {
   open: boolean;
   onClose: () => void;
-  mode?: "launch" | "addToTonight";
 }) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -40,7 +38,6 @@ export function CreateQuestDialog({
   const createQuest = useMutation(api.units.createQuest);
   const createSession = useMutation(api.sessions.create);
   const scheduleBake = useMutation(api.units.scheduleCustomQuestBake);
-  const addSessionToPlan = useMutation(api.takeHomePlans.addSessionToPlan);
 
   const [step, setStep] = useState<"details" | "path">("details");
   const [title, setTitle] = useState("");
@@ -48,6 +45,15 @@ export function CreateQuestDialog({
   const [chosen, setChosen] = useState<PathChoice | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Bumped to abandon an in-flight start (close, unmount): a late
+  // resolve from an abandoned attempt must never navigate or touch state.
+  const attemptRef = useRef(0);
+  useEffect(
+    () => () => {
+      attemptRef.current += 1;
+    },
+    [],
+  );
 
   const trimmedTitle = title.trim();
   const trimmedDescription = description.trim();
@@ -60,8 +66,11 @@ export function CreateQuestDialog({
     setError(null);
   };
 
+  // Always closable — even mid-start. On a locked fleet iPad there is no Home
+  // gesture, so a disabled exit over a stalled request traps the scholar.
   const close = () => {
-    if (submitting) return;
+    attemptRef.current += 1;
+    setSubmitting(false);
     onClose();
     reset();
   };
@@ -77,18 +86,23 @@ export function CreateQuestDialog({
   const handleCreate = async () => {
     if (submitting || !trimmedTitle) return;
     const choice = chosen ?? ENDLESS_CHAT;
+    const attempt = ++attemptRef.current;
+    const live = () => attemptRef.current === attempt;
     setSubmitting(true);
     setError(null);
-    try {
+
+    // None of these writes is idempotent (each mints a new unit / session), so
+    // an abandoned attempt stops at the next step rather than finishing a quest
+    // nobody is waiting for.
+    const start = async () => {
       const result = await createQuest({
         title: trimmedTitle,
         ...(trimmedDescription ? { description: trimmedDescription } : {}),
       });
+      if (!live()) return null;
       const session = await createSession({ unitId: result.unitId });
       if (!session?.id) throw new Error("Session was not created");
-      if (mode === "addToTonight") {
-        await addSessionToPlan({ sessionId: session.id });
-      }
+      if (!live()) return null;
 
       const bakePath =
         choice === ENDLESS_CHAT
@@ -103,26 +117,31 @@ export function CreateQuestDialog({
       } catch (e) {
         console.warn("[custom-quest] bake scheduling failed", e);
       }
+      return session;
+    };
 
+    try {
+      const session = await start();
+      if (!live() || !session) return;
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
         () => {},
       );
+      setSubmitting(false);
       onClose();
       reset();
-      if (mode === "launch") {
-        router.push({
-          pathname: "/session/[id]",
-          params: { id: session.id, title: trimmedTitle },
-        });
-      }
+      router.push({
+        pathname: "/session/[id]",
+        params: { id: session.id, title: trimmedTitle },
+      });
     } catch (e) {
+      if (!live()) return;
+      attemptRef.current += 1;
+      setSubmitting(false);
       const message = e instanceof Error ? e.message : String(e);
       setError(message || "Please try again.");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(
         () => {},
       );
-    } finally {
-      setSubmitting(false);
     }
   };
 
@@ -145,20 +164,18 @@ export function CreateQuestDialog({
               <Text style={styles.eyebrow}>Quest</Text>
               <Text style={styles.title} numberOfLines={2}>
                 {step === "details"
-                  ? mode === "addToTonight" ? "Shape a new quest" : "What do you want to learn?"
+                  ? "What do you want to learn?"
                   : trimmedTitle}
               </Text>
             </View>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Close"
-              disabled={submitting}
               hitSlop={10}
               onPress={close}
               style={({ pressed }) => [
                 styles.closeButton,
                 pressed && styles.closePressed,
-                submitting && styles.disabled,
               ]}
             >
               <Text style={styles.closeText}>×</Text>
@@ -254,7 +271,7 @@ export function CreateQuestDialog({
                   {submitting ? (
                     <ActivityIndicator color={colors.white} />
                   ) : (
-                    <Text style={styles.primaryText}>{mode === "addToTonight" ? "Create & add to tonight" : "Start exploring →"}</Text>
+                    <Text style={styles.primaryText}>Start exploring →</Text>
                   )}
                 </Pressable>
               </View>
@@ -431,9 +448,6 @@ function makeStyles(c: ReturnType<typeof useColors>) {
       color: c.white,
       fontSize: 16,
       fontFamily: fonts.bold,
-    },
-    disabled: {
-      opacity: 0.55,
     },
     footerNote: {
       textAlign: "center",

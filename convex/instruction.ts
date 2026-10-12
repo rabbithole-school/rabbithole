@@ -109,6 +109,31 @@ export type ClaimResult =
   | { claimed: true }
   | { claimed: false; reason: "suppressed" | "daily_cap" };
 
+/** `framing: "question"` — the caller is a question-framing client (the
+ *  "Can you already do this?" pill). Absent on an older installed iPad build. */
+const framingValidator = v.optional(v.literal("question"));
+
+/**
+ * May a lifecycle write for `key` land? A question-framing client always may
+ * (its frame can be the item's own teaching step, which has no content row).
+ * An older installed iPad build (no `framing`) renders only content atoms, so
+ * it may write only for a key with PASSED, non-empty content — otherwise its
+ * standalone card would show nothing, and a "Show me" on it would mark a node
+ * viewed (suppressing the frame for the new build too) without anything seen.
+ */
+async function framedOrHasContent(
+  ctx: QueryCtx,
+  key: string,
+  framing: "question" | undefined,
+): Promise<boolean> {
+  if (framing === "question") return true;
+  const passed = await ctx.db
+    .query("instructionContent")
+    .withIndex("by_key_status", (q) => q.eq("key", key).eq("verifyStatus", "passed"))
+    .collect();
+  return passed.some((row) => (row.atoms?.length ?? 0) > 0);
+}
+
 /**
  * Claim a Launchpad as SHOWN. Idempotent within a scholar-local day, enforces the
  * re-offer cap and the ≤1/day cap authoritatively (the query's checks are only
@@ -118,6 +143,10 @@ export const claimInstructionShown = authedMutation({
   args: {
     scholarId: v.id("users"),
     key: v.string(),
+    /** "question" = the "Can you already do this?" pill on a real item. It is
+     *  exempt from the cross-key ≤1/day cap (see `selectRunLaunchpad`'s
+     *  `dailyCap`); the standalone card (no framing) keeps the cap. */
+    framing: framingValidator,
   },
   handler: async (ctx, args): Promise<ClaimResult> => {
     await authScholar(ctx, args.scholarId);
@@ -135,6 +164,14 @@ export const claimInstructionShown = authedMutation({
       return { claimed: false, reason: "suppressed" };
     }
 
+    // The standalone card (an older iPad build — no `framing`) renders the
+    // entry's atoms. A frame whose move is the item's own teaching step
+    // (`move: "item_steps"`) has none, so refuse it rather than show an empty
+    // card; that card proceeds straight to the item on a refused claim.
+    if (!(await framedOrHasContent(ctx, key, args.framing))) {
+      return { claimed: false, reason: "suppressed" };
+    }
+
     // Already shown today for this key → idempotent (a re-mount), no bump.
     if (existing?.shownAt != null && existing.lastShownDayBucket === dayBucket) {
       return { claimed: true };
@@ -143,10 +180,13 @@ export const claimInstructionShown = authedMutation({
     // ≤1 Launchpad per day across keys: if a DIFFERENT key was already shown
     // today, hold this one for a later day (its ledger is untouched, so it stays
     // eligible — nothing is burned).
-    const all = await ctx.db
-      .query("instructionEvents")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
-      .collect();
+    const all =
+      args.framing === "question"
+        ? []
+        : await ctx.db
+            .query("instructionEvents")
+            .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
+            .collect();
     const anotherShownToday = all.some(
       (e: Doc<"instructionEvents">) =>
         e.key !== key && e.shownAt != null && e.lastShownDayBucket === dayBucket,
@@ -180,9 +220,11 @@ export const recordInstructionChoice = authedMutation({
     scholarId: v.id("users"),
     key: v.string(),
     choice: v.union(v.literal("try"), v.literal("show")),
+    framing: framingValidator,
   },
   handler: async (ctx, args) => {
     await authScholar(ctx, args.scholarId);
+    if (!(await framedOrHasContent(ctx, args.key, args.framing))) return null;
     const row = await eventRow(ctx, args.scholarId, args.key);
     if (!row) return null; // choice without a prior shown claim is a no-op
     await ctx.db.patch(row._id, { initialChoice: args.choice });
@@ -192,16 +234,17 @@ export const recordInstructionChoice = authedMutation({
 
 function terminalMutation(field: "viewedAt" | "completedAt" | "dismissedAt") {
   return authedMutation({
-    args: { scholarId: v.id("users"), key: v.string() },
+    args: { scholarId: v.id("users"), key: v.string(), framing: framingValidator },
     handler: async (
       // `authedMutation`'s `input` augments ctx with `user` (see
       // customFunctions.ts) — matching that here (rather than the bare
       // `MutationCtx` this previously annotated) is what lets `authScholar`'s
       // `ctx.user` read type-check instead of silently widening past it.
       ctx: MutationCtx & { user: Doc<"users"> },
-      args: { scholarId: Id<"users">; key: string },
+      args: { scholarId: Id<"users">; key: string; framing?: "question" },
     ) => {
       await authScholar(ctx, args.scholarId);
+      if (!(await framedOrHasContent(ctx, args.key, args.framing))) return null;
       return await recordInstructionTerminalInContext(
         ctx,
         args.scholarId,

@@ -11,15 +11,29 @@
  * Other activity kinds get a pointer empty state. The unit-level **Review** is
  * its own unit tab now (UnitReviewView), no longer routed through here.
  */
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
-import { useRouter } from "next/navigation";
-import { Box, Button, Flex, HStack, Stack, Text, Tooltip, Portal } from "@chakra-ui/react";
-import { SteeringWheel } from "@phosphor-icons/react";
+import { useRouter, useSearchParams } from "next/navigation";
+import {
+  Box,
+  Button,
+  Flex,
+  HStack,
+  Portal,
+  Stack,
+  Text,
+  Tooltip,
+} from "@chakra-ui/react";
+import { GitForkIcon, SteeringWheel } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { rehearsalSurfaceForActivityKind } from "@/lib/rehearsalActivityKinds";
+import { activityRehearsalPath } from "@/convex/lib/channels";
+import {
+  isRehearsableActivityKind,
+  rehearsalSurfaceForActivityKind,
+} from "@/lib/rehearsalActivityKinds";
 import { toaster } from "@/lib/toaster";
+import { isPlayOnlyApp } from "@/shared/workshopMode";
 import { RehearseBody } from "./nodeEditor/RehearsePanel";
 import type { RehearseFixField } from "./nodeEditor/rehearseResult";
 import { SimulatorPreflightPanel } from "./simulatorTeacher/SimulatorPreflightPanel";
@@ -41,13 +55,19 @@ export function RehearsePane({
   onFixFinding?: (field: RehearseFixField) => void;
 }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const activity = useQuery(api.activities.get, { id: activityId });
   const createSession = useMutation(api.sessions.create);
+  const forkActivity = useMutation(api.activities.forkToMyUnit);
   const [launching, setLaunching] = useState(false);
+  const [forking, setForking] = useState(false);
+  const autoLaunchHandledRef = useRef(false);
+  const manualRehearsalRequested =
+    searchParams.get("rehearse") === "manual";
 
   // Rehearse manually = a teacher-driven manual-rehearsal session (no scholar
   // data written); routes into the scholar UI with the cyan banner.
-  const handleManual = async () => {
+  const handleManual = useCallback(async () => {
     if (launching) return;
     setLaunching(true);
     try {
@@ -58,7 +78,58 @@ export function RehearsePane({
       toaster.error({ title: "Couldn't start — try again." });
       setLaunching(false);
     }
-  };
+  }, [activityId, createSession, launching, router]);
+
+  const handleFork = useCallback(async () => {
+    if (forking) return;
+    setForking(true);
+    try {
+      const result = await forkActivity({ activityId });
+      toaster.success({
+        title: "Activity forked",
+        description: `"${result.activityTitle}" is now in ${result.unitTitle}.`,
+      });
+      router.push(
+        activityRehearsalPath(
+          result.unitId,
+          result.lessonId,
+          result.activityId,
+        ),
+      );
+    } catch (err) {
+      console.error("Fork activity failed:", err);
+      toaster.error({ title: "Couldn't fork activity — try again." });
+      setForking(false);
+    }
+  }, [activityId, forkActivity, forking, router]);
+
+  useEffect(() => {
+    if (
+      autoLaunchHandledRef.current ||
+      !manualRehearsalRequested ||
+      view !== "rehearse" ||
+      activity == null
+    ) {
+      return;
+    }
+
+    autoLaunchHandledRef.current = true;
+    if (launching || !isRehearsableActivityKind(activity.kind)) return;
+
+    // Deferred so the launch (which sets state and navigates) is not a
+    // synchronous setState inside the effect body. No cleanup on purpose: the
+    // ref above already makes this one-shot, and the query re-rendering
+    // before the tick fires must not cancel the launch.
+    setTimeout(() => {
+      void handleManual();
+    }, 0);
+  }, [
+    activity,
+    handleManual,
+    launching,
+    manualRehearsalRequested,
+    view,
+  ]);
 
   if (activity === undefined) {
     return (
@@ -82,6 +153,7 @@ export function RehearsePane({
       <Flex h="full" flexDir="column" overflow="hidden">
         {view === "rehearse" && (
           <HStack px={5} pt={2} justify="flex-end">
+            <ForkActivityButton forking={forking} onClick={handleFork} />
             <ManualRehearsalButton
               launching={launching}
               onClick={handleManual}
@@ -109,18 +181,33 @@ export function RehearsePane({
     return (
       <VibecodeRehearsal
         view={view}
+        playOnly={isPlayOnlyApp({
+          editAccess: activity.editAccess,
+          hasStarter: activity.starterApp != null,
+        })}
         launching={launching}
+        forking={forking}
         onManual={handleManual}
+        onFork={handleFork}
       />
     );
   }
 
   if (surface === "unavailable") {
     return (
-      <RehearseEmpty
-        title="This activity runs offline"
-        body="Scholar-bot rehearsal is for online activities — the ones where a scholar works with the AI tutor. Switch the activity to Online in the Edit tab to rehearse it."
-      />
+      <Flex h="full" flexDir="column" overflow="hidden">
+        {view === "rehearse" && (
+          <HStack px={5} pt={2} justify="flex-end">
+            <ForkActivityButton forking={forking} onClick={handleFork} />
+          </HStack>
+        )}
+        <Box flex={1} minH={0}>
+          <RehearseEmpty
+            title="This activity runs offline"
+            body="Scholar-bot rehearsal is for online activities — the ones where a scholar works with the AI tutor. Switch the activity to Online in the Edit tab to rehearse it."
+          />
+        </Box>
+      </Flex>
     );
   }
 
@@ -131,6 +218,7 @@ export function RehearsePane({
           tab; the Debrief tab stays focused on comparing to real scholars. */}
       {view === "rehearse" && (
         <HStack maxW="900px" mb={3} justify="flex-end">
+          <ForkActivityButton forking={forking} onClick={handleFork} />
           <ManualRehearsalButton
             launching={launching}
             onClick={handleManual}
@@ -155,6 +243,41 @@ export function RehearsePane({
         />
       </Box>
     </Box>
+  );
+}
+
+function ForkActivityButton({
+  forking,
+  onClick,
+}: {
+  forking: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Tooltip.Root openDelay={300} closeDelay={0}>
+      <Tooltip.Trigger asChild>
+        <Button
+          size="xs"
+          variant="outline"
+          fontFamily="heading"
+          fontWeight="600"
+          onClick={onClick}
+          loading={forking}
+          loadingText="Forking…"
+        >
+          <GitForkIcon size={14} weight="duotone" style={{ marginRight: 4 }} />
+          Fork to my unit
+        </Button>
+      </Tooltip.Trigger>
+      <Portal>
+        <Tooltip.Positioner>
+          <Tooltip.Content>
+            If this activity has a starter app, the fork gets its own copy.
+            Resources and process links stay shared.
+          </Tooltip.Content>
+        </Tooltip.Positioner>
+      </Portal>
+    </Tooltip.Root>
   );
 }
 
@@ -201,13 +324,29 @@ function ManualRehearsalButton({
 
 function VibecodeRehearsal({
   view,
+  playOnly,
   launching,
+  forking,
   onManual,
+  onFork,
 }: {
   view: "rehearse" | "debrief";
+  /** Scholars only play this app (a starter, Edit "never"): talk about
+   *  playing it, never about building one (TRA-477). */
+  playOnly: boolean;
   launching: boolean;
+  forking: boolean;
   onManual: () => void;
+  onFork: () => void;
 }) {
+  const title = playOnly ? "Scholars play this app" : "Sims don't build apps yet";
+  const body = playOnly
+    ? view === "rehearse"
+      ? "Sims don't play apps yet. Rehearse this app as a scholar would."
+      : "There is no scholar-bot debrief for apps yet; play the app as a scholar would instead."
+    : view === "rehearse"
+      ? "Rehearse this app-building activity manually in the scholar workshop."
+      : "There is no scholar-bot debrief for Vibecode yet; rehearse the app manually instead.";
   return (
     <Flex h="full" align="center" justify="center" px={8}>
       <Stack
@@ -221,21 +360,24 @@ function VibecodeRehearsal({
         p={6}
       >
         <Text fontFamily="heading" fontSize="md" color="charcoal.500">
-          Sims don&apos;t build apps yet
+          {title}
         </Text>
         <Text fontFamily="body" fontSize="sm" color="charcoal.400">
-          {view === "rehearse"
-            ? "Rehearse this app-building activity manually in the scholar workshop."
-            : "There is no scholar-bot debrief for Vibecode yet; rehearse the app manually instead."}
+          {body}
         </Text>
         {view === "rehearse" && (
-          <Box pt={1}>
+          <HStack pt={1} justify="center" flexWrap="wrap">
+            <ForkActivityButton forking={forking} onClick={onFork} />
             <ManualRehearsalButton
               launching={launching}
               onClick={onManual}
-              tooltip="Open the scholar workshop yourself — nothing is saved to a scholar"
+              tooltip={
+                playOnly
+                  ? "Play the app yourself, as a scholar would — nothing is saved to a scholar"
+                  : "Open the scholar workshop yourself — nothing is saved to a scholar"
+              }
             />
-          </Box>
+          </HStack>
         )}
       </Stack>
     </Flex>

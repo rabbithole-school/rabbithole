@@ -63,7 +63,15 @@ export default function HowItWorksPage() {
   // Logo = Back to where they came from. router.back() returns to the exact
   // prior page; fall back to the viewer's home on a cold load.
   const homePath =
-    role === ROLES.PARENT ? "/parent" : isStaff ? teacherHomePath(role) : "/scholar";
+    role === ROLES.PARENT
+      ? "/parent"
+      : isStaff
+        ? teacherHomePath(
+            role,
+            user?.hasSchoolOperationsAccess,
+            user?.hasCurriculumAccess,
+          )
+        : "/scholar";
   const goBack = () => {
     if (typeof window !== "undefined" && window.history.length > 1) router.back();
     else router.push(homePath);

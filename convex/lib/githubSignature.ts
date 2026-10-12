@@ -13,10 +13,13 @@
 // compare either way.
 //
 // Pure module: unit-tested in convex/lib/__tests__/githubSignature.test.ts.
+// `hmacSha256Hex` and `timingSafeEqual` are exported for other HMAC-signed
+// inbound webhooks.
 
 const SIGNATURE_PREFIX = "sha256=";
 
-async function hmacSha256Hex(secret: string, body: string): Promise<string> {
+/** Lowercase hex HMAC-SHA256 of `body`, keyed by `secret`. */
+export async function hmacSha256Hex(secret: string, body: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -35,7 +38,7 @@ async function hmacSha256Hex(secret: string, body: string): Promise<string> {
 }
 
 /** Constant-time-ish string compare (lengths leak; contents don't). */
-function timingSafeEqual(a: string, b: string): boolean {
+export function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) {

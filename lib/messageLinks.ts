@@ -1,6 +1,13 @@
+// A labelled link is stored inline as `[label](url)` — the only markup a
+// message body carries. `value` is always the exact source text, so joining
+// token values reproduces the body; renderers show `label` and open `url`.
 export type MessageLinkToken =
   | { type: "text"; value: string }
-  | { type: "url"; value: string };
+  | { type: "url"; value: string }
+  | { type: "link"; value: string; label: string; url: string };
+
+const LABELLED_LINK = String.raw`\[([^\[\]\n]+)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))+)\)`;
+const BARE_URL = String.raw`\bhttps?:\/\/[^\s<]+`;
 
 function occurrences(value: string, character: string): number {
   return value.split(character).length - 1;
@@ -30,7 +37,7 @@ function splitTrailingPunctuation(value: string): {
   return { url, trailing };
 }
 
-function isHttpUrl(value: string): boolean {
+export function isHttpUrl(value: string): boolean {
   // `new URL("https:///path")` treats `path` as a host, so require an explicit
   // authority character after the two literal slashes before parsing.
   if (!/^https?:\/\/[^/?#]/i.test(value)) return false;
@@ -45,10 +52,13 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
-/** Tokenize bare absolute web URLs without changing any surrounding text. */
+/**
+ * Tokenize `[label](url)` links and bare absolute web URLs without changing
+ * any surrounding text.
+ */
 export function tokenizeMessageLinks(value: string): MessageLinkToken[] {
   const tokens: MessageLinkToken[] = [];
-  const pattern = /\bhttps?:\/\/[^\s<]+/g;
+  const pattern = new RegExp(`${LABELLED_LINK}|${BARE_URL}`, "g");
   let cursor = 0;
   const addText = (text: string) => {
     if (!text) return;
@@ -63,10 +73,20 @@ export function tokenizeMessageLinks(value: string): MessageLinkToken[] {
   for (const match of value.matchAll(pattern)) {
     const start = match.index;
     if (start === undefined) continue;
-    const { url, trailing } = splitTrailingPunctuation(match[0]);
     if (start > cursor) {
       addText(value.slice(cursor, start));
     }
+    const [source, label, labelledUrl] = match;
+    if (labelledUrl !== undefined) {
+      if (label.trim() && isHttpUrl(labelledUrl)) {
+        tokens.push({ type: "link", value: source, label, url: labelledUrl });
+      } else {
+        addText(source);
+      }
+      cursor = start + source.length;
+      continue;
+    }
+    const { url, trailing } = splitTrailingPunctuation(source);
     if (url && isHttpUrl(url)) {
       tokens.push({ type: "url", value: url });
       addText(trailing);
@@ -114,4 +134,25 @@ export function previewableMessageLink(value: string): string | null {
   }
 
   return null;
+}
+
+/**
+ * The body as plain text for surfaces that cannot carry a hyperlink (SMS,
+ * WhatsApp, Slack, the plain-text email part): a labelled link becomes
+ * `label (url)` so the URL is never lost. `labelsOnly` keeps just the label,
+ * for short one-line teasers (inbox snippets, email subjects).
+ */
+export function messagePlainText(
+  value: string,
+  { labelsOnly = false }: { labelsOnly?: boolean } = {},
+): string {
+  return tokenizeMessageLinks(value)
+    .map((token) =>
+      token.type !== "link"
+        ? token.value
+        : labelsOnly || token.label === token.url
+          ? token.label
+          : `${token.label} (${token.url})`,
+    )
+    .join("");
 }

@@ -10,7 +10,7 @@
  *   - the upgrade-in-place prompt flip (seedOrigin.hasStructure)
  */
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import { buildTutorSystemPrompt } from "../sessionStreamHelpers";
@@ -21,6 +21,26 @@ const modules = (
     glob: (pattern: string) => Record<string, () => Promise<unknown>>;
   }
 ).glob("../**/*.ts");
+
+// The mutations under test schedule actions with runAfter(0): the bake itself,
+// deliverables.generateCriteriaForSession, sessions.generateReflectionForSession
+// and processState.initialize. Every test here asserts on the scheduled row or
+// on what the mutation wrote, and none needs the action to run. On real timers
+// each job fired during a LATER test, owned by nobody, and on a loaded worker
+// was still loading its modules when this file's environment was torn down.
+// A shared vitest worker caches that failed load, so every later file on the
+// worker that imports the same module (slackNotifications, via deliverables)
+// failed with "Cannot load … after the environment was torn down". That was
+// the merge gate's recurring shard-4 adHocCompletion failure (#3864, #3913,
+// #3986, #4055). Faking the scheduler's timer keeps every job pending, and the
+// fake-timer call routes this file to its own worker (vitest.config.ts,
+// ISOLATION_HAZARD).
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 async function withScholar(
   t: ReturnType<typeof convexTest>,
@@ -115,6 +135,28 @@ describe("bake: launch hooks (createFromSeed)", () => {
     expect(args.path?.title).toBe("Be a sound detective");
   });
 
+  test('"Endless chat" opens a plain exploration and never bakes', async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await makeScholar(t);
+    const seedId = await makeTopicSeed(t, scholarId);
+    const asScholar = await withScholar(t, scholarId);
+
+    const { id: sessionId } = await asScholar.mutation(
+      api.sessions.createFromSeed,
+      { seedId, endlessChat: true },
+    );
+
+    // No "building your quest" hold, and no bake that could later swap the
+    // open chat into a baked activity mid-conversation.
+    const session = await t.run((ctx) => ctx.db.get(sessionId));
+    expect(session?.questBakeStatus).toBeUndefined();
+    expect(session?.seedId).toBe(seedId);
+    const scheduled = await t.run((ctx) =>
+      ctx.db.system.query("_scheduled_functions").collect(),
+    );
+    expect(scheduled).toHaveLength(0);
+  });
+
   test("a structured seed initializes its unit process without a remaining activity", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await makeScholar(t);
@@ -173,7 +215,7 @@ describe("bake: launch hooks (createFromSeed)", () => {
     ).toBe(false);
   });
 
-  test("getBakeLaunchInfo flags a topic seed (bake) vs a structured seed (no bake)", async () => {
+  test("getBakeLaunchInfo flags only non-story topic seeds for the picker", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await makeScholar(t);
     const asScholar = await withScholar(t, scholarId);
@@ -197,6 +239,12 @@ describe("bake: launch hooks (createFromSeed)", () => {
       seedId: structuredSeed,
     });
     expect(structuredInfo?.isTopicSeed).toBe(false);
+
+    const storySeed = await makeTopicSeed(t, scholarId, { origin: "story" });
+    const storyInfo = await asScholar.query(api.seeds.getBakeLaunchInfo, {
+      seedId: storySeed,
+    });
+    expect(storyInfo?.isTopicSeed).toBe(false);
   });
 
   test("a STRUCTURED seed launch starts the unit's activity and schedules NO bake", async () => {
@@ -238,6 +286,34 @@ describe("bake: launch hooks (createFromSeed)", () => {
     const scheduled = await t.run((ctx) =>
       ctx.db.system.query("_scheduled_functions").collect(),
     );
+    expect(
+      scheduled.some((job) => job.name.includes("bakeUnitFromSeed")),
+    ).toBe(false);
+  });
+
+  test("an inactive structured seed is refused without creating a session or bake", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await makeScholar(t);
+    const unitId = await t.run((ctx) =>
+      ctx.db.insert("units", {
+        teacherId: scholarId,
+        title: "Paused quest",
+        isActive: false,
+        authorScholarId: scholarId,
+      }),
+    );
+    const seedId = await makeTopicSeed(t, scholarId, { unitId });
+    const asScholar = await withScholar(t, scholarId);
+
+    await expect(
+      asScholar.mutation(api.sessions.createFromSeed, { seedId }),
+    ).rejects.toThrow("This quest isn't available right now.");
+
+    const sessions = await t.run((ctx) => ctx.db.query("sessions").collect());
+    const scheduled = await t.run((ctx) =>
+      ctx.db.system.query("_scheduled_functions").collect(),
+    );
+    expect(sessions).toHaveLength(0);
     expect(
       scheduled.some((job) => job.name.includes("bakeUnitFromSeed")),
     ).toBe(false);

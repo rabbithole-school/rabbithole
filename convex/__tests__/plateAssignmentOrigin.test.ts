@@ -1,5 +1,5 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -9,6 +9,19 @@ const modules = (
     glob: (pattern: string) => Record<string, () => Promise<unknown>>;
   }
 ).glob("../**/*.ts");
+
+// Pin the wall clock to noon at the school (DEFAULT_TIMEZONE, Pacific/Honolulu).
+// These tests stamp pushes `now - 2h`, and a push only shows on the
+// institution day it was set. Between 00:00 and 02:00 local, `now - 2h` falls
+// on yesterday, so the overrun-focus row legitimately disappears. The merge
+// gate hit exactly that when it ran #4057 just after midnight (2026-09-28).
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-28T22:00:00Z"));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {

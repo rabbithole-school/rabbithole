@@ -23,10 +23,18 @@ export const previewForMessage = action({
     }
     // The public query performs the same thread authorization as rendering and
     // returns null unless this exact URL is the message's single eligible link.
-    const request = await ctx.runQuery(
-      api.parentMessages.getMessageLinkPreviewRequest,
-      args,
+    // Scholar ↔ staff threads are authorized by their own rule
+    // (scholarMessages); the family query refuses them.
+    const scholarThread = await ctx.runQuery(
+      internal.scholarMessages.isScholarThreadMessageInternal,
+      { messageId: args.messageId },
     );
+    const request = scholarThread
+      ? await ctx.runQuery(api.scholarMessages.getMessageLinkPreviewRequest, {
+          messageId: args.messageId,
+          url: args.url,
+        })
+      : await ctx.runQuery(api.parentMessages.getMessageLinkPreviewRequest, args);
     if (!request) return null;
 
     const claimId = crypto.randomUUID();

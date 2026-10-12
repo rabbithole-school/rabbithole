@@ -42,26 +42,47 @@ const STACK_TRACE_RE =
 const PROTOCOL_FRAGMENT_RE =
   /\b(?:content_block_start|content_block_delta|tool_use|tool_result|input_json_delta|server_tool_use|stop_reason|sseEvent)\b|^\s*\{\s*"(?:type|role|content|toolUseId|tool_use_id)"\s*:/i;
 
-export function isMachineFacingTextSegment(segment: string): boolean {
+export type ScholarSafeTextPattern =
+  | "internal_marker"
+  | "learner_turn_planning"
+  | "before_addressing_learner_turn"
+  | "raw_choice_index"
+  | "raw_error"
+  | "stack_trace"
+  | "protocol_fragment";
+
+export function matchMachineFacingPattern(
+  segment: string,
+): ScholarSafeTextPattern | null {
   const trimmed = segment.trim();
-  if (!trimmed) return false;
-  return (
-    INTERNAL_MARKER_RE.test(trimmed) ||
-    LEARNER_TURN_PLANNING_RE.test(trimmed) ||
-    BEFORE_ADDRESSING_LEARNER_TURN_RE.test(trimmed) ||
-    RAW_CHOICE_INDEX_RE.test(trimmed) ||
-    RAW_ERROR_RE.test(trimmed) ||
-    STACK_TRACE_RE.test(trimmed) ||
-    PROTOCOL_FRAGMENT_RE.test(trimmed)
-  );
+  if (!trimmed) return null;
+  if (INTERNAL_MARKER_RE.test(trimmed)) return "internal_marker";
+  if (LEARNER_TURN_PLANNING_RE.test(trimmed)) return "learner_turn_planning";
+  if (BEFORE_ADDRESSING_LEARNER_TURN_RE.test(trimmed)) {
+    return "before_addressing_learner_turn";
+  }
+  if (RAW_CHOICE_INDEX_RE.test(trimmed)) return "raw_choice_index";
+  if (RAW_ERROR_RE.test(trimmed)) return "raw_error";
+  if (STACK_TRACE_RE.test(trimmed)) return "stack_trace";
+  if (PROTOCOL_FRAGMENT_RE.test(trimmed)) return "protocol_fragment";
+  return null;
 }
 
-export function sanitizeScholarVisibleText(text: string): string {
+export function isMachineFacingTextSegment(segment: string): boolean {
+  return matchMachineFacingPattern(segment) !== null;
+}
+
+type OnDrop = (drop: {
+  pattern: ScholarSafeTextPattern;
+  length: number;
+}) => void;
+
+export function sanitizeScholarVisibleText(text: string, onDrop?: OnDrop): string {
   const { segments } = takeSegments(text, true);
-  return segments.filter((segment) => !isMachineFacingTextSegment(segment)).join("");
+  return sanitizeSegments(segments, onDrop);
 }
 
-export function createScholarVisibleTextFilter() {
+export function createScholarVisibleTextFilter(onDrop?: OnDrop) {
   let pending = "";
 
   return {
@@ -69,14 +90,25 @@ export function createScholarVisibleTextFilter() {
       pending += delta;
       const { segments, rest } = takeSegments(pending, false);
       pending = rest;
-      return segments.filter((segment) => !isMachineFacingTextSegment(segment)).join("");
+      return sanitizeSegments(segments, onDrop);
     },
     finish(): string {
       const { segments } = takeSegments(pending, true);
       pending = "";
-      return segments.filter((segment) => !isMachineFacingTextSegment(segment)).join("");
+      return sanitizeSegments(segments, onDrop);
     },
   };
+}
+
+function sanitizeSegments(segments: string[], onDrop?: OnDrop): string {
+  return segments
+    .filter((segment) => {
+      const pattern = matchMachineFacingPattern(segment);
+      if (!pattern) return true;
+      onDrop?.({ pattern, length: segment.length });
+      return false;
+    })
+    .join("");
 }
 
 function takeSegments(text: string, flushAll: boolean): { segments: string[]; rest: string } {

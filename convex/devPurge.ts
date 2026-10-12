@@ -40,6 +40,7 @@ export async function deleteSessionInner(ctx: MutationCtx, sessionId: Id<"sessio
   counts.appStates = await deleteSessionAppStates(ctx, sessionId);
   await del("messages", (await ctx.db.query("messages").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect()).map((r) => r._id));
   await del("artifacts", (await ctx.db.query("artifacts").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect()).map((r) => r._id));
+  await del("appAiTurns", (await ctx.db.query("appAiTurns").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect()).map((r) => r._id));
   await del("analyses", (await ctx.db.query("analyses").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect()).map((r) => r._id));
   await del("processState", (await ctx.db.query("processState").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect()).map((r) => r._id));
   await del("sessionSignals", (await ctx.db.query("sessionSignals").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect()).map((r) => r._id));

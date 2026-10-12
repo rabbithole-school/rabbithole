@@ -19,6 +19,7 @@ export type StoryRehearseStory = {
  */
 export function storyMomentForRehearsal(story: StoryRehearseStory): StoryMoment {
   return {
+    kind: "story",
     fromKey: story.fromKey,
     toKey: story.toKey,
     skillLabel: story.fromLabel,

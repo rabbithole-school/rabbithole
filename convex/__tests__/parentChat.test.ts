@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
+import { resolveSelectedChildName } from "../lib/parentAidePrompt";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -112,5 +113,32 @@ describe("parentChat — parent-only session storage", () => {
     );
     expect(context?.children.map((c) => c.id)).toEqual([kai]);
     expect(context?.children.map((c) => c.id)).not.toContain(lani);
+  });
+
+  // The portal header's selected child rides along with the stream request, so
+  // the stream handler resolves it against exactly this list before the prompt
+  // may name anyone (.claude/rules/rabbithole-multi-tenancy.md).
+  test("a selected-child id is only honored when it is one of the parent's own children", async () => {
+    const t = convexTest(schema, modules);
+    const admin = await seedUser(t, "platform_admin", "admin");
+    const kai = await seedUser(t, "scholar", "kai");
+    const lani = await seedUser(t, "scholar", "lani"); // another family's kid
+    const asAdmin = await withUser(t, admin);
+    const { parentId } = await asAdmin.mutation(api.parents.createParent, {
+      name: "P",
+      email: "p@home.com",
+      scholarIds: [kai],
+    });
+    const context = await t.run(async (ctx) =>
+      ctx.runQuery(internal.parentChat.getContext, { parentUserId: parentId }),
+    );
+    const children = context?.children ?? [];
+    expect(resolveSelectedChildName(children, kai)).toBe(
+      children.find((c) => c.id === kai)?.name,
+    );
+    // A guardianship the caller does not hold resolves to nothing, so the
+    // aide falls back to today's behaviour instead of naming another
+    // family's child.
+    expect(resolveSelectedChildName(children, lani)).toBeUndefined();
   });
 });

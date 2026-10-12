@@ -29,6 +29,7 @@ import {
   isBirthdayOnDayKey,
   nthBirthdayLabel,
   nthBirthdayOnDayKey,
+  parseIsoDate,
 } from "../shared/birthday";
 
 /** The minimal scholar shape the birthday derivations need. */
@@ -111,6 +112,14 @@ export async function todaysBirthdayEntries(
 
 type WeekBirthdayRow = BirthdayEntry & { weekday: number };
 
+type RosterBirthdayRow = Pick<
+  BirthdayEntry,
+  "scholarId" | "name" | "username"
+> & {
+  month: number;
+  day: number;
+};
+
 /**
  * Birthdays across a displayed Mon–Fri week, keyed to the weekday column whose
  * date matches. `mondayKey` is the "YYYY-MM-DD" of the week's Monday (the
@@ -146,6 +155,43 @@ export const birthdaysForWeek = teacherQuery({
     }
     rows.sort(
       (a, b) => a.weekday - b.weekday || a.name.localeCompare(b.name),
+    );
+    return rows;
+  },
+});
+
+/**
+ * Every enrolled scholar birthday in the teacher's institution lens. This is
+ * the roster projection of the same scoped read and ISO-date derivation used
+ * by the day- and week-level birthday surfaces.
+ */
+export const birthdaysForRoster = teacherQuery({
+  args: {
+    institutionScope: v.optional(v.string()),
+  },
+  handler: async (ctx, args): Promise<RosterBirthdayRow[]> => {
+    const scholars = await scopedScholarDocs(
+      ctx,
+      ctx.user,
+      args.institutionScope,
+    );
+    const rows: RosterBirthdayRow[] = [];
+    for (const scholar of scholars) {
+      const birthday = parseIsoDate(scholar.dateOfBirth);
+      if (!birthday) continue;
+      rows.push({
+        scholarId: scholar._id,
+        name: scholarDisplayName(scholar),
+        username: scholar.username ?? null,
+        month: birthday.month,
+        day: birthday.day,
+      });
+    }
+    rows.sort(
+      (a, b) =>
+        a.month - b.month ||
+        a.day - b.day ||
+        a.name.localeCompare(b.name),
     );
     return rows;
   },

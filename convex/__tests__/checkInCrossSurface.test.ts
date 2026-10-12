@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -28,13 +28,24 @@ const modules = (import.meta as ImportMeta & { glob: (p: string) => Record<strin
 
 const WHOLE = "whole-number-arithmetic";
 
-async function seedScholar(t: ReturnType<typeof convexTest>, username: string) {
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function seedScholar(t: TestConvex<typeof schema>, username: string) {
   return await t.run(async (ctx) =>
     ctx.db.insert("users", { name: "Cross-surface Scholar", username, role: "scholar" }),
   );
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -60,7 +71,7 @@ async function serveBand(
   return served.items.filter((it) => it.lane === "mapping");
 }
 
-async function rowFor(t: ReturnType<typeof convexTest>, scholarId: Id<"users">, domain: string) {
+async function rowFor(t: TestConvex<typeof schema>, scholarId: Id<"users">, domain: string) {
   return await t.run(async (ctx) =>
     (await ctx.db.query("practicePlacements").collect()).find(
       (r) => r.scholarId === scholarId && r.domain === domain,
@@ -68,7 +79,7 @@ async function rowFor(t: ReturnType<typeof convexTest>, scholarId: Id<"users">, 
   );
 }
 
-async function allAttempts(t: ReturnType<typeof convexTest>, scholarId: Id<"users">) {
+async function allAttempts(t: TestConvex<typeof schema>, scholarId: Id<"users">) {
   return await t.run(async (ctx) =>
     (await ctx.db.query("practiceAttempts").collect()).filter((a) => a.scholarId === scholarId),
   );
@@ -76,8 +87,7 @@ async function allAttempts(t: ReturnType<typeof convexTest>, scholarId: Id<"user
 
 describe("ghost probe — orchestrator serves, the playlist band picks it up", () => {
   test("a probe abandoned in the check-in is re-served VERBATIM by the mapping band", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "ghost_mixed_to_band");
     const asScholar = await asUser(t, scholar);
 
@@ -101,8 +111,7 @@ describe("ghost probe — orchestrator serves, the playlist band picks it up", (
   });
 
   test("answering the re-served probe on the OTHER surface grades it exactly once", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "ghost_graded_once");
     const asScholar = await asUser(t, scholar);
 
@@ -144,8 +153,7 @@ describe("ghost probe — orchestrator serves, the playlist band picks it up", (
   });
 
   test("a stale submit of the parked probe through the CHECK-IN is idempotent, not a second grade", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "ghost_stale_submit");
     const asScholar = await asUser(t, scholar);
 
@@ -181,8 +189,7 @@ describe("ghost probe — orchestrator serves, the playlist band picks it up", (
 
 describe("ghost probe — the band serves, the orchestrator picks it up", () => {
   test("a probe abandoned in the band re-enters the check-in on the same node, and grades once", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "ghost_band_to_mixed");
     const asScholar = await asUser(t, scholar);
 
@@ -237,8 +244,7 @@ describe("ghost probe — the band serves, the orchestrator picks it up", () => 
     // a CONVERGED prerequisite domain gets a lifted start. While the band used the
     // plain scholar grade, the two surfaces aimed at DIFFERENT nodes exactly where
     // inference bites, and a band-abandoned probe never resurfaced in the check-in.
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "ghost_inferred_priors");
     const asScholar = await asUser(t, scholar);
 
@@ -293,8 +299,7 @@ describe("ghost probe — the band serves, the orchestrator picks it up", () => 
   });
 
   test("the band and the check-in agree on WHICH probe is next, across a whole sitting", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "ghost_agreement");
     const asScholar = await asUser(t, scholar);
 

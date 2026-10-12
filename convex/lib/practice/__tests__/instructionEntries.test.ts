@@ -4,8 +4,14 @@ import {
   instructionOfferId,
   isInstructionSuppressed,
   selectRunLaunchpad,
+  questionFrameWritesFor,
   strandInstructionKey,
   nodeInstructionKey,
+  advanceQuestionFrame,
+  compactMoveAtoms,
+  frameMoveFor,
+  hasTeachingStep,
+  type InstructionAtom,
   type InstructionEventLike,
   type RunItemLike,
 } from "../instructionEntries";
@@ -57,129 +63,106 @@ describe("isInstructionSuppressed", () => {
 
 // ── selectRunLaunchpad — the run-anchored selector (P1) ────────────────────
 //
-// The defect this replaces: the strand was chosen by walking the domain graph
-// in node order while the queue picked its own frontier, and the client mounted
-// the winner at idx === 0. The two selectors routinely disagreed, so a scholar
-// could be offered a doorway into a strand the run never served (reproduced
-// 18/18 configurations, 2026-07-24). Selecting FROM the served items makes that
-// unrepresentable — the strand IS the strand of items[at].
+// The defect P1 replaced: the strand was chosen by walking the domain graph in
+// node order while the queue picked its own frontier, and the client mounted
+// the winner at idx === 0 (reproduced 18/18 configurations, 2026-07-24).
+// Selecting FROM the served items makes that unrepresentable.
+//
+// 2026-10-10: the frame is NODE grain only, and an item is framed only when an
+// on-topic move exists — its own teaching step, else node content. Strand
+// content is never a move (the "45¢ in nickels and dimes" → "4 × 3 eggs" bug).
 
 const item = (over: Partial<RunItemLike> & { skillKey: string }): RunItemLike => ({
   domain: "d",
   lane: "new",
+  strand: "s",
+  hasTeachingStep: true,
   ...over,
 });
 
 const always = () => true;
 const never = () => false;
+/** The scholar has drilled these nodes (a real attempt) and nothing else. */
+const attempted = (...keys: string[]) => (skillKey: string) => keys.includes(skillKey);
 
 describe("selectRunLaunchpad", () => {
   const base = {
-    hasMasteryInStrand: never,
-    hasContent: always,
+    hasAttemptOnNode: never,
+    hasNodeContent: never,
     eventByKey: new Map<string, InstructionEventLike>(),
     dayBucket: "2026-07-24",
   };
 
-  test("REGRESSION (§3): the chosen strand is always present in the run", () => {
-    // The old selector could return a strand with no item in the run at all.
-    // Here the run serves reviews in `concept` then frontier work in
-    // `comparison`; `equivalence` (which the old graph-order pick preferred)
-    // appears nowhere. The only answer this function can give is a strand it
-    // read off an actual item.
+  test("REGRESSION (§3): the framed item is always one the run serves", () => {
     const items = [
       item({ skillKey: "c1", strand: "concept", lane: "review" }),
       item({ skillKey: "c2", strand: "concept", lane: "review" }),
       item({ skillKey: "m1", strand: "comparison" }),
-      item({ skillKey: "m2", strand: "comparison" }),
     ];
-    const got = selectRunLaunchpad({ ...base, items });
+    const got = selectRunLaunchpad({ ...base, items, hasAttemptOnNode: attempted("c1", "c2") });
     expect(got).not.toBeNull();
-    expect(got!.strand).toBe("comparison");
-    // The invariant, stated as an assertion rather than trusted:
-    expect(items.map((i) => i.strand)).toContain(got!.strand);
+    expect(items[got!.at].skillKey).toBe(got!.nodeKey);
     expect(items[got!.at].strand).toBe(got!.strand);
   });
 
-  test("anchors `at` to the first item of the strand, not to zero", () => {
+  test("anchors `at` to the first never-attempted item, not to zero", () => {
     const items = [
-      item({ skillKey: "c1", strand: "concept", lane: "review" }),
-      item({ skillKey: "c2", strand: "concept", lane: "review" }),
-      item({ skillKey: "m1", strand: "comparison" }),
+      item({ skillKey: "c1", lane: "review" }),
+      item({ skillKey: "c2", lane: "review" }),
+      item({ skillKey: "m1" }),
     ];
-    expect(selectRunLaunchpad({ ...base, items })!.at).toBe(2);
+    expect(selectRunLaunchpad({ ...base, items, hasAttemptOnNode: attempted("c1", "c2") })!.at).toBe(2);
   });
 
-  test("never opens on a review — a review is not new territory", () => {
-    const items = [item({ skillKey: "c1", strand: "concept", lane: "review" })];
-    expect(selectRunLaunchpad({ ...base, items })).toBeNull();
+  test("never frames a review of a node the scholar has actually attempted", () => {
+    const items = [item({ skillKey: "c1", lane: "review" })];
+    expect(selectRunLaunchpad({ ...base, items, hasAttemptOnNode: attempted("c1") })).toBeNull();
   });
 
-  test("never opens on a mapping probe or an optional challenge/stretch tail", () => {
+  test("a placement-credited but never-ATTEMPTED node counts as new, even served as a review", () => {
+    const items = [item({ skillKey: "c1", lane: "review" })];
+    expect(selectRunLaunchpad({ ...base, items })).toMatchObject({ at: 0, level: "node", nodeKey: "c1" });
+  });
+
+  test("the FIRST frameable item wins — at most one per run", () => {
+    const items = [
+      item({ skillKey: "c1", lane: "review" }),
+      item({ skillKey: "f1" }),
+      item({ skillKey: "g1" }),
+    ];
+    const got = selectRunLaunchpad({ ...base, items, hasAttemptOnNode: attempted("c1") });
+    expect(got).toMatchObject({ at: 1, nodeKey: "f1" });
+  });
+
+  test("the cross-key daily governor can be turned off for the question framing", () => {
+    const eventByKey = new Map<string, InstructionEventLike>([
+      ["node:other", { key: "node:other", shownAt: 1, lastShownDayBucket: "2026-07-24" }],
+    ]);
+    const items = [item({ skillKey: "a" })];
+    expect(selectRunLaunchpad({ ...base, eventByKey, items })).toBeNull();
+    expect(selectRunLaunchpad({ ...base, eventByKey, items, dailyCap: false })).toMatchObject({ nodeKey: "a" });
+  });
+
+  test("never frames a mapping probe or an optional challenge/stretch tail", () => {
     for (const lane of ["mapping", "challenge", "stretch"]) {
-      const items = [item({ skillKey: "x", strand: "s", lane })];
-      expect(selectRunLaunchpad({ ...base, items })).toBeNull();
+      expect(selectRunLaunchpad({ ...base, items: [item({ skillKey: "x", lane })] })).toBeNull();
     }
   });
 
-  test("skips a strand the scholar already has mastery in (expertise reversal)", () => {
-    const items = [
-      item({ skillKey: "a", strand: "known" }),
-      item({ skillKey: "b", strand: "fresh" }),
-    ];
-    const got = selectRunLaunchpad({
-      ...base,
-      items,
-      hasMasteryInStrand: (_d, strand) => strand === "known",
-    });
-    expect(got!.strand).toBe("fresh");
-    expect(got!.at).toBe(1);
+  test("skips an unstranded item", () => {
+    expect(selectRunLaunchpad({ ...base, items: [item({ skillKey: "a", strand: undefined })] })).toBeNull();
   });
 
-  test("skips a strand with no passed content rather than showing an empty card", () => {
-    const items = [
-      item({ skillKey: "a", strand: "uncontented" }),
-      item({ skillKey: "b", strand: "contented" }),
-    ];
-    const got = selectRunLaunchpad({
-      ...base,
-      items,
-      hasContent: (_d, strand) => strand === "contented",
-    });
-    expect(got!.strand).toBe("contented");
+  test("honours fire-once suppression per node and falls through to the next item", () => {
+    const key = nodeInstructionKey("seen");
+    const eventByKey = new Map<string, InstructionEventLike>([[key, { key, viewedAt: 123 }]]);
+    const items = [item({ skillKey: "seen" }), item({ skillKey: "next" })];
+    expect(selectRunLaunchpad({ ...base, eventByKey, items })).toMatchObject({ at: 1, nodeKey: "next" });
   });
 
-  test("skips an unstranded item (no strand-level Launchpad in v1)", () => {
-    expect(
-      selectRunLaunchpad({ ...base, items: [item({ skillKey: "a", strand: undefined })] }),
-    ).toBeNull();
-  });
-
-  test("honours the ≤1/day cap", () => {
-    const eventByKey = new Map<string, InstructionEventLike>([
-      ["strand:other:thing", { key: "strand:other:thing", shownAt: 1, lastShownDayBucket: "2026-07-24" }],
-    ]);
-    expect(
-      selectRunLaunchpad({ ...base, eventByKey, items: [item({ skillKey: "a", strand: "s" })] }),
-    ).toBeNull();
-  });
-
-  test("honours fire-once suppression and falls through to the next strand", () => {
-    const key = strandInstructionKey("d", "seen");
-    const eventByKey = new Map<string, InstructionEventLike>([
-      [key, { key, viewedAt: 123 }],
-    ]);
-    const items = [item({ skillKey: "a", strand: "seen" }), item({ skillKey: "b", strand: "next" })];
-    const got = selectRunLaunchpad({ ...base, eventByKey, items });
-    expect(got!.strand).toBe("next");
-  });
-
-  test("domain-scopes the key so same-named strands across domains never collide", () => {
-    const got = selectRunLaunchpad({
-      ...base,
-      items: [item({ skillKey: "a", strand: "ratio", domain: "fraction-arithmetic" })],
-    });
-    expect(got!.key).toBe("strand:fraction-arithmetic:ratio");
+  test("the key is always the node key — never a strand key", () => {
+    const got = selectRunLaunchpad({ ...base, items: [item({ skillKey: "a", domain: "fraction-arithmetic" })] });
+    expect(got!.key).toBe(nodeInstructionKey("a"));
   });
 
   test("returns null for an empty run", () => {
@@ -187,260 +170,224 @@ describe("selectRunLaunchpad", () => {
   });
 });
 
-describe("selectRunLaunchpad — the <=1/day governor is scoped to OTHER keys", () => {
-  const items = [
-    { skillKey: "s1", domain: "math", strand: "fractions", lane: "new" as const },
+describe("selectRunLaunchpad — the move must be about the framed item", () => {
+  const base = {
+    hasAttemptOnNode: never,
+    eventByKey: new Map<string, InstructionEventLike>(),
+    dayBucket: "2026-10-10",
+  };
+
+  test("precedence: the item's own teaching step beats node content", () => {
+    const got = selectRunLaunchpad({
+      ...base,
+      items: [item({ skillKey: "a", hasTeachingStep: true })],
+      hasNodeContent: always,
+    });
+    expect(got).toMatchObject({ at: 0, move: "item_steps" });
+  });
+
+  test("precedence: node content is the move when the item has no step of its own", () => {
+    const got = selectRunLaunchpad({
+      ...base,
+      items: [item({ skillKey: "a", hasTeachingStep: false })],
+      hasNodeContent: (k) => k === "a",
+    });
+    expect(got).toMatchObject({ at: 0, move: "node_content", key: nodeInstructionKey("a") });
+  });
+
+  test("never frames off-topic: no step and no node content → the item is not framed, even with strand content", () => {
+    // The 45¢ coins item: a manipulative with no worked steps, on a node with
+    // no node content, inside a strand (mult-divide) that HAS content. There
+    // is no way to ask the selector about strand content at all now — the
+    // next frameable item wins instead.
+    const items = [
+      item({ skillKey: "skip_count_coins", strand: "mult-divide", hasTeachingStep: false }),
+      item({ skillKey: "add_make_ten", strand: "add-subtract", hasTeachingStep: true }),
+    ];
+    const got = selectRunLaunchpad({ ...base, items, hasNodeContent: never });
+    expect(got).toMatchObject({ at: 1, nodeKey: "add_make_ten", move: "item_steps" });
+    expect(selectRunLaunchpad({ ...base, items: [items[0]], hasNodeContent: never })).toBeNull();
+  });
+
+  test("node content for a DIFFERENT node never frames this item", () => {
+    const got = selectRunLaunchpad({
+      ...base,
+      items: [item({ skillKey: "a", hasTeachingStep: false })],
+      hasNodeContent: (k) => k === "b",
+    });
+    expect(got).toBeNull();
+  });
+
+  test("frameMoveFor reports the same precedence the selector uses", () => {
+    expect(frameMoveFor({ skillKey: "a", hasTeachingStep: true }, always)).toBe("item_steps");
+    expect(frameMoveFor({ skillKey: "a", hasTeachingStep: false }, always)).toBe("node_content");
+    expect(frameMoveFor({ skillKey: "a" }, never)).toBeNull();
+  });
+});
+
+describe("hasTeachingStep — the shared 'has an interactive step' predicate", () => {
+  test("a single-blank fade needs at least two worked steps", () => {
+    expect(hasTeachingStep(undefined)).toBe(false);
+    expect(hasTeachingStep([])).toBe(false);
+    expect(hasTeachingStep([{ text: "only step" }])).toBe(false);
+    expect(hasTeachingStep([{ text: "one" }, { text: "two" }])).toBe(true);
+  });
+});
+
+describe("compactMoveAtoms — the inline move is text + worked example only", () => {
+  const atoms: InstructionAtom[] = [
+    { kind: "story_hook", hook: "h" },
+    { kind: "micro_explain", text: "t" },
+    { kind: "manipulative", spec: "{}" },
+    {
+      kind: "worked_example",
+      strategyLabel: "s",
+      steps: ["a", "b"],
+      examplePrompt: "p",
+      exampleAnswer: "1",
+    },
+    { kind: "try_it", strategyLabel: "s", steps: ["a", "b"], examplePrompt: "p", exampleAnswer: "1" },
+    {
+      kind: "video",
+      provider: "youtube",
+      videoId: "v",
+      startSec: 0,
+      endSec: 1,
+      captionText: "c",
+      sourceLabel: "l",
+      sourceUrl: "u",
+    },
   ];
+
+  test("drops explorers, manipulatives, videos and story hooks; keeps order", () => {
+    expect(compactMoveAtoms(atoms).map((a) => a.kind)).toEqual(["micro_explain", "worked_example"]);
+  });
+
+  test("content with neither text nor a worked example compacts to nothing (so it frames nothing)", () => {
+    expect(compactMoveAtoms([{ kind: "manipulative", spec: "{}" }, { kind: "story_hook", hook: "h" }])).toEqual([]);
+  });
+});
+
+describe("selectRunLaunchpad — the <=1/day governor is scoped to OTHER keys", () => {
+  const items = [item({ skillKey: "s1", domain: "math", strand: "fractions" })];
+  const key = nodeInstructionKey("s1");
+  const otherKey = nodeInstructionKey("r1");
   const base = {
     items,
-    hasMasteryInStrand: () => false,
-    hasContent: () => true,
+    hasAttemptOnNode: never,
+    hasNodeContent: never,
     dayBucket: "2026-07-24",
   };
 
   it("keeps offering THIS key after its own impression claim (no self-retraction)", () => {
-    // The card claims `shownAt` for its own key on mount. If that retracted the
-    // offer, the card would yank itself off-screen mid-decision.
-    const key = strandInstructionKey("math", "fractions");
     const out = selectRunLaunchpad({
       ...base,
-      eventByKey: new Map([
-        [key, { key, shownAt: 1, lastShownDayBucket: "2026-07-24", offerCount: 1 }],
-      ]),
+      eventByKey: new Map([[key, { key, shownAt: 1, lastShownDayBucket: "2026-07-24", offerCount: 1 }]]),
     });
     expect(out?.key).toBe(key);
   });
 
-  it("still suppresses when a DIFFERENT strand was shown today", () => {
+  it("still suppresses when a DIFFERENT key was shown today", () => {
     const out = selectRunLaunchpad({
       ...base,
-      eventByKey: new Map([
-        [
-          strandInstructionKey("math", "ratio"),
-          { key: strandInstructionKey("math", "ratio"), shownAt: 1, lastShownDayBucket: "2026-07-24", offerCount: 1 },
-        ],
-      ]),
+      eventByKey: new Map([[otherKey, { key: otherKey, shownAt: 1, lastShownDayBucket: "2026-07-24", offerCount: 1 }]]),
     });
     expect(out).toBeNull();
   });
 
-  it("re-offers tomorrow after a different strand was shown yesterday", () => {
+  it("a legacy STRAND key shown today still counts for the governor", () => {
+    const strandKey = strandInstructionKey("math", "ratio");
     const out = selectRunLaunchpad({
       ...base,
-      eventByKey: new Map([
-        [
-          strandInstructionKey("math", "ratio"),
-          { key: strandInstructionKey("math", "ratio"), shownAt: 1, lastShownDayBucket: "2026-07-23", offerCount: 1 },
-        ],
-      ]),
+      eventByKey: new Map([[strandKey, { key: strandKey, shownAt: 1, lastShownDayBucket: "2026-07-24", offerCount: 1 }]]),
     });
-    expect(out?.key).toBe(strandInstructionKey("math", "fractions"));
+    expect(out).toBeNull();
+  });
+
+  it("re-offers tomorrow after a different key was shown yesterday", () => {
+    const out = selectRunLaunchpad({
+      ...base,
+      eventByKey: new Map([[otherKey, { key: otherKey, shownAt: 1, lastShownDayBucket: "2026-07-23", offerCount: 1 }]]),
+    });
+    expect(out?.key).toBe(key);
   });
 
   it("retracts once the scholar actually engages with it", () => {
-    const key = strandInstructionKey("math", "fractions");
     for (const engaged of [{ viewedAt: 2 }, { completedAt: 2 }, { dismissedAt: 2 }]) {
       const out = selectRunLaunchpad({
         ...base,
-        eventByKey: new Map([
-          [key, { key, shownAt: 1, lastShownDayBucket: "2026-07-24", offerCount: 1, ...engaged }],
-        ]),
+        eventByKey: new Map([[key, { key, shownAt: 1, lastShownDayBucket: "2026-07-24", offerCount: 1, ...engaged }]]),
       });
       expect(out).toBeNull();
     }
   });
+
+  it("a node's own re-offer cap suppresses it", () => {
+    const out = selectRunLaunchpad({
+      ...base,
+      eventByKey: new Map([[key, { key, shownAt: 1, initialChoice: "try", offerCount: INSTRUCTION_REOFFER_CAP }]]),
+    });
+    expect(out).toBeNull();
+  });
 });
 
-// ── selectRunLaunchpad — the NODE doorway (§4.1, Phase 2) ──────────────────
-//
-// A node doorway is the SAME positioned-sibling mechanics as the strand
-// doorway, but keyed to a specific node when the scholar has zero mastery on
-// THAT node — narrower than "zero mastery anywhere in the strand", which is
-// exactly what lets a hard node re-open instruction inside an otherwise
-// partly-known (or already-dismissed) strand. It shares the ≤1/day governor
-// and the re-offer cap with the strand grain (one `eventByKey` map, one
-// `nodeInstructionKey`/`strandInstructionKey` key space) rather than adding a
-// second set of rules.
-describe("selectRunLaunchpad — the NODE doorway (§4.1)", () => {
-  const dayBucket = "2026-07-24";
-  const noEvents = new Map<string, InstructionEventLike>();
+describe("advanceQuestionFrame — the shared frame stage machine", () => {
+  const miss = { correct: false };
+  const notYet = { correct: false, dontKnow: true };
+  const right = { correct: true };
 
-  test("omitting hasMasteryOnNode/hasNodeContent disables the node doorway entirely (strand-only, byte-identical to pre-§4.1)", () => {
-    const items = [item({ skillKey: "n1", strand: "known" })];
-    const out = selectRunLaunchpad({
-      items,
-      hasMasteryInStrand: always, // the strand IS mastered — no strand doorway
-      hasContent: never, // and no strand content either
-      eventByKey: noEvents,
-      dayBucket,
-    });
-    expect(out).toBeNull();
+  test("right first time → nailed, for either move", () => {
+    for (const move of ["item_steps", "node_content"] as const) {
+      expect(advanceQuestionFrame("ask", "feedback", right, move)).toEqual({ stage: "nailed", events: ["answered"] });
+    }
   });
 
-  test("fires a node doorway when the strand has mastery but THIS node doesn't, and node content exists", () => {
-    const items = [item({ skillKey: "hard_node", strand: "known" })];
-    const out = selectRunLaunchpad({
-      items,
-      hasMasteryInStrand: always, // the strand as a whole is no longer new
-      hasContent: never, // no strand-level content either
-      hasMasteryOnNode: never, // but THIS node is zero-mastery
-      hasNodeContent: always,
-      eventByKey: noEvents,
-      dayBucket,
-    });
-    expect(out).not.toBeNull();
-    expect(out).toMatchObject({ level: "node", nodeKey: "hard_node", strand: "known" });
-    expect(out!.key).toBe(nodeInstructionKey("hard_node"));
+  test("'Not yet' → move, for either move (its choice was recorded on tap)", () => {
+    for (const move of ["item_steps", "node_content"] as const) {
+      expect(advanceQuestionFrame("ask", "feedback", notYet, move)).toEqual({ stage: "move", events: ["moveShown"] });
+    }
   });
 
-  test("never fires a node doorway when the scholar already has mastery on that node", () => {
-    const items = [item({ skillKey: "known_node", strand: "known" })];
-    const out = selectRunLaunchpad({
-      items,
-      hasMasteryInStrand: always,
-      hasContent: never,
-      hasMasteryOnNode: always, // the node itself is already mastered
-      hasNodeContent: always,
-      eventByKey: noEvents,
-      dayBucket,
+  test("a miss shows node content, but hands an item-steps frame to the ordinary miss lane", () => {
+    expect(advanceQuestionFrame("ask", "feedback", miss, "node_content")).toEqual({
+      stage: "move",
+      events: ["answered", "moveShown"],
     });
-    expect(out).toBeNull();
+    expect(advanceQuestionFrame("ask", "feedback", miss, "item_steps")).toEqual({ stage: "done", events: ["answered"] });
   });
 
-  test("never fires a node doorway when the node has no PASSED node-grain content", () => {
-    const items = [item({ skillKey: "uncontented_node", strand: "known" })];
-    const out = selectRunLaunchpad({
-      items,
-      hasMasteryInStrand: always,
-      hasContent: never,
-      hasMasteryOnNode: never,
-      hasNodeContent: never, // no node-grain content stored/passed
-      eventByKey: noEvents,
-      dayBucket,
-    });
-    expect(out).toBeNull();
-  });
-
-  describe("precedence: STRAND wins over NODE at the same item (§4.1 decision c)", () => {
-    test("when both a strand and a node doorway are eligible on the SAME item, the strand doorway is returned", () => {
-      const items = [item({ skillKey: "n1", strand: "fresh" })];
-      const out = selectRunLaunchpad({
-        items,
-        hasMasteryInStrand: never, // strand IS eligible (whole strand new)
-        hasContent: always,
-        hasMasteryOnNode: never, // node is ALSO eligible
-        hasNodeContent: always,
-        eventByKey: noEvents,
-        dayBucket,
-      });
-      expect(out).toMatchObject({ level: "strand", strand: "fresh" });
-      expect(out!.key).toBe(strandInstructionKey("d", "fresh"));
-    });
-
-    test("a suppressed strand doorway falls through to a still-eligible node doorway on the SAME item, not skipped to the next item", () => {
-      const strandKey = strandInstructionKey("d", "seen");
-      const items = [
-        item({ skillKey: "hard_node", strand: "seen" }),
-        item({ skillKey: "n2", strand: "next" }),
-      ];
-      const out = selectRunLaunchpad({
-        items,
-        hasMasteryInStrand: never,
-        hasContent: always, // strand HAS content...
-        hasMasteryOnNode: never,
-        hasNodeContent: always,
-        // ...but the strand doorway was already dismissed (permanently
-        // suppressed) — the node doorway on the SAME item still fires,
-        // rather than the selector moving on to the "next" strand.
-        eventByKey: new Map([[strandKey, { key: strandKey, dismissedAt: 1 }]]),
-        dayBucket,
-      });
-      expect(out).toMatchObject({ level: "node", nodeKey: "hard_node", strand: "seen" });
-      expect(out!.at).toBe(0);
-    });
-
-    test("a strand doorway suppressed at item 0 with NO node fallback moves on to the next item's strand doorway", () => {
-      const strandKey = strandInstructionKey("d", "seen");
-      const items = [
-        item({ skillKey: "a", strand: "seen" }),
-        item({ skillKey: "b", strand: "next" }),
-      ];
-      const out = selectRunLaunchpad({
-        items,
-        hasMasteryInStrand: never,
-        hasContent: always,
-        // No node doorway support at all (undefined) — matches strand-only
-        // callers exactly as before §4.1.
-        eventByKey: new Map([[strandKey, { key: strandKey, dismissedAt: 1 }]]),
-        dayBucket,
-      });
-      expect(out).toMatchObject({ level: "strand", strand: "next" });
+  test("back to answering after the move → after; the next verdict completes", () => {
+    expect(advanceQuestionFrame("move", "answering", null, "node_content")).toEqual({ stage: "after", events: [] });
+    expect(advanceQuestionFrame("after", "feedback", right, "node_content")).toEqual({
+      stage: "done",
+      events: ["answeredAfterMove"],
     });
   });
 
-  describe("governor sharing across key kinds (§4.1 decision b — extend, don't add)", () => {
-    test("a NODE key shown today blocks a DIFFERENT item's STRAND doorway (shared ≤1/day)", () => {
-      const nodeKey = nodeInstructionKey("other_node");
-      const items = [item({ skillKey: "n1", strand: "fresh" })];
-      const out = selectRunLaunchpad({
-        items,
-        hasMasteryInStrand: never,
-        hasContent: always,
-        eventByKey: new Map([
-          [nodeKey, { key: nodeKey, shownAt: 1, lastShownDayBucket: dayBucket, offerCount: 1 }],
-        ]),
-        dayBucket,
-      });
-      expect(out).toBeNull();
-    });
+  test("no change while answering, or once nailed/done", () => {
+    expect(advanceQuestionFrame("ask", "answering", null, "item_steps")).toBeNull();
+    expect(advanceQuestionFrame("nailed", "feedback", right, "item_steps")).toBeNull();
+    expect(advanceQuestionFrame("move", "feedback", notYet, "item_steps")).toBeNull();
+  });
+});
 
-    test("a STRAND key shown today blocks a DIFFERENT item's NODE doorway (shared ≤1/day)", () => {
-      const strandKey = strandInstructionKey("math", "other-strand");
-      const items = [item({ skillKey: "hard_node", strand: "known" })];
-      const out = selectRunLaunchpad({
-        items,
-        hasMasteryInStrand: always,
-        hasContent: never,
-        hasMasteryOnNode: never,
-        hasNodeContent: always,
-        eventByKey: new Map([
-          [strandKey, { key: strandKey, shownAt: 1, lastShownDayBucket: dayBucket, offerCount: 1 }],
-        ]),
-        dayBucket,
-      });
-      expect(out).toBeNull();
-    });
-
-    test("a node doorway keeps offering ITSELF after its own impression claim (no self-retraction, same as strand)", () => {
-      const key = nodeInstructionKey("hard_node");
-      const items = [item({ skillKey: "hard_node", strand: "known" })];
-      const out = selectRunLaunchpad({
-        items,
-        hasMasteryInStrand: always,
-        hasContent: never,
-        hasMasteryOnNode: never,
-        hasNodeContent: always,
-        eventByKey: new Map([[key, { key, shownAt: 1, lastShownDayBucket: dayBucket, offerCount: 1 }]]),
-        dayBucket,
-      });
-      expect(out?.key).toBe(key);
-    });
-
-    test("a node doorway's own re-offer cap (offerCount<=3) suppresses it exactly like a strand's", () => {
-      const key = nodeInstructionKey("hard_node");
-      const items = [item({ skillKey: "hard_node", strand: "known" })];
-      const out = selectRunLaunchpad({
-        items,
-        hasMasteryInStrand: always,
-        hasContent: never,
-        hasMasteryOnNode: never,
-        hasNodeContent: always,
-        eventByKey: new Map([
-          [key, { key, shownAt: 1, initialChoice: "try", offerCount: INSTRUCTION_REOFFER_CAP }],
-        ]),
-        dayBucket,
-      });
-      expect(out).toBeNull();
-    });
+// ── questionFrameWritesFor — the framed item's telemetry plan ──────────────
+// The framing writes the SAME instructionEvents lifecycle the doorway card did,
+// so the denominator survives the redesign: shown → show|try → viewed →
+// completed. A preview (teacher Rehearse) or a subject-less render writes nothing.
+describe("questionFrameWritesFor", () => {
+  const live = { scholarId: "sch1" };
+  test("maps each framed-item moment to one lifecycle write", () => {
+    expect(questionFrameWritesFor("frameShown", live)).toEqual([{ type: "claimShown" }]);
+    expect(questionFrameWritesFor("notYet", live)).toEqual([{ type: "recordChoice", choice: "show" }]);
+    expect(questionFrameWritesFor("answered", live)).toEqual([{ type: "recordChoice", choice: "try" }]);
+    expect(questionFrameWritesFor("moveShown", live)).toEqual([{ type: "recordViewed" }]);
+    expect(questionFrameWritesFor("answeredAfterMove", live)).toEqual([{ type: "recordCompleted" }]);
+  });
+  test("a preview or a subject-less render writes nothing", () => {
+    for (const ev of ["frameShown", "notYet", "answered", "moveShown", "answeredAfterMove"] as const) {
+      expect(questionFrameWritesFor(ev, { preview: true, scholarId: "sch1" })).toEqual([]);
+      expect(questionFrameWritesFor(ev, { scholarId: null })).toEqual([]);
+    }
   });
 });

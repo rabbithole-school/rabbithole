@@ -41,20 +41,24 @@ function actionCtxFor(t: ReturnType<typeof convexTest>): ActionCtx {
 }
 
 async function seedUser(t: ReturnType<typeof convexTest>, role = "teacher", name?: string) {
-  const institutionId = await seedTestInstitution(t);
+  const institutionId = await seedTestInstitution(t, { isPrimary: true });
   const username = `u-${role}-${Math.random().toString(36).slice(2)}`;
   return role === "teacher"
     ? seedStaffWithMembership(t, { institutionId, name: name ?? `Test ${role}`, username })
     : seedScholarInInstitution(t, { institutionId, name: name ?? `Test ${role}`, username });
 }
 
-async function seedPeriod(t: ReturnType<typeof convexTest>) {
+async function seedPeriod(
+  t: ReturnType<typeof convexTest>,
+  institutionId?: Id<"institutions">,
+) {
   return await t.run(async (ctx) =>
     ctx.db.insert("reportingPeriods", {
       label: "Fall 2026",
       startsAt: Date.now(),
       endsAt: Date.now() + 90 * DAY,
       status: "open",
+      institutionId,
     }),
   );
 }
@@ -258,7 +262,10 @@ describe("master-schedule aide tools (end-to-end)", () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
     const scholar = await seedUser(t, "scholar", "Oliver");
-    const tools = await toolsFor(t, teacher);
+    const emitted: Array<{ toolComplete?: { name: string; result: string } }> = [];
+    const tools = await toolsFor(t, teacher, "teacher", (event) => {
+      emitted.push(event);
+    });
 
     const res = parse(await tools.dispatch_activity.run({
       scholarId: scholar,
@@ -266,6 +273,12 @@ describe("master-schedule aide tools (end-to-end)", () => {
       systemPrompt: "Guide the scholar Socratically through how cities fund themselves.",
     }));
     expect(res.ok).toBe(true);
+    expect(res.confirmation).toBe(
+      'Live now · fades from their screen after today. Say "make it homework" or give a lifetime to keep it.',
+    );
+    expect(emitted.at(-1)?.toolComplete?.result).toContain(
+      res.confirmation as string,
+    );
     const assignmentId = res.assignmentId as Id<"assignments">;
 
     const a = await t.run(async (ctx) => ctx.db.get(assignmentId));
@@ -276,11 +289,21 @@ describe("master-schedule aide tools (end-to-end)", () => {
     expect((a as Doc<"assignments">).activitySchedule![0].setAt).toBeTypeOf("number");
 
     // Queue variant: live:false → planned (setAt null).
+    const startsAt = Date.now() + DAY;
+    const endsAtMs = startsAt + 2 * 60 * 60_000;
     const queued = parse(await tools.dispatch_activity.run({
-      scholarId: scholar, title: "Later reading", live: false, startsAt: Date.now() + DAY,
+      scholarId: scholar,
+      title: "Later reading",
+      live: false,
+      startsAt,
+      endsAtMs,
     }));
     const qa = await t.run(async (ctx) => ctx.db.get(queued.assignmentId as Id<"assignments">));
     expect((qa as Doc<"assignments">).activitySchedule![0].setAt).toBeUndefined();
+    expect((qa as Doc<"assignments">).activitySchedule![0].endsAt).toBe(
+      endsAtMs,
+    );
+    expect(queued.confirmation).toMatch(/^Queued · stays until /);
 
     const dueAt = Date.now() + DAY;
     const instructions = "Read the passage twice.\n\nOn paper, sketch the pattern you notice.";
@@ -372,6 +395,52 @@ describe("master-schedule aide tools (end-to-end)", () => {
       targetSkillKeys: ["angle_sum_triangle"],
       itemCount: 6,
     });
+  });
+
+  test("dispatch_activity rewrites a YouTube web URL into an online activity with a sandboxed video resource", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar", "Nalu");
+    const tools = await toolsFor(t, teacher);
+
+    const res = parse(
+      await tools.dispatch_activity.run({
+        scholarName: "Nalu",
+        title: "Watch: how tide pools work",
+        activityKind: "web",
+        webUrl: "https://www.youtube.com/watch?v=lZUyUkJMc3U",
+      }),
+    );
+    // The tool response must tell the aide it created an ONLINE activity with
+    // the video attached — not the requested web kind (the ...res spread now
+    // carries the effective kind, not the input echo).
+    expect(res.ok).toBe(true);
+    expect(res.scholarId).toBe(scholar);
+    expect(res.activityKind).toBe("online");
+    expect(res.attachedVideoResource).toBe(true);
+
+    const activityId = res.activityId as Id<"activities">;
+    const activity = (await t.run(async (ctx) =>
+      ctx.db.get(activityId),
+    )) as Doc<"activities">;
+    expect(activity.kind).toBe("online");
+    expect(activity.webUrl).toBeUndefined();
+    // A Socratic tutor prompt exists (its exact wording is prompt behavior,
+    // owned by judged evals, not asserted here).
+    expect(activity.systemPrompt).toBeTruthy();
+
+    const resources = (await t.run(async (ctx) =>
+      ctx.db
+        .query("activityResources")
+        .withIndex("by_activity", (q) => q.eq("activityId", activityId))
+        .collect(),
+    )) as Doc<"activityResources">[];
+    expect(resources).toHaveLength(1);
+    expect(resources[0].source).toEqual({
+      kind: "video",
+      url: "https://www.youtube.com/watch?v=lZUyUkJMc3U",
+    });
+    expect(resources[0].uploadedBy).toBe(teacher);
   });
 
   test("dispatch_activity name matching cannot see scholars outside the institution lens", async () => {
@@ -572,6 +641,66 @@ describe("master-schedule aide tools (end-to-end)", () => {
     });
   });
 
+  test("Forbidden from an aide mutation returns a plain tool error", async () => {
+    const t = convexTest(schema, modules);
+    const institutionA = await seedTestInstitution(t, {
+      name: "Moli School",
+      slug: "moli-tool-error",
+      isPrimary: true,
+    });
+    const institutionB = await seedTestInstitution(t, {
+      name: "Kona Tutoring",
+      slug: "kona-tool-error",
+    });
+    const teacherA = await seedStaffWithMembership(t, {
+      institutionId: institutionA,
+      name: "Lehua Torres",
+    });
+    const teacherB = await seedStaffWithMembership(t, {
+      institutionId: institutionB,
+      name: "Noe Alana",
+    });
+    const scholarA = await seedScholarInInstitution(t, {
+      institutionId: institutionA,
+      name: "Kai Kahale",
+    });
+    const periodId = await seedPeriod(t, institutionB);
+    const groupA = await t.run((ctx) =>
+      ctx.db.insert("scholarGroups", {
+        teacherId: teacherA,
+        institutionId: institutionA,
+        name: "Moli Group",
+        scholarIds: [scholarA],
+      }),
+    );
+    const emit = vi.fn();
+    const tools = await toolsFor(t, teacherB, "teacher", emit);
+    const before = await t.run((ctx) =>
+      ctx.db.query("schedulePlacements").collect(),
+    );
+
+    const result = await tools.place_class.run({
+      termId: periodId,
+      groupId: groupA,
+      subject: "Foreign group",
+    });
+
+    expect(result).toMatch(
+      /Could not place the class: .*Forbidden: group is not in your current context/i,
+    );
+    expect(emit).toHaveBeenCalledWith({
+      toolComplete: {
+        name: "place_class",
+        result: expect.stringMatching(
+          /^⚠️ .*Forbidden: group is not in your current context/,
+        ),
+      },
+    });
+    expect(
+      await t.run((ctx) => ctx.db.query("schedulePlacements").collect()),
+    ).toEqual(before);
+  });
+
   test("accept_reorder silences a sequence's out-of-order flag", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
@@ -657,5 +786,112 @@ describe("master-schedule aide tools (end-to-end)", () => {
     expect(shelved.ok).toBe(true);
     const grid3 = parse(await tools.get_master_schedule.run({ termId: periodId }));
     expect((grid3.shelf as { subject?: string }[]).some((s) => s.subject === "Someday HW")).toBe(true);
+  });
+
+  /**
+   * A catalog app placed on a block is the only clock-bounded way to grant a
+   * managed app: the push goes live at the block's start and clears
+   * APP_PLACEMENT_GRACE_MS after it ends. The aide could not reach it at all
+   * before — its only app verb was a standing `appAudiences` grant, which has
+   * no clock (the 2026-09-15 Stop Motion incident). These cover the whole
+   * round trip the bot uses: attach, read back, detach.
+   */
+  test("place_class + update_class carry a catalog app target", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "Serena");
+    const periodId = await seedPeriod(t);
+    const groupId = await seedGroup(t, teacher, "Robotics");
+    const tools = await toolsFor(t, teacher);
+    const appId = await t.run(async (ctx) =>
+      ctx.db.insert("externalApps", { name: "Scratch", webUrl: "https://scratch.mit.edu/" }),
+    );
+
+    const blk = parse(await tools.create_schedule_block.run({
+      termId: periodId, label: "Block E", startLocal: "15:05", endLocal: "16:30",
+    }));
+    const blockId = blk.blockId as string;
+
+    // Attach on create.
+    const placed = parse(await tools.place_class.run({
+      termId: periodId, groupId, subject: "Robotics", teacherId: teacher,
+      weekday: 1, blockId, externalAppId: appId, mode: "classFocus",
+    }));
+    expect(placed.ok).toBe(true);
+    const placementId = placed.placementId as string;
+    expect(
+      await t.run(async (ctx) =>
+        (await ctx.db.get(placementId as Id<"schedulePlacements">))?.externalAppId,
+      ),
+    ).toBe(appId);
+
+    // The grid reports it, which is how the bot confirms its own write.
+    const grid = parse(await tools.get_master_schedule.run({ termId: periodId }));
+    expect(
+      (grid.placements as { _id: string; externalAppName?: string | null }[])
+        .find((x) => x._id === placementId)?.externalAppName,
+    ).toBe("Scratch");
+
+    // Detach — attaching must not be a one-way door. Assert on KEY PRESENCE,
+    // not the value: `v.optional(v.id(...))` permits absent, never a stored
+    // null, so a null here would be a schema violation in production that a
+    // `toBeFalsy()` assertion would have hidden.
+    expect(parse(await tools.update_class.run({ placementId, detachApp: true })).ok).toBe(true);
+    const detached = await t.run(async (ctx) =>
+      ctx.db.get(placementId as Id<"schedulePlacements">),
+    );
+    expect(detached && "externalAppId" in detached).toBe(false);
+
+    // Re-attach through the update path too.
+    expect(
+      parse(await tools.update_class.run({ placementId, externalAppId: appId })).ok,
+    ).toBe(true);
+    expect(
+      await t.run(async (ctx) =>
+        (await ctx.db.get(placementId as Id<"schedulePlacements">))?.externalAppId,
+      ),
+    ).toBe(appId);
+  });
+
+  test("an app target and a curriculum activity are mutually exclusive", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "Serena");
+    const periodId = await seedPeriod(t);
+    const groupId = await seedGroup(t, teacher, "Robotics");
+    const tools = await toolsFor(t, teacher);
+    const appId = await t.run(async (ctx) =>
+      ctx.db.insert("externalApps", { name: "Scratch", webUrl: "https://scratch.mit.edu/" }),
+    );
+    const activityId = await t.run(async (ctx) =>
+      ctx.db.insert("activities", { title: "Build a bot", kind: "offline", order: 0 }),
+    );
+    const blk = parse(await tools.create_schedule_block.run({
+      termId: periodId, label: "Block E", startLocal: "15:05", endLocal: "16:30",
+    }));
+
+    const both = await tools.place_class.run({
+      termId: periodId, groupId, subject: "Robotics", weekday: 1,
+      blockId: blk.blockId as string, externalAppId: appId, activityId,
+    });
+    expect(both).toMatch(/activity or a catalog app, not both/i);
+  });
+
+  test("update_class refuses to attach and detach an app in one call", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "Serena");
+    const periodId = await seedPeriod(t);
+    const groupId = await seedGroup(t, teacher, "Robotics");
+    const tools = await toolsFor(t, teacher);
+    const appId = await t.run(async (ctx) =>
+      ctx.db.insert("externalApps", { name: "Scratch", webUrl: "https://scratch.mit.edu/" }),
+    );
+    const placed = parse(await tools.place_class.run({
+      termId: periodId, groupId, subject: "Robotics",
+    }));
+    const out = await tools.update_class.run({
+      placementId: placed.placementId as string,
+      externalAppId: appId,
+      detachApp: true,
+    });
+    expect(out).toMatch(/not both/i);
   });
 });

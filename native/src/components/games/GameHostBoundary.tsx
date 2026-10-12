@@ -1,6 +1,7 @@
-import { Component, type ReactNode } from "react";
+import type { ReactNode } from "react";
 
-import { useGameRequest, type GameRequest } from "@/lib/gameHost";
+import { ContainmentBoundary } from "@/components/ContainmentBoundary";
+import { useGameRequest } from "@/lib/gameHost";
 
 /**
  * Host-level containment for `<GameHost />`, mounted at the app root.
@@ -23,9 +24,9 @@ import { useGameRequest, type GameRequest } from "@/lib/gameHost";
  * forever would silently disable games for the ENTIRE session, a worse
  * long-term outcome than the crash itself. Every game launch flows through the
  * `openGameActivity` store as a NEW `GameRequest` reference (and `closeGame`
- * sets it to `null`); we key the latch on that reference and clear `crashed`
- * the moment it changes. So the crashed request stays contained, but the next
- * launch remounts a fresh GameHost and works again.
+ * sets it to `null`); we key the `ContainmentBoundary` latch on that
+ * reference, so it clears the moment it changes. So the crashed request stays
+ * contained, but the next launch remounts a fresh GameHost and works again.
  *
  * Reporting: GameHost's own `onCrash` reports to Convex via
  * `api.games.reportCrash`, but that needs a live `sessionId`. A host-level
@@ -40,30 +41,13 @@ import { useGameRequest, type GameRequest } from "@/lib/gameHost";
  */
 export function GameHostBoundary({ children }: { children: ReactNode }) {
   const request = useGameRequest();
-  return <GameHostBoundaryInner resetKey={request}>{children}</GameHostBoundaryInner>;
+  return (
+    <ContainmentBoundary resetKey={request} onCatch={reportHostCrash}>
+      {children}
+    </ContainmentBoundary>
+  );
 }
 
-class GameHostBoundaryInner extends Component<
-  { children: ReactNode; resetKey: GameRequest | null },
-  { crashed: boolean }
-> {
-  state = { crashed: false };
-
-  static getDerivedStateFromError() {
-    return { crashed: true };
-  }
-
-  componentDidCatch(error: unknown) {
-    console.error("[game-host] GameHost host-level render threw — games disabled until the next launch", error);
-  }
-
-  componentDidUpdate(prevProps: { resetKey: GameRequest | null }) {
-    if (this.state.crashed && prevProps.resetKey !== this.props.resetKey) {
-      this.setState({ crashed: false });
-    }
-  }
-
-  render() {
-    return this.state.crashed ? null : this.props.children;
-  }
+function reportHostCrash(error: unknown) {
+  console.error("[game-host] GameHost host-level render threw — games disabled until the next launch", error);
 }

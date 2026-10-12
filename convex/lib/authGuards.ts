@@ -9,6 +9,7 @@ import type { Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
 import { ROLES, canUsePassword, isPasskeyRole } from "./roles";
 import { normalizeEmail, isValidEmail } from "./email";
+import { takeRateToken } from "./rateBucket";
 
 /**
  * Refuse to sign in to (or bootstrap credentials onto) a non-human SERVICE
@@ -116,6 +117,48 @@ export async function grantPasswordBind(
   });
 }
 
+/** At most this many magic-link emails per address per hour. */
+export const MAGIC_LINK_REQUESTS_PER_HOUR = 5;
+const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * Gate a magic-link REQUEST before @convex-dev/auth sees it (the `signIn`
+ * wrapper in convex/auth.ts). True means "let the library create the code and
+ * send the email"; false means "answer `{ started: true }` and do nothing".
+ *
+ * The caller answers both cases identically, so the response never says
+ * whether an address has an account (the request leg used to throw from
+ * `resolveMagicLinkUser` for an unknown email, which told anyone whether a
+ * family had applied). Refused: an invalid address, no account with that
+ * email, an account whose email is not a real one, a service account, and an
+ * address over {@link MAGIC_LINK_REQUESTS_PER_HOUR}. The bucket is kept only
+ * for addresses with an account, so a stream of made-up addresses writes
+ * nothing.
+ *
+ * Convex gives a public action no client IP, so there is no per-IP limit.
+ */
+export async function admitMagicLinkRequest(
+  ctx: MutationCtx,
+  rawEmail: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const email = normalizeEmail(rawEmail);
+  if (!isValidEmail(email)) return false;
+  const user = await ctx.db
+    .query("users")
+    .withIndex("by_email", (q) => q.eq("email", email))
+    // .first(), not .unique(): a duplicate account for one email must not
+    // make the request leg throw (and so answer differently).
+    .first();
+  if (!user || !isValidEmail(user.email ?? "") || user.isSystem) return false;
+  return await takeRateToken(
+    ctx,
+    `magic-link-request:${email}`,
+    { max: MAGIC_LINK_REQUESTS_PER_HOUR, windowMs: HOUR_MS },
+    now,
+  );
+}
+
 /**
  * Resolve a magic-link sign-in to a pre-provisioned account that has a real
  * email on file. Magic-link NEVER creates accounts — it only resolves an
@@ -124,8 +167,10 @@ export async function grantPasswordBind(
  * role allowlist; auth method follows the credential the account has. The
  * `isValidEmail` guard rejects the synthetic `username@local` Password
  * address (no dot in the domain), so a password-only account can't be
- * magic-linked into. `sendVerificationRequest` also pre-checks eligibility
- * so we don't email a link to a non-account.
+ * magic-linked into. `admitMagicLinkRequest` refuses a non-account before
+ * the request leg reaches this resolver, so the throw below is defence in
+ * depth (and the verify leg's guard); `sendVerificationRequest` also
+ * pre-checks eligibility so we don't email a link to a non-account.
  */
 export async function resolveMagicLinkUser(
   ctx: MutationCtx,
@@ -144,7 +189,7 @@ export async function resolveMagicLinkUser(
       ? await ctx.db
           .query("users")
           .withIndex("by_email", (q) => q.eq("email", email))
-          .unique()
+          .first()
       : null);
 
   if (!user || !isValidEmail(user.email ?? "")) {

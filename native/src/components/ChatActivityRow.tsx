@@ -18,7 +18,10 @@ import { fonts, useColors } from "@/theme";
 export type ChatActivity =
   | { kind: "thinking" }
   | { kind: "image" }
-  | { kind: "tool"; label: string };
+  | { kind: "tool"; label: string }
+  // A slow first token: the escalating patience copy (`pendingTurnLabel`),
+  // already punctuated.
+  | { kind: "waiting"; label: string };
 
 function labelFor(activity: ChatActivity): string {
   switch (activity.kind) {
@@ -28,6 +31,8 @@ function labelFor(activity: ChatActivity): string {
       return "Making a picture…";
     case "tool":
       return `${activity.label}…`;
+    case "waiting":
+      return activity.label;
   }
 }
 

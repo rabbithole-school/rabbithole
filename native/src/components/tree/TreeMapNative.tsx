@@ -23,6 +23,7 @@ import * as Haptics from "expo-haptics";
 import Animated, {
   cancelAnimation,
   runOnJS,
+  useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
   withDecay,
@@ -134,20 +135,14 @@ const BLEED = 60;
 
 const ZOOM_SPRING = { damping: 28, stiffness: 300, mass: 0.8 } as const;
 
-/* CRASH NOTE — never call runOnJS from an animation COMPLETION CALLBACK here.
-   `runOnJS(...)` inside a withTiming/withSpring/withDecay completion callback can
-   hard-crash the iOS app (SIGABRT, no red box: `JSIWorkletsModuleProxy::toOptimizedObject`
-   → `JSScheduler::scheduleOnJS`) once the React Compiler MEMOIZES the enclosing
-   component. The compiler is enabled in this app, and #1928 cleared
-   `TreeMapNative`'s last recorded bailout. The two legacy withDecay completion
-   callbacks below are therefore an ARMED risk, not a dormant one. This exact
-   sequence already bit sky.tsx's ZoomControls (PR #1847 removed its last
-   violation → memoized → the dormant recenter went live; PR #1853 fixed it).
-
-   The remedy, copied from native/src/app/sky.tsx + ui/Drawer.tsx: drive the JS
-   follow-up off a plain setTimeout, which never crosses the UI-worklet→JS
-   boundary. See RECENTER_SETTLE_MS below (spring case) and the decay-fling
-   CRASH NOTE in the pan gesture (the two calls left unfixed, with reasoning). */
+/* CRASH NOTE — animation completion callbacks are the one context known to
+   hard-crash when they call runOnJS. Reactions are a different context: the
+   compiler-memoized CoordinatePlane, Array, and SimulatorViewport components
+   ship runOnJS from useAnimatedReaction in fleet builds; gesture callbacks are
+   also fine. The crash is nondeterministic, so a passing tap-test proves nothing;
+   the fix is the code shape. TreeMapNative has no compiler-baseline entry since
+   #1928, so this is load-bearing now: completions bump the nonce, and the reaction
+   performs the JS hop. Never move runOnJS back into a completion callback. */
 
 /* Recenter settle timer. A spring has no duration, so this can't mirror an
    animation length — it must outlast the spring's own termination. This
@@ -508,6 +503,7 @@ export function TreeMapNative() {
   const tx = useSharedValue(0);
   const ty = useSharedValue(0);
   const scale = useSharedValue(1);
+  const decaySettleNonce = useSharedValue(0);
   const [snapshot, setSnapshot] = useState<Snapshot>({ scale: 1, tx: 0, ty: 0 });
 
   // Open on the fitted HOME camera once the layout reports its size (dims start
@@ -540,6 +536,15 @@ export function TreeMapNative() {
   const commitSettle = useCallback((s: number, x: number, y: number) => {
     setSnapshot({ scale: s, tx: x, ty: y });
   }, [setSnapshot]);
+
+  useAnimatedReaction(
+    () => decaySettleNonce.get(),
+    (nonce, prev) => {
+      if (prev !== null && nonce !== prev) {
+        runOnJS(commitSettle)(scale.get(), tx.get(), ty.get());
+      }
+    },
+  );
 
   // Pending re-snapshot for an in-flight recenter — driven off a JS timer, NOT a
   // spring completion callback (see the CRASH NOTE by RECENTER_SETTLE_MS).
@@ -605,39 +610,13 @@ export function TreeMapNative() {
       // review finding). A double commit is harmless: the snapshot is
       // idempotent and the later one lands at the truly settled camera.
       //
-      // CRASH NOTE — these two `runOnJS(commitSettle)` calls are inside withDecay
-      // COMPLETION CALLBACKS, the exact shape that hard-crashes the app once the
-      // React Compiler memoizes this component (see the CRASH NOTE by
-      // RECENTER_SETTLE_MS). They are LEFT UNFIXED, deliberately:
-      //   • ARMED now — #1928 cleared `TreeMapNative`'s last recorded compiler
-      //     bailout, so these callbacks no longer have incidental protection.
-      //   • NO fixed JS timer can replace them. Unlike the recenter spring (whose
-      //     ~601ms termination is derivable), a withDecay's duration is a function
-      //     of release velocity — a timer right for a gentle flick is wrong for a
-      //     hard one, so the Drawer/recenter remedy does not transfer.
-      //   • The shipped reference (native/src/app/sky.tsx) makes the SAME choice:
-      //     it fixed only its recenter spring and still runs `runOnJS(bumpLabels)`
-      //     in its withDecay fling callbacks. SkyScreen currently bails on an
-      //     upstream try/finally lowering gap; that incidental protection can
-      //     disappear in a compiler upgrade.
-      //   A future fix must track a velocity-dependent rest WITHOUT an
-      //   animation-completion callback — e.g. a `useAnimatedReaction` that
-      //   watches tx/ty for rest and fires `commitSettle` from there (a reaction
-      //   is a different context; this file already runs `runOnJS` from reactions
-      //   — see the grabX reaction — without crashing, but that a reaction is
-      //   crash-SAFE here is inferred, not device-verified). Alternatively these
-      //   commits may be droppable outright: line ~588 already commits
-      //   unconditionally at release and pinch's onFinalize commits too — what is
-      //   lost is the re-cull at the SETTLED framing after a fling (a hard fling
-      //   would leave the crisp layer / labels culled to the release viewport,
-      //   exposing uncovered gutters until the next gesture). That is a visible
-      //   quality regression, not a correctness bug; do not delete on our own
-      //   authority — tracked in TODO.html#runonjs-decay-completion-callbacks.
+      // CRASH NOTE — keep these callbacks UI-thread-only; see the header note.
+      // Each axis bumps the nonce, and the reaction above performs the JS hop.
       tx.set(withDecay({ velocity: vx }, (finished) => {
-        if (finished) runOnJS(commitSettle)(scale.get(), tx.get(), ty.get());
+        if (finished) decaySettleNonce.set(decaySettleNonce.get() + 1);
       }));
       ty.set(withDecay({ velocity: vy }, (finished) => {
-        if (finished) runOnJS(commitSettle)(scale.get(), tx.get(), ty.get());
+        if (finished) decaySettleNonce.set(decaySettleNonce.get() + 1);
       }));
       runOnJS(commitSettle)(scale.get(), tx.get(), ty.get());
     });

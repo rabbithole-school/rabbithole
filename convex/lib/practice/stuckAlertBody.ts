@@ -4,8 +4,25 @@ import {
   SPIRAL_GAP_MS,
   SPIRAL_MISS_THRESHOLD,
 } from "./spiralBreaker";
+import {
+  dayKeyForTimezone,
+  shiftDayKey,
+  weekdayForDayKey,
+} from "../../../shared/institutionDay";
 
 export const STUCK_SITTING_SCAN_LIMIT = 120;
+
+/**
+ * "Recently" for the same-node breaker re-trip line (T6 calibration): a prior
+ * breaker episode on the same (scholar, node) counts when it falls inside the
+ * last 7 days. Anchored to the measured prod concentration — the 2026-09-01 pull
+ * found re-trips clustered within ~a single week: one scholar tripped
+ * permutations_r_from_n ×4 and nt_prime_gaps ×2, another exponents_repeated_mult
+ * ×3, and two more ×2. See review/breaker-perseverance-plan.html
+ * (§3 Finding C). Widening this window would surface unrelated episodes; a
+ * tighter one would miss the concentration the teacher needs to see.
+ */
+export const BREAKER_REPEAT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 /** The parent alert is queued in the threshold-crossing transaction. */
 export const PRACTICE_ALERT_COMPOSE_DELAY_MS = 0;
 
@@ -60,12 +77,24 @@ export type DiagnosableStuckAttempt = {
   expectedAnswer?: string;
 };
 
+/**
+ * Prior same-node breaker episodes for this scholar inside the repeat window.
+ * `priorEpisodeAts` are the trigger timestamps of earlier episodes only (the
+ * current one is excluded upstream); when non-empty, this episode is at least
+ * the second on this node.
+ */
+export type RepeatBreakerEvidence = {
+  priorEpisodeAts: number[];
+  timeZone: string;
+};
+
 export type StuckAlertBodyInput = {
   missStreak: number;
   misses: readonly StuckAlertMiss[];
   sitting?: PracticeSitting;
   diagnosis?: string;
   breaker?: BreakerTelemetry;
+  repeatBreaker?: RepeatBreakerEvidence;
   fallbackSkillLabel: string;
   now: number;
 };
@@ -76,6 +105,16 @@ export type NotYetTaughtAlertBodyInput = {
   sitting?: PracticeSitting;
   breaker?: BreakerTelemetry;
   now: number;
+};
+
+export type BreakerSkillState = {
+  label: string;
+  proficiency: "not_started" | "practicing" | "fluent" | "overlearned";
+  missStreak: number;
+  progressed: boolean;
+  episodeProgressKnown: boolean;
+  brandNew: boolean;
+  firstCorrectAnswer: boolean;
 };
 
 /** Whether a pinned breaker streak contains a wrong answer a teacher can inspect. */
@@ -120,6 +159,13 @@ function truncate(value: string, maxLength: number): string {
 }
 
 function safeText(value: string): string {
+  // NOTE: this backslash-escape does NOT survive Slack. These bodies go out as
+  // `markdown_text` (CommonMark): Slack parses `\\*` as a literal asterisk and
+  // then re-emits it RAW into mrkdwn, where its own renderer reads it as markup
+  // again, so an emphasis marker in a label still renders as emphasis. Probed
+  // live 2026-09-17. The fix is NOT `escapeSlackInline` (convex/lib/slackText.ts)
+  // as-is: that STRIPS `_`, which mangles the underscored skill ids this
+  // function is mostly given (`divide_by_6` → `divideby6`). Tracked separately.
   return escapeSlackText(value.replace(/`/g, "")).replace(/([*_])/g, "\\$1");
 }
 
@@ -133,7 +179,7 @@ function renderMiss(miss: StuckAlertMiss): string | null {
 
   const elapsed = formatAttemptElapsed(miss.elapsedMs);
   const lines = [
-    `• *${safeText(skillLabel)}*${
+    `• **${safeText(skillLabel)}**${
       elapsed ? ` (${elapsed} on this one)` : ""
     }`,
   ];
@@ -174,7 +220,7 @@ function renderNotYetTaughtMiss(miss: StuckAlertMiss): string | null {
 
   const elapsed = formatAttemptElapsed(miss.elapsedMs);
   const lines = [
-    `• *${safeText(skillLabel)}*${
+    `• **${safeText(skillLabel)}**${
       elapsed ? ` (${elapsed} on this one)` : ""
     }`,
   ];
@@ -312,10 +358,40 @@ export function breakerResponseLine(
   );
 }
 
+function proficiencyLabel(proficiency: BreakerSkillState["proficiency"]): string {
+  return proficiency.replace("_", " ");
+}
+
+export function breakerSkillStateLine(
+  state: BreakerSkillState,
+  breaker?: BreakerTelemetry,
+): string {
+  const label = safeText(state.label);
+  if (!state.episodeProgressKnown) {
+    return `${label}: currently ${proficiencyLabel(state.proficiency)} — progress during this episode is unknown.`;
+  }
+  if (state.brandNew && state.firstCorrectAnswer) {
+    return `${label}: first correct answer on this skill in this episode.`;
+  }
+  if (state.progressed) {
+    return `${label}: now ${proficiencyLabel(state.proficiency)}.`;
+  }
+
+  const misses = state.missStreak > 0
+    ? `${state.missStreak} ${state.missStreak === 1 ? "miss" : "misses"} in a row, `
+    : "";
+  const recovery =
+    breaker?.recovery === "won"
+      ? " Recovered on an easier item; the skill itself did not move."
+      : "";
+  return `${label}: still ${proficiencyLabel(state.proficiency)} — ${misses}no progress this episode.${recovery}`;
+}
+
 /** One terminal (or sitting-timeout) reply under the immediate parent alert. */
 export function buildBreakerOutcomeReply(
   breaker: BreakerTelemetry | undefined,
   diagnosis?: string,
+  skillState?: BreakerSkillState,
 ): string {
   const lifecycle = breaker?.lifecycle;
   let outcome: string;
@@ -382,13 +458,72 @@ export function buildBreakerOutcomeReply(
   }
 
   return [
-    `*What happened next:* ${outcome}`,
+    `**What happened next:** ${outcome}`,
+    ...(skillState ? [breakerSkillStateLine(skillState, breaker)] : []),
     ...(diagnosis?.trim() ? [`_AI read:_ ${safeText(diagnosis.trim())}`] : []),
   ].join("\n");
 }
 
+const REPEAT_ORDINALS = [
+  "",
+  "First",
+  "Second",
+  "Third",
+  "Fourth",
+  "Fifth",
+  "Sixth",
+  "Seventh",
+  "Eighth",
+  "Ninth",
+];
+
+function repeatOrdinal(count: number): string {
+  return REPEAT_ORDINALS[count] ?? `${count}th`;
+}
+
+const REPEAT_WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function repeatDayLabel(dayKey: string, nowDayKey: string): string {
+  if (dayKey === nowDayKey) return "earlier today";
+  if (dayKey === shiftDayKey(nowDayKey, -1)) return "yesterday";
+  return REPEAT_WEEKDAYS[weekdayForDayKey(dayKey)] ?? dayKey;
+}
+
+function joinWithAnd(items: readonly string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+/**
+ * One staff-voiced factual sentence naming a same-node breaker re-trip, so a
+ * teacher in the room can decide to pull the scholar aside. Names the pattern
+ * only — the count and the prior days — never a prescription. Absent unless the
+ * scholar has at least one prior episode on this node in the window.
+ */
+export function breakerRepeatLine(
+  repeat: RepeatBreakerEvidence | undefined,
+  now: number,
+): string | undefined {
+  if (!repeat || repeat.priorEpisodeAts.length === 0) return undefined;
+  const count = repeat.priorEpisodeAts.length + 1;
+  const nowDayKey = dayKeyForTimezone(now, repeat.timeZone);
+  const seenDays = new Set<string>();
+  const labels: string[] = [];
+  for (const at of [...repeat.priorEpisodeAts].sort((a, b) => a - b)) {
+    const dayKey = dayKeyForTimezone(at, repeat.timeZone);
+    if (seenDays.has(dayKey)) continue;
+    seenDays.add(dayKey);
+    labels.push(repeatDayLabel(dayKey, nowDayKey));
+  }
+  return `${repeatOrdinal(
+    count,
+  )} breaker on this skill in the last week (also ${joinWithAnd(labels)}).`;
+}
+
 /** Build the complete staff-facing Slack body for one paused practice episode. */
 export function buildStuckAlertBody(input: StuckAlertBodyInput): string {
+  const repeatLine = breakerRepeatLine(input.repeatBreaker, input.now);
   const renderedMisses = input.misses
     .map(renderMiss)
     .filter((miss): miss is string => miss !== null);
@@ -396,7 +531,8 @@ export function buildStuckAlertBody(input: StuckAlertBodyInput): string {
   if (renderedMisses.length === 0) {
     return [
       scholarOfferLine(input.missStreak, input.breaker),
-      `Most recently on *${safeText(input.fallbackSkillLabel)}*.`,
+      `Most recently on **${safeText(input.fallbackSkillLabel)}**.`,
+      ...(repeatLine ? [repeatLine] : []),
       "Might be a good moment to check in.",
     ].join("\n");
   }
@@ -408,6 +544,7 @@ export function buildStuckAlertBody(input: StuckAlertBodyInput): string {
   if (tally) lines.push(tally);
 
   lines.push("", ...renderedMisses);
+  if (repeatLine) lines.push("", repeatLine);
   lines.push("", "Might be a good moment to check in.");
   return lines.join("\n");
 }

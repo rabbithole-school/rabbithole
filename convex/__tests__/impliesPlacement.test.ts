@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -23,17 +23,28 @@ const modules = (import.meta as ImportMeta & {
   glob: (p: string) => Record<string, () => Promise<unknown>>;
 }).glob("../**/*.ts");
 
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
 const PROBABILITY = "probability";
 const WHOLE_NUMBER = "whole-number-arithmetic";
 const DISPLAY_ENTRANCES = ["read_picture_graph", "read_bar_graph", "read_line_plot"];
 
-async function seedScholar(t: ReturnType<typeof convexTest>, username: string): Promise<Id<"users">> {
+async function seedScholar(t: TestConvex<typeof schema>, username: string): Promise<Id<"users">> {
   return await t.run(async (ctx) =>
     ctx.db.insert("users", { name: "Placement Scholar", username, role: "scholar" }),
   );
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -48,7 +59,7 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
  *  a real `practiceMastery` row in the source's OWN domain, exactly as practice
  *  would leave it. This is the "measured whole-number strength" precondition. */
 async function demonstrateSource(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   scholarId: Id<"users">,
   skillKey: string,
 ): Promise<void> {
@@ -97,7 +108,7 @@ async function runPlacement(
 
 /** The probability skills the scholar was CREDITED (accessProven placement rows). */
 async function creditedKeys(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   scholarId: Id<"users">,
 ): Promise<Set<string>> {
   const keys = await t.run(async (ctx) => {
@@ -114,7 +125,7 @@ async function creditedKeys(
   return new Set(keys);
 }
 
-async function probeLogLen(t: ReturnType<typeof convexTest>, scholarId: Id<"users">): Promise<number> {
+async function probeLogLen(t: TestConvex<typeof schema>, scholarId: Id<"users">): Promise<number> {
   return await t.run(async (ctx) => {
     const row = (await ctx.db.query("practicePlacements").collect()).find(
       (r) => r.scholarId === scholarId && r.domain === PROBABILITY,
@@ -126,7 +137,7 @@ async function probeLogLen(t: ReturnType<typeof convexTest>, scholarId: Id<"user
 /** How many probes the scholar spent inside the `data-displays` strand — the
  *  strand whose entrances the `implies` floor pre-credits. */
 async function dataDisplayProbeCount(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   scholarId: Id<"users">,
 ): Promise<number> {
   return await t.run(async (ctx) => {
@@ -139,8 +150,7 @@ async function dataDisplayProbeCount(
 
 describe("implies — REAL placement effect on an unmapped domain", () => {
   test("isolation: a demonstrated cross-domain source CREDITS the target entrances WITHOUT probing them; without it, nothing", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
 
     // Scholar A: no whole-number strength. Scholar B: demonstrated the shipped
     // `implies` source `count_objects_within_20`. Both answer every probe "don't
@@ -173,8 +183,7 @@ describe("implies — REAL placement effect on an unmapped domain", () => {
   });
 
   test("non-inferiority: the demonstrated source never costs MORE probes, and still credits every entrance for free", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
 
     // Both scholars answer everything CORRECTLY (the realistic "strong scholar").
     // B additionally has the demonstrated cross-domain source, so its data-display
@@ -219,8 +228,7 @@ describe("implies — REAL placement effect on an unmapped domain", () => {
     // `compare_within_10` (the PRUNED §5 sources) must NOT get any probability
     // entrance credited — those edges were removed precisely because the target
     // template doesn't exercise the source, so they must mint no placement credit.
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "placement_pruned_source");
     for (const src of ["compare_3digit", "perimeter_polygons", "compare_within_10"]) {
       await demonstrateSource(t, scholar, src);

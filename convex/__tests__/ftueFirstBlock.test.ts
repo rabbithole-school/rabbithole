@@ -122,3 +122,87 @@ test("an all-not-yet first block cannot mix count-to-20 with long division", asy
     session.items.some((item) => item.skillKey === "long_division_2digit_divisor"),
   ).toBe(false);
 });
+
+test("the first block reads this domain's attempts, including legacy rows without a domain", async () => {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+
+  const now = Date.now();
+  const scholarId = await t.run(async (ctx) =>
+    ctx.db.insert("users", {
+      name: "Attempt Log Scholar",
+      username: "ftue_attempt_log",
+      role: "scholar",
+      gradeLevel: "3",
+    }),
+  );
+  await t.run(async (ctx) => {
+    await ctx.db.insert("practicePlacements", {
+      scholarId,
+      domain: "whole-number-arithmetic",
+      status: "complete",
+      probesAnswered: 1,
+      probeLog: [
+        {
+          nodeKey: "count_objects_within_20",
+          strand: "counting",
+          outcome: "unknown" as const,
+          at: now,
+        },
+      ],
+      updatedAt: now,
+    });
+    await ctx.db.insert("practiceMastery", {
+      scholarId,
+      skillKey: "count_objects_within_20",
+      domain: "whole-number-arithmetic",
+      strand: "counting",
+      repetition: 0,
+      halfLifeDays: 0,
+      frontier: true,
+      source: "placement",
+      updatedAt: now,
+    });
+    // A long diagnostic history in this domain and real drilling in another
+    // domain: neither ends the first block.
+    for (let index = 0; index < 40; index += 1) {
+      await ctx.db.insert("practiceAttempts", {
+        scholarId,
+        nodeKey: "count_objects_within_20",
+        correct: false,
+        domain: "whole-number-arithmetic",
+        lane: "placement",
+        createdAt: now - (index + 2) * 60_000,
+      });
+    }
+    await ctx.db.insert("practiceAttempts", {
+      scholarId,
+      nodeKey: "simplify_fractions",
+      correct: true,
+      domain: "fraction-arithmetic",
+      lane: "frontier",
+      createdAt: now - 60_000,
+    });
+  });
+
+  const authed = await asScholar(t, scholarId);
+  const playlistFor = () =>
+    authed.query(api.practiceSkills.playlistForScholar, {
+      scholarId,
+      domain: "whole-number-arithmetic",
+    });
+  expect((await playlistFor()).firstPostPlacementBlock).toBe(true);
+
+  // A drill row written before attempts carried a domain counts as
+  // whole-number arithmetic, so it ends the first block.
+  await t.run(async (ctx) => {
+    await ctx.db.insert("practiceAttempts", {
+      scholarId,
+      nodeKey: "count_objects_within_20",
+      correct: true,
+      lane: "frontier",
+      createdAt: now - 30 * 24 * 60 * 60_000,
+    });
+  });
+  expect((await playlistFor()).firstPostPlacementBlock).toBe(false);
+});

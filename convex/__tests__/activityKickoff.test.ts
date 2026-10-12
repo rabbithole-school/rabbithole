@@ -51,6 +51,10 @@ async function withUser(t: TC, userId: Id<"users">) {
 async function seedUnitWithActivity(
   t: TC,
   teacherId: Id<"users">,
+  options: {
+    appRequest?: string;
+    kind?: "online" | "vibecode";
+  } = {},
 ) {
   return await t.run(async (ctx) => {
     const unitId = await ctx.db.insert("units", {
@@ -66,9 +70,12 @@ async function seedUnitWithActivity(
     const activityId = await ctx.db.insert("activities", {
       lessonId,
       title: "Test Activity",
-      kind: "online",
+      kind: options.kind ?? "online",
       systemPrompt: "Invite the scholar to investigate balance.",
       order: 0,
+      ...(options.appRequest !== undefined
+        ? { appRequest: options.appRequest }
+        : {}),
     });
     return { unitId, lessonId, activityId };
   });
@@ -102,6 +109,80 @@ async function sessionMessages(
 }
 
 describe("sessions.startActivityKickoff", () => {
+  test("getWithMessages leaks the app brief ONLY to the teacher build hand-off", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher", "lehua_torres");
+    const scholarId = await seedUser(t, "scholar", "kai_kahale");
+    const { activityId: requestedActivityId } = await seedUnitWithActivity(
+      t,
+      teacherId,
+      {
+        appRequest: "Build a rocket shop.",
+        kind: "vibecode",
+      },
+    );
+    const { activityId: plainActivityId } = await seedUnitWithActivity(
+      t,
+      teacherId,
+    );
+    const requestedSessionId = await seedSession(t, teacherId, {
+      activityId: requestedActivityId,
+      isTestDrive: true,
+    });
+    const plainSessionId = await seedSession(t, teacherId, {
+      activityId: plainActivityId,
+      isTestDrive: true,
+    });
+    const liveSessionId = await seedSession(t, teacherId, {
+      activityId: requestedActivityId,
+    });
+    // A real coached scholar session on the SAME activity that carries the brief.
+    const scholarSessionId = await seedSession(t, scholarId, {
+      activityId: requestedActivityId,
+    });
+    const asTeacher = await withUser(t, teacherId);
+    const asScholar = await withUser(t, scholarId);
+
+    const requested = await asTeacher.query(api.sessions.getWithMessages, {
+      id: requestedSessionId,
+    });
+    const plain = await asTeacher.query(api.sessions.getWithMessages, {
+      id: plainSessionId,
+    });
+    const live = await asTeacher.query(api.sessions.getWithMessages, {
+      id: liveSessionId,
+    });
+    const scholarView = await asScholar.query(api.sessions.getWithMessages, {
+      id: scholarSessionId,
+    });
+
+    expect(requested.session.teacherBuildKickoff).toBe(true);
+    expect(plain.session.teacherBuildKickoff).toBe(false);
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        live.session,
+        "teacherBuildKickoff",
+      ),
+    ).toBe(false);
+
+    // The teacher build hand-off DOES receive the brief (it drives the
+    // designer's opening "The brief" card).
+    expect(requested.session.appRequest).toBe("Build a rocket shop.");
+
+    // Everyone else — a live (non-rehearsal) teacher session, and any scholar —
+    // gets the boolean but never the text.
+    expect(live.session.appRequest).toBeNull();
+    expect(JSON.stringify(live.session)).not.toContain("Build a rocket shop.");
+
+    expect(scholarView.session.appRequest).toBeNull();
+    expect((scholarView.session as { hasAppRequest?: boolean }).hasAppRequest).toBe(
+      true,
+    );
+    expect(JSON.stringify(scholarView.session)).not.toContain(
+      "Build a rocket shop.",
+    );
+  });
+
   test("an empty activity session gets exactly one assistant placeholder", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedUser(t, "scholar", "kai_kahale");

@@ -17,7 +17,7 @@ export function effectiveInstitutionTimeZone(timeZone?: string): string {
 }
 
 export async function timeZoneForInstitution(
-  ctx: QueryCtx,
+  ctx: Pick<QueryCtx, "db">,
   institutionId?: Id<"institutions">,
 ): Promise<string> {
   const institution = institutionId ? await ctx.db.get(institutionId) : null;

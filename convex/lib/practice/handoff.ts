@@ -50,7 +50,7 @@ import {
  * produced under — the same role `promptVersion` plays for the streaming tutor.
  * A date+slug string is enough; it is opaque to consumers.
  */
-export const HANDOFF_PROMPT_VERSION = "2026-07-context-v4-landplane";
+export const HANDOFF_PROMPT_VERSION = "2026-09-context-v5-statement-close";
 
 /**
  * Version stamp for the MANIPULATIVE handoff/explain prompt
@@ -60,7 +60,7 @@ export const HANDOFF_PROMPT_VERSION = "2026-07-context-v4-landplane";
  * are keyed to the exact prompt they were produced under.
  */
 export const MANIPULATIVE_HANDOFF_PROMPT_VERSION =
-  "2026-07-manip-context-v4-landplane";
+  "2026-09-manip-context-v5-statement-close";
 
 export type HandoffEntryMode = "stuck" | "spiral" | "ladder" | "game";
 
@@ -201,11 +201,22 @@ box closes: the kid will NOT see a reply box and CANNOT answer you. So do NOT en
 on a question, and do NOT hand them something new to do in the chat — that would
 strand them on a prompt they can't respond to.
 
+SHAPE OF THIS MESSAGE — non-negotiable: every sentence is a statement or a
+warm send-off, and the whole message contains NO question mark anywhere. Not at the end, not buried in
+the middle, not softened ("what do you think?", "make sense?", "right?", "can
+you count them up?", "want to try one more?"), not rhetorical. No arithmetic,
+count, check, or step left for them to do here — not even "one more." Before you
+send it, reread your draft: if it contains a "?", rewrite that sentence as a
+statement or delete it.
+
 Instead, close warmly in ONE short wrap: reflect the thinking they brought back
 to them, name what they can carry forward, and send them off (e.g. "${sendOff}").
-Everything above still holds — landing the plane never means revealing the answer,
-confirming a value, or finishing the work for them. The real practice happens next,
-on their own.`;
+This turn OVERRIDES every instruction above that tells you to ask, probe, get
+curious, pose one real question, offer a neutral self-check, or hand them
+something to try in this chat — those are all for earlier turns and are
+CANCELLED now. What still holds is everything above about what you must NOT
+do: landing the plane never means revealing the answer, confirming a value, or
+finishing the work for them. The real practice happens next, on their own.`;
 }
 
 function normalizedEntryMode(

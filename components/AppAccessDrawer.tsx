@@ -16,6 +16,7 @@
  * (teacher / admin / operations staff); mounts its roster subscription only while open.
  */
 
+import type { ManagedNativeAppKey } from "@/convex/lib/managedNativeApps";
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery } from "convex/react";
@@ -33,6 +34,7 @@ import {
 } from "@chakra-ui/react";
 import { Check, X } from "@phosphor-icons/react";
 import { ScholarPicker } from "@/components/ScholarPicker";
+import { AppPreviewButton } from "@/components/AppPreviewButton";
 import { useScholarRoster } from "@/hooks/useScholarRoster";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -43,12 +45,16 @@ export interface AppAccessTarget {
   _id: Id<"externalApps">;
   name: string;
   webUrl: string;
+  /** The native launch scheme, when this is a native iPad app. Optional so
+   * builders that don't carry it can omit it; the Preview helper uses it only
+   * to word the "iPad app, nothing to preview on the web" disabled state. */
+  nativeUrlScheme?: string | null;
   credentialSource: "scholarApp" | "libraryCard" | null;
   /**
    * Set when the catalog entry also launches an app that is installed on
    * managed iPads. Web surfaces always open `webUrl`.
    */
-  managedNativeAppKey?: "google-sheets" | "lego-spike" | null;
+  managedNativeAppKey?: ManagedNativeAppKey | null;
 }
 
 type Scope = "group" | "institution" | "scholars";
@@ -175,18 +181,27 @@ function DrawerHeader({
           {appLaunchSummary(app)}
         </Text>
       </Stack>
-      <Drawer.CloseTrigger asChild>
-        <IconButton
-          aria-label="Close"
-          size="sm"
-          variant="ghost"
-          color="charcoal.400"
-          _hover={{ bg: "gray.100" }}
-          onClick={onClose}
-        >
-          <X />
-        </IconButton>
-      </Drawer.CloseTrigger>
+      <HStack gap={1} flexShrink={0} align="center">
+        <AppPreviewButton
+          app={{
+            name: app.name,
+            webUrl: app.webUrl,
+            nativeUrlScheme: app.nativeUrlScheme,
+          }}
+        />
+        <Drawer.CloseTrigger asChild>
+          <IconButton
+            aria-label="Close"
+            size="sm"
+            variant="ghost"
+            color="charcoal.400"
+            _hover={{ bg: "gray.100" }}
+            onClick={onClose}
+          >
+            <X />
+          </IconButton>
+        </Drawer.CloseTrigger>
+      </HStack>
     </Drawer.Header>
   );
 }

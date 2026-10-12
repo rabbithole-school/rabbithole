@@ -14,7 +14,13 @@ import { ParentChat } from "@/components/ParentChat";
  * is always about their own children. Closed → renders nothing (the portal
  * body takes the full width).
  */
-export function ParentAideDock() {
+export function ParentAideDock({
+  activeChildId,
+}: {
+  /** The child selected in the portal header — the aide answers about them
+   *  instead of asking which child a bare "my child" means. */
+  activeChildId?: string | null;
+}) {
   const { open, setOpen, pendingComposerSeed, consumeComposerSeed } =
     useAideDock();
   if (!open) return null;
@@ -57,6 +63,7 @@ export function ParentAideDock() {
       </Flex>
       <Box flex={1} minH={0} display="flex" flexDirection="column" overflow="hidden">
         <ParentChat
+          activeChildId={activeChildId}
           seed={pendingComposerSeed}
           onSeedConsumed={consumeComposerSeed}
         />

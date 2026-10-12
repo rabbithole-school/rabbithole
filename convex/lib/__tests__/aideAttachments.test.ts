@@ -65,6 +65,18 @@ const RTF = new TextEncoder().encode(
   String.raw`{\rtf1\ansi{\fonttbl\f0 Arial;}\f0 Hello \b bold\b0  world\par Line two\par}`,
 );
 
+// A real, decodable 2x2 PNG, and the same bytes with a flipped byte inside
+// IDAT: its chunk CRC no longer matches, which the API answers with 400
+// "Could not process image".
+const VALID_PNG = new Uint8Array(
+  Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGM8EaDBwMDAxAAGAA/KAUR0s/I7AAAAAElFTkSuQmCC",
+    "base64",
+  ),
+);
+const CORRUPT_PNG = VALID_PNG.slice();
+CORRUPT_PNG[40] ^= 0xff;
+
 const origFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = origFetch;
@@ -205,6 +217,7 @@ describe("buildAideUserContent (real extraction)", () => {
   });
 
   test("image → url image block", async () => {
+    stubFetch({ "https://x/img.png": VALID_PNG });
     const m: AideContextMessage = {
       role: "user",
       content: "look",
@@ -212,7 +225,122 @@ describe("buildAideUserContent (real extraction)", () => {
     };
     const out = await buildAideUserContent(ctx, userId, m);
     const blocks = out as unknown as Array<Record<string, unknown>>;
-    expect(blocks.some((b) => b.type === "image")).toBe(true);
+    expect(blocks).toContainEqual({
+      type: "image",
+      source: { type: "url", url: "https://x/img.png" },
+    });
+  });
+
+  test("corrupt image upload → noted, never sent", async () => {
+    // Every aide turn rebuilds every earlier turn's attachments, so an image
+    // the API cannot decode would fail the whole thread from here on.
+    stubFetch({ "https://x/broken.png": CORRUPT_PNG });
+    const out = await buildAideUserContent(ctx, userId, {
+      role: "user",
+      content: "look",
+      attachments: [att("broken.png", "image/png", "https://x/broken.png")],
+    });
+    const blocks = out as unknown as Array<Record<string, unknown>>;
+    expect(blocks.some((b) => b.type === "image")).toBe(false);
+    expect(
+      blocks.some((b) => String(b.text).includes("not shown inline: broken.png")),
+    ).toBe(true);
+  });
+
+  test("corrupt video poster → transcript kept, contact sheet dropped", async () => {
+    stubFetch({ "https://x/sheet.png": CORRUPT_PNG });
+    const out = await buildAideUserContent(ctx, userId, {
+      role: "user",
+      content: "",
+      attachments: [
+        {
+          ...att("clip.mov", "video/quicktime", "https://x/video"),
+          transcript: "The cart speeds up.",
+          posterStorageId: "poster1" as Id<"_storage">,
+          posterUrl: "https://x/sheet.png",
+          durationMs: 5_000,
+        },
+      ],
+    });
+    const blocks = out as unknown as Array<Record<string, unknown>>;
+    expect(blocks.some((b) => b.type === "image")).toBe(false);
+    expect(
+      blocks.some((b) => String(b.text).includes("The cart speeds up.")),
+    ).toBe(true);
+  });
+
+  test("audio with transcript → duration-labelled text block", async () => {
+    const out = await buildAideUserContent(ctx, userId, {
+      role: "user",
+      content: "Listen to this.",
+      attachments: [
+        {
+          ...att("reflection.webm", "audio/webm", "https://x/audio"),
+          transcript: "I noticed the pattern repeats every third step.",
+          durationMs: 42_000,
+        },
+      ],
+    });
+    const blocks = out as unknown as Array<Record<string, unknown>>;
+    const text = blocks.find((b) => b.type === "text") as { text: string };
+    expect(text.text).toContain(
+      "Transcript of reflection.webm (audio, 0:42):\nI noticed the pattern repeats every third step.",
+    );
+    expect(text.text).not.toContain("not shown inline");
+  });
+
+  test("audio without transcript → no-speech note", async () => {
+    const out = await buildAideUserContent(ctx, userId, {
+      role: "user",
+      content: "",
+      attachments: [
+        {
+          ...att("quiet.m4a", "audio/mp4", "https://x/audio"),
+          transcript: "",
+          durationMs: 3_000,
+        },
+      ],
+    });
+    const blocks = out as unknown as Array<Record<string, unknown>>;
+    const text = blocks.find((b) => b.type === "text") as { text: string };
+    expect(text.text).toContain("Transcript of quiet.m4a (audio, 0:03):");
+    expect(text.text).toContain("No speech detected or transcript unavailable");
+    expect(text.text).not.toContain("not shown inline");
+  });
+
+  test("video with poster → transcript, contact-sheet label, and image block", async () => {
+    stubFetch({ "https://x/contact-sheet.jpg": VALID_PNG });
+    const out = await buildAideUserContent(ctx, userId, {
+      role: "user",
+      content: "",
+      attachments: [
+        {
+          ...att("experiment.mov", "video/quicktime", "https://x/video"),
+          transcript: "The cart speeds up after the second marker.",
+          posterStorageId: "poster1" as Id<"_storage">,
+          posterUrl: "https://x/contact-sheet.jpg",
+          durationMs: 17_000,
+        },
+      ],
+    });
+    const blocks = out as unknown as Array<Record<string, unknown>>;
+    const transcript = blocks.find(
+      (b) =>
+        b.type === "text" &&
+        String(b.text).includes("Transcript of experiment.mov"),
+    ) as { text: string };
+    expect(transcript.text).toContain(
+      "Transcript of experiment.mov (video, 0:17):\nThe cart speeds up after the second marker.",
+    );
+    expect(blocks).toContainEqual({
+      type: "text",
+      text: "Contact sheet of evenly spaced frames from experiment.mov (read left→right, top→bottom)",
+    });
+    expect(blocks).toContainEqual({
+      type: "image",
+      source: { type: "url", url: "https://x/contact-sheet.jpg" },
+    });
+    expect(transcript.text).not.toContain("not shown inline");
   });
 
   test("linked Drive doc → exported text block", async () => {
@@ -283,9 +411,7 @@ describe("buildAideUserContent (real extraction)", () => {
   });
 
   test("linked Drive image → base64 image block with sniffed mime", async () => {
-    // Minimal PNG signature so detectImageMime resolves image/png.
-    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
-    stubFetch({ [driveMediaUrl("img1")]: png });
+    stubFetch({ [driveMediaUrl("img1")]: VALID_PNG });
     const out = await buildAideUserContent(ctx, userId, {
       role: "user",
       content: "",
@@ -298,6 +424,22 @@ describe("buildAideUserContent (real extraction)", () => {
     expect(imgBlock.source.type).toBe("base64");
     expect(imgBlock.source.media_type).toBe("image/png");
     expect(imgBlock.source.data.length).toBeGreaterThan(0);
+  });
+
+  test("corrupt linked Drive image → damaged-image note, no image block", async () => {
+    stubFetch({ [driveMediaUrl("img2")]: CORRUPT_PNG });
+    const out = await buildAideUserContent(ctx, userId, {
+      role: "user",
+      content: "",
+      driveAttachments: [drive("img2", "board.png", "image/png")],
+    });
+    const blocks = out as unknown as Array<Record<string, unknown>>;
+    expect(blocks.some((b) => b.type === "image")).toBe(false);
+    expect(
+      blocks.some((b) =>
+        String(b.text).includes('"board.png" is a damaged image'),
+      ),
+    ).toBe(true);
   });
 
   test("linked Drive .docx → extracted text block (same path as uploads)", async () => {

@@ -5,7 +5,6 @@ import {
   maxPairwiseDisagreement,
   mean,
   roundTo,
-  DISAGREEMENT_FLAG_THRESHOLD,
   type TurnLabelInput,
 } from "../lib/labelAgreement";
 
@@ -33,9 +32,6 @@ describe("basic stats helpers", () => {
     expect(roundTo(3.005, 2)).toBe(3.01);
   });
 
-  test("flag threshold is 2", () => {
-    expect(DISAGREEMENT_FLAG_THRESHOLD).toBe(2);
-  });
 });
 
 describe("computeAgreement", () => {

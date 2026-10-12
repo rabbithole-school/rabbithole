@@ -1,5 +1,5 @@
 import { convexTest, type TestConvex } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { ELECTIVE_PRACTICE_DOMAINS } from "../knowledgeNodes";
 import { api, internal } from "../_generated/api";
@@ -15,6 +15,17 @@ import { automaticPlacementGrade, domainHasAffectSafeEntry } from "../lib/practi
 // rows alone must never count as "mapped".
 
 const modules = (import.meta as ImportMeta & { glob: (p: string) => Record<string, () => Promise<unknown>> }).glob("../**/*.ts");
+
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
 
 async function seedScholar(
   t: TestConvex<typeof schema>,
@@ -69,8 +80,7 @@ async function expectedEligibleCount(
 
 describe("mapProgressForScholar — the Home CTA's honest N-of-M", () => {
   test("counts a CONVERGED run as mapped, and eligible domains only (not every seeded domain)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_progress_honest", "5");
     const asScholar = await asUser(t, scholar);
 
@@ -101,8 +111,7 @@ describe("mapProgressForScholar — the Home CTA's honest N-of-M", () => {
   });
 
   test("mastery rows with NO converged run do not count as mapped (shadow-placement)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_progress_shadow", "5");
     const asScholar = await asUser(t, scholar);
 
@@ -146,8 +155,7 @@ describe("mapProgressForScholar — the Home CTA's honest N-of-M", () => {
   });
 
   test("a missing grade reads as the K ring, not the most permissive one", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_progress_no_grade"); // no gradeLevel
     const asScholar = await asUser(t, scholar);
 
@@ -166,8 +174,7 @@ describe("mapProgressForScholar — the Home CTA's honest N-of-M", () => {
 
 describe("mixedPlacementCurrent — the check-in header reads the SAME N-of-M", () => {
   test("mapped/eligible agree exactly with mapProgressForScholar (one derivation, every surface)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_progress_cross_surface", "3");
     const asScholar = await asUser(t, scholar);
 
@@ -196,8 +203,7 @@ describe("mixedPlacementCurrent — the check-in header reads the SAME N-of-M", 
 
 describe("mapCompletionForScholar / acknowledgeMapCompletion — the once-ever reveal", () => {
   test("fires 'complete' exactly once, then 'growth' only after M genuinely grows", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     // A grade whose K+2-style ring likely reaches exactly the foundational
     // domain(s) so we can drive `allMapped` by converging just those.
     const scholar = await seedScholar(t, "map_completion_lifecycle", "K");
@@ -257,8 +263,7 @@ describe("mapCompletionForScholar / acknowledgeMapCompletion — the once-ever r
   });
 
   test("acknowledging when there is nothing to reveal is a no-op", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_completion_noop", "5");
     const asScholar = await asUser(t, scholar);
 
@@ -277,8 +282,7 @@ describe("mapCompletionForScholar / acknowledgeMapCompletion — the once-ever r
     // in `newDomainLabels` (`scratch-critiques/slip-confirm-interaction-review.md`
     // §2).
     const ALGEBRA1 = "algebra-1";
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_completion_selfopen", "4");
     const asScholar = await asUser(t, scholar);
 

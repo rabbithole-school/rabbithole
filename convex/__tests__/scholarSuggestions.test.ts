@@ -21,6 +21,10 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
+// Schema-typed client for helpers that read through an index.
+const _makeTypedTestConvex = () => convexTest(schema, modules);
+type TypedTestConvex = ReturnType<typeof _makeTypedTestConvex>;
+
 const originalFetch = globalThis.fetch;
 const originalSlackToken = process.env.SLACK_BOT_TOKEN;
 const originalWorkshopChannel = process.env.SLACK_WORKSHOP_CHANNEL_ID;
@@ -62,6 +66,80 @@ async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
     subject: `${userId}|${sessionId}`,
     issuer: "https://convex.dev",
   });
+}
+
+/**
+ * Put a scholar at a school — a thread needs an institution to anchor to.
+ * Deliberately NOT primary: a primary school's idea would schedule a real
+ * #workshop post that can outlive the test and hit the next test's fetch mock.
+ */
+async function enrollAtSchool(
+  t: TypedTestConvex,
+  scholarId: Id<"users">,
+  slug = "school-fixture",
+): Promise<Id<"institutions">> {
+  return await t.run(async (ctx) => {
+    const existing = await ctx.db
+      .query("institutions")
+      .withIndex("by_slug", (q) => q.eq("slug", slug))
+      .unique();
+    const institutionId =
+      existing?._id ??
+      (await ctx.db.insert("institutions", {
+        name: "School Fixture",
+        slug,
+        kind: "school",
+      }));
+    await ctx.db.patch(scholarId, { institutionId });
+    return institutionId;
+  });
+}
+
+/**
+ * A teacher MEMBERSHIP at the fixture school: posting into a Workshop thread
+ * needs the team rule, not just a teacher role + a resolved lens.
+ */
+async function teachAtSchool(
+  t: TypedTestConvex,
+  teacherId: Id<"users">,
+  slug = "school-fixture",
+) {
+  await t.run(async (ctx) => {
+    const school = await ctx.db
+      .query("institutions")
+      .withIndex("by_slug", (q) => q.eq("slug", slug))
+      .unique();
+    if (!school) throw new Error("fixture school missing");
+    await ctx.db.insert("memberships", {
+      userId: teacherId,
+      role: "teacher",
+      institutionId: school._id,
+    });
+  });
+}
+
+/** The idea's Workshop thread messages, in order. */
+async function ideaMessages(
+  t: TypedTestConvex,
+  suggestionId: Id<"scholarSuggestions">,
+) {
+  return await t.run(async (ctx) => {
+    const row = await ctx.db.get(suggestionId);
+    if (!row?.threadId) return [];
+    return await ctx.db
+      .query("parentMessages")
+      .withIndex("by_thread", (q) => q.eq("threadId", row.threadId!))
+      .collect();
+  });
+}
+
+async function staffReplies(
+  t: TypedTestConvex,
+  suggestionId: Id<"scholarSuggestions">,
+) {
+  return (await ideaMessages(t, suggestionId)).filter(
+    (message) => message.authorType === "teacher",
+  );
 }
 
 /**
@@ -148,7 +226,7 @@ describe("createMine", () => {
       "When there is a math problem, show what happened there because I want to understand every step instead of only seeing a shortened title.\nAlso keep my second line <exactly>.";
 
     expect(workshopIdeaSlackText("Kai Nakamura", longIdea)).toBe(
-      "💡 *Kai N.* filed a Workshop idea:\n" +
+      "💡 **Kai N.** filed a Workshop idea:\n" +
         "> When there is a math problem, show what happened there because I want to understand every step instead of only seeing a shortened title.\n" +
         "> Also keep my second line &lt;exactly&gt;.",
     );
@@ -206,6 +284,7 @@ describe("createMine", () => {
   test("rejects a 6th open idea with the friendly cap error", async () => {
     const t = convexTest(schema, modules);
     const scholar = await seedUser(t, "scholar", { username: "kai3" });
+    await enrollAtSchool(t, scholar);
     const asKai = await withUser(t, scholar);
     for (let i = 0; i < 5; i++) {
       await asKai.mutation(api.scholarSuggestions.createMine, {
@@ -228,6 +307,7 @@ describe("createMine", () => {
     // the staff-set state: the cap is a prioritization lesson aimed at the kid,
     // so an adult answering an idea must not quietly decide it's off the plate.
     const teacher = await seedUser(t, "teacher", { username: "lehua3" });
+    await teachAtSchool(t, teacher);
     await t.run(async (ctx) =>
       ctx.runMutation(internal.scholarSuggestions.respond, {
         suggestionId: open[0]._id,
@@ -295,7 +375,7 @@ describe("createMine", () => {
     const posted = JSON.parse(String((request as RequestInit).body));
     expect(posted.channel).toBe("C-WORKSHOP");
     expect(posted.markdown_text).toBe(
-      `💡 *Kai N.* filed a Workshop idea:\n> ${fullIdea}`,
+      `💡 **Kai N.** filed a Workshop idea:\n> ${fullIdea}`,
     );
     expect(posted.metadata).toMatchObject({
       event_type: "rabbithole_workshop_idea",
@@ -490,12 +570,19 @@ describe("listMine", () => {
 
     const mine = await asKai.query(api.scholarSuggestions.listMine, {});
     const answered = mine.find((r) => r._id === suggestionId);
-    expect(answered?.staffResponse).toBeTruthy();
-    expect(answered?.responderName).toBe("Lehua Torres");
-    expect(answered?.staffResponse?.body).toBe("Great idea — thanks!");
-    // A still-open idea has no responder name.
-    const open = mine.find((r) => !r.staffResponse);
-    expect(open?.responderName ?? null).toBe(null);
+    expect(answered?.answered).toBe(true);
+    expect(answered?.threadId).toBeTruthy();
+    expect(answered?.lastMessage).toMatchObject({
+      authorName: "Lehua Torres",
+      body: "Great idea — thanks!",
+      mine: false,
+    });
+    expect(answered?.unread).toBe(true);
+    // A still-open idea: the latest message is the kid's own words.
+    const open = mine.find((r) => r._id !== suggestionId);
+    expect(open?.answered).toBe(false);
+    expect(open?.lastMessage).toMatchObject({ authorName: "You", mine: true });
+    expect(open?.unread).toBe(false);
   });
 });
 
@@ -601,6 +688,7 @@ describe("respond (the aide tool's backing mutation)", () => {
     username = "kai7",
   ): Promise<Id<"scholarSuggestions">> {
     const scholar = await seedUser(t, "scholar", { username });
+    await enrollAtSchool(t, scholar);
     const asKai = await withUser(t, scholar);
     const { suggestionId } = await asKai.mutation(
       api.scholarSuggestions.createMine,
@@ -613,6 +701,7 @@ describe("respond (the aide tool's backing mutation)", () => {
     const t = convexTest(schema, modules);
     const suggestionId = await seedIdea(t);
     const teacher = await seedUser(t, "teacher", { username: "lehua7" });
+    await teachAtSchool(t, teacher);
 
     await t.run(async (ctx) =>
       ctx.runMutation(internal.scholarSuggestions.respond, {
@@ -626,28 +715,36 @@ describe("respond (the aide tool's backing mutation)", () => {
 
     const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
     expect(row?.archivedAt).toBeUndefined();
-    expect(row?.staffResponse?.authorId).toBe(teacher);
-    expect(row?.staffResponse?.body).toContain("Love this");
-    expect(typeof row?.staffResponse?.at).toBe("number");
+    // The reply is a message in the idea's thread, not a field on the idea.
+    expect(row?.staffResponse).toBeUndefined();
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies).toHaveLength(1);
+    expect(replies[0].authorUserId).toBe(teacher);
+    expect(replies[0].body).toContain("Love this");
   });
 
-  test("a second reply overwrites the first (aide/dashboard path)", async () => {
+  test("a second reply is a second message, never an overwrite", async () => {
     const t = convexTest(schema, modules);
     const suggestionId = await seedIdea(t, "kai8");
     const teacher = await seedUser(t, "teacher", { username: "lehua8" });
+    await teachAtSchool(t, teacher);
+    for (const body of ["Love it.", "Tell me more tomorrow?"]) {
+      await t.run(async (ctx) =>
+        ctx.runMutation(internal.scholarSuggestions.respond, {
+          suggestionId,
+          authorId: teacher,
+          body,
+          scholarLensResolved: true,
+        }),
+      );
+    }
 
-    await t.run(async (ctx) =>
-      ctx.runMutation(internal.scholarSuggestions.respond, {
-        suggestionId,
-        authorId: teacher,
-        body: "Tell me more tomorrow?",
-        scholarLensResolved: true,
-      }),
-    );
-
-    const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
-    expect(row?.archivedAt).toBeUndefined();
-    expect(row?.staffResponse?.body).toBe("Tell me more tomorrow?");
+    const messages = await ideaMessages(t, suggestionId);
+    expect(messages.map((m) => [m.authorType, m.body])).toEqual([
+      ["scholar", "Dark mode for the Sky"],
+      ["teacher", "Love it."],
+      ["teacher", "Tell me more tomorrow?"],
+    ]);
   });
 
   test("a scholar author is Forbidden (defense-in-depth)", async () => {
@@ -669,6 +766,7 @@ describe("respond (the aide tool's backing mutation)", () => {
     const t = convexTest(schema, modules);
     const suggestionId = await seedIdea(t, "kai10");
     const teacher = await seedUser(t, "teacher", { username: "lehua10" });
+    await teachAtSchool(t, teacher);
     await expect(
       t.run(async (ctx) =>
         ctx.runMutation(internal.scholarSuggestions.respond, {
@@ -728,30 +826,10 @@ describe("respondAsStaff (teacher-dashboard wrapper)", () => {
 
     const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
     expect(row?.archivedAt).toBeUndefined();
-    expect(row?.staffResponse?.authorId).toBe(teacher);
-    expect(row?.staffResponse?.body).toBe("Sharing this with the team.");
-  });
-
-  test("replying never takes the idea off the scholar\u2019s board", async () => {
-    const t = convexTest(schema, modules);
-    const { suggestionId, institutionId } = await seedIdea(t, "kaiRS2");
-    const teacher = await seedUser(t, "teacher", { username: "lehuaRS2" });
-    await t.run((ctx) =>
-      ctx.db.insert("memberships", {
-        userId: teacher,
-        role: "teacher",
-        institutionId,
-      }),
-    );
-    const asTeacher = await withUser(t, teacher);
-
-    await asTeacher.mutation(
-      api.scholarSuggestions.respondAsStaff,
-      { suggestionId, body: "Tell me more?" },
-    );
-    const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
-    expect(row?.archivedAt).toBeUndefined();
-    expect(row?.staffResponse?.body).toBe("Tell me more?");
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies.map((m) => [m.authorUserId, m.body])).toEqual([
+      [teacher, "Sharing this with the team."],
+    ]);
   });
 
   test("a scholar calling respondAsStaff is Forbidden", async () => {
@@ -1306,10 +1384,13 @@ describe("respondFromSlackThread (a plain Slack thread reply)", () => {
     });
 
     const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
-    expect(row?.staffResponse?.body).toBe(
-      "thanks for letting us know! I'll take a look.",
-    );
-    expect(row?.staffResponse?.authorId).toBe(teacher);
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({
+      body: "thanks for letting us know! I'll take a look.",
+      authorUserId: teacher,
+      source: "slack",
+    });
     // A thread reply has no "and close it" affordance — closing stays the
     // deliberate act it is on the aide tool.
     // A reply changes NO state — the idea stays on the kid's board until THEY
@@ -1317,7 +1398,7 @@ describe("respondFromSlackThread (a plain Slack thread reply)", () => {
     expect(row?.archivedAt).toBeUndefined();
   });
 
-  test("a second reply APPENDS rather than destroying the first", async () => {
+  test("a second reply is its own message rather than destroying the first", async () => {
     const t = convexTest(schema, modules);
     const { teacher, suggestionId } = await seedIdeaAndTeacher(t);
     const send = (body: string) =>
@@ -1333,8 +1414,10 @@ describe("respondFromSlackThread (a plain Slack thread reply)", () => {
     const second = await send("fixed it!");
     expect(second).toMatchObject({ status: "recorded", appended: true });
 
-    const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
-    expect(row?.staffResponse?.body).toBe("I'll take a look.\n\nfixed it!");
+    expect((await staffReplies(t, suggestionId)).map((m) => m.body)).toEqual([
+      "I'll take a look.",
+      "fixed it!",
+    ]);
   });
 
   test("a follow-up that is a SUFFIX of the prior reply still appends", async () => {
@@ -1354,43 +1437,13 @@ describe("respondFromSlackThread (a plain Slack thread reply)", () => {
     await send("I will look into this and get back to you soon.");
     await send("you soon.");
 
-    const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
-    expect(row?.staffResponse?.body).toBe(
-      "I will look into this and get back to you soon.\n\nyou soon.",
-    );
+    expect((await staffReplies(t, suggestionId)).map((m) => m.body)).toEqual([
+      "I will look into this and get back to you soon.",
+      "you soon.",
+    ]);
   });
 
-  test("a follow-up appends and still leaves the idea on the board", async () => {
-    const t = convexTest(schema, modules);
-    const { teacher, suggestionId, institutionId } =
-      await seedIdeaAndTeacher(t);
-    void institutionId;
-
-    // Staff answered through the dashboard first.
-    const asTeacher = await withUser(t, teacher);
-    await asTeacher.mutation(api.scholarSuggestions.respondAsStaff, {
-      suggestionId,
-      body: "We shipped this — thank you!",
-    });
-
-    await t.run((ctx) =>
-      ctx.runMutation(internal.scholarSuggestions.respondFromSlackThread, {
-        suggestionId,
-        authorId: teacher,
-        body: "no problem!",
-      }),
-    );
-
-    const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
-    expect(row?.staffResponse?.body).toBe(
-      "We shipped this — thank you!\n\nno problem!",
-    );
-    // No amount of staff replying files the idea away — that stays the
-    // scholar's call.
-    expect(row?.archivedAt).toBeUndefined();
-  });
-
-  test("an identical repeat is not doubled", async () => {
+  test("a human repeating themselves is two messages (retries dedupe upstream)", async () => {
     const t = convexTest(schema, modules);
     const { teacher, suggestionId } = await seedIdeaAndTeacher(t);
     const send = () =>
@@ -1403,8 +1456,10 @@ describe("respondFromSlackThread (a plain Slack thread reply)", () => {
       );
     await send();
     await send();
-    const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
-    expect(row?.staffResponse?.body).toBe("working on it!");
+    expect((await staffReplies(t, suggestionId)).map((m) => m.body)).toEqual([
+      "working on it!",
+      "working on it!",
+    ]);
   });
 
   test("a non-teacher replier writes nothing", async () => {
@@ -1489,6 +1544,7 @@ describe("respondFromSlackThread (a plain Slack thread reply)", () => {
 describe("setArchivedMine (the scholar puts an idea away)", () => {
   async function seedMine(t: ReturnType<typeof convexTest>, username = "kaiAR") {
     const scholar = await seedUser(t, "scholar", { username });
+    await enrollAtSchool(t, scholar);
     const asScholar = await withUser(t, scholar);
     const { suggestionId } = await asScholar.mutation(
       api.scholarSuggestions.createMine,
@@ -1522,6 +1578,7 @@ describe("setArchivedMine (the scholar puts an idea away)", () => {
     const t = convexTest(schema, modules);
     const { asScholar, suggestionId } = await seedMine(t, "kaiAR2");
     const teacher = await seedUser(t, "teacher", { username: "lehuaAR2" });
+    await teachAtSchool(t, teacher);
     await t.run((ctx) =>
       ctx.runMutation(internal.scholarSuggestions.respond, {
         suggestionId,
@@ -1543,7 +1600,9 @@ describe("setArchivedMine (the scholar puts an idea away)", () => {
     expect(second?.archivedAt).toBe(first?.archivedAt);
     // Their reply is still there to read — archiving is putting away, not
     // throwing out.
-    expect(second?.staffResponse?.body).toBe("Thanks for this.");
+    expect((await staffReplies(t, suggestionId)).map((m) => m.body)).toEqual([
+      "Thanks for this.",
+    ]);
   });
 
   test("another scholar cannot archive my idea, and it is 'not found' to them", async () => {

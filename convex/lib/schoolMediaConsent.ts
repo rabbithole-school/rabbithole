@@ -30,7 +30,7 @@ export async function hasSchoolMediaConsent(
   return (await schoolMediaConsentStatus(ctx, scholarId)) === "granted";
 }
 
-async function schoolMediaConsentStatus(
+export async function schoolMediaConsentStatus(
   ctx: ConsentCtx,
   scholarId: Id<"users">,
 ): Promise<MediaConsentStatus> {
@@ -122,6 +122,26 @@ export async function portfolioFamilySharingEligibility(
     };
   }
   return { allowed: true, blocker: null };
+}
+
+/**
+ * The family-facing reading of media consent, for the parent portal's course
+ * view. An ENROLLED scholar's media consent rides on the annual health record,
+ * which the portal already surfaces on its own card — so the course view says
+ * nothing about it ("not_applicable"). A PROGRAM GUEST's consent is the media
+ * release on the visiting-student form, which is exactly the thing a family can
+ * act on from here, so its three states collapse to "have we got the form at
+ * all" vs "did they grant".
+ */
+export async function familyMediaReleaseStatus(
+  ctx: ConsentCtx,
+  scholarId: Id<"users">,
+): Promise<"not_applicable" | "granted" | "not_granted" | "form_missing"> {
+  const scholar = await ctx.db.get(scholarId);
+  if (!scholar || !isProgramGuest(scholar)) return "not_applicable";
+  const status = await schoolMediaConsentStatus(ctx, scholarId);
+  if (status === "missing_visiting_student_form") return "form_missing";
+  return status === "granted" ? "granted" : "not_granted";
 }
 
 export function captureRosterName(scholar: Pick<Doc<"users">, "name">): string {

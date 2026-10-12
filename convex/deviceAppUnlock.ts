@@ -11,10 +11,11 @@
  * This file now holds both halves of a deliberate transition:
  *
  *   • the LEASE ceremony — `status` / `requestUnlock` / `requestLock` /
- *     `markReturned` and the relock gate. The shipped iPad build drives it on
- *     every managed-app launch, so it keeps working UNCHANGED until its
- *     retirement lane ships a new build. Nothing about its contract moves
- *     here.
+ *     `markReturned` and the relock gate. The in-repo native client stopped
+ *     driving it in f33dda5b6 (2026-09-01, lane D) and now sends only
+ *     `nudgeProjection`. iPad builds older than that commit still drive it on
+ *     every managed-app launch, so it keeps working UNCHANGED until a later
+ *     cleanup lane removes it. Nothing about its contract moves here.
  *   • the GRANT PROJECTION — `projectionCandidates` /
  *     `prepareProjectionPatch` / `recordProjectionPatch`, converged by the
  *     same reconciler cron. A bound device's allowlist becomes an
@@ -23,11 +24,11 @@
  *
  * They share ONE dedicated profile, so they must never want different things
  * from it. They don't: both compute the same target set through
- * `projectedBundleIdsForClaim` (lib/deviceAppProjection.ts), where the live
- * lease is a guaranteed superset member and "relock" means "converge to the
- * projection" rather than "return to bare baseline". Mutual exclusion is the
- * pre-existing per-row `operationToken`, acquired immediately before each
- * PATCH and never reserved across a batch.
+ * `projectedBundleIdsForClaim` (lib/deviceAppProjection.ts), which holds every
+ * app the relock gate would keep a lease open for, and "relock" means
+ * "converge to the projection" rather than "return to bare baseline". Mutual
+ * exclusion is the pre-existing per-row `operationToken`, acquired
+ * immediately before each PATCH and never reserved across a batch.
  *
  * The profile-safety core is untouched: `verifyDedicatedProfileScope`,
  * `assertLiveTemplate`, `validateBaseline`, the durable-before-network
@@ -51,25 +52,27 @@ import {
 import { makeFunctionReference } from "convex/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { authedMutation, authedQuery } from "./lib/customFunctions";
-import { requireUser, assertNotImpersonating } from "./lib/auth";
+import { requireUser, assertCanWrite } from "./lib/auth";
 import { primaryInstitutionId } from "./lib/primaryInstitution";
 import { hasSchoolOperationsAccessAtInstitution } from "./lib/staffCapabilities";
 import { ROLES } from "./lib/roles";
-import { launcherShowsApp, scholarHasGrantForApp } from "./lib/appAudiences";
 import {
   MANAGED_NATIVE_APPS,
-  managedNativeAppKeyForScheme,
+  managedNativeAppKeyForApp,
   type ManagedNativeAppKey,
 } from "./lib/managedNativeApps";
 import {
-  freshDeviceOwner,
-  grantedManagedAppKeysForScholar,
+  HOME_LAYOUT_PROJECTION_FORMAT_VERSION,
+  projectedHomeLayoutBundleIds,
+  projectsHomeLayout,
+} from "./lib/homeLayoutTiles";
+import {
+  authorizedManagedAppKeysForClaim,
   resolveProjectionTrust,
   uncertainProjectionWrite,
-  livePushShowsAppToScholar,
   projectedBundleIdsForClaim,
   projectionHasDrifted,
-  pushedManagedAppKeysForScholar,
+  scholarAppAccess,
 } from "./lib/deviceAppProjection";
 
 export {
@@ -80,20 +83,39 @@ export {
   schedulePushProjectionRefresh,
   type RevocationSchedulerCtx,
 } from "./lib/deviceAppUnlockScheduling";
+import {
+  findSimpleMdmDeviceBySerial,
+  isSimpleMdmApiError,
+  mdmFailureCode,
+  simpleMdmJson,
+  simpleMdmRequest,
+  type SimpleMdmRetryTimingSource,
+} from "./lib/simpleMdmClient";
+// The devices console's landing progress bar quotes the same window this
+// stamps into `expectedAvailableAt`, so the estimate has one definition.
+import { EXPECTED_MDM_PROPAGATION_MS } from "../shared/appAccessLanding";
+import { writeAuditLog } from "./lib/auditLog";
 
-const SIMPLEMDM_API_BASE = "https://a.simplemdm.com/api/v1";
 const IDLE_LEASE_DURATION_MS = 60 * 60 * 1_000;
 // An active native-app session cannot report a heartbeat, so it gets a longer
 // hard cap. Returning to Rabbithole switches back to the one-hour idle lease.
 const ACTIVE_SESSION_FAILSAFE_MS = 8 * 60 * 60 * 1_000;
-const EXPECTED_MDM_PROPAGATION_MS = 15 * 1_000;
-const MDM_FETCH_TIMEOUT_MS = 12 * 1_000;
 // Keep the operation lease beyond the bounded request deadline. This prevents
 // a transport that times out locally from being immediately overtaken by a
-// second whole-profile PATCH; a stale completion also cannot update database
-// state because `recordMdmPatch` requires this token.
+// second whole-profile PATCH; a stale completion also cannot complete anything
+// because `recordMdmPatch` requires this token (it only stamps the landing
+// barrier for its PATCH, TRA-442).
 const OPERATION_TIMEOUT_MS = 120 * 1_000;
 const LOCK_RETRY_DELAY_MS = 5 * 60 * 1_000;
+// A removed device's teardown (`cleanupAfterLockIntent`) retries on a backoff
+// that doubles from LOCK_RETRY_DELAY_MS, and stops after this many attempts,
+// about a week after the first failure (5 min × (2^11 − 1)). A transient
+// SimpleMDM failure is retried at the old cadence first; a refusal nothing in
+// Rabbithole can change stops costing requests. Before this cap, one refused
+// teardown retried every five minutes for four weeks.
+const MAX_TEARDOWN_ATTEMPTS = 12;
+// `pendingLockRetryAt` of a stopped teardown: never due, so no scan returns it.
+const TEARDOWN_STOPPED_RETRY_AT = Number.MAX_SAFE_INTEGER;
 const STATUS_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 // The bounded per-tick scan size for the active-unlock reconciler's due-row
 // query — a cheap read/gate-check per row, not a network call, so this can
@@ -123,8 +145,8 @@ const RECHECK_AFTER_INFLIGHT_MS = OPERATION_TIMEOUT_MS + 5_000;
 // (distinct from MAX_RECONCILE_BATCH, which only bounds how many rows are
 // gate-checked, a cheap DB-only operation). Small on purpose: patchProfile
 // can make up to 2 PATCH attempts per claim (a 429 retries once, each
-// attempt bounded by MDM_FETCH_TIMEOUT_MS, plus the retry-after delay) on
-// top of its 2 read-only verify/download fetches — so this cap bounds
+// attempt bounded by the shared client's deadline, plus the retry-after
+// delay) on top of its read-only verify/download fetches — so this cap bounds
 // actual MDM attempts/time per invocation, not just a row count that could
 // each independently balloon under sustained rate-limiting. Any row the
 // gate already locked but this budget didn't reach patching is safe to defer
@@ -174,6 +196,13 @@ const PROJECTION_STALL_BACKOFF_MIN_MS = 1_000;
 // a rebind, an uncertain write — invalidates trust immediately and does not
 // wait for it.
 const PROJECTION_VERIFY_INTERVAL_MS = 60 * 60 * 1_000;
+// A 429 pauses the whole SimpleMDM account, not one iPad. Retry-After is used
+// when present; the fallback matches the client's staff-facing "wait a minute"
+// guidance. The cap prevents a malformed remote header from freezing projection
+// indefinitely, while the small buffer avoids retrying on the exact boundary.
+const PROJECTION_RATE_LIMIT_FALLBACK_MS = 60 * 1_000;
+const PROJECTION_RATE_LIMIT_MAX_MS = PROJECTION_VERIFY_INTERVAL_MS;
+const PROJECTION_RATE_LIMIT_BUFFER_MS = 1_000;
 
 type AppKey = ManagedNativeAppKey;
 type DesiredState = "locked" | "unlocked";
@@ -232,10 +261,13 @@ const NOT_CONFIGURED_STATUS: AppUnlockStatus = {
 };
 
 const SUPPORTED_APPS = MANAGED_NATIVE_APPS;
+/** Bundle ids that WERE managed apps and may linger in live profiles. */
+const RETIRED_MANAGED_BUNDLE_IDS = ["com.cateater.funapps.stopmotion"];
 
 // These are the only Rabbithole identities a dedicated profile may name. The
 // profile's exact baseline still comes from the operator; this only ensures a
 // future binding cannot strand its iPad away from Rabbithole or Wi-Fi recovery.
+// Deployment configuration — see DEPLOYMENT.md (Device-unlock bundle namespace).
 let RABBITHOLE_BUNDLE_IDS = new Set([
   "org.rabbithole.app",
   "org.rabbithole.app.dev",
@@ -257,11 +289,7 @@ function apiKey(): string {
   return key;
 }
 
-function authorizationHeader(key: string): string {
-  return `Basic ${btoa(`${key}:`)}`;
-}
-
-function profileXml(template: string, bundleIds: string[]): string {
+function allowlistProfileXml(template: string, bundleIds: string[]): string {
   const strings = bundleIds.map((bundleId) => `        <string>${bundleId}</string>`).join("\n");
   const matches = [...template.matchAll(
     /(<key>allowListedAppBundleIDs<\/key>\s*<array>)([\s\S]*?)(<\/array>)/g,
@@ -273,6 +301,167 @@ function profileXml(template: string, bundleIds: string[]): string {
   return template.slice(0, match.index) +
     match[1] + `\n${strings}\n      ` + match[3] +
     template.slice(match.index + match[0].length);
+}
+
+const UUID_PATTERN =
+  /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i;
+const HOME_LAYOUT_PAYLOAD_TYPE = "com.apple.homescreenlayout";
+const STATIC_FLEET_HOME_LAYOUT_NAME_PATTERN = /^Rabbithole Home Layout(?: v\d+)?$/;
+
+function offsetUuid(uuid: string, offset: number): string {
+  if (!UUID_PATTERN.test(uuid)) {
+    throw new Error("The stored dedicated profile has an invalid payload UUID.");
+  }
+  const compact = uuid.replaceAll("-", "").toUpperCase();
+  const last = Number.parseInt(compact.at(-1)!, 16);
+  const changed = compact.slice(0, -1) + ((last + offset) % 16).toString(16).toUpperCase();
+  return `${changed.slice(0, 8)}-${changed.slice(8, 12)}-${changed.slice(12, 16)}-${changed.slice(16, 20)}-${changed.slice(20)}`;
+}
+
+function homeLayoutPayloadUuid(
+  binding: Pick<Doc<"deviceAppUnlockBindings">, "profileUuid" | "profilePayloadUuid">,
+): string {
+  const first = offsetUuid(binding.profileUuid, 1);
+  return first === binding.profilePayloadUuid ? offsetUuid(binding.profileUuid, 2) : first;
+}
+
+function homeLayoutPayloadIdentifier(
+  binding: Pick<Doc<"deviceAppUnlockBindings">, "profilePayloadIdentifier">,
+): string {
+  return `${binding.profilePayloadIdentifier}.home-layout`;
+}
+
+function homeLayoutPayloadXml(
+  binding: Pick<
+    Doc<"deviceAppUnlockBindings">,
+    "profilePayloadIdentifier" | "profilePayloadUuid" | "profileUuid"
+  >,
+  bundleIds: string[],
+): string {
+  const tiles = projectedHomeLayoutBundleIds(bundleIds)
+    .map(
+     (bundleId) => `        <dict>
+         <key>Type</key><string>Application</string>
+         <key>BundleID</key><string>${bundleId}</string>
+       </dict>`,
+    )
+    .join("\n");
+  return `    <dict>
+     <key>PayloadType</key><string>${HOME_LAYOUT_PAYLOAD_TYPE}</string>
+     <key>PayloadVersion</key><integer>1</integer>
+     <key>PayloadIdentifier</key>
+     <string>${homeLayoutPayloadIdentifier(binding)}</string>
+     <key>PayloadUUID</key>
+     <string>${homeLayoutPayloadUuid(binding)}</string>
+     <key>PayloadDisplayName</key><string>Rabbithole Home Layout</string>
+     <key>Pages</key>
+     <array>
+       <array>
+${tiles}
+       </array>
+     </array>
+    </dict>`;
+}
+
+function homeLayoutPayloadMatches(profile: string): RegExpMatchArray[] {
+  return [...profile.matchAll(
+    new RegExp(
+     `<dict>\\s*<key>PayloadType<\\/key>\\s*<string>${HOME_LAYOUT_PAYLOAD_TYPE.replaceAll(".", "\\.")}<\\/string>[\\s\\S]*?<key>Pages<\\/key>\\s*<array>\\s*<array>[\\s\\S]*?<\\/array>\\s*<\\/array>\\s*<\\/dict>`,
+     "g",
+    ),
+  )];
+}
+
+function rootPayloadIdentifierIndex(profile: string, payloadIdentifier: string): number {
+  const escapedIdentifier = payloadIdentifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const matches = [...profile.matchAll(
+    new RegExp(
+      `<key>PayloadIdentifier<\\/key>\\s*<string>${escapedIdentifier}<\\/string>`,
+      "g",
+    ),
+  )];
+  return matches.length === 1 && matches[0].index !== undefined ? matches[0].index : -1;
+}
+
+function hasSinglePlistStringValue(profile: string, key: string, value: string): boolean {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedValue = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return [
+    ...profile.matchAll(
+      new RegExp(
+        `<key>${escapedKey}<\\/key>\\s*<string>${escapedValue}<\\/string>`,
+        "g",
+      ),
+    ),
+  ].length === 1;
+}
+
+function homeLayoutOf(
+  binding: Pick<
+    Doc<"deviceAppUnlockBindings">,
+    "profilePayloadIdentifier" | "profilePayloadUuid" | "profileUuid"
+  >,
+  profile: string,
+): string[] | null {
+  const matches = homeLayoutPayloadMatches(profile);
+  if (matches.length === 0) return null;
+  if (matches.length !== 1) {
+    throw new Error("The dedicated profile must contain at most one Home Screen layout.");
+  }
+  const payload = matches[0][0];
+  if (
+    !hasSinglePlistStringValue(
+      payload,
+      "PayloadIdentifier",
+      homeLayoutPayloadIdentifier(binding),
+    ) ||
+    !hasSinglePlistStringValue(payload, "PayloadUUID", homeLayoutPayloadUuid(binding)) ||
+    payload.includes("<key>Dock</key>")
+  ) {
+    throw new Error("The dedicated profile has an unexpected Home Screen layout payload.");
+  }
+  const pages = [...payload.matchAll(
+    /<key>Pages<\/key>\s*<array>([\s\S]*?)<\/array>\s*<\/array>/g,
+  )];
+  if (pages.length !== 1) {
+    throw new Error("The dedicated profile has an ambiguous Home Screen page.");
+  }
+  return [...pages[0][1].matchAll(
+    /<key>BundleID<\/key>\s*<string>([^<]+)<\/string>/g,
+  )].map((entry) => entry[1]);
+}
+
+function projectedProfileXml(
+  binding: Doc<"deviceAppUnlockBindings">,
+  template: string,
+  bundleIds: string[],
+): string {
+  const withAllowlist = allowlistProfileXml(template, bundleIds);
+  if (!projectsHomeLayout(binding.profilePayloadIdentifier)) return withAllowlist;
+
+  const payload = homeLayoutPayloadXml(binding, bundleIds);
+  const matches = homeLayoutPayloadMatches(withAllowlist);
+  if (matches.length > 1) {
+    throw new Error("The dedicated profile must contain at most one Home Screen layout.");
+  }
+  const match = matches[0];
+  if (matches.length === 1 && match.index !== undefined) {
+    return withAllowlist.slice(0, match.index) +
+     payload +
+     withAllowlist.slice(match.index + match[0].length);
+  }
+
+  const rootIndex = rootPayloadIdentifierIndex(
+    withAllowlist,
+    binding.profilePayloadIdentifier,
+  );
+  const contentEnd = rootIndex < 0 ? -1 : withAllowlist.lastIndexOf("</array>", rootIndex);
+  if (contentEnd < 0) {
+    throw new Error("The stored dedicated profile has no unambiguous PayloadContent array.");
+  }
+  return withAllowlist.slice(0, contentEnd) +
+    `${payload}\n  ` +
+    withAllowlist.slice(contentEnd);
 }
 
 /** Validate a requested allowlist against this binding's safety envelope. */
@@ -316,11 +505,17 @@ function assertRequestedAllowlist(
 async function readLiveProfile(
   key: string,
   binding: Doc<"deviceAppUnlockBindings">,
-): Promise<{ template: string; bundleIds: string[] }> {
-  await verifyDedicatedProfileScope(key, binding);
+): Promise<{ template: string; bundleIds: string[]; homeLayoutBundleIds: string[] | null }> {
+  await verifyDedicatedProfileScope(key, binding, {
+    rejectCompetingHomeLayout: projectsHomeLayout(binding.profilePayloadIdentifier),
+  });
   const template = await downloadProfileTemplate(key, binding.simpleMdmProfileId);
   assertLiveTemplate(binding, template);
-  return { template, bundleIds: allowlistOf(template) };
+  return {
+    template,
+    bundleIds: allowlistOf(template),
+    homeLayoutBundleIds: homeLayoutOf(binding, template),
+  };
 }
 
 /**
@@ -337,105 +532,102 @@ async function verifyAndApplyProfile(
   key: string,
   binding: Doc<"deviceAppUnlockBindings">,
   bundleIds: string[],
+  markPatchMayHaveBeenSubmitted: () => void,
 ): Promise<{ patched: boolean; liveBundleIds: string[] }> {
   assertRequestedAllowlist(binding, bundleIds);
   const live = await readLiveProfile(key, binding);
   const target = [...bundleIds].sort();
   const current = [...live.bundleIds].sort();
-  if (
+  const allowlistMatches =
     current.length === target.length &&
-    current.every((bundleId, i) => bundleId === target[i])
-  ) {
+    current.every((bundleId, i) => bundleId === target[i]);
+  const expectedHomeLayout = projectedHomeLayoutBundleIds(bundleIds);
+  const homeLayoutMatches =
+    !projectsHomeLayout(binding.profilePayloadIdentifier) ||
+    (
+      live.homeLayoutBundleIds !== null &&
+      live.homeLayoutBundleIds.length === expectedHomeLayout.length &&
+      live.homeLayoutBundleIds.every((bundleId, i) => bundleId === expectedHomeLayout[i])
+    );
+  if (allowlistMatches && homeLayoutMatches) {
     return { patched: false, liveBundleIds: current };
   }
-  await patchLiveProfile(key, binding, live.template, bundleIds);
+  await patchLiveProfile(
+    key,
+    binding,
+    live.template,
+    bundleIds,
+    markPatchMayHaveBeenSubmitted,
+  );
   return { patched: true, liveBundleIds: target };
+}
+
+function createPatchAttemptMarker(): {
+  markMayHaveBeenSubmitted: () => void;
+  mayHaveBeenSubmitted: () => boolean;
+} {
+  let mayHaveBeenSubmitted = false;
+  return {
+    markMayHaveBeenSubmitted: () => {
+      mayHaveBeenSubmitted = true;
+    },
+    mayHaveBeenSubmitted: () => mayHaveBeenSubmitted,
+  };
 }
 
 async function patchProfile(
   key: string,
   binding: Doc<"deviceAppUnlockBindings">,
   bundleIds: string[],
+  markPatchMayHaveBeenSubmitted: () => void,
 ): Promise<void> {
   assertRequestedAllowlist(binding, bundleIds);
   const live = await readLiveProfile(key, binding);
-  await patchLiveProfile(key, binding, live.template, bundleIds);
+  await patchLiveProfile(
+    key,
+    binding,
+    live.template,
+    bundleIds,
+    markPatchMayHaveBeenSubmitted,
+  );
 }
+
+const PATCH_RETRY_STATUSES: ReadonlySet<number> = new Set([429]);
 
 async function patchLiveProfile(
   key: string,
   binding: Doc<"deviceAppUnlockBindings">,
   liveTemplate: string,
   bundleIds: string[],
+  markPatchMayHaveBeenSubmitted: () => void,
 ): Promise<void> {
-  const update = async (): Promise<Response> => {
-    const form = new FormData();
-    form.append(
-      "mobileconfig",
-      new Blob([profileXml(liveTemplate, bundleIds)], {
-        type: "application/x-apple-aspen-config",
-      }),
-      "rabbithole-temporary-app-access.mobileconfig",
-    );
-    try {
-      return await simpleMdmFetch(
-        `${SIMPLEMDM_API_BASE}/custom_configuration_profiles/${encodeURIComponent(
-          binding.simpleMdmProfileId,
-        )}`,
-        {
-          method: "PATCH",
-          headers: { Authorization: authorizationHeader(key) },
-          body: form,
-        },
-      );
-    } catch {
-      throw new Error("Could not reach SimpleMDM to update the app-access profile.");
-    }
-  };
-
-  let response = await update();
-  // SimpleMDM rate limits are transient. Retry once, bounded by its explicit
-  // advice, only for this idempotent whole-profile PATCH.
-  if (response.status === 429) {
-    const retryAfter = Number(response.headers.get("retry-after"));
-    const delayMs = Number.isFinite(retryAfter)
-      ? Math.min(Math.max(retryAfter, 0), 5) * 1_000
-      : 1_000;
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-    response = await update();
-  }
-  if (!response.ok) {
-    throw new Error(
-      `SimpleMDM returned HTTP ${response.status} while updating the app-access profile.`,
-    );
-  }
-}
-
-async function simpleMdmFetch(
-  url: string,
-  init: RequestInit,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MDM_FETCH_TIMEOUT_MS);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } catch {
-    throw new Error("Could not reach SimpleMDM.");
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function simpleMdmJson(key: string, path: string): Promise<unknown> {
-  const response = await simpleMdmFetch(`${SIMPLEMDM_API_BASE}/${path}`, {
-    headers: { Authorization: authorizationHeader(key), Accept: "application/json" },
-  });
-  if (!response.ok) throw new Error("Could not verify the dedicated app-access profile.");
-  try {
-    return await response.json();
-  } catch {
-    throw new Error("SimpleMDM returned an unreadable inventory response.");
-  }
+  const form = new FormData();
+  form.append(
+    "mobileconfig",
+    new Blob([projectedProfileXml(binding, liveTemplate, bundleIds)], {
+      type: "application/x-apple-aspen-config",
+    }),
+    "rabbithole-temporary-app-access.mobileconfig",
+  );
+  // Whole-profile PATCH. A 429 is retried once, bounded by SimpleMDM's own
+  // advice. A transport failure is NOT retried here: the PATCH may or may not
+  // have applied, and that ambiguity belongs to the operation lease +
+  // reconciler (see MAX_REVOCATION_BATCH), not to a blind second attempt.
+  // Mark immediately before entering the request helper: every failure before
+  // this point is provably read-only, while any failure after it must assume
+  // that fetch dispatched the PATCH.
+  markPatchMayHaveBeenSubmitted();
+  await simpleMdmRequest(
+    key,
+    `custom_configuration_profiles/${encodeURIComponent(binding.simpleMdmProfileId)}`,
+    { method: "PATCH", body: form },
+    {
+      what: "updating the app-access profile",
+      attempts: 2,
+      retryOnTransportError: false,
+      retryStatuses: PATCH_RETRY_STATUSES,
+    },
+  );
 }
 
 function records(payload: unknown): Record<string, unknown>[] {
@@ -456,12 +648,6 @@ function hasMore(payload: unknown): boolean {
     result?.links?.next != null;
 }
 
-function deviceSerial(device: Record<string, unknown>): string | null {
-  const attributes = device.attributes as Record<string, unknown> | undefined;
-  const value = attributes?.serial_number ?? attributes?.serial ?? device.serial_number;
-  return typeof value === "string" ? value : null;
-}
-
 function simpleMdmId(value: unknown): string | null {
   if (typeof value === "string") return value.trim() || null;
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
@@ -475,17 +661,18 @@ function simpleMdmId(value: unknown): string | null {
 async function verifyDedicatedProfileScope(
   key: string,
   binding: Pick<Doc<"deviceAppUnlockBindings">, "simpleMdmProfileId" | "serial">,
+  options: { rejectCompetingHomeLayout?: boolean } = {},
 ): Promise<void> {
-  const devicesPayload = await simpleMdmJson(key, "devices?limit=100");
-  if (hasMore(devicesPayload)) throw new Error("SimpleMDM device inventory is paginated; refusing profile update.");
-  const matches = records(devicesPayload).filter((device) => deviceSerial(device) === binding.serial);
-  const deviceId = matches.length === 1 ? simpleMdmId(matches[0].id) : null;
+  const device = await findSimpleMdmDeviceBySerial(key, binding.serial);
+  const deviceId = device?.id ?? null;
   if (!deviceId) {
     throw new Error("Could not resolve this claimed iPad in SimpleMDM.");
   }
-  const profilesPayload = await simpleMdmJson(key, "profiles?limit=100");
+  const what = "verifying the dedicated app-access profile";
+  const profilesPayload = await simpleMdmJson(key, "profiles?limit=100", { what });
   if (hasMore(profilesPayload)) throw new Error("SimpleMDM profile inventory is paginated; refusing profile update.");
-  const profiles = records(profilesPayload).filter(
+  const allProfiles = records(profilesPayload);
+  const profiles = allProfiles.filter(
     (profile) => simpleMdmId(profile.id) === binding.simpleMdmProfileId,
   );
   if (profiles.length !== 1) {
@@ -501,23 +688,84 @@ async function verifyDedicatedProfileScope(
   const installedPayload = await simpleMdmJson(
     key,
     `devices/${encodeURIComponent(deviceId)}/profiles?limit=100`,
+    { what },
   );
   if (hasMore(installedPayload)) {
     throw new Error("SimpleMDM profile inventory is paginated; refusing profile update.");
   }
-  if (!records(installedPayload).some(
-    (profileRow) => simpleMdmId(profileRow.id) === binding.simpleMdmProfileId,
-  )) {
+  const installedProfileIds = new Set(
+    records(installedPayload)
+      .map((profileRow) => simpleMdmId(profileRow.id))
+      .filter((id): id is string => id !== null),
+  );
+  if (!installedProfileIds.has(binding.simpleMdmProfileId)) {
     throw new Error("The dedicated app-access profile is not installed on this iPad.");
+  }
+  if (
+    options.rejectCompetingHomeLayout &&
+    allProfiles.some((profile) => {
+      const id = simpleMdmId(profile.id);
+      const profileAttributes = profile.attributes as Record<string, unknown> | undefined;
+      return (
+        id !== null &&
+        id !== binding.simpleMdmProfileId &&
+        installedProfileIds.has(id) &&
+        typeof profileAttributes?.name === "string" &&
+        STATIC_FLEET_HOME_LAYOUT_NAME_PATTERN.test(profileAttributes.name.trim())
+      );
+    })
+  ) {
+    throw new Error(
+      "The static fleet Home Screen layout is still installed on this iPad; refusing a duplicate Home Screen Layout payload.",
+    );
   }
 }
 
-async function downloadProfileTemplate(key: string, profileId: string): Promise<string> {
-  const response = await simpleMdmFetch(
-    `${SIMPLEMDM_API_BASE}/custom_configuration_profiles/${encodeURIComponent(profileId)}/download`,
-    { headers: { Authorization: authorizationHeader(key) } },
+/**
+ * Has SimpleMDM deleted this dedicated profile? Asked only after a removed
+ * device's teardown failed before its PATCH was sent.
+ *
+ * Only a deleted profile ends a teardown early. One that still exists keeps
+ * the allowlist it last held even when it is assigned to nothing, and
+ * scripts/provision-device-app-unlock.mjs re-assigns exactly such a profile
+ * when the same serial is set up again, so it stays owned until relocked.
+ *
+ * `true` needs positive evidence: a successful, complete listing without the
+ * id. A failed read, a paginated, full or empty page is `false`. SimpleMDM
+ * reports pagination at the top level, which `hasMore` does not read.
+ */
+async function dedicatedProfileIsGone(
+  simpleMdmProfileId: string,
+): Promise<boolean> {
+  let payload: unknown;
+  try {
+    payload = await simpleMdmJson(apiKey(), "profiles?limit=100", {
+      what: "checking whether the app-access profile still exists",
+    });
+  } catch {
+    return false;
+  }
+  const profiles = records(payload);
+  if (
+    hasMore(payload) ||
+    (payload as { has_more?: unknown } | null)?.has_more === true ||
+    profiles.length === 0 ||
+    profiles.length >= 100
+  ) {
+    return false;
+  }
+  return !profiles.some(
+    (profile) => simpleMdmId(profile.id) === simpleMdmProfileId,
   );
-  if (!response.ok) throw new Error("Could not download the dedicated app-access profile.");
+}
+
+async function downloadProfileTemplate(key: string, profileId: string): Promise<string> {
+  const response = await simpleMdmRequest(
+    key,
+    `custom_configuration_profiles/${encodeURIComponent(profileId)}/download`,
+    {},
+    { what: "downloading the dedicated app-access profile" },
+  );
   const responseBody = await response.text();
   let body = responseBody;
   if (!body.includes("<plist")) {
@@ -567,7 +815,13 @@ function parseDedicatedProfileTemplate(profile: string): {
   const uuids = [...profile.matchAll(
     /<key>PayloadUUID<\/key>\s*<string>([^<]+)<\/string>/g,
   )].map((match) => match[1]);
-  if (allowlists.length !== 1 || identifiers.length !== 2 || uuids.length !== 2) {
+  const homeLayouts = homeLayoutPayloadMatches(profile);
+  if (
+    allowlists.length !== 1 ||
+    homeLayouts.length > 1 ||
+    identifiers.length !== 2 + homeLayouts.length ||
+    uuids.length !== 2 + homeLayouts.length
+  ) {
     throw new Error("The dedicated profile has an ambiguous payload identity.");
   }
   const baselineBundleIds = [...allowlists[0][1].matchAll(/<string>([^<]*)<\/string>/g)]
@@ -577,22 +831,71 @@ function parseDedicatedProfileTemplate(profile: string): {
     baselineBundleIds,
     // The application-access payload is first in a standard mobileconfig;
     // the root Configuration payload follows it.
-    profilePayloadIdentifier: identifiers[1],
+    profilePayloadIdentifier: identifiers.at(-1)!,
     profilePayloadUuid: uuids[0],
-    profileUuid: uuids[1],
+    profileUuid: uuids.at(-1)!,
   };
 }
 
-function normalizedTemplateShell(profile: string): string {
+function assertConfiguredHomeLayout(
+  profile: string,
+  identity: ReturnType<typeof parseDedicatedProfileTemplate>,
+): void {
+  const layout = homeLayoutOf(identity, profile);
+  if (!projectsHomeLayout(identity.profilePayloadIdentifier)) {
+    if (layout !== null) {
+      throw new Error("The Pilot app-access profile must keep its Home Screen layout static.");
+    }
+    return;
+  }
+  if (layout === null) return; // Legacy allowlist-only binding; rollout adds it.
+  const expected = projectedHomeLayoutBundleIds(identity.baselineBundleIds);
+  if (
+    layout.length !== expected.length ||
+    layout.some((bundleId, index) => bundleId !== expected[index])
+  ) {
+    throw new Error("The dedicated profile's initial Home Screen layout is invalid.");
+  }
+}
+
+function normalizedTemplateShell(
+  binding: Doc<"deviceAppUnlockBindings">,
+  profile: string,
+): string {
   const matches = [...profile.matchAll(
     /(<key>allowListedAppBundleIDs<\/key>\s*<array>)([\s\S]*?)(<\/array>)/g,
   )];
   if (matches.length !== 1 || matches[0].index === undefined) {
     throw new Error("The dedicated profile must contain exactly one app allowlist.");
   }
-  return (profile.slice(0, matches[0].index) + matches[0][1] + "<APP_LIST>" +
-    matches[0][3] + profile.slice(matches[0].index + matches[0][0].length))
-    .replace(/\s+/g, "");
+  let normalized = profile.slice(0, matches[0].index) + matches[0][1] + "<APP_LIST>" +
+    matches[0][3] + profile.slice(matches[0].index + matches[0][0].length);
+  if (projectsHomeLayout(binding.profilePayloadIdentifier)) {
+    const homeMatches = homeLayoutPayloadMatches(normalized);
+    if (homeMatches.length > 1) {
+      throw new Error("The dedicated profile must contain at most one Home Screen layout.");
+    }
+    const homeMatch = homeMatches[0];
+    if (homeMatches.length === 1 && homeMatch.index !== undefined) {
+      homeLayoutOf(binding, normalized);
+      normalized = normalized.slice(0, homeMatch.index) +
+        "<HOME_LAYOUT>" +
+        normalized.slice(homeMatch.index + homeMatch[0].length);
+    } else {
+      const rootIndex = rootPayloadIdentifierIndex(
+        normalized,
+        binding.profilePayloadIdentifier,
+      );
+      const contentEnd = rootIndex < 0 ? -1 : normalized.lastIndexOf("</array>", rootIndex);
+      if (contentEnd < 0) {
+        throw new Error("The stored dedicated profile has no unambiguous PayloadContent array.");
+      }
+      normalized = normalized.slice(0, contentEnd) +
+        "<HOME_LAYOUT>" +
+        normalized.slice(contentEnd);
+    }
+  }
+  return normalized.replace(/\s+/g, "");
 }
 
 /** The bundle ids in a profile's single app allowlist, in document order. */
@@ -610,12 +913,24 @@ function assertLiveTemplate(
   binding: Doc<"deviceAppUnlockBindings">,
   liveTemplate: string,
 ): void {
-  if (normalizedTemplateShell(liveTemplate) !== normalizedTemplateShell(binding.baselineProfileXml)) {
-    throw new Error("The dedicated profile changed outside its app allowlist.");
+  if (
+    normalizedTemplateShell(binding, liveTemplate) !==
+    normalizedTemplateShell(binding, binding.baselineProfileXml)
+  ) {
+    throw new Error("The dedicated profile changed outside its projected app-access payloads.");
   }
   const current = allowlistOf(liveTemplate);
   const baseline = validateBaseline(binding.baselineBundleIds);
-  const temporary = Object.values(SUPPORTED_APPS).map((app) => app.bundleId);
+  // A retired managed bundle may still sit in a LIVE profile until the
+  // projection PATCHes it out; it is tolerated on READ only, never requested
+  // (`assertRequestedAllowlist` still refuses it), so the next PATCH removes
+  // it. Without this, swapping a catalog entry's bundle id (Stop Motion
+  // Studio → Pro, 2026-09-10) made every live profile read as tampered and
+  // the swap could never land.
+  const temporary = [
+    ...Object.values(SUPPORTED_APPS).map((app) => app.bundleId),
+    ...RETIRED_MANAGED_BUNDLE_IDS,
+  ];
   // The live profile must still be "baseline ∪ some subset of the managed
   // bundles" — no duplicates, nothing unknown, and never missing a baseline
   // entry. The lease model additionally required at most ONE managed bundle;
@@ -629,6 +944,21 @@ function assertLiveTemplate(
     current.some((bundleId) => !baseline.includes(bundleId) && !temporary.includes(bundleId))
   ) {
     throw new Error("The dedicated profile allowlist has an unsafe unexpected change.");
+  }
+  if (projectsHomeLayout(binding.profilePayloadIdentifier)) {
+    const homeLayout = homeLayoutOf(binding, liveTemplate);
+    if (
+      homeLayout !== null &&
+      (
+        new Set(homeLayout).size !== homeLayout.length ||
+        homeLayout.some(
+          (bundleId) =>
+            !baseline.includes(bundleId) && !temporary.includes(bundleId),
+        )
+      )
+    ) {
+      throw new Error("The dedicated profile Home Screen layout has an unsafe unexpected change.");
+    }
   }
 }
 
@@ -759,48 +1089,45 @@ async function requireClaimedDevice(
  * "some scholar-visible surface legitimately shows this app to this scholar
  * right now."
  *
- * Two surfaces do: the launcher TILE (`launcherShowsApp` — a direct
- * `scholarApps` row or an audience grant) and a live PUSH CARD (FocusStrip
- * renders an app-target push as a tappable "Right now" card, and that tap
- * lands in this same launch path). Both must be accepted, because a tap this
- * gate refuses on a card Rabbithole itself just rendered is a re-run of the
- * 2026-08-31 incident — a visible affordance failing closed against a door
- * MDM had already opened. `lib/deviceAppProjection.ts`'s doctrine is that "I
- * can see it" and "the bundle is in my allowlist" cannot drift apart; a
- * grants-only gate on a mediated device is exactly that drift.
+ * Two surfaces do: the launcher TILE (a direct `scholarApps` row, an
+ * audience grant or a live push) and a live PUSH CARD (FocusStrip renders an
+ * app-target push as a tappable "Right now" card, and that tap lands in this
+ * same launch path). Both must be accepted, because a tap this gate refuses on
+ * a card Rabbithole itself just rendered is a re-run of the 2026-08-31
+ * incident — a visible affordance failing closed against a door MDM had
+ * already opened. `lib/deviceAppProjection.ts`'s doctrine is that "I can see
+ * it" and "the bundle is in my allowlist" cannot drift apart; a grants-only
+ * gate on a mediated device is exactly that drift. `scholarAppAccess` is the
+ * tile's rule, shared with the web launch gate and the autofill.
  *
  * (This is a different question from what belongs in the ALLOWLIST. There,
  * widening past what a surface can reach is harmless — the allowlist is a
  * ceiling, not an invitation. Here we are deciding whether to refuse a tap,
  * so the ceiling argument does not apply.)
  *
- * Push visibility takes no clock: whether a card is on screen is a pure
- * function of `setAt` / `clearedAt` (lib/pushes.ts's showing-vs-blocking
- * split), so there is no expiry boundary for the reactive `status` query to
- * go stale across.
+ * No clock argument: `scholarAppAccess` judges pushes at the server clock.
+ * `prepareRequest` runs this in a mutation, always fresh. `status` is a QUERY,
+ * but the older iPad builds that still call it make a one-shot call with a
+ * new `nowMs` on every poll, so no subscription can hold a stale verdict (and
+ * that client `nowMs` stays out of this gate: it is not a time authority).
+ * Push visibility is day-scoped (`isFocusShowing`), so a SUBSCRIBED consumer
+ * of the same question threads a minute-rounded cache-buster instead (see
+ * `scholarApps.listForLauncher`).
  */
 async function requireAuthorizedNativeTile(
   ctx: DbCtx,
   user: Doc<"users">,
   externalAppId: Id<"externalApps">,
 ): Promise<AppKey> {
-  const app = await ctx.db.get(externalAppId);
-  if (!app || app.archived) {
+  const access = await scholarAppAccess(ctx, user, externalAppId);
+  if (access.denied === "missing" || access.denied === "archived") {
     throw new Error("This app is no longer available.");
   }
-  const appKey = managedNativeAppKeyForScheme(app.nativeUrlScheme);
+  const appKey = managedNativeAppKeyForApp(access.app);
   if (!appKey) {
     throw new Error("This app does not support temporary native access.");
   }
-  const link = await ctx.db
-    .query("scholarApps")
-    .withIndex("by_scholar_app", (q) => q.eq("scholarId", user._id).eq("appId", externalAppId))
-    .first();
-  const granted = await scholarHasGrantForApp(ctx as QueryCtx, user, externalAppId);
-  const visible =
-    launcherShowsApp({ link, granted }) ||
-    (await livePushShowsAppToScholar(ctx, user, externalAppId));
-  if (!visible) {
+  if (!access.allowed) {
     throw new Error("This app is not available to this scholar.");
   }
   return appKey;
@@ -863,6 +1190,32 @@ function preemptProjectionPatch(
     projectionError: undefined,
     ...uncertainProjectionWrite(state, state.operationStartedAt ?? nowMs),
   };
+}
+
+/**
+ * The fields for a writer that takes over an operation token whose lease has
+ * EXPIRED, whichever writer held it (TRA-442).
+ *
+ * Nothing recorded what that operation's PATCH did: its action died after
+ * sending it, or is still running past the lease. The PATCH may land after
+ * the taker's own, so the taker stamps its landing barrier, as a preemption
+ * does. A removed iPad's teardown then closes only on a relock accepted after
+ * that PATCH could land, however its action ended.
+ *
+ * A failed record keeps its token until the lease ends, and the taker cannot
+ * tell that token from a dead one. Stamping it is harmless: a failure that may
+ * have sent its PATCH already stamped this same barrier, and one proved
+ * read-only gets a barrier it did not need, which costs at most one more
+ * relock. A row with no token has nothing in flight and gets nothing
+ * (TRA-427).
+ */
+function expiredOperationPatch(
+  state: Doc<"deviceAppUnlockStates">,
+  nowMs: number,
+) {
+  return state.operationToken !== undefined
+    ? uncertainProjectionWrite(state, state.operationStartedAt ?? nowMs)
+    : {};
 }
 
 function statusFor(
@@ -987,7 +1340,7 @@ async function prepareRequest(
     }
 > {
   const user = await requireUser(ctx);
-  await assertNotImpersonating(ctx);
+  await assertCanWrite(ctx);
   const { claim, binding } = await requireClaimedDevice(ctx, user, args.deviceId);
   // One clock for the whole request: the visibility gate below and every
   // timestamp written on this row must agree about when "now" is, or a focus
@@ -1092,21 +1445,19 @@ async function prepareRequest(
   // The ceremony writes the SAME target set as the projection, so the two
   // writers can never fight over one profile (see lib/deviceAppProjection.ts
   // § composition rule). Two consequences worth naming:
-  //   • an unlock is `projected ∪ {the leased app}` — the leased app is
-  //     normally already granted, so this union is usually a no-op, but it
-  //     makes the lease a guaranteed superset member even at a race edge;
+  //   • an unlock is `projected ∪ {the leased app}`, and the union adds
+  //     nothing. The launch gate above and `authorizedManagedAppKeysForClaim`
+  //     agree on the owner (every check `requireClaimedDevice` passed makes
+  //     `freshDeviceOwner` name this caller) and on the rule (granted or
+  //     pushed, as `requireAuthorizedNativeTile` checked), in this same
+  //     transaction, so the leased app is already in `projected`;
   //   • a LOCK no longer PATCHes bare baseline. "Relock" now means "converge
   //     to the projection", so handing an iPad back cannot strip the apps a
   //     teacher has standing-granted it.
-  // `state: null` deliberately excludes the CURRENT lease from the derivation
-  // — this request is what decides the lease — so a lock never re-adds the
-  // very app it is closing.
   const projected = await projectedBundleIdsForClaim(ctx, {
     claim,
     binding,
-    state: null,
     baseline: validateBaseline(binding.baselineBundleIds),
-    nowMs: now,
   });
   const bundleIds =
     args.desiredState === "unlocked" && appKey
@@ -1136,10 +1487,15 @@ async function prepareRequest(
     operationToken: crypto.randomUUID(),
     operationStartedAt: now,
     tokenKind: "ceremony" as const,
-    // If this request took the token from an in-flight projection PATCH, that
-    // PATCH may still land after ours. We cannot know, so the next projection
-    // pass must re-read the live profile rather than trust any stored hint.
-    ...(preempting && current ? preemptProjectionPatch(current, now) : {}),
+    // If this request took the token from an in-flight projection PATCH, or
+    // from an operation whose lease expired unrecorded, that PATCH may still
+    // land after ours. We cannot know, so the next projection pass must
+    // re-read the live profile rather than trust any stored hint.
+    ...(current
+      ? preempting
+        ? preemptProjectionPatch(current, now)
+        : expiredOperationPatch(current, now)
+      : {}),
     // Stamped fresh on every grant so the reconciler's atomic gate can tell
     // a fresh, just-authorized unlock (generation matches the claim's
     // CURRENT value) apart from stale leftover state from a since-departed
@@ -1156,7 +1512,8 @@ async function prepareRequest(
   } as const;
   if (current) await ctx.db.patch(current._id, patch);
   else await ctx.db.insert("deviceAppUnlockStates", patch);
-  await ctx.db.insert("auditLog", {
+  await writeAuditLog(ctx, {
+    institutionId: claim.institutionId,
     actorUserId: user._id,
     targetUserId: user._id,
     at: now,
@@ -1196,6 +1553,9 @@ const recordMdmPatchRef = makeFunctionReference<
     operationToken: string;
     accepted: boolean;
     appliedBundleIds?: string[];
+    patchMayHaveBeenSubmitted?: boolean;
+    errorCode?: string;
+    profileGone?: boolean;
   },
   { recorded: boolean }
 >("deviceAppUnlock:recordMdmPatch");
@@ -1283,9 +1643,9 @@ const recordDedicatedProfileRef = makeFunctionReference<
 
 // A settled `locked` row (MDM acceptance recorded, no in-flight operation, no
 // pending retry owed) — or no row at all — is the only state with nothing in
-// motion: safe to reconfigure its profile binding, and safe to delete both it
-// and its binding immediately (Finding 3, final gate — see
-// `cleanupAfterLockIntent`'s schema doc comment and `removeManagedDevice`).
+// motion: safe to reconfigure its profile binding. It is NOT proof the
+// profile holds only its baseline (the projection may have added granted
+// apps), so removal still relocks a bound device (`removeManagedDeviceRow`).
 export function isUnlockStateSettled(
   activeState: Doc<"deviceAppUnlockStates"> | null,
 ): boolean {
@@ -1296,6 +1656,49 @@ export function isUnlockStateSettled(
     activeState.operationToken === undefined &&
     activeState.pendingLockRetryAt === undefined
   );
+}
+
+// A removed device's teardown that spent its attempt budget and stopped
+// retrying (see `preparePendingLock`). Read by the devices console.
+export function isTeardownStopped(
+  state: Doc<"deviceAppUnlockStates">,
+): boolean {
+  return (
+    state.cleanupAfterLockIntent === true &&
+    state.pendingLockRetryAt === TEARDOWN_STOPPED_RETRY_AT
+  );
+}
+
+/**
+ * End a removed device's teardown WITHOUT the baseline PATCH it was waiting
+ * for, because there is no profile left to PATCH: SimpleMDM deleted it, or no
+ * binding names one. Deletes the state row and its binding, and records why.
+ *
+ * The only deletion that does not wait for an accepted PATCH past the verify
+ * barrier. The barrier stops a late write re-widening a profile that can
+ * still reach an iPad; a deleted profile can never reach one again.
+ */
+async function closeTeardown(
+  ctx: MutationCtx,
+  state: Doc<"deviceAppUnlockStates">,
+  binding: Doc<"deviceAppUnlockBindings"> | null,
+  now: number,
+  reason: string,
+): Promise<void> {
+  if (binding) await ctx.db.delete(binding._id);
+  await ctx.db.delete(state._id);
+  await writeAuditLog(ctx, {
+    institutionId: state.institutionId,
+    // The system acts here. Attribute it to the operator who configured the
+    // dedicated profile, as the lazily created state row does, or, with no
+    // binding left, to whoever last requested this row.
+    actorUserId: binding?.configuredBy ?? state.requestedBy,
+    at: now,
+    action: "device.app-unlock.teardown-closed",
+    detail: binding
+      ? `Closed the app-access teardown for removed iPad serial ${binding.serial} (SimpleMDM profile ${binding.simpleMdmProfileId}): ${reason}`
+      : `Closed the app-access teardown for a removed iPad: ${reason}`,
+  });
 }
 
 // Rejects a dedicated-profile (re)configuration while an unlock/relock is
@@ -1393,6 +1796,7 @@ export const configureDedicatedProfile = action({
     const profileXml = await downloadProfileTemplate(apiKey(), prepared.simpleMdmProfileId);
     assertTemplateBaseline(profileXml, prepared.baselineBundleIds);
     const identity = parseDedicatedProfileTemplate(profileXml);
+    assertConfiguredHomeLayout(profileXml, identity);
     await verifyDedicatedProfileScope(apiKey(), {
       simpleMdmProfileId: prepared.simpleMdmProfileId,
       serial: prepared.serial,
@@ -1416,7 +1820,7 @@ export const prepareDedicatedProfile = internalMutation({
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
     const primaryInstitution = await primaryInstitutionId(ctx);
     const claim = await ctx.db.get(args.managedDeviceClaimId);
     if (
@@ -1563,6 +1967,7 @@ export const recordDedicatedProfile = internalMutation({
     if (boundState) {
       await ctx.db.patch(boundState._id, {
         appliedBundleIds: undefined,
+        projectionFormatVersion: undefined,
         projectionAppliedAt: undefined,
         projectionVerifiedAt: undefined,
         projectionVerifyNeeded: true,
@@ -1571,7 +1976,8 @@ export const recordDedicatedProfile = internalMutation({
       });
     }
     await ctx.scheduler.runAfter(0, reconcileActiveUnlocksRef, {});
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: claim.institutionId,
       actorUserId: args.configuredBy,
       targetUserId: claim.scholarId ?? args.configuredBy,
       at: now,
@@ -1615,6 +2021,15 @@ export const recordMdmPatch = internalMutation({
     // without a second write path: one place stamps "SimpleMDM durably holds
     // this set for this device", whoever performed the PATCH.
     appliedBundleIds: v.optional(v.array(v.string())),
+    // False only when the action proved it failed before entering the PATCH
+    // request helper. Omitted/true stays conservative for legacy callers.
+    patchMayHaveBeenSubmitted: v.optional(v.boolean()),
+    // WHY the write failed, as a short stored classifier (`mdmFailureCode`).
+    // Ignored unless `accepted` is false; absent records the flat legacy value.
+    errorCode: v.optional(v.string()),
+    // For a failed teardown only: a complete read-only SimpleMDM listing taken
+    // after the failure no longer contains the profile (`dedicatedProfileIsGone`).
+    profileGone: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const state = await ctx.db
@@ -1623,18 +2038,57 @@ export const recordMdmPatch = internalMutation({
         q.eq("managedDeviceClaimId", args.managedDeviceClaimId),
       )
       .unique();
+    if (!state) return { recorded: false };
+    const now = Date.now();
     if (
-      !state ||
       state.updatedAt !== args.revision ||
       state.operationToken !== args.operationToken
-    ) return { recorded: false };
-    const now = Date.now();
+    ) {
+      // TOKEN LOST: another writer took this row while our PATCH was in
+      // flight, which a slow action allows once its lease expires. Our PATCH
+      // may land after theirs, so stamp its landing barrier, as
+      // `recordProjectionPatch` does (TRA-442). A failure proved read-only
+      // sent nothing.
+      if (args.patchMayHaveBeenSubmitted !== false) {
+        await ctx.db.patch(state._id, {
+          ...uncertainProjectionWrite(state, now),
+          projectionDueAt: preservedProjectionDueAt(state, now),
+        });
+      }
+      return { recorded: false };
+    }
     if (!args.accepted) {
       const failedUnlock = state.desiredState === "unlocked";
       const operationLeaseExpiresAt =
         (state.operationStartedAt ?? now) + OPERATION_TIMEOUT_MS;
+      // A removed device's relock can end in two ways besides success.
+      const failedTeardown = state.cleanupAfterLockIntent === true && !failedUnlock;
+      // CLOSED: the claim is gone and SimpleMDM has deleted the dedicated
+      // profile, so no iPad can ever receive its allowlist again. (The device
+      // being gone is not enough: it can re-enroll under the same serial.)
+      if (
+        failedTeardown &&
+        args.profileGone === true &&
+        (await ctx.db.get(args.managedDeviceClaimId)) === null
+      ) {
+        const binding = await ctx.db
+          .query("deviceAppUnlockBindings")
+          .withIndex("by_managed_device", (q) =>
+            q.eq("managedDeviceClaimId", args.managedDeviceClaimId),
+          )
+          .unique();
+        await closeTeardown(
+          ctx,
+          state,
+          binding,
+          now,
+          "SimpleMDM no longer lists its dedicated profile.",
+        );
+        return { recorded: true };
+      }
+      const teardownAttempts = state.cleanupAttempts ?? 0;
       await ctx.db.patch(state._id, {
-        lastMdmError: "request-failed",
+        lastMdmError: args.errorCode ?? "request-failed",
         desiredState: failedUnlock ? "locked" : state.desiredState,
         appKey: failedUnlock ? undefined : state.appKey,
         expiresAt: failedUnlock ? undefined : state.expiresAt,
@@ -1645,14 +2099,23 @@ export const recordMdmPatch = internalMutation({
         activeLeaseToken: failedUnlock ? undefined : state.activeLeaseToken,
         pendingLockRetryAt: failedUnlock
           ? operationLeaseExpiresAt
-          : now + LOCK_RETRY_DELAY_MS,
+          : !failedTeardown
+            ? now + LOCK_RETRY_DELAY_MS
+            : teardownAttempts >= MAX_TEARDOWN_ATTEMPTS
+              // Budget spent: due as soon as this operation's lease closes, so
+              // the next scan hands it to `preparePendingLock`, which stops it.
+              ? operationLeaseExpiresAt
+              // Doubling backoff, starting at the ordinary five minutes.
+              : now + LOCK_RETRY_DELAY_MS * 2 ** Math.max(0, teardownAttempts - 1),
         updatedAt: Math.max(now, state.updatedAt + 1),
         // The device's real allowlist is now UNKNOWN (a timed-out PATCH may
         // still have landed), so `appliedBundleIds` is deliberately left
         // alone rather than guessed at — and the stored hint is marked
         // untrusted so the next projection pass reads the LIVE profile instead
         // of comparing against a value it can no longer vouch for.
-        ...uncertainProjectionWrite(state, state.operationStartedAt ?? now),
+        ...(args.patchMayHaveBeenSubmitted === false
+          ? {}
+          : uncertainProjectionWrite(state, state.operationStartedAt ?? now)),
         projectionDueAt: preservedProjectionDueAt(state, operationLeaseExpiresAt),
       });
       if (failedUnlock) {
@@ -1673,13 +2136,14 @@ export const recordMdmPatch = internalMutation({
     ) {
       // Finding 3 (final gate): the row survived deliberately so a relock
       // still in flight when its claim was removed could finish and be
-      // recorded. SimpleMDM has now durably accepted the baseline PATCH —
-      // nothing left in motion — so complete the deferred cleanup: delete
-      // both this state row and its dedicated-profile binding instead of
-      // merely marking them accepted. The staleness guard above (matching
-      // revision + operationToken) already proves this is the exact
-      // operation the removal scheduled; a stale/superseded task can never
-      // reach here to delete a binding a fresh registration now depends on.
+      // recorded. Once SimpleMDM has durably accepted the baseline PATCH —
+      // nothing left in motion — complete the deferred cleanup: delete both
+      // this state row and its dedicated-profile binding instead of merely
+      // marking them accepted. The staleness guard above (matching revision
+      // + operationToken) proves this is the row's CURRENT operation, so a
+      // superseded task can never reach here to delete a binding a fresh
+      // registration now depends on. It does not prove the operation began
+      // after the removal: see TRA-436 below.
       //
       // Defect-only gate (round 5), Finding 1: cleanup must ONLY finalize
       // on an accepted LOCK PATCH, never an accepted UNLOCK PATCH. If
@@ -1710,35 +2174,61 @@ export const recordMdmPatch = internalMutation({
       // idempotent, so the existing pending-lock machinery simply re-runs it
       // after the window closes — and that later run, which no stale write can
       // overtake, is the proof that lets this branch delete.
-      const barrierAt = state.projectionVerifyBarrierAt;
-      // `>= now`, not `> now`: trust (resolveProjectionTrust) is only safe
-      // STRICTLY after the barrier, so a baseline acceptance recorded at
-      // exactly `barrierAt` must still park — an uncertain write can legally
-      // land at that same instant. The two predicates must stay complements.
-      if (barrierAt !== undefined && barrierAt >= now) {
-        await ctx.db.patch(state._id, {
-          desiredState: "locked",
-          mdmAcceptedAt: undefined,
-          expectedAvailableAt: undefined,
-          lockedAt: undefined,
-          // Just past the barrier: `pendingLocks` filters on
-          // `pendingLockRetryAt <= nowMs`, so this is exactly when the
-          // re-assertion becomes eligible and not a tick sooner.
-          pendingLockRetryAt: barrierAt + 1,
-          updatedAt: Math.max(now, state.updatedAt + 1),
-          operationToken: undefined,
-          operationStartedAt: undefined,
-          tokenKind: undefined,
-          projectionDueAt: preservedProjectionDueAt(state, barrierAt + 1),
-        });
-        return { recorded: true };
-      }
       const binding = await ctx.db
         .query("deviceAppUnlockBindings")
         .withIndex("by_managed_device", (q) =>
           q.eq("managedDeviceClaimId", args.managedDeviceClaimId),
         )
         .unique();
+      // ONLY THE BARE BASELINE CLOSES IT (TRA-436). `removeManagedDeviceRow`
+      // stamps intent without touching the revision or the token, so a relock
+      // already in flight at removal still matches the guard above, and its
+      // target was projected while the claim still named a scholar: it can
+      // carry that scholar's granted and pushed apps. Deleting the binding on
+      // its acceptance would leave them on the iPad with nothing left to
+      // narrow them. So an accepted lock of any other set owes the relock
+      // again. The test is what was SENT, not when it was prepared: a relock
+      // from before the removal that sent the bare baseline still closes, and
+      // a caller that did not declare what it sent proves nothing. With no
+      // binding left, nothing names a profile to compare or relock.
+      const sentBareBaseline =
+        binding === null ||
+        !projectionHasDrifted(
+          [...validateBaseline(binding.baselineBundleIds)].sort(),
+          args.appliedBundleIds,
+        );
+      const barrierAt = state.projectionVerifyBarrierAt;
+      // When the relock is owed again. After a lock of any other set the row
+      // is due at once, but nothing here schedules a pass: the corrective
+      // PATCH goes out on the next reconcile tick (the cron runs every five
+      // minutes), which projects a claim that no longer exists, so it sends
+      // the bare baseline. A baseline waits until just past the barrier:
+      // `pendingLocks` filters on `pendingLockRetryAt <= nowMs`, so that is
+      // exactly when the re-assertion becomes eligible and not a tick
+      // sooner. `>= now`, not `> now`: trust (resolveProjectionTrust) is only
+      // safe STRICTLY after the barrier, so a baseline acceptance recorded at
+      // exactly `barrierAt` must still park — an uncertain write can legally
+      // land at that same instant. The two predicates must stay complements.
+      const retryAt = !sentBareBaseline
+        ? now
+        : barrierAt !== undefined && barrierAt >= now
+          ? barrierAt + 1
+          : undefined;
+      if (retryAt !== undefined) {
+        await ctx.db.patch(state._id, {
+          desiredState: "locked",
+          mdmAcceptedAt: undefined,
+          expectedAvailableAt: undefined,
+          lockedAt: undefined,
+          pendingLockRetryAt: retryAt,
+          updatedAt: Math.max(now, state.updatedAt + 1),
+          operationToken: undefined,
+          operationStartedAt: undefined,
+          tokenKind: undefined,
+          projectionDueAt: preservedProjectionDueAt(state, retryAt),
+        });
+        return { recorded: true };
+      }
       if (binding) await ctx.db.delete(binding._id);
       await ctx.db.delete(state._id);
       return { recorded: true };
@@ -1762,6 +2252,7 @@ export const recordMdmPatch = internalMutation({
       ...(args.appliedBundleIds !== undefined
         ? {
             appliedBundleIds: args.appliedBundleIds,
+            projectionFormatVersion: HOME_LAYOUT_PROJECTION_FORMAT_VERSION,
             projectionAppliedAt: now,
             // A ceremony PATCH goes through the same safety core, which reads
             // the live profile before writing it, so this set is a genuine
@@ -1790,14 +2281,22 @@ async function executePreparedRequest(
   prepared: Awaited<ReturnType<typeof prepareRequest>>,
 ) {
   if (!prepared.needsPatch) return { ...prepared.status, idempotent: true };
+  const patchAttempt = createPatchAttemptMarker();
   try {
-    await patchProfile(apiKey(), prepared.binding, prepared.bundleIds);
-  } catch {
+    await patchProfile(
+      apiKey(),
+      prepared.binding,
+      prepared.bundleIds,
+      patchAttempt.markMayHaveBeenSubmitted,
+    );
+  } catch (error) {
     await ctx.runMutation(recordMdmPatchRef, {
       managedDeviceClaimId: prepared.binding.managedDeviceClaimId,
       revision: prepared.revision,
       operationToken: prepared.operationToken,
       accepted: false,
+      errorCode: mdmFailureCode(error),
+      patchMayHaveBeenSubmitted: patchAttempt.mayHaveBeenSubmitted(),
     });
     throw new Error("SimpleMDM could not accept the temporary app-access update. Try again.");
   }
@@ -1851,43 +2350,6 @@ export const stateForClaim = internalQuery({
       )
       .unique(),
 });
-
-// ── Reconciler authorization derivation: the ONE place that decides whether
-// a scholar can currently see a tile mapping to a given managed appKey — via
-// ANY catalog app sharing that scheme, using the exact same `launcherShowsApp`
-// rule `requireAuthorizedNativeTile` enforces on request. This is called
-// fresh, in the SAME transaction, by prepareReconcileLock below — never
-// cached or passed in by a caller — so a stale verdict can never leave a
-// device unlocked past what a fresh unlock request would itself be refused
-// for. ──────────────────────────────────────────────────────────────────────
-
-// The per-key question is now one membership test against the generalized
-// sets in lib/deviceAppProjection.ts, which answer for EVERY managed key at
-// once using the identical predicates and sources.
-//
-// Granted-OR-PUSHED, deliberately, and for the same reason the launch gate
-// (`requireAuthorizedNativeTile`) accepts both: this decides whether to
-// force-close a lease, so it must ask the question a fresh request would be
-// asked. If it asked only about grants, a scholar holding a live push card
-// would have their lease relocked out from under a tap the launch gate would
-// then happily re-authorize — a relock/re-unlock loop for the length of the
-// focus, each iteration a real MDM PATCH.
-//
-// It also keeps this gate and the allowlist projection on the same predicate.
-// They would not FIGHT if they disagreed — the ceremony's relock converges to
-// the projected set, so a lease closed here still leaves a pushed app in the
-// allowlist — but "the lease closed while the app stayed launchable" is an
-// incoherent state to have to reason about, and nothing is bought by it.
-async function isScholarAuthorizedForAppKey(
-  ctx: DbCtx,
-  scholarId: Id<"users">,
-  appKey: AppKey,
-): Promise<boolean> {
-  if ((await grantedManagedAppKeysForScholar(ctx, scholarId)).has(appKey)) {
-    return true;
-  }
-  return (await pushedManagedAppKeysForScholar(ctx, scholarId)).has(appKey);
-}
 
 /** The active-unlock reconciler's due-scan: every currently-unlocked device
  *  row that is due (or has never been recheck-stamped) for its periodic
@@ -1976,48 +2438,45 @@ export const prepareReconcileLock = internalMutation({
     const preemptedProjection = holder === "projection";
 
     const claim = await ctx.db.get(state.managedDeviceClaimId);
+    const binding = await ctx.db
+      .query("deviceAppUnlockBindings")
+      .withIndex("by_managed_device", (q) =>
+        q.eq("managedDeviceClaimId", args.managedDeviceClaimId),
+      )
+      .unique();
     const expired = state.expiresAt !== undefined && state.expiresAt <= args.nowMs;
 
-    // "Fresh owner" is deliberately paranoid: EVERY direct/derived link in the
-    // claim → scholar → institution → physical-device chain must still agree,
-    // not just the generation counter. A stale reconcile task must never
-    // mistake a departed owner's leftover row for a fresh one just because a
-    // single field happened to still match.
+    // The keep-rule (spec S1): the lease is unexpired, it is still the SAME
+    // lease, and its app is one the device's fresh owner may open right now.
     //
-    // That chain now lives in `freshDeviceOwner` (lib/deviceAppProjection.ts)
-    // and is shared VERBATIM with the allowlist projector, so the two can
-    // never disagree about who a device belongs to. Nothing in it relaxed:
-    // claim claimed + assigned, institution and serial matching the binding,
-    // the scholar still existing as a SCHOLAR at that institution (an
-    // institution transfer or a role change must lock regardless of a
-    // surviving grant), and a CURRENT `pairedDevices` row proving the roster
-    // binding this unlock was granted under is still live.
+    // "The same lease" means the claim's generation still matches the value
+    // stamped on this row at unlock time. That is what stops a stale
+    // reconcile task from closing a fresh owner's valid unlock.
     //
-    // This gate keeps ONE check the projector deliberately omits: the claim's
-    // generation must still match the value stamped on this row at unlock
-    // time. That is the "is this the same LEASE" question, and it is what
-    // stops a stale reconcile task from closing a fresh owner's valid unlock.
+    // "May open" is `authorizedManagedAppKeysForClaim`
+    // (lib/deviceAppProjection.ts), derived fresh in this transaction, never
+    // passed in, and shared VERBATIM with the allowlist projector, which
+    // allowlists exactly that set. So the two can never disagree about who a
+    // device belongs to or what they may open, and a lease this gate has not
+    // yet closed can never widen the projection (TRA-433). Its owner chain,
+    // `freshDeviceOwner`, is deliberately paranoid: EVERY link from claim to
+    // scholar to institution to physical device must still agree, not just the
+    // generation counter. The claim is claimed and assigned, its institution
+    // and serial match the binding, the scholar is still a SCHOLAR at that
+    // institution (an institution transfer or a role change must lock
+    // regardless of a surviving grant), and a CURRENT `pairedDevices` row
+    // proves the roster binding this unlock was granted under is still live.
     const generationMatches =
       !!claim &&
       claim.institutionId === state.institutionId &&
       (claim.claimGeneration ?? 0) === (state.claimGeneration ?? 0);
-    const owner = generationMatches
-      ? await freshDeviceOwner(ctx, {
-          claim,
-          binding: await ctx.db
-            .query("deviceAppUnlockBindings")
-            .withIndex("by_managed_device", (q) =>
-              q.eq("managedDeviceClaimId", claim!._id),
-            )
-            .unique(),
-        })
-      : null;
-    const freshOwner = owner !== null;
     const stillAuthorized =
       !expired &&
-      freshOwner &&
+      generationMatches &&
       state.appKey !== undefined &&
-      (await isScholarAuthorizedForAppKey(ctx, claim!.scholarId!, state.appKey));
+      (await authorizedManagedAppKeysForClaim(ctx, { claim, binding })).has(
+        state.appKey,
+      );
 
     if (stillAuthorized) {
       await ctx.db.patch(state._id, {
@@ -2027,12 +2486,6 @@ export const prepareReconcileLock = internalMutation({
       return { status: "authorized" };
     }
 
-    const binding = await ctx.db
-      .query("deviceAppUnlockBindings")
-      .withIndex("by_managed_device", (q) =>
-        q.eq("managedDeviceClaimId", args.managedDeviceClaimId),
-      )
-      .unique();
     if (!binding) {
       // Nothing to physically relock (never had a dedicated profile bound,
       // or it was already torn down) — clear desiredState so this row stops
@@ -2049,7 +2502,12 @@ export const prepareReconcileLock = internalMutation({
     const patch = {
       ...lockedStatePatch(args.nowMs),
       updatedAt: revision,
-      ...(preemptedProjection ? preemptProjectionPatch(state, args.nowMs) : {}),
+      // Closing the lease clears the token. Whoever held it may still land a
+      // PATCH: a preempted projection, or an operation whose lease expired
+      // unrecorded (TRA-442).
+      ...(preemptedProjection
+        ? preemptProjectionPatch(state, args.nowMs)
+        : expiredOperationPatch(state, args.nowMs)),
     };
     await ctx.db.patch(state._id, patch);
     return { status: "locked" };
@@ -2089,7 +2547,11 @@ export const cleanupIntents = internalQuery({
   handler: async (ctx) =>
     await ctx.db
       .query("deviceAppUnlockStates")
-      .withIndex("by_cleanup_intent", (q) => q.eq("cleanupAfterLockIntent", true))
+      .withIndex("by_cleanup_intent", (q) =>
+        q
+          .eq("cleanupAfterLockIntent", true)
+          .lt("pendingLockRetryAt", TEARDOWN_STOPPED_RETRY_AT),
+      )
       .take(MAX_RECONCILE_BATCH),
 });
 
@@ -2120,7 +2582,9 @@ export const normalizeCleanupIntent = internalMutation({
     const now = Date.now();
     if (operationHolder(state, now) !== null) return { normalized: false };
     // Already correctly parked for the pending-lock sweep — leave the retry
-    // schedule alone rather than resetting its backoff on every tick.
+    // schedule alone rather than resetting its backoff on every tick. An
+    // expired token it still holds is stamped when `preparePendingLock` takes
+    // it over.
     if (
       state.desiredState === "locked" &&
       state.mdmAcceptedAt === undefined &&
@@ -2143,7 +2607,11 @@ export const normalizeCleanupIntent = internalMutation({
       operationToken: undefined,
       operationStartedAt: undefined,
       tokenKind: undefined,
-      ...uncertainProjectionWrite(state, state.operationStartedAt ?? now),
+      // Only an expired token is an action that died with its write
+      // unrecorded. Every other uncertain write already stamped its own
+      // barrier, so a row with no token (a settled removal, TRA-427) has
+      // nothing in flight and must not wait out a landing window.
+      ...expiredOperationPatch(state, now),
     });
     return { normalized: true };
   },
@@ -2176,6 +2644,22 @@ export const preparePendingLock = internalMutation({
       )
       .unique();
     if (!binding) {
+      // A removed device's teardown with no binding left has no profile to
+      // relock, and no binding can ever reappear for a deleted claim. Close
+      // it rather than back off below forever.
+      if (
+        state.cleanupAfterLockIntent &&
+        (await ctx.db.get(args.managedDeviceClaimId)) === null
+      ) {
+        await closeTeardown(
+          ctx,
+          state,
+          null,
+          Date.now(),
+          "no dedicated profile is bound to it any more.",
+        );
+        return null;
+      }
       // No binding at all is not actionable — a stale operationToken lease
       // check below (state.operationToken set) would still self-heal via
       // its own advance, but a MISSING binding never will (nothing here
@@ -2210,25 +2694,49 @@ export const preparePendingLock = internalMutation({
       });
       return null;
     }
+    // STOPPED: a removed device's teardown that has spent its attempt budget.
+    // Every teardown attempt starts here, so the budget holds even for
+    // attempts whose actions died without recording. The row keeps its
+    // cleanup intent and binding, and is shown to staff (`isTeardownStopped`).
+    // Dropping the expired token keeps a record that outlived its lease from
+    // completing anything.
+    const teardownAttempts = state.cleanupAttempts ?? 0;
+    if (
+      state.cleanupAfterLockIntent &&
+      teardownAttempts >= MAX_TEARDOWN_ATTEMPTS
+    ) {
+      await ctx.db.patch(state._id, {
+        pendingLockRetryAt: TEARDOWN_STOPPED_RETRY_AT,
+        operationToken: undefined,
+        operationStartedAt: undefined,
+        tokenKind: undefined,
+      });
+      await writeAuditLog(ctx, {
+        institutionId: state.institutionId,
+        actorUserId: binding.configuredBy,
+        at: pendingNow,
+        action: "device.app-unlock.teardown-stopped",
+        detail: `Stopped retrying the app-access teardown for removed iPad serial ${binding.serial} (SimpleMDM profile ${binding.simpleMdmProfileId}) after ${teardownAttempts} attempts. Last error: ${state.lastMdmError ?? "none recorded"}`,
+      });
+      return null;
+    }
     // A PROJECTION token is preempted rather than waited on — an owed relock
     // outranks background convergence, and both target the same set anyway.
+    // An EXPIRED token is taken over, and its PATCH may still land after this
+    // one (TRA-442).
     const preemptedProjection = holder === "projection";
     const operationToken = crypto.randomUUID();
     const now = Date.now();
     // "Relock" converges to the PROJECTION, not to bare baseline — the whole
     // point of the inversion. Derived in THIS transaction, immediately before
     // the token is handed out, so the set that gets sent is the set that was
-    // true when the operation was claimed. `state` is passed so a row whose
-    // lease is somehow still live keeps its app (the composition rule); a
-    // gate-locked row has already had its lease cleared, so this is baseline
-    // ∪ whatever the scholar is currently granted-or-pushed.
+    // true when the operation was claimed: baseline ∪ whatever the device's
+    // fresh owner is currently granted-or-pushed.
     const claim = await ctx.db.get(args.managedDeviceClaimId);
     const bundleIds = await projectedBundleIdsForClaim(ctx, {
       claim,
       binding,
-      state,
       baseline: validateBaseline(binding.baselineBundleIds),
-      nowMs: now,
     });
     await ctx.db.patch(state._id, {
       operationToken,
@@ -2236,7 +2744,12 @@ export const preparePendingLock = internalMutation({
       tokenKind: "ceremony" as const,
       pendingLockRetryAt: now + OPERATION_TIMEOUT_MS,
       desiredBundleIds: bundleIds,
-      ...(preemptedProjection ? preemptProjectionPatch(state, pendingNow) : {}),
+      ...(preemptedProjection
+        ? preemptProjectionPatch(state, pendingNow)
+        : expiredOperationPatch(state, pendingNow)),
+      ...(state.cleanupAfterLockIntent
+        ? { cleanupAttempts: teardownAttempts + 1 }
+        : {}),
     });
     return { binding, revision: state.updatedAt, operationToken, bundleIds };
   },
@@ -2275,6 +2788,23 @@ type ProjectionCandidate = {
   dueAt: number;
 };
 
+async function activeProjectionRateLimitCooldown(
+  ctx: QueryCtx | MutationCtx,
+  nowMs: number,
+): Promise<number | undefined> {
+  const controls = await ctx.db
+    .query("simpleMdmProjectionControls")
+    .withIndex("by_key", (q) => q.eq("key", "global"))
+    .collect();
+  const cooldownUntil = Math.max(
+    0,
+    ...controls.map((control) => control.rateLimitCooldownUntil),
+  );
+  return cooldownUntil > nowMs
+    ? cooldownUntil
+    : undefined;
+}
+
 /**
  * Every BOUND device whose projection is due, most-due first.
  *
@@ -2293,6 +2823,9 @@ type ProjectionCandidate = {
 export const projectionCandidates = internalQuery({
   args: { nowMs: v.number() },
   handler: async (ctx, args): Promise<ProjectionCandidate[]> => {
+    if ((await activeProjectionRateLimitCooldown(ctx, args.nowMs)) !== undefined) {
+      return [];
+    }
     const bindings = await ctx.db
       .query("deviceAppUnlockBindings")
       .take(MAX_BINDINGS_ENUMERATED);
@@ -2347,6 +2880,7 @@ function projectionTrustIsFresh(
   state: Doc<"deviceAppUnlockStates">,
   nowMs: number,
 ): boolean {
+  if (state.projectionFormatVersion !== HOME_LAYOUT_PROJECTION_FORMAT_VERSION) return false;
   if (state.projectionVerifyNeeded === true) return false;
   if (state.appliedBundleIds === undefined) return false;
   if (state.projectionVerifiedAt === undefined) return false;
@@ -2375,8 +2909,8 @@ function projectionTrustIsFresh(
  * minutes on real MDM calls before this runs, and stamping `operationStartedAt`
  * with a stale timestamp would mint a token that is already expired — instantly
  * preemptible, and invisible as an in-flight operation. The same fresh reading
- * drives push and lease liveness, so a focus that closed during phase 2 is not
- * projected as still open.
+ * drives push liveness, so a focus that closed during phase 2 is not projected
+ * as still open.
  */
 export const prepareProjectionPatch = internalMutation({
   args: { managedDeviceClaimId: v.id("managedDeviceClaims") },
@@ -2397,6 +2931,14 @@ export const prepareProjectionPatch = internalMutation({
         q.eq("managedDeviceClaimId", args.managedDeviceClaimId),
       )
       .unique();
+
+    const cooldownUntil = await activeProjectionRateLimitCooldown(ctx, now);
+    if (cooldownUntil !== undefined) {
+      if (existing && (existing.projectionDueAt ?? 0) < cooldownUntil) {
+        await ctx.db.patch(existing._id, { projectionDueAt: cooldownUntil });
+      }
+      return { status: "settled" };
+    }
 
     // Nothing to project through — this device's launches are not
     // unlock-mediated (the fleet's group-profile case). Back off rather than
@@ -2457,7 +2999,7 @@ export const prepareProjectionPatch = internalMutation({
           operationToken: undefined,
           operationStartedAt: undefined,
           tokenKind: undefined,
-          ...uncertainProjectionWrite(existing, existing.operationStartedAt ?? now),
+          ...expiredOperationPatch(existing, now),
         });
         // Re-read: every decision below turns on the freshness fields that
         // patch just changed, and a stale in-memory copy would let this row
@@ -2475,9 +3017,7 @@ export const prepareProjectionPatch = internalMutation({
     const desired = await projectedBundleIdsForClaim(ctx, {
       claim,
       binding,
-      state: existing ?? null,
       baseline: validateBaseline(binding.baselineBundleIds),
-      nowMs: now,
     });
 
     // A trusted hint may prove there is nothing to do. An untrusted one may
@@ -2607,6 +3147,14 @@ export const recordProjectionPatch = internalMutation({
     // Did this operation READ the live allowlist (rather than only write one)?
     // Only a live read may clear an outstanding verify barrier.
     verifiedByLiveRead: v.optional(v.boolean()),
+    // WHY the write failed, as a short stored classifier (`mdmFailureCode`).
+    // Ignored unless `accepted` is false. Optional so an older in-flight caller
+    // still records the flat legacy value rather than nothing.
+    errorCode: v.optional(v.string()),
+    // False only when the action proved it failed before entering the PATCH
+    // request helper. Omitted/true stays conservative for legacy in-flight
+    // callers and any operation whose dispatch point is unknown.
+    patchMayHaveBeenSubmitted: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const state = await ctx.db
@@ -2617,6 +3165,16 @@ export const recordProjectionPatch = internalMutation({
       .unique();
     if (!state) return { recorded: false };
     const now = Date.now();
+    const operationMatches =
+      state.updatedAt === args.revision &&
+      state.operationToken === args.operationToken;
+
+    // A proved read-only stale record has no authority over the operation that
+    // replaced it. In particular it must not clear that writer's token or
+    // manufacture/extend an uncertainty barrier on its behalf.
+    if (!operationMatches && args.patchMayHaveBeenSubmitted === false) {
+      return { recorded: false };
+    }
 
     // TEARDOWN FIRST, unconditionally. `removeManagedDevice` may have stamped
     // cleanup intent while this write was in flight, and that outranks every
@@ -2627,11 +3185,11 @@ export const recordProjectionPatch = internalMutation({
     // rows), so the binding survived with the profile still holding the
     // removed scholar's apps and nothing left to notice.
     //
-    // Whatever happened to our PATCH, the row is driven back into the
+    // Whatever happened to our operation, the row is driven back into the
     // pending-lock path so the existing teardown machinery — baseline PATCH,
     // then `recordMdmPatch` deleting row and binding together — finishes the
-    // job. Trust is destroyed either way, because a write we cannot vouch for
-    // may still land on a profile we are about to hand back.
+    // job. Trust is destroyed only when a PATCH may have been submitted; a
+    // proved read-only failure preserves any trust state already on the row.
     if (state.cleanupAfterLockIntent) {
       await ctx.db.patch(state._id, {
         desiredState: "locked",
@@ -2648,7 +3206,9 @@ export const recordProjectionPatch = internalMutation({
         operationToken: undefined,
         operationStartedAt: undefined,
         tokenKind: undefined,
-        ...uncertainProjectionWrite(state, state.operationStartedAt ?? now),
+        ...(args.patchMayHaveBeenSubmitted === false
+          ? {}
+          : uncertainProjectionWrite(state, state.operationStartedAt ?? now)),
       });
       return { recorded: true };
     }
@@ -2660,10 +3220,7 @@ export const recordProjectionPatch = internalMutation({
     // stored hint can no longer be trusted, and the next pass must read live.
     // Stamping applied state here is exactly how a resurrected, revoked app
     // would be hidden forever.
-    if (
-      state.updatedAt !== args.revision ||
-      state.operationToken !== args.operationToken
-    ) {
+    if (!operationMatches) {
       await ctx.db.patch(state._id, {
         ...uncertainProjectionWrite(state, now),
         projectionDueAt: preservedProjectionDueAt(state, now),
@@ -2672,17 +3229,19 @@ export const recordProjectionPatch = internalMutation({
     }
 
     if (!args.accepted) {
-      // A PATCH that timed out may still reach SimpleMDM later, so nothing is
-      // claimed about the profile's contents and the hint is invalidated
-      // BEHIND A BARRIER — no later success may clear it until that write's
-      // landing window has closed. The operation LEASE is released rather than
-      // held: holding it would block a scholar's tap behind an invisible
-      // background failure, and the ceremony preempts a projection token
-      // anyway. The PROJECTOR still backs off past its own window so two of
-      // its writes cannot be in flight together.
+      // A PATCH that timed out may still reach SimpleMDM later, so its hint is
+      // invalidated BEHIND A BARRIER — no later success may clear it until that
+      // write's landing window has closed. A proved pre-PATCH failure preserves
+      // the row's existing trust state instead. The operation LEASE is released
+      // rather than held: holding it would block a scholar's tap behind an
+      // invisible background failure, and the ceremony preempts a projection
+      // token anyway. The PROJECTOR still backs off past its own operation
+      // window so two of its attempts cannot run together.
       await ctx.db.patch(state._id, {
-        projectionError: "request-failed",
-        ...uncertainProjectionWrite(state, state.operationStartedAt ?? now),
+        projectionError: args.errorCode ?? "request-failed",
+        ...(args.patchMayHaveBeenSubmitted === false
+          ? {}
+          : uncertainProjectionWrite(state, state.operationStartedAt ?? now)),
         projectionDueAt: preservedProjectionDueAt(
           state,
           (state.operationStartedAt ?? now) + OPERATION_TIMEOUT_MS,
@@ -2697,6 +3256,7 @@ export const recordProjectionPatch = internalMutation({
     const live = args.liveBundleIds ?? [];
     await ctx.db.patch(state._id, {
       appliedBundleIds: live,
+      projectionFormatVersion: HOME_LAYOUT_PROJECTION_FORMAT_VERSION,
       projectionAppliedAt: now,
       // Whether this may be TRUSTED is not ours to assert: a live read clears
       // the flag only once every outstanding uncertain write has passed its
@@ -2714,6 +3274,84 @@ export const recordProjectionPatch = internalMutation({
       tokenKind: undefined,
     });
     return { recorded: true };
+  },
+});
+
+/**
+ * Pause the projector at the unit SimpleMDM actually rate-limits: one API
+ * account. All rows are moved past the window, while the singleton also gates
+ * devices without a state row and dirty marks written during the cooldown.
+ */
+export const deferProjectionForRateLimit = internalMutation({
+  args: {
+    retryAfterMs: v.optional(v.number()),
+    retryTimingSource: v.optional(
+      v.union(
+        v.literal("retry-after"),
+        v.literal("x-ratelimit-reset"),
+        v.literal("retry-after+x-ratelimit-reset"),
+        v.literal("fallback"),
+      ),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const requestedMs =
+      args.retryAfterMs !== undefined && Number.isFinite(args.retryAfterMs)
+        ? Math.max(0, args.retryAfterMs)
+        : PROJECTION_RATE_LIMIT_FALLBACK_MS;
+    const proposedCooldownUntil =
+      now +
+      Math.min(requestedMs, PROJECTION_RATE_LIMIT_MAX_MS) +
+      PROJECTION_RATE_LIMIT_BUFFER_MS;
+    const existingControls = await ctx.db
+      .query("simpleMdmProjectionControls")
+      .withIndex("by_key", (q) => q.eq("key", "global"))
+      .collect();
+    const existing = existingControls.reduce<
+      Doc<"simpleMdmProjectionControls"> | undefined
+    >(
+      (max, control) =>
+        control.rateLimitCooldownUntil > (max?.rateLimitCooldownUntil ?? 0)
+          ? control
+          : max,
+      undefined,
+    );
+    const proposedCooldownWins =
+      proposedCooldownUntil >= (existing?.rateLimitCooldownUntil ?? 0);
+    const cooldownUntil = Math.max(
+      existing?.rateLimitCooldownUntil ?? 0,
+      proposedCooldownUntil,
+    );
+    const retryTimingSource = proposedCooldownWins
+      ? (args.retryTimingSource ?? "fallback")
+      : existing?.retryTimingSource;
+    if (existingControls.length > 0) {
+      for (const control of existingControls) {
+        await ctx.db.patch(control._id, {
+          rateLimitCooldownUntil: cooldownUntil,
+          retryTimingSource,
+          updatedAt: now,
+        });
+      }
+    } else {
+      await ctx.db.insert("simpleMdmProjectionControls", {
+        key: "global",
+        rateLimitCooldownUntil: cooldownUntil,
+        retryTimingSource,
+        updatedAt: now,
+      });
+    }
+
+    for (const state of await ctx.db.query("deviceAppUnlockStates").collect()) {
+      if (
+        !state.cleanupAfterLockIntent &&
+        (state.projectionDueAt ?? 0) < cooldownUntil
+      ) {
+        await ctx.db.patch(state._id, { projectionDueAt: cooldownUntil });
+      }
+    }
+    return { cooldownUntil };
   },
 });
 
@@ -2746,9 +3384,19 @@ const recordProjectionPatchRef = makeFunctionReference<
     accepted: boolean;
     liveBundleIds?: string[];
     verifiedByLiveRead?: boolean;
+    errorCode?: string;
+    patchMayHaveBeenSubmitted?: boolean;
   },
   { recorded: boolean }
 >("deviceAppUnlock:recordProjectionPatch");
+const deferProjectionForRateLimitRef = makeFunctionReference<
+  "mutation",
+  {
+    retryAfterMs?: number;
+    retryTimingSource?: SimpleMdmRetryTimingSource;
+  },
+  { cooldownUntil: number }
+>("deviceAppUnlock:deferProjectionForRateLimit");
 
 /**
  * The cold-path nudge: "I just tapped a tile — converge my iPad now."
@@ -2762,7 +3410,7 @@ const recordProjectionPatchRef = makeFunctionReference<
 export const nudgeProjection = authedMutation({
   args: { deviceId: v.string() },
   handler: async (ctx, args) => {
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
     const { claim, binding } = await resolveClaimedDevice(
       ctx,
       ctx.user,
@@ -2857,12 +3505,22 @@ export const reconcileActiveUnlocks = internalAction({
       });
       if (!prepared) continue;
       networkBudget -= 1;
+      const patchAttempt = createPatchAttemptMarker();
+      // Same rule as the projector below: only an MDM-segment throw may have
+      // its message recorded, never one from the acceptance mutation.
+      let mdmSettled = false;
       try {
         // The relock target is the PROJECTED set, derived by
         // preparePendingLock in the same transaction that handed out this
         // operation token — not bare baseline. Converging a device therefore
         // never strips the apps its scholar is standing-granted.
-        await patchProfile(apiKey(), prepared.binding, prepared.bundleIds);
+        await patchProfile(
+          apiKey(),
+          prepared.binding,
+          prepared.bundleIds,
+          patchAttempt.markMayHaveBeenSubmitted,
+        );
+        mdmSettled = true;
         await ctx.runMutation(recordMdmPatchRef, {
           managedDeviceClaimId: row.managedDeviceClaimId,
           revision: prepared.revision,
@@ -2871,12 +3529,26 @@ export const reconcileActiveUnlocks = internalAction({
           appliedBundleIds: prepared.bundleIds,
         });
         locked += 1;
-      } catch {
+      } catch (error) {
+        // A teardown that failed BEFORE its PATCH was sent may have been
+        // refused because its profile was deleted. After the PATCH was sent,
+        // the profile had just been found, so there is nothing to ask.
+        const askWhetherGone =
+          row.cleanupAfterLockIntent === true && !patchAttempt.mayHaveBeenSubmitted();
         await ctx.runMutation(recordMdmPatchRef, {
           managedDeviceClaimId: row.managedDeviceClaimId,
           revision: prepared.revision,
           operationToken: prepared.operationToken,
           accepted: false,
+          errorCode: mdmSettled ? "record-failed" : mdmFailureCode(error),
+          patchMayHaveBeenSubmitted: patchAttempt.mayHaveBeenSubmitted(),
+          ...(askWhetherGone
+            ? {
+                profileGone: await dedicatedProfileIsGone(
+                  prepared.binding.simpleMdmProfileId,
+                ),
+              }
+            : {}),
         });
         failed += 1;
       }
@@ -2886,14 +3558,12 @@ export const reconcileActiveUnlocks = internalAction({
     // so one invocation can never exceed MAX_REVOCATION_BATCH real MDM
     // attempts in total.
     //
-    // Revocation runs FIRST for a reason beyond priority. The projected set
-    // carries a device's LIVE lease as a superset member (the composition
-    // rule), so a revoked app would linger in the projection for exactly as
-    // long as its lease row still claims to be unlocked. Phase 1's gate is
-    // what clears that claim, and it has already run — durably — by the time
-    // anything here derives a set. A revoke hook additionally stamps the row
-    // due immediately, so the gate reaches it on the very same invocation.
-    // Absent any hook, the bound is unchanged from before: one cron interval.
+    // Revocation runs first, but nothing here depends on it having reached a
+    // row. The projected set reads no lease: Phase 1's gate keeps a lease only
+    // while its app is in the set projected anyway, so a lease the gate has
+    // not closed yet (its recheck deferred past an in-flight ceremony, or no
+    // revoking writer kicked it) adds nothing to what this phase sends
+    // (TRA-433).
     let projected = 0;
     let projectionFailed = 0;
     let projectionExhaustedBudget = false;
@@ -2901,6 +3571,7 @@ export const reconcileActiveUnlocks = internalAction({
     // on somebody else's token — earns the backed-off continuation below.
     let projectionProgressed = false;
     let earliestTokenRetryAt = Number.MAX_SAFE_INTEGER;
+    let projectionRateLimitCooldownUntil: number | undefined;
     for (const candidate of projectionDue) {
       if (networkBudget <= 0) {
         projectionExhaustedBudget = true;
@@ -2925,6 +3596,12 @@ export const reconcileActiveUnlocks = internalAction({
       }
       projectionProgressed = true;
       networkBudget -= 1;
+      // Only a throw from the MDM segment may have its message recorded: those
+      // are all in-repo refusal strings. A failure of the acceptance mutation
+      // below is an internal bug whose message can carry argument values (the
+      // operation token among them), so it records a bare code instead.
+      let mdmSettled = false;
+      const patchAttempt = createPatchAttemptMarker();
       try {
         // "verify" means the stored hint may not be trusted, so the LIVE
         // profile decides: `verifyAndApplyProfile` reads it through the same
@@ -2939,13 +3616,20 @@ export const reconcileActiveUnlocks = internalAction({
             apiKey(),
             prepared.binding,
             prepared.bundleIds,
+            patchAttempt.markMayHaveBeenSubmitted,
           );
           live = result.liveBundleIds;
           if (result.patched) projected += 1;
         } else {
-          await patchProfile(apiKey(), prepared.binding, prepared.bundleIds);
+          await patchProfile(
+            apiKey(),
+            prepared.binding,
+            prepared.bundleIds,
+            patchAttempt.markMayHaveBeenSubmitted,
+          );
           projected += 1;
         }
+        mdmSettled = true;
         await ctx.runMutation(recordProjectionPatchRef, {
           managedDeviceClaimId: candidate.managedDeviceClaimId,
           revision: prepared.revision,
@@ -2956,15 +3640,36 @@ export const reconcileActiveUnlocks = internalAction({
           // `readLiveProfile`), so either is a genuine verification — the
           // barrier, not the branch, decides whether it may clear the flag.
           verifiedByLiveRead: true,
+          patchMayHaveBeenSubmitted: patchAttempt.mayHaveBeenSubmitted(),
         });
-      } catch {
+      } catch (error) {
+        const errorCode = mdmSettled ? "record-failed" : mdmFailureCode(error);
         await ctx.runMutation(recordProjectionPatchRef, {
           managedDeviceClaimId: candidate.managedDeviceClaimId,
           revision: prepared.revision,
           operationToken: prepared.operationToken,
           accepted: false,
+          errorCode,
+          patchMayHaveBeenSubmitted: patchAttempt.mayHaveBeenSubmitted(),
         });
         projectionFailed += 1;
+        if (
+          !mdmSettled &&
+          isSimpleMdmApiError(error) &&
+          error.data.code === "rate-limited"
+        ) {
+          const deferred = await ctx.runMutation(deferProjectionForRateLimitRef, {
+            retryAfterMs: error.data.retryAfterMs,
+            retryTimingSource: error.data.retryTimingSource,
+          });
+          projectionRateLimitCooldownUntil = deferred.cooldownUntil;
+          await ctx.scheduler.runAt(
+            deferred.cooldownUntil,
+            reconcileActiveUnlocksRef,
+            {},
+          );
+          break;
+        }
       }
     }
 
@@ -2997,12 +3702,16 @@ export const reconcileActiveUnlocks = internalAction({
     const dueScanWasFull = due.length >= MAX_RECONCILE_BATCH;
     const pendingScanWasFull = pending.length >= MAX_RECONCILE_BATCH;
     const projectionScanWasFull = projectionDue.length >= MAX_PROJECTION_BATCH;
-    const needsContinuation =
+    const nonProjectionNeedsContinuation =
       dueScanWasFull ||
       pendingScanWasFull ||
-      pendingExhaustedBudget ||
-      projectionScanWasFull ||
-      projectionExhaustedBudget;
+      pendingExhaustedBudget;
+    const projectionNeedsContinuation =
+      projectionScanWasFull || projectionExhaustedBudget;
+    const needsContinuation =
+      nonProjectionNeedsContinuation ||
+      (projectionRateLimitCooldownUntil === undefined &&
+        projectionNeedsContinuation);
     if (needsContinuation) {
       // A continuation must be able to accomplish something. If the ONLY
       // reason to continue is a full projection page, and not one candidate on

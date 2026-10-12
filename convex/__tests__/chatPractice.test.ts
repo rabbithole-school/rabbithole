@@ -643,4 +643,34 @@ describe("chatPractice.serveChatPracticeItem", () => {
     });
     expect(afterRetry.retryRow?.lane).toBeUndefined();
   });
+
+  test("the replacement placeholder carries the live streamId so a render check binds", async () => {
+    const t = convexTest(schema, modules);
+    const { scholar, sessionId, assistantMsg } = await setup(t);
+    const streamId = "live-stream-xyz";
+    await t.run((ctx) => ctx.db.patch(assistantMsg, { streamId }));
+
+    const res = await t.mutation(internal.chatPractice.serveChatPracticeItem, {
+      sessionId,
+      scholarId: scholar,
+      currentMessageId: assistantMsg,
+      contentSoFar: "Sure — let's try one.",
+      skill: "multiplication facts for 7, 8, 9",
+    });
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error("expected a practice item to be served");
+
+    const replacement = await t.run((ctx) => ctx.db.get(res.newMessageId));
+    expect(replacement?.streamId).toBe(streamId);
+
+    // A stream-bound render check now binds to the post-split placeholder.
+    await expect(
+      t.mutation(internal.sessions.requestRenderCheck, {
+        sessionId,
+        streamId,
+        messageId: res.newMessageId,
+        checkId: "check-1",
+      }),
+    ).resolves.toMatchObject({ requestedAt: expect.any(Number) });
+  });
 });

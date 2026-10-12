@@ -523,7 +523,7 @@ export function Placement({
   }, [gradeAnswer]);
 
   // The two-way slip/concede choice, shown after a first typed miss.
-  // "I just made a silly mistake" → answer the fresh confirm item already served.
+  // "I just made a mistake" → answer the fresh confirm item already served.
   const onRetrySlip = useCallback(() => {
     setInput("");
     setPhase("quiz");

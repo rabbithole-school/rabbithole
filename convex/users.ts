@@ -1,7 +1,7 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { query, mutation, internalMutation, internalQuery } from "./_generated/server";
 import { authedQuery, authedMutation, teacherQuery, platformAdminMutation, platformAdminQuery, scholarAdminQuery, scholarAdminMutation, schoolAdminMutation } from "./lib/customFunctions";
-import { getCurrentUser } from "./lib/auth";
+import { assertCanWrite, getCurrentUser, getSessionOwner } from "./lib/auth";
 import {
   assertInstitutionActive,
   requireActiveScholarAccess,
@@ -25,12 +25,20 @@ import {
   ROLES,
   isNonTeachingOperationsRole,
   isPlatformAdminRole,
+  GLOBALLY_PRIVILEGED_ROLES,
+  isGloballyPrivilegedMembership,
   isStaffRole,
+  STAFF_ROLES,
+  SCHOOL_STANDING_ROLES,
   type Role,
 } from "./lib/roles";
 import { internal } from "./_generated/api";
 import { normalizeEmail, isValidEmail } from "./lib/email";
-import { assertValidUsername } from "./lib/username";
+import {
+  assertValidUsername,
+  passwordAccountId,
+  usernameError,
+} from "./lib/username";
 import { isValidGradeLevel } from "./lib/standardStrand";
 import { seedDefaultAppsForScholar } from "./lib/externalAppsSeed";
 import { resolveValidatedProfileImageUrl } from "./lib/profileImage";
@@ -52,8 +60,13 @@ import {
 import { DEFAULT_TIMEZONE, isValidTimeZone } from "../shared/institutionDay";
 import { grantPasswordBind } from "./lib/authGuards";
 import { isPublicProductionDeployment } from "./lib/deploymentSafety";
+import {
+  deleteSessionCascade,
+  purgeScholarOwned,
+  type Counts,
+} from "./lib/cascade";
 
-function slugifyInstitutionName(name: string): string {
+export function slugifyInstitutionName(name: string): string {
   return name
     .toLowerCase()
     .replace(/['’ʻ]/g, "")
@@ -63,12 +76,14 @@ function slugifyInstitutionName(name: string): string {
 }
 import { entryTargetsScholar } from "./assignments";
 import { ENROLLMENT_STANDINGS } from "./lib/enrollmentStanding";
+import { normalizePronouns } from "./lib/scholarPronouns";
 import {
   EXTENDED_EDUCATION_LABEL,
   includesProgramGuests,
 } from "../shared/scholarGroupRouting";
 import {
   authorizedGroupIds,
+  hasActiveStaffMembershipAtInstitution,
   hasSchoolOperationsAccessAtInstitution,
   healthInstitutionIds,
   schoolOperationsInstitutionIds,
@@ -566,6 +581,7 @@ export const storeUser = mutation({
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
     if (!userId) throw new Error("Not authenticated");
+    await assertCanWrite(ctx);
 
     const existing = await ctx.db.get(userId);
     if (existing) {
@@ -1020,6 +1036,30 @@ export const getByIdInternal = internalQuery({
   },
 });
 
+/** Action bridge for assertWritableAction: is the session owner read-only? */
+export const isSessionOwnerReadOnly = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const owner = await getSessionOwner(ctx);
+    return owner?.readOnly === true;
+  },
+});
+
+/**
+ * Mark a user read-only (queries work; every authenticated write refuses it —
+ * see assertCanWrite). For the `claude-readonly` prod service account (TRA-494).
+ * Usage: npx convex run users:setReadOnly '{"userId":"<id>","readOnly":true}'
+ */
+export const setReadOnly = internalMutation({
+  args: { userId: v.id("users"), readOnly: v.boolean() },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) throw new Error(`No user found with id: ${args.userId}`);
+    await ctx.db.patch(args.userId, { readOnly: args.readOnly || undefined });
+    return { userId: args.userId, username: user.username, readOnly: args.readOnly };
+  },
+});
+
 /** Internal action bridge for the session owner's curriculum-design capability. */
 export const hasCurriculumAccessInternal = internalQuery({
   args: { id: v.id("users") },
@@ -1089,10 +1129,11 @@ export const isMagicLinkEligible = internalQuery({
   handler: async (ctx, args) => {
     const email = normalizeEmail(args.email);
     if (!isValidEmail(email)) return false;
+    // .first(): a duplicate account must not make the request leg throw.
     const user = await ctx.db
       .query("users")
       .withIndex("by_email", (q) => q.eq("email", email))
-      .unique();
+      .first();
     return !!user && isValidEmail(user.email ?? "");
   },
 });
@@ -1117,7 +1158,7 @@ export const isMagicLinkEligible = internalQuery({
  * belong to an account (a mild enumeration vector); operators get the
  * specific message.
  */
-async function patchUserEmail(
+export async function patchUserEmail(
   ctx: MutationCtx,
   userId: Id<"users">,
   rawEmail: string,
@@ -1221,25 +1262,201 @@ export const getBySlackIdInternal = internalQuery({
 });
 
 /**
+ * Roles whose standing is BOTH deployment-wide and staff — the only roles an
+ * unscoped membership may confer staff-directory reachability through. Derived
+ * from the two predicates rather than hardcoded, so adding a role to either
+ * list keeps this honest. Today: platform_admin, curriculum_designer.
+ * Deliberately EXCLUDES `lifelong_learner`, which is globally privileged for
+ * lifecycle purposes but is not staff.
+ */
+const GLOBAL_STAFF_STANDING_ROLES: readonly Role[] =
+  GLOBALLY_PRIVILEGED_ROLES.filter((role) => isStaffRole(role));
+
+/** The projection `send_slack_dm` needs to name a person and open a Slack IM. */
+function slackDmCandidate(u: Doc<"users">) {
+  return {
+    id: u._id,
+    name: u.name ?? u.username ?? "Unknown",
+    username: u.username ?? null,
+    slackUserId: u.slackUserId ?? null,
+  };
+}
+
+/**
  * Internal: the staff directory the `send_slack_dm` aide tool resolves a
- * recipient against. STAFF-role users ONLY — a scholar or parent must never be
- * a DM target, so they aren't even candidates for the name match. Returns just
- * the fields the tool needs to name a person and open a Slack IM; `slackUserId`
- * is null when the staffer isn't linked to Slack (the tool then returns the
- * "not linked" instruction instead of sending).
+ * recipient against. Returns just the fields the tool needs to name a person
+ * and open a Slack IM; `slackUserId` is null when the staffer isn't linked to
+ * Slack (the tool then returns the "not linked" instruction instead of
+ * sending).
+ *
+ * TWO independent filters, both required:
+ *
+ *  1. STAFF-role users ONLY — a scholar or parent must never be a DM target,
+ *     so they aren't even candidates for the name match. Enforced on BOTH the
+ *     membership role and `users.role`, so a stray non-staff account holding a
+ *     staff membership row still can't be DMed.
+ *  2. TENANT BOUNDARY — candidates must share an active staff membership with
+ *     the caller. A role-only filter is the documented shape of a cross-tenant
+ *     leak (`.claude/rules/rabbithole-multi-tenancy.md`): this deployment hosts
+ *     many schools, and knowing a colleague's exact name at another school is
+ *     not authority to message them. The institution-scoped membership is the
+ *     boundary; `users.role` is only a denormalized default (see
+ *     `hasActiveStaffMembershipAtInstitution`).
+ *
+ * Policy, deliberate: a `platform_admin` keeps GLOBAL reach (the global
+ * Rabbithole operator, consistent with `schoolOperationsInstitutionIds` /
+ * `healthInstitutionIds` returning "all"), and a caller holding staff
+ * memberships at several schools sees the UNION of those schools — they really
+ * are staff at each.
+ *
+ * GLOBAL STAFF STANDING is the third way in — for RECIPIENTS. (Global SENDER
+ * reach stays limited to `platform_admin`; an unscoped curriculum_designer is
+ * reachable from anywhere but still resolves only their own directory, which
+ * is deliberate — nothing here broadens sender authority.) A
+ * `platform_admin`, or anyone whose staff standing comes from an UNSCOPED
+ * membership (what `ensureDefaultMembershipForUser` mints for a
+ * `curriculum_designer`), belongs to the whole deployment rather than to one
+ * school. There is no tenant to cross, so they are reachable from anywhere
+ * (only the `platform_admin` additionally SENDS anywhere, per the policy
+ * above). An earlier revision granted the platform admin
+ * global reach as a SENDER only, which silently made the operator un-DMable
+ * from every school but the one they happened to hold a scoped membership at —
+ * see the correction on PR #3895. Mirrors `isGloballyPrivilegedRole` /
+ * `isGloballyPrivilegedMembership`, which already encode "standing never
+ * derived from one institution".
+ *
+ * Query shape: the caller's institutions resolve ONCE, then one membership
+ * scan per institution. A per-candidate membership check over a full `users`
+ * collect would be O(N) subqueries in the size of the whole deployment.
  */
 export const listStaffForSlackDmInternal = internalQuery({
-  args: {},
-  handler: async (ctx) => {
-    const users = await ctx.db.query("users").collect();
-    return users
-      .filter((u) => isStaffRole(u.role))
-      .map((u) => ({
-        id: u._id,
-        name: u.name ?? u.username ?? "Unknown",
-        username: u.username ?? null,
-        slackUserId: u.slackUserId ?? null,
-      }));
+  args: { callerUserId: v.id("users") },
+  handler: async (ctx, args) => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller) return [];
+
+    // System/service accounts (e.g. MCP service accounts) have no Slack
+    // identity and are not people to DM.
+    const isDmablePerson = (u: Doc<"users">) =>
+      isStaffRole(u.role) && u.isSystem !== true;
+
+    if (isPlatformAdminRole(caller.role)) {
+      // Indexed per staff role rather than a whole-table collect: the previous
+      // shape materialised every scholar on the deployment to discard them,
+      // which scales with enrollment. Same recipients, none of the scholars.
+      const adminSeen = new Set<Id<"users">>();
+      const everyStaff: ReturnType<typeof slackDmCandidate>[] = [];
+      for (const role of STAFF_ROLES) {
+        for (const u of await ctx.db
+          .query("users")
+          .withIndex("by_role", (q) => q.eq("role", role))
+          .collect()) {
+          if (adminSeen.has(u._id) || !isDmablePerson(u)) continue;
+          adminSeen.add(u._id);
+          everyStaff.push(slackDmCandidate(u));
+        }
+      }
+      return everyStaff;
+    }
+
+    // Every ACTIVE school where the caller holds staff standing. The primitive
+    // rejects a disabled institution and a non-staff membership, so anything
+    // that survives here is a real tenant the caller belongs to.
+    const callerInstitutionIds = new Set<Id<"institutions">>();
+    const callerMemberships = await ctx.db
+      .query("memberships")
+      .withIndex("by_user", (q) => q.eq("userId", args.callerUserId))
+      .collect();
+    for (const institutionId of new Set(
+      callerMemberships.flatMap((m) => (m.institutionId ? [m.institutionId] : [])),
+    )) {
+      if (
+        await hasActiveStaffMembershipAtInstitution(
+          ctx,
+          caller._id,
+          institutionId,
+        )
+      ) {
+        callerInstitutionIds.add(institutionId);
+      }
+    }
+
+    const seen = new Set<Id<"users">>();
+    const out: ReturnType<typeof slackDmCandidate>[] = [];
+
+    // GLOBAL STAFF STANDING is reachable from anywhere. A `platform_admin`, or
+    // anyone whose STAFF standing comes from an UNSCOPED membership, belongs to
+    // the whole deployment rather than to one school — there is no tenant to
+    // cross, and they were reachable by every staffer before the boundary
+    // existed. Without this the platform admin is addressable only from
+    // whichever school they happen to hold a scoped membership at, which
+    // silently broke "message the operator on Slack" — the single most-used
+    // recipient (see the correction on PR #3895).
+    //
+    // ⚠️ The role must be globally privileged AND a staff role. Intersecting
+    // them is the whole point: `lifelong_learner` is globally privileged for
+    // LIFECYCLE purposes (never swept by an institution delete, never blocked
+    // by a suspension) but is NOT staff, and an unscoped lifelong-learner
+    // membership is exactly the kind of row a school-scoped teacher can also
+    // hold — staff dogfooding is what that role is FOR. Accepting it here let
+    // a `teacher@B` be resolved from school A, because the old code checked
+    // global standing on the MEMBERSHIP and staff standing only on the USER,
+    // combining two unrelated capacities into cross-school authority. Caught
+    // by adversarial review before landing; regression-tested below.
+    for (const role of GLOBAL_STAFF_STANDING_ROLES) {
+      // `by_institution_role` with an undefined institution returns ONLY the
+      // unscoped rows for that role. A `by_role` scan would instead collect
+      // every scoped membership of that role and discard it — an index does
+      // not make an unrestricted role population bounded.
+      const memberships = await ctx.db
+        .query("memberships")
+        .withIndex("by_institution_role", (q) =>
+          q.eq("institutionId", undefined).eq("role", role),
+        )
+        .collect();
+      for (const membership of memberships) {
+        if (!isGloballyPrivilegedMembership(membership)) continue;
+        if (seen.has(membership.userId)) continue;
+        seen.add(membership.userId);
+        const u = await ctx.db.get(membership.userId);
+        if (!u || !isDmablePerson(u)) continue;
+        out.push(slackDmCandidate(u));
+      }
+    }
+    // A platform admin whose only membership is SCOPED still has global
+    // standing by role, so resolve them by role too rather than trusting the
+    // shape of their membership rows.
+    for (const u of await ctx.db
+      .query("users")
+      .withIndex("by_role", (q) => q.eq("role", ROLES.PLATFORM_ADMIN))
+      .collect()) {
+      if (seen.has(u._id) || !isDmablePerson(u)) continue;
+      seen.add(u._id);
+      out.push(slackDmCandidate(u));
+    }
+
+    for (const institutionId of callerInstitutionIds) {
+      // Indexed PER STAFF ROLE rather than one `by_institution` collect: a
+      // school's memberships are dominated by its scholars, and reading all of
+      // them on every DM lookup is an unbounded read that grows with
+      // enrollment. `by_institution_role` touches only staff rows.
+      for (const role of STAFF_ROLES) {
+        const memberships = await ctx.db
+          .query("memberships")
+          .withIndex("by_institution_role", (q) =>
+            q.eq("institutionId", institutionId).eq("role", role),
+          )
+          .collect();
+        for (const membership of memberships) {
+          if (seen.has(membership.userId)) continue;
+          seen.add(membership.userId);
+          const u = await ctx.db.get(membership.userId);
+          if (!u || !isDmablePerson(u)) continue;
+          out.push(slackDmCandidate(u));
+        }
+      }
+    }
+    return out;
   },
 });
 
@@ -1341,7 +1558,7 @@ export const listDevLoginUsers = query({
     const users = await ctx.db.query("users").collect();
     return users
       .flatMap((u) =>
-        u.username
+        u.username && u.isSystem !== true
           ? [{ username: u.username, name: u.name ?? null, role: u.role ?? ROLES.SCHOLAR }]
           : [],
       )
@@ -1351,6 +1568,12 @@ export const listDevLoginUsers = query({
 
 /**
  * List all users (admin only).
+ *
+ * Carries each account's STAFF memberships alongside its learner one so
+ * `/admin/accounts` can both show and edit institution standing from the row
+ * it already renders. Read per staff role off `by_role` rather than one
+ * `by_user` pass per account: a deployment's staff rows are a small bounded
+ * set, whereas a query-per-row would scale with the user list.
  */
 export const listAllUsers = platformAdminQuery({
   args: {},
@@ -1363,6 +1586,57 @@ export const listAllUsers = platformAdminQuery({
     const learnerByUser = new Map(
       learnerMemberships.map((membership) => [membership.userId, membership]),
     );
+
+    // The roles that actually give someone STANDING at a school — the same
+    // set `listInstitutionStaff` reads, deliberately excluding
+    // `platform_admin` (a scoped platform_admin row grants authority but
+    // never appears in a school's staff directory, which is the trap that
+    // makes this surface easy to get subtly wrong) and `parent`
+    // (guardianship-derived, not institutional).
+    const institutions = await ctx.db.query("institutions").collect();
+    const instById = new Map(institutions.map((i) => [i._id, i]));
+    const staffByUser = new Map<
+      Id<"users">,
+      Array<{
+        _id: Id<"memberships">;
+        role: string;
+        institutionId: Id<"institutions"> | null;
+        institutionName: string | null;
+        institutionEmoji: string | null;
+        institutionDisabled: boolean;
+      }>
+    >();
+    const staffRows = (
+      await Promise.all(
+        SCHOOL_STANDING_ROLES.map((role) =>
+          ctx.db
+            .query("memberships")
+            .withIndex("by_role", (q) => q.eq("role", role))
+            .collect(),
+        ),
+      )
+    ).flat();
+    for (const m of staffRows) {
+      const inst = m.institutionId ? instById.get(m.institutionId) : undefined;
+      const list = staffByUser.get(m.userId) ?? [];
+      list.push({
+        _id: m._id,
+        role: m.role,
+        institutionId: m.institutionId ?? null,
+        institutionName: inst?.name ?? null,
+        institutionEmoji: inst?.emoji ?? null,
+        institutionDisabled: inst?.disabledAt !== undefined,
+      });
+      staffByUser.set(m.userId, list);
+    }
+    for (const list of staffByUser.values()) {
+      list.sort(
+        (a, b) =>
+          (a.institutionName ?? "").localeCompare(b.institutionName ?? "") ||
+          a.role.localeCompare(b.role),
+      );
+    }
+
     return users.map((u) => ({
       _id: u._id,
       username: u.username ?? null,
@@ -1373,6 +1647,9 @@ export const listAllUsers = platformAdminQuery({
       email: u.email ?? null,
       slackUserId: u.slackUserId ?? null,
       institutionId: u.institutionId ?? null,
+      // Non-human account (onboarding guide, MCP service accounts) — the
+      // directory labels it rather than hiding it from platform admins.
+      isSystem: u.isSystem === true,
       learnerMembershipId:
         u.role === ROLES.SCHOLAR
           ? null
@@ -1381,6 +1658,11 @@ export const listAllUsers = platformAdminQuery({
         u.role === ROLES.SCHOLAR
           ? null
           : (learnerByUser.get(u._id)?.institutionId ?? null),
+      // Institution standing, hydrated. An account whose `role` is a staff
+      // role but whose list is EMPTY has authority with no standing anywhere
+      // — the invisible state behind TRA-349 — so the row renders that
+      // explicitly rather than as a blank.
+      staffMemberships: staffByUser.get(u._id) ?? [],
       _creationTime: u._creationTime,
     }));
   },
@@ -1402,12 +1684,13 @@ export const listInstitutionStaff = scholarAdminQuery({
   args: { scope: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const lens = await resolveInstitutionLens(ctx, ctx.user, args.scope);
-    const staffRoles = new Set<string>([
-      ROLES.TEACHER,
-      ROLES.STAFF,
-      ROLES.CURRICULUM_DESIGNER,
-      ROLES.SCHOOL_ADMIN,
-    ]);
+    // Deliberately NOT `STAFF_ROLES` — that set also carries
+    // `platform_admin`, and iterating it here would newly surface an
+    // institution-scoped platform-admin membership in a school's staff
+    // directory. `SCHOOL_STANDING_ROLES` is that distinction's canonical
+    // home (it carries this warning); keep using it rather than
+    // `STAFF_ROLES`.
+    const staffRoles = SCHOOL_STANDING_ROLES;
     const allInstitutions = await ctx.db.query("institutions").collect();
     // With an active institution lens (?inst=<slug>), narrow to the single
     // resolved school — the resolver only honors an institution the caller may
@@ -1435,15 +1718,51 @@ export const listInstitutionStaff = scholarAdminQuery({
       institutionName: string | null;
     }> = [];
     for (const instId of institutionIds) {
-      const mems = await ctx.db
-        .query("memberships")
-        .withIndex("by_institution", (q) => q.eq("institutionId", instId))
-        .collect();
+      // Indexed PER STAFF ROLE rather than one `by_institution` collect: a
+      // school's memberships are dominated by its SCHOLARS, so the old shape
+      // materialised the whole enrollment on every directory load to discard
+      // almost all of it — an unbounded read that grows with enrollment and
+      // eventually trips Convex read limits. `by_institution_role` touches
+      // only staff rows. Same shape as the sibling
+      // `listStaffForSlackDmInternal` (PR #3895).
+      const perRole = await Promise.all(
+        staffRoles.map((role) =>
+          ctx.db
+            .query("memberships")
+            .withIndex("by_institution_role", (q) =>
+              q.eq("institutionId", instId).eq("role", role),
+            )
+            .collect(),
+        ),
+      );
+      // Re-interleave into the order the single `by_institution` scan
+      // produced, so the dedupe below still picks the same row it always did:
+      // when one person somehow holds two staff memberships at the same
+      // school, they keep the role of their FIRST row rather than whichever
+      // role we happened to query first.
+      //
+      // An index's sort key is its declared fields followed by
+      // `_creationTime` and then `_id`, so `_id` — compared by code unit, the
+      // order Convex compares strings in — is the tie-break, not a no-op.
+      // Two membership rows written in one transaction can share a
+      // `_creationTime`, and without the second leg a tie would silently fall
+      // back to the order the roles happen to be queried in. Caught by
+      // adversarial review.
+      const mems = perRole
+        .flat()
+        .sort(
+          (a, b) =>
+            a._creationTime - b._creationTime ||
+            (a._id < b._id ? -1 : a._id > b._id ? 1 : 0),
+        );
       for (const m of mems) {
-        if (!staffRoles.has(m.role) || seen.has(m.userId)) continue;
+        if (seen.has(m.userId)) continue;
         const u = await ctx.db.get(m.userId);
         if (!u) continue;
         seen.add(m.userId);
+        // MCP service accounts hold a membership so the institution lens
+        // scopes them, but they are not people in the staff directory.
+        if (u.isSystem === true) continue;
         out.push({
           id: u._id,
           name: u.name ?? null,
@@ -1463,11 +1782,10 @@ export const listInstitutionStaff = scholarAdminQuery({
 
 /**
  * Delete a user and all associated data (admin only).
- * Cascading delete: projects (with messages, artifacts, analyses, processState),
- * observations, mastery, seeds, signals, connections, dossiers,
- * assignments, and auth sessions/accounts.
- */
-/**
+ * Cascading delete: sessions (with messages, artifacts, analyses, processState),
+ * observations, mastery, practice-engine ledgers, seeds, signals, connections,
+ * dossiers, assignments, and auth sessions/accounts.
+ *
  * Cascade-delete a user and every record that references them. Shared core so
  * both the public `deleteUser` (admin dashboard) and the AI bot tool
  * (`internal.teacherAide.deleteScholar`) destroy a scholar identically.
@@ -1490,168 +1808,101 @@ export async function deleteUserCore(
   if (!targetUser) throw new Error("User not found");
 
   const args = { userId };
+  const counts: Counts = {};
 
-  // 1. Delete all projects and their children (messages, artifacts, analyses, processState)
-    const sessions = await ctx.db
-      .query("sessions")
-      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+  // 1. Delete all sessions through the canonical blob-aware session cascade.
+  const sessions = await ctx.db
+    .query("sessions")
+    .withIndex("by_user", (q) => q.eq("userId", args.userId))
+    .collect();
+  for (const session of sessions) {
+    await deleteSessionCascade(ctx, counts, session._id);
+  }
+
+  // 2. Delete the canonical scholar-owned inventory before the user row.
+  await purgeScholarOwned(ctx, counts, args.userId);
+
+  // 3. Delete observations authored as a teacher. Scholar-owned observations
+  // were already removed by purgeScholarOwned.
+  const obsAsTeacher = await ctx.db
+    .query("observations")
+    .withIndex("by_teacher", (q) => q.eq("teacherId", args.userId))
+    .collect();
+  for (const o of obsAsTeacher) await ctx.db.delete(o._id);
+
+  // 4. Delete assignments (post Assignments split — used to be focusSettings).
+  const assignments = await ctx.db
+    .query("assignments")
+    .withIndex("by_teacher", (q) => q.eq("teacherId", args.userId))
+    .collect();
+  for (const a of assignments) await ctx.db.delete(a._id);
+
+  // 5. Delete auth sessions and accounts
+  const authSessions = await ctx.db
+    .query("authSessions")
+    .filter((q) => q.eq(q.field("userId"), args.userId))
+    .collect();
+  for (const s of authSessions) {
+    // Delete refresh tokens for this session
+    const refreshTokens = await ctx.db
+      .query("authRefreshTokens")
+      .filter((q) => q.eq(q.field("sessionId"), s._id))
       .collect();
+    for (const rt of refreshTokens) await ctx.db.delete(rt._id);
+    await ctx.db.delete(s._id);
+  }
 
-    for (const session of sessions) {
-      const messages = await ctx.db
-        .query("messages")
-        .withIndex("by_session", (q) => q.eq("sessionId", session._id))
-        .collect();
-      for (const msg of messages) await ctx.db.delete(msg._id);
-
-      const artifacts = await ctx.db
-        .query("artifacts")
-        .withIndex("by_session", (q) => q.eq("sessionId", session._id))
-        .collect();
-      for (const a of artifacts) await ctx.db.delete(a._id);
-
-      const analyses = await ctx.db
-        .query("analyses")
-        .withIndex("by_session", (q) => q.eq("sessionId", session._id))
-        .collect();
-      for (const a of analyses) await ctx.db.delete(a._id);
-
-      const processStates = await ctx.db
-        .query("processState")
-        .withIndex("by_session", (q) => q.eq("sessionId", session._id))
-        .collect();
-      for (const ps of processStates) await ctx.db.delete(ps._id);
-
-      await ctx.db.delete(session._id);
-    }
-
-    // 2. Delete observations (as scholar or teacher)
-    const obsAsScholar = await ctx.db
-      .query("observations")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", args.userId))
+  const accounts = await ctx.db
+    .query("authAccounts")
+    .filter((q) => q.eq(q.field("userId"), args.userId))
+    .collect();
+  for (const a of accounts) {
+    // Delete verification codes for this account
+    const codes = await ctx.db
+      .query("authVerificationCodes")
+      .filter((q) => q.eq(q.field("accountId"), a._id))
       .collect();
-    for (const o of obsAsScholar) await ctx.db.delete(o._id);
+    for (const c of codes) await ctx.db.delete(c._id);
+    await ctx.db.delete(a._id);
+  }
 
-    const obsAsTeacher = await ctx.db
-      .query("observations")
-      .withIndex("by_teacher", (q) => q.eq("teacherId", args.userId))
-      .collect();
-    for (const o of obsAsTeacher) await ctx.db.delete(o._id);
+  // 5b. Delete institution memberships (role/institution context rows).
+  // Not scholar-keyed, so it belongs in the CORE — both the admin-dashboard
+  // deleteUser and the internal cascade benefit, and no membership row is
+  // left dangling to a now-deleted user.
+  const memberships = await ctx.db
+    .query("memberships")
+    .withIndex("by_user", (q) => q.eq("userId", args.userId))
+    .collect();
+  for (const m of memberships) await ctx.db.delete(m._id);
 
-    // 3. Delete mastery observations + teacher overrides
-    const mastery = await ctx.db
-      .query("masteryObservations")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", args.userId))
-      .collect();
-    for (const m of mastery) {
-      // Delete any teacher overrides for this observation
-      const overrides = await ctx.db
-        .query("teacherMasteryOverrides")
-        .withIndex("by_scholar", (q) => q.eq("scholarId", args.userId))
-        .collect();
-      for (const ov of overrides) await ctx.db.delete(ov._id);
-      await ctx.db.delete(m._id);
-    }
+  // 5c. Delete guardianship links in BOTH directions. The family directory
+  // (parents.listAllParents) derives its guardian set from this whole table,
+  // so a dangling link to a deleted parent or scholar must not linger.
+  const asGuardian = await ctx.db
+    .query("guardianships")
+    .withIndex("by_parent", (q) => q.eq("parentUserId", args.userId))
+    .collect();
+  for (const g of asGuardian) await ctx.db.delete(g._id);
+  const asWard = await ctx.db
+    .query("guardianships")
+    .withIndex("by_scholar", (q) => q.eq("scholarUserId", args.userId))
+    .collect();
+  for (const g of asWard) await ctx.db.delete(g._id);
 
-    // 4. Delete seeds
-    const seeds = await ctx.db
-      .query("seeds")
-      .withIndex("by_scholar_status", (q) => q.eq("scholarId", args.userId))
-      .collect();
-    for (const s of seeds) await ctx.db.delete(s._id);
+  // 5d. A deleted scholar can never again be "authorized", but nothing else
+  // in this cascade tells an already-unlocked managed device to re-lock —
+  // schedule that BEFORE the user row disappears so the durable relock
+  // record survives regardless of what happens to the user/claim rows next.
+  await scheduleClaimDecommissionLocksForScholar(ctx, args.userId);
 
-    // 5. Delete session signals
-    const signals = await ctx.db
-      .query("sessionSignals")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", args.userId))
-      .collect();
-    for (const s of signals) await ctx.db.delete(s._id);
+  // 6. Finally, delete the user
+  await ctx.db.delete(args.userId);
 
-    // 6. Delete cross-domain connections
-    const connections = await ctx.db
-      .query("crossDomainConnections")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", args.userId))
-      .collect();
-    for (const c of connections) await ctx.db.delete(c._id);
-
-    // 7. Delete scholar dossiers
-    const dossiers = await ctx.db
-      .query("scholarDossiers")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", args.userId))
-      .collect();
-    for (const d of dossiers) await ctx.db.delete(d._id);
-
-    // 8. Delete assignments (post Assignments split — used to be
-    // focusSettings).
-    const assignments = await ctx.db
-      .query("assignments")
-      .withIndex("by_teacher", (q) => q.eq("teacherId", args.userId))
-      .collect();
-    for (const a of assignments) await ctx.db.delete(a._id);
-
-    // 9. Delete auth sessions and accounts
-    const authSessions = await ctx.db
-      .query("authSessions")
-      .filter((q) => q.eq(q.field("userId"), args.userId))
-      .collect();
-    for (const s of authSessions) {
-      // Delete refresh tokens for this session
-      const refreshTokens = await ctx.db
-        .query("authRefreshTokens")
-        .filter((q) => q.eq(q.field("sessionId"), s._id))
-        .collect();
-      for (const rt of refreshTokens) await ctx.db.delete(rt._id);
-      await ctx.db.delete(s._id);
-    }
-
-    const accounts = await ctx.db
-      .query("authAccounts")
-      .filter((q) => q.eq(q.field("userId"), args.userId))
-      .collect();
-    for (const a of accounts) {
-      // Delete verification codes for this account
-      const codes = await ctx.db
-        .query("authVerificationCodes")
-        .filter((q) => q.eq(q.field("accountId"), a._id))
-        .collect();
-      for (const c of codes) await ctx.db.delete(c._id);
-      await ctx.db.delete(a._id);
-    }
-
-    // 9b. Delete institution memberships (role/institution context rows).
-    // Not scholar-keyed, so it belongs in the CORE — both the admin-dashboard
-    // deleteUser and the internal cascade benefit, and no membership row is
-    // left dangling to a now-deleted user.
-    const memberships = await ctx.db
-      .query("memberships")
-      .withIndex("by_user", (q) => q.eq("userId", args.userId))
-      .collect();
-    for (const m of memberships) await ctx.db.delete(m._id);
-
-    // 9c. Delete guardianship links in BOTH directions. The family directory
-    // (parents.listAllParents) derives its guardian set from this whole table,
-    // so a dangling link to a deleted parent or scholar must not linger.
-    const asGuardian = await ctx.db
-      .query("guardianships")
-      .withIndex("by_parent", (q) => q.eq("parentUserId", args.userId))
-      .collect();
-    for (const g of asGuardian) await ctx.db.delete(g._id);
-    const asWard = await ctx.db
-      .query("guardianships")
-      .withIndex("by_scholar", (q) => q.eq("scholarUserId", args.userId))
-      .collect();
-    for (const g of asWard) await ctx.db.delete(g._id);
-
-    // 9d. A deleted scholar can never again be "authorized", but nothing else
-    // in this cascade tells an already-unlocked managed device to re-lock —
-    // schedule that BEFORE the user row disappears so the durable relock
-    // record survives regardless of what happens to the user/claim rows next.
-    await scheduleClaimDecommissionLocksForScholar(ctx, args.userId);
-
-    // 10. Finally, delete the user
-    await ctx.db.delete(args.userId);
-
-    return { deleted: true, name: targetUser.name ?? targetUser.username ?? "Unknown" };
+  return {
+    deleted: true,
+    name: targetUser.name ?? targetUser.username ?? "Unknown",
+  };
 }
 
 export const deleteUser = platformAdminMutation({
@@ -1752,7 +2003,11 @@ export const createScholar = scholarAdminMutation({
         .query("users")
         .withIndex("by_username", (q) => q.eq("username", username))
         .unique();
-      if (existing) throw new Error(`Username "${username}" is already taken`);
+      // A ConvexError, so production shows staff this sentence rather than
+      // "Server Error".
+      if (existing) {
+        throw new ConvexError(`Username "${username}" is already taken`);
+      }
     }
 
     const userId = await ctx.db.insert("users", {
@@ -1947,7 +2202,71 @@ export const removeStaffFromInstitution = schoolAdminMutation({
 });
 
 /**
- * Scholar-admin: edit a scholar's basic profile (name / DOB / grade / avatar).
+ * Point a scholar's login at a new username. The username is the password
+ * login key (`<username>@local`, see lib/username.ts) as well as the profile
+ * URL slug, so a rename moves the scholar's password credential in the same
+ * transaction — the move `migrations.normalizeSpacedUsernames` made in bulk.
+ * Left behind, the password would stay filed under the old name, and
+ * `enrollment.redeemScholarEnrollToken` (which keys off the CURRENT username)
+ * could never reset it again. A username can be changed but not cleared.
+ *
+ * Refusals are ConvexErrors so the sentence reaches staff in production, where
+ * a plain Error arrives as "Server Error".
+ */
+async function renameScholarUsername(
+  ctx: MutationCtx,
+  scholar: Doc<"users">,
+  requested: string,
+): Promise<void> {
+  const problem = usernameError(requested);
+  if (problem) throw new ConvexError(problem);
+  const username = requested.trim();
+  if (username === scholar.username) return;
+
+  const taken = new ConvexError(`Username "${username}" is already taken`);
+  const holder = await ctx.db
+    .query("users")
+    .withIndex("by_username", (q) => q.eq("username", username))
+    .first();
+  if (holder) throw taken;
+  // A credential already filed under the new name would sign this scholar in
+  // as whoever owns it, so it blocks the rename even without a users row.
+  // Check every row at that key: drift could put this scholar's own row there
+  // beside someone else's, and a first() that found only theirs would miss it.
+  const accountId = passwordAccountId(username);
+  const accountHolders = await ctx.db
+    .query("authAccounts")
+    .withIndex("providerAndAccountId", (q) =>
+      q.eq("provider", "password").eq("providerAccountId", accountId),
+    )
+    .collect();
+  if (accountHolders.some((account) => account.userId !== scholar._id)) {
+    throw taken;
+  }
+
+  const credentials = await ctx.db
+    .query("authAccounts")
+    .withIndex("userIdAndProvider", (q) =>
+      q.eq("userId", scholar._id).eq("provider", "password"),
+    )
+    .collect();
+  // No flow creates a second password row. If drift did, moving one could
+  // leave two on the same account id — and sign-in's unique lookup would then
+  // fail every attempt — so refuse rather than guess which one is live.
+  if (credentials.length > 1) {
+    throw new ConvexError(
+      "This scholar has more than one password on file, so their username can't be changed here. Ask your Rabbithole admin for help.",
+    );
+  }
+  if (credentials[0]) {
+    await ctx.db.patch(credentials[0]._id, { providerAccountId: accountId });
+  }
+  await ctx.db.patch(scholar._id, { username });
+}
+
+/**
+ * Scholar-admin: edit a scholar's basic profile (name / username / DOB /
+ * grade / pronouns / avatar).
  * Allowed for teacher, admin, operations staff. Target must be a scholar.
  * Reading level and other measurements are NOT editable here — those
  * stay teacher-only (scholars.updateReadingLevel).
@@ -1956,11 +2275,18 @@ export const adminUpdateScholarProfile = scholarAdminMutation({
   args: {
     scholarId: v.id("users"),
     name: v.optional(v.string()),
+    // The sign-in username. "Add scholar" leaves it optional (a school iPad
+    // signs in through device setup), so this is where it gets added later —
+    // or changed; see renameScholarUsername.
+    username: v.optional(v.string()),
     dateOfBirth: v.optional(v.string()),
     // Chronological grade ("K"–"8"), or null to clear. This is the reference
     // notch on the Knowledge Tree / Acceleration view, NOT a measurement —
     // roster info like DOB, so it lives here (and operations staff may set it).
     gradeLevel: v.optional(v.union(v.string(), v.null())),
+    // Third-person pronouns, or null to clear. Roster info like grade — staff
+    // set it, and it never reaches a parent or the scholar. See schema.ts.
+    pronouns: v.optional(v.union(v.string(), v.null())),
     imageStorageId: v.optional(v.id("_storage")),
   },
   handler: async (ctx, args) => {
@@ -1973,8 +2299,11 @@ export const adminUpdateScholarProfile = scholarAdminMutation({
     if (args.name !== undefined) {
       const trimmed = args.name.trim();
       // Don't let a cleared field blank the scholar's name everywhere.
-      if (trimmed === "") throw new Error("Name cannot be empty");
+      if (trimmed === "") throw new ConvexError("Name cannot be empty");
       patch.name = trimmed;
+    }
+    if (args.username !== undefined) {
+      await renameScholarUsername(ctx, scholar, args.username);
     }
     if (args.dateOfBirth !== undefined) patch.dateOfBirth = args.dateOfBirth;
     if (args.gradeLevel !== undefined) {
@@ -1982,6 +2311,9 @@ export const adminUpdateScholarProfile = scholarAdminMutation({
         throw new Error("Invalid grade level");
       }
       patch.gradeLevel = args.gradeLevel ?? undefined;
+    }
+    if (args.pronouns !== undefined) {
+      patch.pronouns = normalizePronouns(args.pronouns) ?? undefined;
     }
     if (args.imageStorageId !== undefined) {
       patch.image = await resolveValidatedProfileImageUrl(

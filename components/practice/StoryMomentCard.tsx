@@ -8,7 +8,8 @@
  *
  * THE REVEAL. On mount, a field of small stars twinkles onto the night surface,
  * ONE brightens where the art will land, the story's baked art (or authored
- * `visualEmoji` fallback) springs in there, then the eyebrow + hook + teaser
+ * `visualEmoji` fallback; a preview seed's authored `visualEmoji`) springs in
+ * there, then the eyebrow + hook + teaser
  * fade up — ~0.5s, once, no loop — settling to a calm night card. This is a
  * DECLARED charm layer on a kid-facing celebratory surface
  * (visual-design.md's charm exception); the visual is the story's real referent,
@@ -57,27 +58,10 @@ import {
   STORY_FIELD_SETTLED_OPACITY,
   STORY_HINT_MS,
   STORY_REVEAL_MS,
+  type StoryMoment as SharedStoryMoment,
 } from "@/shared/storyReveal";
 
-export type StoryMoment = {
-  fromKey: string;
-  toKey: string;
-  skillLabel: string;
-  hook: string;
-  // Short card teaser (hook + surprise). The card shows THIS in place of the
-  // full narrative so the moment reads as a teaser, not a wall of text; the
-  // full narrative still feeds the "Find out more" tutor thread (storyOpen).
-  // Optional: falls back to narrative until stories are re-seeded with teasers.
-  teaser?: string;
-  /** Optional authored curiosity cue; legacy stories stay text-only. */
-  visualEmoji?: string;
-  /** Pre-baked far-end-node art. visualEmoji remains the fallback. */
-  artUrl?: string;
-  narrative: string;
-  probe?: string;
-  kindLabel: string;
-  hasApplication: boolean;
-};
+export type StoryMoment = SharedStoryMoment<Id<"seeds">>;
 
 type CardPhase = "offer" | "dismissed";
 
@@ -160,6 +144,8 @@ const STARS: {
 
 /** The scholar's Story reveal presentation, reusable without its ledger lifecycle. */
 export function StoryMomentReveal({ moment }: { moment: StoryMoment }) {
+  // Seeds carry no baked art; their hero is the authored emoji alone.
+  const artUrl = moment.kind === "story" ? moment.artUrl : undefined;
   // Transient tap hint. Tapping reveals it for ~2s then it fades out; repeat
   // taps re-show it (a fresh key restarts the CSS animation). Never a toast.
   const [hintShown, setHintShown] = useState(false);
@@ -248,58 +234,61 @@ export function StoryMomentReveal({ moment }: { moment: StoryMoment }) {
           {STORY_CARD_COPY.eyebrow}
         </Text>
 
-        {/* Hero cell — the shine lands behind the art/emoji, so it reads as
-            "this star became the story." */}
-        <Box
-          position="relative"
-          h={moment.artUrl ? { base: "132px", md: "150px" } : "84px"}
-          w={moment.artUrl ? { base: "132px", md: "150px" } : "84px"}
-          mt={1}
-        >
+        {moment.kind === "story" || moment.visualEmoji ? (
+          /* Hero cell — the shine lands behind the art/emoji, so it reads as
+             "this star became the story." A preview seed uses the same slot
+             for its authored emoji (seeds have no art). */
           <Box
-            className="rh-story-shine"
-            aria-hidden="true"
-            position="absolute"
-            top="50%"
-            left="50%"
-            w="40px"
-            h="40px"
-            borderRadius="full"
-            pointerEvents="none"
-            opacity={0}
-            css={{
-              background:
-                "radial-gradient(circle, rgba(255,255,255,0.95) 0%, rgba(214,199,255,0.55) 45%, rgba(214,199,255,0) 72%)",
-            }}
-          />
-          {moment.artUrl ? (
-            <Image
-              className="rh-story-emoji"
-              src={moment.artUrl}
-              alt=""
+            position="relative"
+            h={artUrl ? { base: "132px", md: "150px" } : "84px"}
+            w={artUrl ? { base: "132px", md: "150px" } : "84px"}
+            mt={1}
+          >
+            <Box
+              className="rh-story-shine"
               aria-hidden="true"
               position="absolute"
-              inset={0}
-              w="100%"
-              h="100%"
-              objectFit="contain"
+              top="50%"
+              left="50%"
+              w="40px"
+              h="40px"
+              borderRadius="full"
+              pointerEvents="none"
+              opacity={0}
+              css={{
+                background:
+                  "radial-gradient(circle, rgba(255,255,255,0.95) 0%, rgba(214,199,255,0.55) 45%, rgba(214,199,255,0) 72%)",
+              }}
             />
-          ) : moment.visualEmoji ? (
-            <Text
-              className="rh-story-emoji"
-              aria-hidden="true"
-              position="absolute"
-              inset={0}
-              display="flex"
-              alignItems="center"
-              justifyContent="center"
-              fontSize="76px"
-              lineHeight="1"
-            >
-              {moment.visualEmoji}
-            </Text>
-          ) : null}
-        </Box>
+            {artUrl ? (
+              <Image
+                className="rh-story-emoji"
+                src={artUrl}
+                alt=""
+                aria-hidden="true"
+                position="absolute"
+                inset={0}
+                w="100%"
+                h="100%"
+                objectFit="contain"
+              />
+            ) : moment.visualEmoji ? (
+              <Text
+                className="rh-story-emoji"
+                aria-hidden="true"
+                position="absolute"
+                inset={0}
+                display="flex"
+                alignItems="center"
+                justifyContent="center"
+                fontSize="76px"
+                lineHeight="1"
+              >
+                {moment.visualEmoji}
+              </Text>
+            ) : null}
+          </Box>
+        ) : null}
 
         <Text
           className="rh-story-rise"
@@ -318,7 +307,9 @@ export function StoryMomentReveal({ moment }: { moment: StoryMoment }) {
           color="whiteAlpha.800"
           maxW="46ch"
         >
-          {moment.teaser ?? moment.narrative}
+          {moment.kind === "seed"
+            ? moment.teaser
+            : (moment.teaser ?? moment.narrative)}
         </Text>
       </VStack>
 
@@ -383,7 +374,7 @@ export function StoryMomentCard({
    *  prop) because it's an imperative, at-most-once external event, not part of
    *  normal render data flow. No-ops once the card is already settled. Walking
    *  away records nothing (the moment stays `offered`); the story waits in the
-   *  Quests tab's "New stories" section. */
+   *  Quests tab's "New quests" section. */
   settleRef?: React.Ref<StoryMomentCardHandle>;
 }) {
   const recordOffered = useMutation(api.practiceMoments.recordMomentOffered);
@@ -393,11 +384,18 @@ export function StoryMomentCard({
   const offerRef = useRef<Promise<Id<"momentEvents"> | null> | null>(null);
 
   useEffect(() => {
+    const momentArgs =
+      moment.kind === "seed"
+        ? { kind: "seed" as const, seedId: moment.seedId }
+        : {
+            kind: "story" as const,
+            fromKey: moment.fromKey,
+            toKey: moment.toKey,
+          };
     offerRef.current = recordOffered({
       scholarId,
-      fromKey: moment.fromKey,
-      toKey: moment.toKey,
       clientEventId,
+      ...momentArgs,
     })
       .then((res) => res.eventId)
       .catch(() => null);

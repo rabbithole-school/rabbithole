@@ -1,7 +1,5 @@
 import { describe, expect, test } from "vitest";
 import {
-  CANVAS_MISSING_SCOPE_LINE,
-  canvasErrorLine,
   composeCanvasBody,
 } from "../slackCanvasReport";
 
@@ -20,26 +18,24 @@ describe("composeCanvasBody — shared teaser + best-effort canvas link", () => 
     expect(body).toContain("<https://slack.example/canvas/123|Open the full cost report →>");
   });
 
-  test("missing_scope → teaser + the explicit scope-naming human-fix line", () => {
-    const { body, mode } = composeCanvasBody({
+  test("missing_scope → the canvas_missing_scope branch", () => {
+    const { mode } = composeCanvasBody({
       teaser,
       canvasUrl: null,
       canvasError: "missing_scope",
       openLabel: "x",
     });
     expect(mode).toBe("canvas_missing_scope");
-    expect(body).toContain(CANVAS_MISSING_SCOPE_LINE);
   });
 
-  test("other error → teaser + generic line carrying the code", () => {
-    const { body, mode } = composeCanvasBody({
+  test("other error → the canvas_error branch", () => {
+    const { mode } = composeCanvasBody({
       teaser,
       canvasUrl: null,
       canvasError: "ratelimited",
       openLabel: "x",
     });
     expect(mode).toBe("canvas_error");
-    expect(body).toContain(canvasErrorLine("ratelimited"));
   });
 
   test("not attempted (no url, no error) → teaser alone", () => {

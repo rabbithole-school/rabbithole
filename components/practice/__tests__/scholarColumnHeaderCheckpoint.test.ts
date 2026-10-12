@@ -16,8 +16,6 @@
  * test cannot prove a badge is gone from a branch it did not take.
  */
 // @vitest-environment jsdom
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -26,9 +24,6 @@ import { ChakraProvider } from "@chakra-ui/react";
 import { system } from "@/lib/theme";
 import { CHECKPOINT_CORNER_STYLE } from "../MathPlanMarks";
 import { ScholarColumnHeader } from "../MathSkillsMasteryView";
-
-const read = (name: string) =>
-  readFileSync(join(process.cwd(), "components/practice", name), "utf8");
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -106,13 +101,6 @@ describe("the heading's checkpoint mark", () => {
         hexToRgb(CHECKPOINT_CORNER_STYLE[state].bg),
       );
     }
-  });
-
-  it("follows the heading's rounded corner instead of cutting across it", () => {
-    // `borderTopLeftRadius: inherit` is what lets ONE corner component sit
-    // flush in a flush matrix cell AND inside the heading's rounded card.
-    const marks = read("MathPlanMarks.tsx");
-    expect(marks).toContain('borderTopLeftRadius="inherit"');
   });
 
   it("is out of flow — the centred stack is byte-identical with and without it", async () => {
@@ -193,54 +181,6 @@ describe("the heading stays exactly one control", () => {
     expect(heading().getAttribute("aria-label")).toBe(
       "Ada Lovelace across Fractions",
     );
-  });
-});
-
-describe("every matrix mode shares the one heading", () => {
-  const view = read("MathSkillsMasteryView.tsx");
-
-  it("routes all three matrices through it, and marks only the one with state", () => {
-    expect(view.match(/<ScholarColumnHeader/g) ?? []).toHaveLength(3);
-    // Single-domain is the only matrix that reads a Math plan, so it is the
-    // only one that can hand the heading a checkpoint. All domains and Fast
-    // math pass none and therefore draw none — no invented state.
-    expect(view.match(/checkpoint=\{scholarCheckpointState\(/g) ?? []).toHaveLength(
-      1,
-    );
-    expect(view).toContain("scholarCheckpointState(\n                                planByScholar.get(scholar.id),\n                              )");
-  });
-
-  it("derives the mode from the ONE projection rule the cells use", () => {
-    const projection = read("mathPlanProjection.ts");
-    // Not a second `conflict ? … : mode` spelled out at the call site.
-    expect(projection).toContain("export function scholarCheckpointState(");
-    expect(projection).toMatch(
-      /scholarCheckpointState\([\s\S]*?return cornerState\(plan, plan\.checkpoint !== null\);/,
-    );
-    expect(view).not.toMatch(/conflict\s*\?\s*"conflict"/);
-  });
-});
-
-describe("the centred circular badge is gone", () => {
-  it("leaves no chip component, import, or call site behind", () => {
-    const view = read("MathSkillsMasteryView.tsx");
-    const marks = read("MathPlanMarks.tsx");
-    expect(marks).not.toContain("CheckpointModeChip");
-    expect(view).not.toContain("CheckpointModeChip");
-    // The badge's whole geometry: a 16px circle with a flag in it.
-    expect(marks).not.toMatch(/borderRadius="full"[\s\S]{0,120}FlagCheckered/);
-  });
-
-  it("stops sizing the header row around a checkpoint line", () => {
-    const view = read("MathSkillsMasteryView.tsx");
-    // The +12px variant existed only to seat the badge; a non-flow corner needs
-    // no room, so the header row and the strand sticky offset are one constant
-    // again and cannot disagree.
-    expect(view).not.toContain("SCHOLAR_HEADER_H_WITH_CHECKPOINT_MODE");
-    expect(view).not.toMatch(/h=\{\s*checkpointModeRollup/);
-    expect(view).not.toMatch(/top=\{\s*checkpointModeRollup/);
-    expect(view).toContain("h={SCHOLAR_HEADER_H}");
-    expect(view).toContain("top={SCHOLAR_HEADER_H}");
   });
 });
 

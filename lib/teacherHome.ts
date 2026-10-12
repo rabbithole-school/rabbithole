@@ -10,14 +10,27 @@ import { withInstitutionScope } from "@/lib/institutionLinks";
 export function teacherHomePath(
   role: string | undefined,
   hasSchoolOperationsAccess = false,
+  hasCurriculumAccess = false,
+  mentorOnly = false,
 ): string {
-  return role === ROLES.CURRICULUM_DESIGNER
-    ? "/teacher/curriculum"
-    : role === ROLES.STAFF && hasSchoolOperationsAccess
-      ? "/teacher/scholars"
-      : role === ROLES.STAFF
-        ? "/teacher/apps"
-      : "/teacher";
+  if (role === ROLES.CURRICULUM_DESIGNER) return "/teacher/curriculum";
+  if (role === ROLES.STAFF) {
+    // A mentor-only staffer's one surface is Messages (it opens on Scholars,
+    // the only kind they can see).
+    if (mentorOnly) return "/teacher/messages";
+    // `staff` is the BASE institution role — it carries no authority of its
+    // own, so a staffer's home is whichever section their capability grants
+    // actually open. The order mirrors `teacherNavKeysForRole`'s staff branch
+    // (its first key is this href), and a test asserts the two stay in step.
+    if (hasSchoolOperationsAccess) return "/teacher/scholars";
+    if (hasCurriculumAccess) return "/teacher/curriculum";
+    // No grants (or health:manage only, which opens nothing under /teacher):
+    // the school shell is their one working surface — it routes on to the
+    // first section their grants allow, e.g. /school/health. Sending them to
+    // a /teacher tab instead is what put a health staffer on an error page.
+    return "/school";
+  }
+  return "/teacher";
 }
 
 /**
@@ -30,9 +43,16 @@ export function teacherHomeHref(
   role: string | undefined,
   scope: string | null | undefined,
   hasSchoolOperationsAccess = false,
+  hasCurriculumAccess = false,
+  mentorOnly = false,
 ): string {
   return withInstitutionScope(
-    teacherHomePath(role, hasSchoolOperationsAccess),
+    teacherHomePath(
+      role,
+      hasSchoolOperationsAccess,
+      hasCurriculumAccess,
+      mentorOnly,
+    ),
     scope ?? "",
   );
 }

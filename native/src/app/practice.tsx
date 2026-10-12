@@ -35,7 +35,7 @@
  * Placement runs in-app (see the placement gate below), mirroring web.
  */
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   ActionSheetIOS,
@@ -77,13 +77,15 @@ import {
   StoryMomentCard,
   type StoryMomentCardHandle,
 } from "@/components/practice/StoryMomentCard";
+import { QuestionCard } from "@/components/practice/QuestionCard";
+import { storyMomentKey } from "../../vendor/shared/storyReveal";
 import { FAST_MATH_NAME } from "../../vendor/shared/fastMathName";
 import { resolveCompletionOffers } from "../../vendor/shared/completionOffers";
 import {
   dedupeDispatchCompletionReceipts,
   type DispatchCompletionReceipt as DispatchCompletionReceiptData,
 } from "../../vendor/shared/dispatchCompletionReceipt";
-import { derivePlaylistDoneness, playlistCompleteEyebrow } from "../../vendor/shared/playlistDoneness";
+import { derivePlaylistDoneness, playlistCompleteEyebrow, storyCardGateOpen } from "../../vendor/shared/playlistDoneness";
 import {
   PRACTICE_SCOPE_BLOCKED_DETAIL,
   PRACTICE_SCOPE_BLOCKED_HEADLINE,
@@ -95,7 +97,7 @@ import {
   useGuardedPracticeAction,
 } from "@/components/practice/NativePracticeControls";
 import { PracticeProgressHeader } from "@/components/practice/PracticeProgressHeader";
-import { LaunchpadCard } from "@/components/practice/LaunchpadCard";
+import { LaunchpadAtoms } from "@/components/practice/LaunchpadContent";
 import {
   InstructionExampleSheet,
   type InstructionExampleContent,
@@ -137,6 +139,8 @@ import {
   challengeFrontierMove,
   CHALLENGE_OFFER_TITLE,
   CHALLENGE_OFFER_ACCEPT,
+  DONT_KNOW_STAMP_ANNOUNCEMENT,
+  DONT_KNOW_STAMP_LABEL,
   challengeOfferBody,
   type PracticeVerdict,
   HANDOFF_OPENER,
@@ -148,6 +152,7 @@ import {
   breakerEasySubmitArgs,
   breakerFreshSubmitArgs,
   breakerControls,
+  breakerEpisodeAppliesToRun,
   breakerRecovered,
   makeClientEventId,
   MAPPING_SIT_CAP,
@@ -173,7 +178,16 @@ import {
   practiceDomainLabel,
   strandHeadlineFor,
 } from "../../vendor/shared/practiceDomainLabels";
-import type { RunLaunchpad } from "../../vendor/practice/instructionEntries";
+import {
+  QUESTION_FRAME_NOT_YET,
+  QUESTION_FRAME_PILL,
+  QUESTION_FRAME_TRY_ONE,
+  advanceQuestionFrame,
+  compactMoveAtoms,
+  questionFrameWritesFor,
+  type QuestionFrameStage,
+  type RunLaunchpad,
+} from "../../vendor/practice/instructionEntries";
 import type { RunGameBeat } from "../../vendor/practice/gameBeats";
 import { MASTERY_LABELS } from "../../vendor/shared/masteryLexicon";
 import { hintForSkill } from "../../vendor/shared/mathPracticeHints";
@@ -188,6 +202,7 @@ import {
   rawAnswersEqual,
   type AnswerType as GradeAnswerType,
 } from "../../vendor/practice/answers";
+import { localFactVerdict } from "../../vendor/practice/factVerdict";
 import { superscriptExponents } from "../../vendor/shared/mathNotation";
 import {
   buildPracticeClosure,
@@ -197,6 +212,9 @@ import {
   type PracticeSignal,
 } from "../../vendor/shared/closureLines";
 import { useEnsuredClosure } from "@/hooks/useEnsuredClosure";
+import { useNow } from "@/hooks/useNow";
+import { useOfferLedger } from "@/hooks/useOfferLedger";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { hasPracticeMath } from "../../vendor/shared/fractions";
 import type { PracticePromptVisual } from "../../vendor/shared/practicePromptVisual";
 import { FractionText } from "@/components/FractionText";
@@ -233,6 +251,10 @@ import {
   newPracticeState,
   breakerCommandId,
 } from "../../vendor/shared/practiceMachine";
+import {
+  initialQueueState,
+  queueReducer,
+} from "../../vendor/shared/practice/sessionMachine";
 import {
   isResumableSnapshot,
   loadResumeSnapshot,
@@ -332,23 +354,19 @@ type ServedItem = {
 // that same "up to" ceiling throughout the sitting, and the server finalizes
 // placement when that ceiling is reached.
 
-// Extend a run-length `segments` list with `count` more mapping items: grow the
-// trailing mapping segment if the run already ends in one (a seamless
-// continuation of the same `· mapping` beat), else append a fresh mapping
-// segment. Keeps the segment strip + beat headers aligned with appended items.
-function appendMappingSegment(prev: Segment[], count: number): Segment[] {
-  if (count <= 0) return prev;
-  const last = prev[prev.length - 1];
-  if (last && last.kind === "mapping") {
-    return [...prev.slice(0, -1), { kind: "mapping", count: last.count + count }];
-  }
-  return [...prev, { kind: "mapping", count }];
-}
+// The run-length `segments` extension for a mapping-sit recomposition is now
+// owned by the `queueReducer`'s "mappingBatchAppended" action
+// (../../vendor/shared/practice/sessionMachine) — one copy shared with web,
+// previously hand-duplicated verbatim in both hosts.
 
 type Proficiency = "not_started" | "practicing" | "fluent" | "overlearned";
 
 type SubmitResult = {
   correct: boolean;
+  /** The client's own Fast math verdict, on screen until the server's grade
+   *  replaces it (vendor/practice/factVerdict.ts). It carries no mastery
+   *  reading, so the proficiency row waits for the real one. */
+  provisional?: boolean;
   /** Present only when this verdict recorded a practice attempt. */
   attemptId?: Id<"practiceAttempts">;
   correctAnswer?: string;
@@ -600,6 +618,9 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     onQueuedCount: () => {},
     onDispatchCompleted: () => {},
     onAnswerQueued: () => {},
+    provisionalGrade: () => ({ correct: false }),
+    onHeld: () => {},
+    onProvisionalRetracted: () => {},
   });
   const initialMachineState = useMemo(
     () =>
@@ -688,21 +709,44 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       : "skip",
   );
 
-  const [items, setItems] = useState<ServedItem[] | null>(null);
+  // The item queue — items/segments/mapping progress/the challenge+stretch
+  // tails — is owned by the shared `queueReducer` (../../vendor/shared/
+  // practice/sessionMachine), the same pure-reducer extraction web uses.
+  // `idx` (../../vendor/shared/practiceMachine via `usePracticeMachine`)
+  // stays untouched; this reducer only tracks WHAT is queued, never the
+  // current position.
+  const [queueState, dispatchQueue] = useReducer(
+    queueReducer<ServedItem>,
+    undefined,
+    initialQueueState<ServedItem>,
+  );
+  const {
+    items,
+    segments,
+    mappingProgressOffset,
+    mappedDomainLabel,
+    challengeItems,
+    inChallenge,
+    stretchItems,
+    inStretch,
+    stretchCracked,
+  } = queueState;
   const [quickFactsUnavailableReason, setQuickFactsUnavailableReason] = useState<string | null>(null);
-  // Playlist segments v1 — parallel run-length metadata over `items` (see the
-  // `Segment` type above). `idx`/`total` (shared/practiceLoop) are untouched.
-  const [segments, setSegments] = useState<Segment[]>([]);
-  // The instructional "Launchpad" — a positioned, UNGRADED beat on this run
-  // (`practiceSession.launchpad` = `{at, entry}`). Native had no Launchpad at
-  // all before this; the web client also excluded every mixed-domain run, so a
-  // scholar on iPad never met instruction. `at` is the index of the first item
-  // of the strand it introduces, so the beat lands immediately before the work
-  // it explains, and it can only ever introduce a strand this run actually
-  // serves. It is a SIBLING of `items`, never a member, which is what makes
-  // "never grades, never moves mastery" structural rather than a flag.
+  // "Can you already do this?" — the run's `launchpad` entry (`{at, entry}`, a
+  // SIBLING of `items`, never a member). `at` is the first item of a strand/node
+  // the scholar has never ATTEMPTED. It used to mount a card of words in front
+  // of that item; now it FRAMES the item (twin of web PracticeSession):
+  //   ask    → a pill over the real item; answering is an ordinary graded
+  //            attempt, and "Not yet — show me" is the honest don't-know.
+  //   move   → after "Not yet" (or a miss, for node content): the move, which
+  //            is about THIS item — its own TeachingStep (`move:
+  //            "item_steps"`), else the node's compact worked example and
+  //            "Got it, let me try one" (an ungraded Socratic retry).
+  //   after  → answering again after the move.
+  //   nailed → right first time: the move is never shown (the fast lane).
+  //   done   → finished, or the impression claim was refused.
   const [launchpad, setLaunchpad] = useState<RunLaunchpad | null>(null);
-  const [launchpadDone, setLaunchpadDone] = useState(false);
+  const [frameStage, setFrameStage] = useState<QuestionFrameStage>("ask");
   // The game BEAT — the Launchpad's sibling, and the answer to "can a game show
   // up in a practice set?" once D-3 forbids a game paying out skill credit. Same
   // shape, same reason: `{at, entry}` beside `items`, never inside it, so `idx`
@@ -712,29 +756,10 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // beat was never worth credit in the first place.
   const [gameBeat, setGameBeat] = useState<RunGameBeat | null>(null);
   const [gameBeatDone, setGameBeatDone] = useState(false);
-  // Option D: the run is 100% `· mapping` — drives the ceremony-lite skin + the
-  // "Your map is started ✨" completion beat. `mappedDomainLabel` names a domain
-  // that FINISHED placing this run ("Your tree just filled in ✨").
-  const [mappingProgressOffset, setMappingProgressOffset] = useState(0);
-  const [mappedDomainLabel, setMappedDomainLabel] = useState<string | null>(null);
-  // The OPTIONAL above-band challenge tail (P1e) served alongside the required
-  // set — offered on the done screen ("Want a challenge?"), never mixed in.
-  const [challengeItems, setChallengeItems] = useState<ServedItem[]>([]);
-  // The OPTIONAL "Go deeper" stretch tail — insight problems on nodes she
-  // already owns (demonstrated fluent). Offered on the done screen; misses in
-  // a stretch round never touch the mastery row (server-enforced).
-  const [stretchItems, setStretchItems] = useState<ServedItem[]>([]);
-  const [inStretch, setInStretch] = useState(false);
-  // True once ANY attempt (first try or retry) solved a stretch item this
-  // round — the done wrap distinguishes "cracked it eventually" (persistence,
-  // the thing to celebrate) from "not this time". The log only holds first
-  // attempts, so this flag is the retry-aware reading.
-  const [stretchCracked, setStretchCracked] = useState(false);
   // Verdict of a graded DIALOGUE stretch item (null until "Check my thinking").
   const [dialogueVerdict, setDialogueVerdict] = useState<
     { passed: boolean; metCount: number; total: number } | null
   >(null);
-  const [inChallenge, setInChallenge] = useState(false);
   const [firstPostPlacementBlock, setFirstPostPlacementBlock] = useState(false);
   /** The server declined to compose anything because the scholar's Math plan
    *  leaves nothing servable right now (`practiceSession`'s `blocked` flag).
@@ -791,6 +816,10 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // "confirm before you cap" retry is lane-local, and otherwise the item's
   // phase from the machine decides feedback vs. queued vs. answering. Mirrors
   // web's PracticeSession `phase` derivation exactly.
+  /** A provisional Fast math verdict is showing and its server grade has not
+   *  come back yet. Next / Try again tapped in this window are held by the
+   *  machine (`ui:hold`) and released once it confirms (`onHeld`). */
+  const confirming = machine.state.item.confirming !== null;
   const phase: Phase =
     breaker?.flow.stage === "close"
       ? "breakerClose"
@@ -868,6 +897,15 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // state updater may be replayed (Strict Mode double-invokes it in dev), which
   // would double the haptic. Mirrors the web PracticeSession fix exactly.
   const streakRef = useRef(0);
+  /** The receipt of the answer whose provisional Fast math verdict is on
+   *  screen, so its server grade REPLACES it instead of logging twice — plus
+   *  what that verdict changed, so a lost answer can be retracted exactly. */
+  const provisionalEventRef = useRef<{
+    clientEventId: string;
+    logged: boolean;
+    streakBefore: number;
+    wrongAnswersBefore: number;
+  } | null>(null);
 
   // Predict-then-Check calibration: the kid's OPTIONAL pre-answer confidence for
   // the current item (null = skipped). `revealPrediction` freezes the confidence
@@ -957,6 +995,9 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   const [storyMoment, setStoryMoment] = useState<typeof storyMomentLive>(null);
   const [storySettled, setStorySettled] = useState(false);
   const storyCardSettleRef = useRef<StoryMomentCardHandle | null>(null);
+  // The question card carries its own "Done for today" once answered, so the
+  // page's quiet Done retires then (one Done on screen, never two).
+  const [questionAnswered, setQuestionAnswered] = useState(false);
   useEffect(() => {
     if (!storyMomentLive) return;
     // Detect a genuinely new moment (a different edge) from the currently
@@ -970,12 +1011,12 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     // render. Mirrors the web PracticeSession fix exactly.
     const isNewMoment =
       !storyMoment ||
-      storyMoment.fromKey !== storyMomentLive.fromKey ||
-      storyMoment.toKey !== storyMomentLive.toKey;
+      storyMomentKey(storyMoment) !== storyMomentKey(storyMomentLive);
     if (isNewMoment) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- commits a server-arbitrated new moment before its reactive query clears after recording.
       setStoryMoment(storyMomentLive);
       setStorySettled(false);
+      setQuestionAnswered(false);
     }
   }, [storyMomentLive, storyMoment]);
 
@@ -1104,6 +1145,8 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   }, [idx, phase, current?.itemId, handoff?.messages.length, reduceMotion]);
 
   const resetHostRun = useCallback(() => {
+    provisionalEventRef.current = null;
+    dispatchQueue({ type: "reset" });
     setInput("");
     setResult(null);
     setHandoff(null);
@@ -1117,14 +1160,9 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     setPredictedConfidence(null);
     setHelpReported(false);
     setRevealPrediction(null);
-    setInChallenge(false);
-    setInStretch(false);
-    setStretchCracked(false);
     setDialogueVerdict(null);
     setFirstPostPlacementBlock(false);
     setScopeBlocked(false);
-    setMappingProgressOffset(0);
-    setMappedDomainLabel(null);
     setDispatchCompleted([]);
     setMappingRetry(false);
     setHintRungs([]);
@@ -1166,7 +1204,6 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // caller (the effect below) is the one place `sessionInputKey` is built.
   const loadRun = useCallback(
     async (inputKey: string, forceFresh: boolean): Promise<LoadedPracticeRun> => {
-      setItems(null);
       resetHostRun();
       let discardResume = forceFresh;
       const seed = Math.floor(Math.random() * 2_000_000_000);
@@ -1201,16 +1238,19 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
             (snapshot.mappingProgressOffset ?? 0) + snapshot.resumeIdx >= MAPPING_SIT_CAP
           )
         ) {
-          setItems(snapshot.items);
-          setSegments(snapshot.segments ?? []);
+          dispatchQueue({
+            type: "loaded",
+            items: snapshot.items,
+            segments: snapshot.segments ?? [],
+            mappingProgressOffset: snapshot.mappingProgressOffset ?? 0,
+            mappedDomainLabel: snapshot.mappedDomainLabel ?? null,
+            challengeItems: [],
+            stretchItems: [],
+          });
           setLaunchpad(snapshot.launchpad ?? null);
-          setLaunchpadDone(false);
+          setFrameStage("ask");
           setGameBeat(null);
           setGameBeatDone(false);
-          setMappingProgressOffset(snapshot.mappingProgressOffset ?? 0);
-          setMappedDomainLabel(snapshot.mappedDomainLabel ?? null);
-          setChallengeItems([]);
-          setStretchItems([]);
           const item = snapshot.items[snapshot.resumeIdx];
           return {
             itemCount: snapshot.items.length,
@@ -1241,14 +1281,19 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
           seed,
           size: PRACTICE_SESSION_SIZE,
         });
-        setItems(res.items as ServedItem[]);
-        setSegments((res as { segments?: Segment[] }).segments ?? []);
+        dispatchQueue({
+          type: "loaded",
+          items: res.items as ServedItem[],
+          segments: (res as { segments?: Segment[] }).segments ?? [],
+          mappingProgressOffset: 0,
+          mappedDomainLabel: null,
+          challengeItems: [],
+          stretchItems: [],
+        });
         setLaunchpad(null);
-        setLaunchpadDone(false);
+        setFrameStage("ask");
         setGameBeat(null);
         setGameBeatDone(false);
-        setChallengeItems([]);
-        setStretchItems([]);
         setQuickFactsUnavailableReason(
           res.available ? null : (res.unavailableReason ?? "generator_unavailable"),
         );
@@ -1285,7 +1330,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       // the web twin, PracticeSession.tsx). Everything else keeps this
       // session's `domain` (omitted for a blend).
       const serveDomain = bonusMoreSkillKeys && choiceHint ? choiceHint.domain : domain;
-      const res = await convex.query(api.practiceSkills.practiceSession, {
+      const serveArgs = {
         scholarId,
         size,
         seed,
@@ -1304,20 +1349,35 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
         canPlayGames: true,
         // §4/finding-4: this IS the native client — a Launchpad authored
         // web-only (or native-only) must be gated accordingly.
-        platform: "native",
+        platform: "native" as const,
+      };
+      // `questionFraming`: this build renders the frame as the "Can you
+      // already do this?" pill (item_steps frames, no daily cap). An older
+      // backend rejects the unknown arg — retry once without it (web twin).
+      const res = await convex
+        .query(api.practiceSkills.practiceSession, { ...serveArgs, questionFraming: true })
+        .catch((error: unknown) => {
+          if (!String(error).includes("questionFraming")) throw error;
+          return convex.query(api.practiceSkills.practiceSession, serveArgs);
+        });
+      dispatchQueue({
+        type: "loaded",
+        items: res.items as ServedItem[],
+        segments: (res as { segments?: Segment[] }).segments ?? [],
+        mappingProgressOffset: !activeKeys
+          ? ((res as { mappingProgressOffset?: number }).mappingProgressOffset ?? 0)
+          : 0,
+        mappedDomainLabel: null,
+        // Challenge tail: only after a whole-graph required set (never a
+        // tune-up scoped run, which sends none).
+        challengeItems: activeKeys ? [] : ((res as { challenge?: ServedItem[] }).challenge ?? []),
+        stretchItems: activeKeys ? [] : ((res as { stretch?: ServedItem[] }).stretch ?? []),
       });
-      setItems(res.items as ServedItem[]);
-      setSegments((res as { segments?: Segment[] }).segments ?? []);
       setLaunchpad(activeKeys ? null : ((res as { launchpad?: RunLaunchpad }).launchpad ?? null));
-      setLaunchpadDone(false);
+      setFrameStage("ask");
       setGameBeat(activeKeys ? null : ((res as { gameBeat?: RunGameBeat }).gameBeat ?? null));
       setGameBeatDone(false);
       const loadedAllMapping = !activeKeys && !!(res as { allMapping?: boolean }).allMapping;
-      setMappingProgressOffset(
-        !activeKeys
-          ? ((res as { mappingProgressOffset?: number }).mappingProgressOffset ?? 0)
-          : 0,
-      );
       setFirstPostPlacementBlock(
         !activeKeys && !!(res as { firstPostPlacementBlock?: boolean }).firstPostPlacementBlock,
       );
@@ -1325,14 +1385,6 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       // skills all sit outside the scholar's current scope is blocked for
       // exactly the same reason, and a summit read would be just as untrue.
       setScopeBlocked(!!(res as { blocked?: boolean }).blocked);
-      // Challenge tail: only after a whole-graph required set (never a tune-up
-      // scoped run, which sends none).
-      setChallengeItems(
-        activeKeys ? [] : ((res as { challenge?: ServedItem[] }).challenge ?? []),
-      );
-      setStretchItems(
-        activeKeys ? [] : ((res as { stretch?: ServedItem[] }).stretch ?? []),
-      );
       if (!res.scopeKey || !res.dayKey) {
         throw new Error("Practice run is missing its scope/day identity");
       }
@@ -1424,8 +1476,16 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // itself is idempotent against the SAME episode (`sameBreakerEpisode`), so
   // two consecutive relaunches settle into the identical breaker state rather
   // than re-alerting or regrading.
-  const activeBreakerEpisode = useQuery(api.practiceSkills.activeBreakerEpisode, {
+  //
+  // An episode's window closes with the clock, never with a write, so the
+  // query takes this screen's minute bucket (T11) — without it an idle
+  // episode kept outranking the scholar's practice until some unrelated write.
+  // Smoothed so each minute's re-arm keeps the last projection instead of
+  // reading as "not loaded yet" for a round-trip. Mirrors web PracticeSession.
+  const minuteNow = Math.floor(useNow(60_000) / 60_000) * 60_000;
+  const activeBreakerEpisode = useSmoothedQuery(api.practiceSkills.activeBreakerEpisode, {
     scholarId,
+    now: minuteNow,
   });
   const breakerPayloadLoadRef = useRef<string | null>(null);
   const projectedBreakerRef = useRef<{
@@ -1442,10 +1502,24 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     if (checkInAllDomains) return;
     if (!quickFacts && !isMixed && !mappingEntry && needsPlacement !== false) return;
     if (activeBreakerEpisode === undefined) return;
-    if (activeBreakerEpisode) {
+    // A live episode blocks this screen's own run (the early return below), so
+    // it may only do that for the run it actually belongs to — otherwise one
+    // domain's spiral freezes every OTHER domain, targeted set and Fast-math
+    // round for the whole SPIRAL_GAP_MS window. See the predicate's comment.
+    const breakerEpisode =
+      activeBreakerEpisode &&
+      breakerEpisodeAppliesToRun({
+        episodeDomain: activeBreakerEpisode.domain,
+        domain,
+        mixedDomains: isMixed ? domainSet : undefined,
+        quickFacts,
+      })
+        ? activeBreakerEpisode
+        : null;
+    if (breakerEpisode) {
       projectedBreakerRef.current = {
-        triggerAttemptId: String(activeBreakerEpisode.triggerAttemptId),
-        triggerItemId: activeBreakerEpisode.triggerItemId ?? null,
+        triggerAttemptId: String(breakerEpisode.triggerAttemptId),
+        triggerItemId: breakerEpisode.triggerItemId ?? null,
       };
       // A cold relaunch mid-"repair"/"coach" short-circuits BEFORE this point
       // ever reaches `run:inputsChanged` (see the early return two lines
@@ -1458,9 +1532,9 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       // reconstructed by the reducer's own `serveBreakerFresh`/
       // `serveBreakerEasy` commands (idempotent re-serves), which the
       // executor already handles.
-      const stage = activeBreakerEpisode.flow.stage;
-      const triggerAttemptId = String(activeBreakerEpisode.triggerAttemptId);
-      const triggerItemId = activeBreakerEpisode.triggerItemId ?? null;
+      const stage = breakerEpisode.flow.stage;
+      const triggerAttemptId = String(breakerEpisode.triggerAttemptId);
+      const triggerItemId = breakerEpisode.triggerItemId ?? null;
       const payloadKey =
         stage === "repair" || stage === "coach"
           ? `${triggerAttemptId}:${triggerItemId ?? ""}`
@@ -1501,7 +1575,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
                 restored.bindingOutcome.error,
               );
             }
-            setItems([restored.item]);
+            dispatchQueue({ type: "singleItemInstalled", item: restored.item });
           } else if (restored.status === "unreadable") {
             console.error(
               "practice breaker trigger-item cache is unreadable:",
@@ -1534,12 +1608,20 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       if (payloadKey && triggerItemId && !alreadyInstalled) {
         return;
       }
-      sendPracticeEvent(breakerHydrationEvent(activeBreakerEpisode));
+      sendPracticeEvent(breakerHydrationEvent(breakerEpisode, sessionInputKey));
       return;
     }
     breakerPayloadLoadRef.current = null;
-    const retired = projectedBreakerRef.current;
-    projectedBreakerRef.current = null;
+    // Retire the durably-cached trigger item only when the server has stopped
+    // reporting an episode at all — NOT when one is still live but simply
+    // doesn't belong to the run this screen just switched to. Retiring on a
+    // domain switch would delete the repair payload the episode still needs
+    // when the scholar comes back to its own domain, turning a resumable
+    // repair into the "wasn't saved on this iPad" dead end. Whether an episode
+    // is still live stays entirely the server's call — this file never invents
+    // a client-side lifetime for it.
+    const retired = activeBreakerEpisode === null ? projectedBreakerRef.current : null;
+    if (activeBreakerEpisode === null) projectedBreakerRef.current = null;
     if (retired) {
       void retireBreakerTriggerItemPayload<ServedItem>(
         nativePracticePersistenceAdapter,
@@ -1554,10 +1636,19 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
         }
       });
     }
+    // Drop any breaker state this mount hydrated earlier before asking for a
+    // run: either the episode is gone, or it belongs to another domain. Both
+    // clients key their screen WITHOUT the domain, so a switch re-renders in
+    // place and that stale state would otherwise keep refusing every load —
+    // for longer than the episode itself lives. No-ops when nothing is
+    // hydrated.
+    sendPracticeEvent({ type: "hydrate:noBreakerForRun" });
     sendPracticeEvent({ type: "run:inputsChanged", inputKey: sessionInputKey });
   }, [
     activeBreakerEpisode,
     checkInAllDomains,
+    domain,
+    domainSet,
     machine.state.run.inputKey,
     machine.state.run.pendingLoad?.id,
     mappingEntry,
@@ -1664,14 +1755,12 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   const onAcceptChallenge = useCallback(() => {
     if (challengeItems.length === 0) return;
     const next = challengeItems;
-    setChallengeItems([]);
-    setInChallenge(true);
-    setFirstPostPlacementBlock(false);
-    setItems(next);
     // The challenge round is a separate labeled tail, not part of playlist
-    // segments v1 (no "challenge" segment kind) — clear stale segments from
-    // the just-finished required set so no beat/divider misaligns with it.
-    setSegments([]);
+    // segments v1 (no "challenge" segment kind) — the reducer clears stale
+    // segments from the just-finished required set so no beat/divider
+    // misaligns with it.
+    dispatchQueue({ type: "challengeAccepted" });
+    setFirstPostPlacementBlock(false);
     setInput("");
     setResult(null);
     setLog([]);
@@ -1690,13 +1779,10 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
 
   const startStretchRound = useCallback(
     (next: ServedItem[]) => {
-      setInStretch(true);
-      setStretchCracked(false);
+      dispatchQueue({ type: "stretchAccepted" });
       setFirstPostPlacementBlock(false);
-      setItems(next);
-      setSegments([]);
       setLaunchpad(null);
-      setLaunchpadDone(false);
+      setFrameStage("ask");
       setInput("");
       setResult(null);
       setLog([]);
@@ -1724,14 +1810,14 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     // served story hook, the only story identity the client is given), the
     // moment was TRIED. A bonus start no longer records "dismissed".
     const startedThisStory =
-      !!storyMoment?.hook &&
+      storyMoment?.kind === "story" &&
+      storyMoment.hasApplication &&
       stretchItems.some((it) => it.storyHook === storyMoment.hook);
     if (startedThisStory) {
       storyCardSettleRef.current?.markTried();
       setStorySettled(true);
     }
     const next = stretchItems;
-    setStretchItems([]);
     startStretchRound(next);
   }, [stretchItems, storyMoment, startStretchRound]);
 
@@ -1772,6 +1858,10 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     // replacing the old dedicated re-entrancy ref (the CTA that calls this is
     // ALSO disabled while busy, so this is a second, defense-in-depth check).
     if (busy) return;
+    if (confirming) {
+      machine.send({ type: "ui:hold", action: "advance" });
+      return;
+    }
     resetItemHostState();
     const outcome = items ? advanceStep(idx, items.length) : null;
     if (outcome?.done) {
@@ -1802,8 +1892,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
         setLaneBusy(false);
         if (more.length > 0) {
           const nextItems = [...items, ...more];
-          setItems(nextItems);
-          setSegments((prev) => appendMappingSegment(prev, more.length));
+          dispatchQueue({ type: "mappingBatchAppended", added: more });
           machine.send({ type: "lane:batchAppended", addedCount: more.length });
           machine.send({
             type: "ui:advance",
@@ -1833,6 +1922,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     fetchMoreMapping,
     machine,
     resetItemHostState,
+    confirming,
   ]);
 
   // The three-miss breaker is now entirely machine-owned: `server:submitSucceeded`
@@ -1901,7 +1991,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
             // answers that confirm item; the concede path don't-knows it (fast cap).
             if (graded.retry && graded.retryItem) {
               const confirm = graded.retryItem as ServedItem;
-              setItems((prev) => (prev ? prev.map((it, i) => (i === idx ? confirm : it)) : prev));
+              dispatchQueue({ type: "itemReplacedAt", index: idx, item: confirm });
               setInput("");
               setResult(null);
               setRevealPrediction(null);
@@ -1929,7 +2019,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
             if (firstAttempt) {
               setLog((l) => [...l, { correct: res.correct, skillLabel: res.skillLabel, dontKnow: res.dontKnow }]);
             }
-            if (graded.domainJustMapped) setMappedDomainLabel(graded.domainLabel ?? null);
+            if (graded.domainJustMapped) dispatchQueue({ type: "mappedDomainLabelSet", label: graded.domainLabel ?? null });
             setMappingRetry(false);
             machine.send({
               type: "lane:mappingAnswered",
@@ -1998,6 +2088,9 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
           : {}),
         ...(firstAttempt && predictedConfidence ? { predictedConfidence } : {}),
         ...breakerSubmitContext,
+        // Which list this item came from (TRA-250): the opt-in challenge tail
+        // may record lane "challenge"; required work always counts.
+        servedLane: current.lane === "challenge" ? "challenge" : "required",
         ...(timing.firstKeyMs !== undefined
           ? { latencyMs: timing.firstKeyMs }
           : {}),
@@ -2005,12 +2098,18 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
           ? { thinkTimeMs: timing.elapsedMs }
           : {}),
       };
+      // Fast math: a bare fact is checked on the client so the verdict is
+      // instant; the server still grades and records it (factVerdict.ts).
+      const provisionalCorrect = quickFacts
+        ? localFactVerdict(current, answer)
+        : null;
       machine.send({
         type: "ui:submit",
         answer,
         clientEventId,
         clientEventKey,
         entry,
+        ...(provisionalCorrect !== null ? { provisionalCorrect } : {}),
       });
     },
     [
@@ -2088,7 +2187,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
         ) {
           // Withdraw only the item this admission appended, and only while it is
           // still ahead of the scholar.
-          setItems(items.slice(0, lastIdx));
+          dispatchQueue({ type: "lastItemWithdrawn" });
           machine.send({ type: "run:itemCountAdjusted", delta: -1 });
           helpRetryItemIdRef.current = null;
         }
@@ -2103,7 +2202,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       helpRetryItemIdRef.current = retry?.itemId ?? null;
       if (retry) {
         // Append rather than interrupting the verdict; the fresh shot arrives later in this run.
-        setItems((prev) => (prev ? [...prev, retry] : prev));
+        dispatchQueue({ type: "itemAppended", item: retry });
         machine.send({ type: "run:itemCountAdjusted", delta: 1 });
       }
     } catch (error) {
@@ -2162,7 +2261,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
         };
         setRevealPrediction(null);
         setLog((l) => [...l, { correct: false, skillLabel: res.skillLabel, dontKnow: true }]);
-        if (graded.domainJustMapped) setMappedDomainLabel(graded.domainLabel ?? null);
+        if (graded.domainJustMapped) dispatchQueue({ type: "mappedDomainLabelSet", label: graded.domainLabel ?? null });
         setMappingRetry(false);
         machine.send({ type: "lane:mappingAnswered", recorded: true, correct: false });
         if (showsMappingFeedback(allMapping)) {
@@ -2231,6 +2330,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       // A prediction paired with an honest don't-know is still calibration data.
       ...(predictedConfidence ? { predictedConfidence } : {}),
       ...breakerSubmitContext,
+      servedLane: current.lane === "challenge" ? "challenge" : "required",
       ...(timing.firstKeyMs !== undefined
         ? { latencyMs: timing.firstKeyMs }
         : {}),
@@ -2283,13 +2383,17 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // for the NEXT `ui:submit`, exactly the transition `phase==="feedback"`
   // otherwise blocks.
   const onRetry = useCallback(() => {
+    if (confirming) {
+      machine.send({ type: "ui:hold", action: "retry" });
+      return;
+    }
     setInput("");
     setResult(null);
     setError(null);
     setHandoff(null);
     setHandoffInput("");
     machine.send({ type: "ui:retry" });
-  }, [machine]);
+  }, [confirming, machine]);
 
   // "Try a fresh one" — a new variant of the SAME skill (mirrors web). Replaces
   // the current slot in place; falls back to advancing if none is available.
@@ -2297,7 +2401,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // handoff chat's exit — `lane:handoffClosed` is safe either way (it forces
   // `lane: null`, a no-op when already null).
   const onFreshVariant = useCallback(async () => {
-    if (!current) return;
+    if (!current || confirming) return;
     setLaneBusy(true);
     try {
       const seed = Math.floor(Math.random() * 2_000_000_000);
@@ -2312,7 +2416,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       resetItemHostState();
       if (fresh) {
         if (current.lane) fresh.lane = current.lane;
-        setItems((prev) => (prev ? prev.map((it, i) => (i === idx ? fresh : it)) : prev));
+        dispatchQueue({ type: "itemReplacedAt", index: idx, item: fresh });
         machine.send({
           type: "lane:handoffClosed",
           outcome: "fresh-variant",
@@ -2328,7 +2432,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     } finally {
       setLaneBusy(false);
     }
-  }, [current, scholarId, convex, domain, idx, items, machine, resetItemHostState]);
+  }, [confirming, current, scholarId, convex, domain, idx, items, machine, resetItemHostState]);
 
   // Install the handoff/coach chat's RENDER content — a pure setter, no lane
   // dispatch. Used both by machine-driven opens (`onCoach`/`onHandoff`
@@ -2357,9 +2461,12 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // Open the Socratic handoff (kid-initiated, after 2 misses). Native mirror of
   // web's onTalkItThrough.
   const openTalkItThrough = useCallback(() => {
+    // Not while a provisional Fast math verdict is confirming: its result must
+    // land on this item before anything opens a lane or replaces the item.
+    if (confirming) return;
     installHandoff("stuck");
     machine.send({ type: "lane:entered", lane: "handoff" });
-  }, [installHandoff, machine]);
+  }, [confirming, installHandoff, machine]);
   const onTalkItThrough = useCallback(() => openTalkItThrough(), [openTalkItThrough]);
 
   // The handoff/dialogue lane's two exits — a stretch item retries the SAME
@@ -2427,8 +2534,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // Swap the playlist for exactly ONE item and hand the answer surface back.
   const installBreakerItem = useCallback(
     (item: ServedItem) => {
-      setItems([item]);
-      setSegments([]);
+      dispatchQueue({ type: "singleItemInstalled", item });
       resetItemHostState();
     },
     [resetItemHostState],
@@ -2633,7 +2739,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
         setDialogueVerdict(verdict);
         setLog((l) => [...l, { correct: verdict.passed, skillLabel: current.skillLabel }]);
         if (verdict.passed) {
-          setStretchCracked(true);
+          dispatchQueue({ type: "stretchCracked" });
           successNotify();
         }
         setHandoff((h) => (h ? { ...h, loading: false, ended: true } : h));
@@ -2749,6 +2855,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
           : {}),
         ...(args.firstKeyMs !== undefined ? { latencyMs: args.firstKeyMs } : {}),
         ...(args.elapsedMs !== undefined ? { thinkTimeMs: args.elapsedMs } : {}),
+        servedLane: current.lane === "challenge" ? "challenge" : "required",
       };
       return new Promise<NativeManipulativeSubmission>((resolve, reject) => {
         pendingManipulativeSubmitRef.current = { clientEventId, resolve, reject };
@@ -2801,6 +2908,34 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
         throw new Error("Practice grader returned an invalid verdict");
       }
       const res = raw as SubmitResult;
+      if (res.provisional) {
+        provisionalEventRef.current = {
+          clientEventId: entry.clientEventId,
+          logged: entry.record,
+          streakBefore: streakRef.current,
+          wrongAnswersBefore: wrongAnswersRef.current.length,
+        };
+      } else if (provisionalEventRef.current?.clientEventId === entry.clientEventId) {
+        // The server's grade for an answer already marked provisionally: swap
+        // it in (it may carry a different verdict, a mastery reading, and the
+        // attempt id), replacing — not appending — the run-log entry. The
+        // streak and haptics already fired on the provisional mark.
+        provisionalEventRef.current = null;
+        accumulateDispatchCompleted(res.dispatchCompleted);
+        setResult(res);
+        setComesBackText(
+          res.turnedFluent && res.comesBackAt != null
+            ? comesBackLine(formatComesBack(res.comesBackAt, Date.now()))
+            : null,
+        );
+        if (entry.record) {
+          setLog((l) => [
+            ...l.slice(0, -1),
+            { correct: res.correct, skillLabel: res.skillLabel, dontKnow: res.dontKnow },
+          ]);
+        }
+        return;
+      }
       const pending = pendingManipulativeSubmitRef.current;
       if (pending && pending.clientEventId === entry.clientEventId) {
         pendingManipulativeSubmitRef.current = null;
@@ -2821,7 +2956,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       if (entry.record) {
         setLog((l) => [...l, { correct: res.correct, skillLabel: res.skillLabel, dontKnow: res.dontKnow }]);
       }
-      if (res.correct && current?.lane === "stretch") setStretchCracked(true);
+      if (res.correct && current?.lane === "stretch") dispatchQueue({ type: "stretchCracked" });
       streakRef.current = nextStreak(streakRef.current, res.correct);
       if (res.correct && shouldPulseStreak(streakRef.current)) {
         // Milestone flourish: a second HAPTIC only (no second chime) — the
@@ -2999,9 +3134,33 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
           receipts as DispatchCompletionReceiptData[] | undefined,
         ),
       onAnswerQueued,
+      onHeld: (action) => {
+        if (action === "advance") void advance();
+        else onRetry();
+      },
+      onProvisionalRetracted: (clientEventId) => {
+        const undo = provisionalEventRef.current;
+        if (undo?.clientEventId !== clientEventId) return;
+        provisionalEventRef.current = null;
+        setResult(null);
+        if (undo.logged) setLog((l) => l.slice(0, -1));
+        streakRef.current = undo.streakBefore;
+        wrongAnswersRef.current = wrongAnswersRef.current.slice(0, undo.wrongAnswersBefore);
+      },
+      provisionalGrade: (entry, correct): SubmitResult => ({
+        correct,
+        provisional: true,
+        skillKey:
+          items?.find((item) => item.itemId === entry.itemId)?.skillKey ?? "",
+        skillLabel: entry.skillLabel,
+        repetition: 0,
+        proficiency: "not_started",
+        dontKnow: false,
+      }),
     };
   }, [
     accumulateDispatchCompleted,
+    advance,
     buildResumeSnapshot,
     installBreakerItem,
     installHandoff,
@@ -3011,6 +3170,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     machine.state.terminal,
     onAnswerQueued,
     onGrade,
+    onRetry,
     scholarId,
   ]);
 
@@ -3088,6 +3248,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       ? [
           {
             key: "stretch",
+            kind: "stretch" as const,
             title: "Go deeper?",
             body:
               (stretchItems.length === 1 ? "A puzzle" : "A couple of puzzles") +
@@ -3102,6 +3263,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       ? [
           {
             key: "challenge",
+            kind: "challenge" as const,
             title: CHALLENGE_OFFER_TITLE,
             body: challengeOfferBody(challengeItems.length),
             onAccept: onAcceptChallenge,
@@ -3114,6 +3276,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       ? [
           {
             key: "bonus-more-of-pick",
+            kind: "moreOfPick" as const,
             title: `More ${strandHeadlineFor(choiceHint!.domain, choiceHint!.strand)}?`,
             // When this run mapped the SAME domain the pick belongs to, name the
             // strand↔domain relationship so "More Area & Perimeter?" doesn't read
@@ -3136,6 +3299,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       ? [
           {
             key: "tuneup",
+            kind: "tuneup" as const,
             title: "Quick tune-up?",
             body: `${tuneupOffer!.count} quick ones from things you've already learned — keeps your map fresh.`,
             onAccept: () => void onAcceptTuneup(),
@@ -3146,6 +3310,66 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       : []),
   ];
 
+  // ── "Can you already do this?" — is THIS item the framed one? ──────────────
+  // One interception point, as before: `idx === launchpad.at`. Never on a
+  // mapping probe or inside placement. Native has no remote/rehearse view.
+  const frameOnItem =
+    !!launchpad &&
+    !!scholarId &&
+    !enteredPlacement &&
+    idx === launchpad.at &&
+    !!current &&
+    current.lane !== "mapping" &&
+    frameStage !== "done";
+  const frameKey = launchpad?.entry.key ?? null;
+  const claimInstructionShown = useMutation(api.instruction.claimInstructionShown);
+  const recordInstructionChoice = useMutation(api.instruction.recordInstructionChoice);
+  const recordInstructionViewed = useMutation(api.instruction.recordInstructionViewed);
+  const recordInstructionCompleted = useMutation(api.instruction.recordInstructionCompleted);
+  // Fire-and-forget telemetry from the shared plan (`questionFrameWritesFor`);
+  // a write hiccup never traps the scholar.
+  const runFrameWrites = useCallback(
+    (event: Parameters<typeof questionFrameWritesFor>[0]) => {
+      if (!frameKey || !scholarId) return;
+      for (const w of questionFrameWritesFor(event, { scholarId })) {
+        // `framing: "question"`: without it the server treats the caller as an
+        // older build and refuses writes for a key with no content row.
+        const args = { scholarId, key: frameKey, framing: "question" as const };
+        if (w.type === "recordChoice") void recordInstructionChoice({ ...args, choice: w.choice }).catch(() => {});
+        else if (w.type === "recordViewed") void recordInstructionViewed(args).catch(() => {});
+        else if (w.type === "recordCompleted") void recordInstructionCompleted(args).catch(() => {});
+      }
+    },
+    [frameKey, recordInstructionChoice, recordInstructionCompleted, recordInstructionViewed, scholarId],
+  );
+  // Claim the impression when the framed item first renders (shownAt — the
+  // denominator). `framing: "question"` exempts it from the cross-key daily
+  // cap; a "suppressed" refusal (already engaged elsewhere) drops the frame.
+  const frameClaimedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!frameOnItem || !frameKey || !scholarId || frameStage !== "ask") return;
+    const claimId = `${frameKey}@${launchpad?.at}`;
+    if (frameClaimedRef.current === claimId) return;
+    frameClaimedRef.current = claimId;
+    void claimInstructionShown({ scholarId, key: frameKey, framing: "question" })
+      .then((res) => {
+        if (!res.claimed) setFrameStage("done");
+      })
+      .catch(() => {});
+  }, [claimInstructionShown, frameKey, frameOnItem, frameStage, launchpad?.at, scholarId]);
+  // Advance the frame when a verdict lands on the framed item (answering is the
+  // ordinary graded path; the shared `advanceQuestionFrame` — twin of web —
+  // decides what the frame shows next and which lifecycle events to write).
+  // An entry minted before `move` existed always carried atoms.
+  const frameMove = launchpad?.entry.move ?? "node_content";
+  useEffect(() => {
+    if (!frameOnItem) return;
+    const next = advanceQuestionFrame(frameStage, phase, result, frameMove);
+    if (!next) return;
+    for (const e of next.events) runFrameWrites(e);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mirrors the answer machine's verdict.
+    setFrameStage(next.stage);
+  }, [frameMove, frameOnItem, frameStage, phase, result, runFrameWrites]);
 
   if (
     (skillKey && targetedNode === undefined) ||
@@ -3630,28 +3854,34 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       // (there genuinely is nothing more to serve), though never a completion.
       playlistVerdict.blocked ||
       playlistVerdict.caughtUp;
-    const showContinue = plainPlaylistWrap && !playlistCaughtUp;
-    // The story/quest card is the payoff for FINISHING the daily playlist, so
-    // it only appears on a plain playlist wrap once we can CONFIRM the set is
-    // caught up — never on a tune-up / challenge / bonus-more / mapping /
-    // stretch / calibration / frontier / stretch-hint wrap, and never during
-    // the doneness-loading window. Suppressing it (rather than firing it
-    // mid-playlist) BURNS NOTHING: the card only mints the seed + starts the
-    // 20h cooldown when it actually mounts, so the moment stays eligible and
-    // waits for the true playlist-complete wrap. Gating here also removes the
-    // two-competing-primaries screen — when the playlist isn't caught up,
-    // `showContinue` owns the primary and the card is hidden.
-    // Blocked is the mirror asymmetry of the loading window above: a boundary
-    // stops the run without earning the payoff, so it never reads as complete.
-    const playlistComplete = plainPlaylistWrap && !!playlistVerdict && playlistVerdict.caughtUp;
+    // The story/quest card is the payoff for finishing a plain playlist ROUND —
+    // never a tune-up / challenge / bonus-more / mapping / stretch / calibration
+    // / frontier / stretch-hint wrap, never during the doneness-loading window,
+    // never on a scope-blocked wrap. It deliberately does NOT wait for
+    // `caughtUp`: the daily set is a rolling window that refills as items are
+    // done, so that state is unreachable in practice (see storyCardGateOpen).
+    // The 20h offer cooldown is what keeps this to one card a day.
+    // A moment that carries a bonus QUESTION (the question card) may close ANY
+    // finished round — Fast math, tune-up, challenge, bonus-more, mapping,
+    // stretch, calibration — not just the plain playlist wrap (this block only
+    // renders on the done screen, never mid-run). On a plain wrap it keeps the
+    // same doneness gate as the story card (not while loading, not scope-blocked);
+    // the server's 20h cooldown still caps it at one a day.
+    const questionCardMoment = storyMoment?.question ? storyMoment : null;
+    const storyCardGate = questionCardMoment
+      ? plainPlaylistWrap
+        ? storyCardGateOpen(true, playlistVerdict)
+        : true
+      : storyCardGateOpen(plainPlaylistWrap, playlistVerdict);
     // P4 ("primary means alone"): when the story announcement is actually on the
-    // done screen (the arbiter's story primary AND the playlist-complete gate),
-    // it is the ONLY offer — the reprobe offer and the "Keep going?" chooser are
-    // suppressed (their eligibility persists to the next story-less close), and
-    // the close is Done (showContinue is already false once playlistComplete).
-    // Mirrors the web twin.
+    // done screen (the arbiter's story primary AND the round gate), it is the
+    // ONLY offer — the reprobe offer, the "Keep going?" chooser AND the Continue
+    // primary are suppressed (their eligibility persists to the next story-less
+    // close; Home still offers "Continue your math playlist"), and the close is
+    // Done. Mirrors the web twin.
     const storyCardVisible =
-      showStoryCard && !!storyMoment && !!scholarId && playlistComplete;
+      showStoryCard && !!storyMoment && !!scholarId && storyCardGate;
+    const showContinue = plainPlaylistWrap && !playlistCaughtUp && !storyCardVisible;
     return (
       <>
         {header}
@@ -3784,9 +4014,18 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
                 genuinely different moment remounts fresh. Rendered as the
                 completion arbiter's PRIMARY offer — never alongside an
                 in-progress continuation (shared/completionOffers.ts). */}
-            {showStoryCard && storyMoment && scholarId && playlistComplete ? (
+            {storyCardVisible && questionCardMoment ? (
+              <QuestionCard
+                key={storyMomentKey(questionCardMoment)}
+                scholarId={scholarId}
+                moment={questionCardMoment}
+                question={questionCardMoment.question!}
+                onDone={goHome}
+                onAnswered={() => setQuestionAnswered(true)}
+              />
+            ) : storyCardVisible ? (
               <StoryMomentCard
-                key={`${storyMoment.fromKey}-${storyMoment.toKey}`}
+                key={storyMomentKey(storyMoment)}
                 scholarId={scholarId}
                 moment={storyMoment}
                 settleRef={storyCardSettleRef}
@@ -3850,6 +4089,9 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
                   <Text style={styles.linkBtnText}>Done</Text>
                 </Pressable>
               </>
+            ) : storyCardVisible && questionCardMoment && questionAnswered ? (
+              /* The answered question card carries "Done for today" itself. */
+              null
             ) : storyCardVisible ? (
               /* A story reveal is on screen: the reveal is the loud thing, so
                  Done goes QUIET — the demoted link control, not the primary
@@ -3910,17 +4152,46 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   // moment as ONE interactive faded worked step (TeachingStep) — for typed AND
   // manipulative items — so the manipulative branch yields to it. A mapping item
   // is placement measurement (reveal-only), so it never shows a teaching step.
+  // The framed item's node-content move shows only in the verdict moment that
+  // earned it ("Not yet" or a miss); it replaces the teaching step there, so
+  // two instructional beats never stack. An `item_steps` move IS the teaching
+  // step (the honest don't-know path), so it never renders here.
+  const frameMoveVisible =
+    frameOnItem && frameStage === "move" && phase === "feedback" && frameMove === "node_content";
+  const frameAsking = frameOnItem && frameStage === "ask";
   const showTeaching =
     phase === "feedback" &&
     !!result?.dontKnow &&
     !!current &&
     !isMapping &&
+    !frameMoveVisible &&
     onBreakerItem !== true;
   const verdict = result ? classifyVerdict(result, missCount) : null;
   // The stem card's overlay state: a stamp/ring/tint on correct or miss; nothing
-  // on an honest don't-know (its own supportive note carries the moment).
-  const cardFeedback: PracticeCardFeedback =
-    phase === "feedback" && result && !result.dontKnow ? (result.correct ? "correct" : "miss") : null;
+  // on an honest don't-know (its own supportive note carries the moment) —
+  // except the framed item, whose "Not yet" earns placement's "Noted" stamp.
+  const frameNoted = frameOnItem && phase === "feedback" && !!result?.dontKnow;
+  const cardFeedback: PracticeCardFeedback = frameNoted
+    ? "miss"
+    : phase === "feedback" && result && !result.dontKnow
+      ? result.correct
+        ? "correct"
+        : "miss"
+      : null;
+  const onNotYet = () => {
+    runFrameWrites("notYet");
+    void onDontKnow();
+  };
+  // "Can you already do this?" — a small pill over the real item, kept through
+  // a right first answer; gone once the move has been shown.
+  const framePillEl =
+    frameOnItem && (frameStage === "ask" || frameStage === "nailed") ? (
+      <View style={styles.framePillRow}>
+        <View style={styles.framePill}>
+          <Text style={styles.framePillText}>⚡ {QUESTION_FRAME_PILL}</Text>
+        </View>
+      </View>
+    ) : null;
   // Predict-then-Check reveal — one gentle mismatch-only line above the card.
   const calibrationReveal =
     phase === "feedback" && result && revealPrediction !== null && !result.dontKnow
@@ -3948,77 +4219,15 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     !!result.attemptId &&
     onBreakerItem !== true &&
     current?.lane !== "stretch";
-  const exampleVisible = phase === "answering" && !!strandExample;
+  // The Example pill would show the move before the kid has been asked.
+  const exampleVisible = phase === "answering" && !!strandExample && !frameAsking;
 
-  // The Launchpad doorway opens at the item it introduces (`launchpad.at`) and
-  // is rendered INSTEAD of that item; `launchpadDone` then lets the same index
-  // fall through to the item itself. One interception point, and `idx` never
-  // shifts — it keeps indexing the graded `items` array exactly as before.
-  const launchpadDoorwayOpen =
-    !!launchpad &&
-    !launchpadDone &&
-    !enteredPlacement &&
-    idx === launchpad.at &&
-    !hasRecorded &&
-    phase === "answering";
-  if (launchpadDoorwayOpen && launchpad) {
-    return (
-      <>
-        <Stack.Screen options={{ headerShown: false }} />
-        <View style={styles.screen}>
-          {/* The doorway keeps the playlist's chrome — the same header and the
-              same progress track the scholar sees on every other slot — so it
-              reads as a beat IN the run rather than an interstitial in front of
-              it. Web does exactly the same (parity is EXPERIENCE, not merely
-              feature existence). */}
-          <PracticeProgressHeader
-            title={launchpad.entry.title}
-            subtitle="FIRST LOOK"
-            subtitleTone="muted"
-            progressLabel={pretestProgress?.label ?? `${idx + 1} of ${items.length}`}
-            progressAccessibilityLabel={
-              pretestProgress
-                ? `Question ${pretestProgress.label}`
-                : `Question ${idx + 1} of ${items.length}`
-            }
-            progressPercent={Math.round(progress * 100)}
-            segmentBoundaries={
-              segments.length > 1 ? segmentStartIdx.slice(1).map((i) => i / items.length) : undefined
-            }
-            topInset={insets.top}
-            onBack={() => router.back()}
-          />
-          <ScrollView
-            style={styles.launchpadScroll}
-            contentContainerStyle={styles.launchpadScrollContent}
-            showsVerticalScrollIndicator={false}
-          >
-            <LaunchpadCard
-              scholarId={scholarId}
-              entry={launchpad.entry}
-              onProceed={() => {
-                setLaunchpadDone(true);
-                // Generic bridge — harmless no-op if a lane was never entered
-                // for this beat (the doorway is a separate render branch
-                // nothing else runs alongside), and keeps every "a beat/tail
-                // moved past" transition going through the SAME typed event.
-                machine.send({ type: "lane:beatProceeded" });
-              }}
-            />
-          </ScrollView>
-        </View>
-      </>
-    );
-  }
-
-  // The game doorway, in exactly the Launchpad's shape. If both want the same
-  // run, the Launchpad wins by being tested first: a first look at a strand
-  // precedes a game about it, and the game will still be offered on a later run
-  // (its cooldown is keyed to actual PLAY, not to having been passed over).
+  // The game doorway. If it shares `at` with the framed item, the game plays
+  // first and the framed item follows (the framing is no longer a doorway of
+  // its own, so there is nothing to arbitrate).
   const gameBeatDoorwayOpen =
     !!gameBeat &&
     !gameBeatDone &&
-    !launchpadDoorwayOpen &&
     !enteredPlacement &&
     idx === gameBeat.at &&
     !hasRecorded &&
@@ -4156,7 +4365,11 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
           </View>
         ) : null}
 
-        {isManipulative && current && !isHandoff && !showTeaching ? (
+        {/* A manipulative renders its own card here, so its pill sits above
+            it; pad/MC items carry the pill inside the stage, over the stem. */}
+        {isManipulative ? framePillEl : null}
+
+        {isManipulative && current && !isHandoff && !showTeaching && !frameMoveVisible ? (
           // Reuse the shared manipulative item card verbatim — it grades through
           // the SAME `ui:submit` path a typed/MC answer uses (never a second
           // direct `submitAnswer` mutation — see `submitManipulativeAnswer`),
@@ -4176,7 +4389,18 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
             isLast={onBreakerItem || isLastItem(idx, items.length)}
             getSubmissionContext={breakerManipulativeSubmitContext}
             submitAnswerOverride={submitManipulativeAnswer}
-            onDontKnow={() => void onDontKnow()}
+            // On the framed item the card's own skip link IS "Not yet — show
+            // me" (same place, same onDontKnow path), never a second escape.
+            // A retry after the move is not a first look, so no escape at all
+            // (onDontKnow would no-op there anyway).
+            onDontKnow={
+              !isFirstAttempt(hasRecorded)
+                ? undefined
+                : frameAsking
+                  ? onNotYet
+                  : () => void onDontKnow()
+            }
+            dontKnowLabel={frameAsking ? QUESTION_FRAME_NOT_YET : undefined}
             online={online}
             onRequestClose={
               onBreakerItem ? finishBreakerItem : advance
@@ -4278,10 +4502,13 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
                 {current?.storyHook ? (
                   <Text style={styles.storyHook}>{current.storyHook}</Text>
                 ) : null}
+                {isManipulative ? null : framePillEl}
                 <StemCard
                   stem={current?.stem}
                   promptVisual={current?.promptVisual}
                   feedback={cardFeedback}
+                  stampLabel={frameNoted ? DONT_KNOW_STAMP_LABEL : undefined}
+                  stampAnnouncement={frameNoted ? DONT_KNOW_STAMP_ANNOUNCEMENT : undefined}
                   reduceMotion={reduceMotion}
                   styles={styles}
                   speakable={currentIsKinder}
@@ -4293,7 +4520,14 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
                   <WorkedSteps steps={current.workedSteps} />
                 ) : null}
 
-                {showTeaching && current ? (
+                {frameMoveVisible && launchpad ? (
+                  // "Can you already do this?" → not yet / a miss: the entry's
+                  // move, inline (the SAME atom renderer the example sheet
+                  // uses), then "Got it, let me try one" in the CTA lane.
+                  <View style={styles.frameMove}>
+                    <LaunchpadAtoms atoms={compactMoveAtoms(launchpad.entry.atoms)} />
+                  </View>
+                ) : showTeaching && current ? (
                   // Teach-as-action — after "I haven't learned this yet", ONE
                   // interactive faded step to finish (doing it IS the reading).
                   // Records nothing; degrades to reveal-only for a step-less item
@@ -4304,7 +4538,12 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
                     itemId={current.itemId}
                     styles={styles}
                     colors={colors}
-                    onReady={() => setDontKnowStepReady(true)}
+                    onReady={() => {
+                      setDontKnowStepReady(true);
+                      // The framed item's move was this step: attempting it
+                      // completes the frame (idempotent server-side).
+                      if (frameOnItem && frameStage === "move") runFrameWrites("answeredAfterMove");
+                    }}
                     onEscalate={onTalkItThrough}
                   />
                 ) : (
@@ -4338,6 +4577,23 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
                             : undefined
                         }
                       />
+                    ) : null}
+
+                    {/* The honest don't-know for the framed item — a quiet
+                        text link under the answer, not a competing button. */}
+                    {frameAsking &&
+                    phase === "answering" &&
+                    online &&
+                    isFirstAttempt(hasRecorded) &&
+                    (isTypedItem || isMcItem) ? (
+                      <Pressable
+                        onPress={onNotYet}
+                        disabled={busy}
+                        style={styles.linkBtn}
+                        accessibilityRole="button"
+                      >
+                        <Text style={styles.linkBtnText}>{QUESTION_FRAME_NOT_YET}</Text>
+                      </Pressable>
                     ) : null}
 
                     {phase === "feedback" && result ? (
@@ -4392,11 +4648,14 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
               // Hidden (not merely disabled) while offline — matching web's
               // `skipVisible` exactly: a documented no-op reads as confusing if
               // the affordance still looks pressable.
+              // On the framed item the escape is "Not yet — show me" under the
+              // answer instead (same onDontKnow path), so this pill steps aside.
               showSkip={
                 phase === "answering" &&
                 online &&
                 isFirstAttempt(hasRecorded) &&
-                (isTypedItem || isMcItem)
+                (isTypedItem || isMcItem) &&
+                !frameAsking
               }
               onDontKnow={() => void onDontKnow()}
               busy={busy}
@@ -4404,6 +4663,25 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
               colors={colors}
             />
 
+            {frameMoveVisible ? (
+              // The framed item after "Not yet" / a miss: the one way on is to
+              // try again — an ungraded Socratic retry of the SAME item (the
+              // first answer already recorded). A second miss then gets the
+              // ordinary stuck lane. Twin of web PracticeSession.
+              <View style={styles.ctaLane}>
+                <PracticePrimaryAction
+                  label={`${QUESTION_FRAME_TRY_ONE}  →`}
+                  accessibilityLabel={QUESTION_FRAME_TRY_ONE}
+                  disabled={busy}
+                  styles={styles}
+                  indicatorColor={colors.white}
+                  onAction={() => {
+                    setFrameStage("after");
+                    onRetry();
+                  }}
+                />
+              </View>
+            ) : (
             <CtaLane
               phase={phase}
               result={phase === "feedback" ? result : null}
@@ -4433,6 +4711,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
               styles={styles}
               colors={colors}
             />
+            )}
           </>
         )}
 
@@ -4524,6 +4803,10 @@ function NativeReprobeOffer({
 }) {
   const convex = useConvex();
   const submit = useMutation(api.practiceSkills.submitReprobe);
+  const ledger = useOfferLedger();
+  useEffect(() => {
+    ledger.shown("reprobe");
+  }, [ledger]);
   const [phase, setPhase] = useState<"offer" | "probing" | "submitting" | "result">("offer");
   const [probe, setProbe] = useState<ReprobeProbe | null>(null);
   const [answers, setAnswers] = useState<ReprobeAnswer[]>([]);
@@ -4562,10 +4845,11 @@ function NativeReprobeOffer({
   );
 
   const start = useCallback(() => {
+    ledger.settle("reprobe", "accepted");
     onStart?.();
     setPhase("probing");
     void advance([]);
-  }, [advance, onStart]);
+  }, [advance, onStart, ledger]);
 
   const onKey = useCallback((k: string) => {
     Haptics.selectionAsync().catch(() => {});
@@ -4650,7 +4934,14 @@ function NativeReprobeOffer({
         >
           <Text style={styles.primaryBtnText}>Jump ahead  →</Text>
         </Pressable>
-        <Pressable onPress={onResolved} style={styles.linkBtn} accessibilityRole="button">
+        <Pressable
+          onPress={() => {
+            ledger.settle("reprobe", "declined");
+            onResolved();
+          }}
+          style={styles.linkBtn}
+          accessibilityRole="button"
+        >
           <Text style={styles.linkBtnText}>Keep going here</Text>
         </Pressable>
       </View>
@@ -5613,12 +5904,14 @@ function FeedbackNote({
         {verdict === "accelerated" ? (
           <Text style={styles.noteAccelerated}>⚡  Two in a row, fast — skill earned!</Text>
         ) : null}
-        <View style={styles.profRow}>
-          <View style={[styles.profDot, { backgroundColor: profFill[result.proficiency] }]} />
-          <Text style={styles.profText}>
-            {result.skillLabel} · {MASTERY_LABELS[result.proficiency]}
-          </Text>
-        </View>
+        {result.provisional ? null : (
+          <View style={styles.profRow}>
+            <View style={[styles.profDot, { backgroundColor: profFill[result.proficiency] }]} />
+            <Text style={styles.profText}>
+              {result.skillLabel} · {MASTERY_LABELS[result.proficiency]}
+            </Text>
+          </View>
+        )}
         {/* Consolidation moment (P1e): this attempt turned the skill fluent. */}
         {comesBackText ? <Text style={styles.comesBackText}>{comesBackText}</Text> : null}
       </View>
@@ -6378,6 +6671,39 @@ function makeStyles(c: ColorSet) {
       alignSelf: "center",
       paddingHorizontal: 16,
       paddingTop: 12,
+    },
+    // "Can you already do this?" — the framed item's pill + inline move. Same
+    // warm amber as web's pill; a plain even border (no stripe/gradient).
+    framePillRow: {
+      width: "100%",
+      maxWidth: COLUMN_MAX_WIDTH,
+      alignSelf: "center",
+      alignItems: "center",
+      paddingTop: 8,
+      paddingBottom: 8,
+    },
+    framePill: {
+      backgroundColor: "#fff4d6",
+      borderWidth: 1,
+      borderColor: "#f0d58a",
+      borderRadius: 999,
+      paddingHorizontal: 12,
+      paddingVertical: 4,
+    },
+    framePillText: {
+      fontFamily: fonts.semibold,
+      fontSize: 13,
+      color: "#7a5a12",
+    },
+    frameMove: {
+      width: "100%",
+      marginTop: 12,
+      backgroundColor: c.bg,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 14,
+      padding: 16,
+      gap: 12,
     },
     domainChip: {
       alignSelf: "flex-start",

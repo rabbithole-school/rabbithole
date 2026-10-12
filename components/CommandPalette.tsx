@@ -202,6 +202,7 @@ export function CommandPalette({
   institutionName,
   institutionSearchScope,
   institutionScope,
+  canSearchScholars = true,
   canSearchSkills,
   canSearchCurriculum,
 }: {
@@ -217,6 +218,9 @@ export function CommandPalette({
   institutionSearchScope?: ScholarSearchScope;
   /** URL scope forwarded to institution-aware search queries. */
   institutionScope?: string;
+  /** Whether the caller may read the scholar directory (scholar-admin). The
+   *  directory query throws for anyone else, so it is skipped for them. */
+  canSearchScholars?: boolean;
   /** Whether the current staff role may use the teacher-only skills search. */
   canSearchSkills: boolean;
   /** Whether the caller has curriculum access — i.e. a Units tab to land on. */
@@ -228,7 +232,7 @@ export function CommandPalette({
   const scholars = (
     useQuery(
       api.users.listDirectoryScholars,
-      isOpen
+      isOpen && canSearchScholars
         ? { institutionScope: institutionScope || undefined }
         : "skip",
     ) ?? EMPTY_SCHOLARS

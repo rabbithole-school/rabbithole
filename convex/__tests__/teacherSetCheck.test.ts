@@ -288,9 +288,13 @@ describe("applyCheckResult — scan evidence excerpt", () => {
       await ctx.db.patch(deliverableId, { portfolioItemId: itemId });
     });
 
+    const { submittedAt: assessedSubmittedAt } = (await t.run((ctx) =>
+      ctx.db.get(deliverableId),
+    ))!;
     await t.run(async (ctx) =>
       ctx.runMutation(internal.deliverables.applyCheckResult, {
         deliverableId,
+        assessedSubmittedAt,
         verdicts: [],
         overall: "full",
         feedback: "Solid work.",

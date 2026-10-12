@@ -1,9 +1,15 @@
 import { convexTest } from "convex-test";
+import { PNG } from "pngjs";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
-import { buildThemeIconPrompt, parseSimulatorSpeciesLabel } from "../lib/themeIconArt";
+import {
+  appCharmThemeLabel,
+  buildThemeIconPrompt,
+  isAppCharmThemeLabel,
+  parseSimulatorSpeciesLabel,
+} from "../lib/themeIconArt";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -39,14 +45,79 @@ async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
   });
 }
 
+/** A 1x1 fully transparent PNG — a real, decodable image, which the pipeline
+ *  now requires: an undecodable response must fail the row rather than publish
+ *  bytes no surface can render. */
+function tinyTransparentPngBase64(): string {
+  const png = new PNG({ width: 1, height: 1 });
+  png.data[0] = 0;
+  png.data[1] = 0;
+  png.data[2] = 0;
+  png.data[3] = 0;
+  return PNG.sync.write(png).toString("base64");
+}
+
+/** A non-retryable client error — the way to make ONE row fail fast. */
+function imagesApiBadRequest() {
+  return {
+    ok: false,
+    status: 400,
+    text: async () => JSON.stringify({ error: { message: "invalid prompt" } }),
+  };
+}
+
+/** One successful Images-API response carrying `png`. */
+function imagesApiOk(png: string) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ data: [{ b64_json: png }] }),
+    text: async () => "",
+  };
+}
+
+/**
+ * Run an action whose provider call backs off, WITHOUT sleeping for real — the
+ * merge gate runs four vitest shards on a shared, load-starved host, where a
+ * test that burns seconds of wall clock is exactly the kind that trips the 5s
+ * timeout and durably excludes a candidate.
+ */
+async function withoutWaiting<T>(start: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  try {
+    const pending = start();
+    await vi.advanceTimersByTimeAsync(120_000);
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+/** A 429 that names its own cooldown, the way the Images API does. */
+function imagesApiRateLimited(retryAfter = "10ms") {
+  return {
+    ok: false,
+    status: 429,
+    text: async () =>
+      JSON.stringify({
+        error: {
+          message: `Rate limit reached for gpt-image-2.5-flare on input-images per min: Limit 5, Used 5, Requested 1. Please try again in ${retryAfter}.`,
+        },
+      }),
+  };
+}
+
 // ── buildThemeIconPrompt: pure, deterministic ────────────────────────────────
 
 describe("buildThemeIconPrompt", () => {
-  test("embeds the label, forces a wordless small-legible icon on green screen", () => {
+  test("embeds the label and forces a wordless, small-legible, backdrop-free icon", () => {
     const p = buildThemeIconPrompt("rocket ship");
     expect(p).toContain("rocket ship");
     expect(p).toContain("NO text");
-    expect(p).toContain("#00B140"); // the chroma-key green
+    // The sprite is composited into a grid cell, so a painted backdrop or a
+    // baked-in contact shadow would read as dirt on the grid.
+    expect(p).toContain("TRANSPARENT");
+    expect(p).toContain("no drop shadow");
     expect(p.toLowerCase()).toContain("silhouette");
   });
 
@@ -64,9 +135,9 @@ describe("buildThemeIconPrompt", () => {
     expect(p).toContain("FACING LEFT");
     expect(p.toLowerCase()).toContain("isometric");
     expect(p.toLowerCase()).toContain("three-quarter");
-    // Same guards as the icon: single-subject, wordless, green screen.
+    // Same guards as the icon: single-subject, wordless, no backdrop.
     expect(p).toContain("NO text");
-    expect(p).toContain("#00B140");
+    expect(p).toContain("TRANSPARENT");
     // But NOT the flat face-on manipulative framing.
     expect(p).not.toContain("Face-on");
     // The setting is context, never drawn as a background.
@@ -91,6 +162,19 @@ describe("parseSimulatorSpeciesLabel", () => {
     expect(parseSimulatorSpeciesLabel("world:fish")).toEqual({
       settingPhrase: "",
       species: "fish",
+    });
+  });
+
+  describe("app charm cache keys", () => {
+    test("selects the flat or isometric prompt branch", () => {
+      const flat = appCharmThemeLabel("Parrotfish", "flat");
+      const isometric = appCharmThemeLabel("Parrotfish", "isometric");
+      expect(flat).toBe("app:flat:Parrotfish");
+      expect(isometric).toBe("world:app asset:Parrotfish");
+      expect(isAppCharmThemeLabel(flat)).toBe(true);
+      expect(isAppCharmThemeLabel(isometric)).toBe(true);
+      expect(buildThemeIconPrompt(flat)).toContain("Face-on");
+      expect(buildThemeIconPrompt(isometric)).toContain("FACING LEFT");
     });
   });
 });
@@ -169,6 +253,23 @@ describe("theme icon resolver", () => {
     });
     expect(hidden?.hidden).toBe(true);
     expect(hidden?.url).toBeNull();
+  });
+
+  test("app-only charm keys stay out of the curator cache list", async () => {
+    const t = convexTest(schema, modules);
+    const asUser = await withUser(t, await seedUser(t));
+    await asUser.mutation(api.manipulativeThemeIcons.ensure, { label: "acorn" });
+    await t.run((ctx) =>
+      ctx.db.insert("manipulativeThemeIcons", {
+        label: "app:flat:parrotfish",
+        displayLabel: "parrotfish",
+        status: "pending",
+        createdAt: Date.now(),
+      }),
+    );
+
+    const list = await asUser.query(api.manipulativeThemeIcons.listAll, {});
+    expect(list.map((row) => row.label)).toEqual(["acorn"]);
   });
 });
 
@@ -252,7 +353,7 @@ describe("override mutations are teacher-gated", () => {
 
 describe("species-icon generation routing (action layer)", () => {
   // The camera directive must reach the actual generation REQUEST end-to-end:
-  // generateThemeIcon builds the prompt from the row and sends it to Gemini,
+  // generateThemeIcon builds the prompt from the row and sends it to the model,
   // then PERSISTS the exact prompt on the row (setArt). We stub fetch to return
   // a trivial image and read the stored `row.prompt` — keyed by row id, so this
   // is immune to any cross-test global-stub ordering (unlike capturing the
@@ -269,29 +370,11 @@ describe("species-icon generation routing (action layer)", () => {
         createdAt: Date.now(),
       }),
     );
-    vi.stubEnv("GEMINI_API_KEY", "test-key");
-    // A minimal inline image. The chroma-key post-process will reject these few
-    // bytes and the action falls back to storing them raw — either way it
-    // reaches setArt(prompt), which is all this test asserts on.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          candidates: [
-            {
-              content: {
-                parts: [
-                  { inlineData: { mimeType: "image/png", data: "iVBORw0KGgo=" } },
-                ],
-              },
-            },
-          ],
-        }),
-        text: async () => "",
-      })),
-    );
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    // A minimal image. The downscale rejects these few bytes and the action
+    // falls back to storing them raw — either way it reaches setArt(prompt),
+    // which is all this test asserts on.
+    vi.stubGlobal("fetch", vi.fn(async () => imagesApiOk(tinyTransparentPngBase64())));
     await t.action(internal.manipulativeThemeIconActions.generateThemeIcon, {
       id,
     });
@@ -327,40 +410,24 @@ describe("species-icon generation routing (action layer)", () => {
 });
 
 describe("theme icon generation failures", () => {
-  test("model-pinned batches continue after one label throws", async () => {
+  test("re-mint batches continue after one label throws", async () => {
     const t = convexTest(schema, modules);
-    vi.stubEnv("GEMINI_API_KEY", "test-key");
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
     vi.stubGlobal(
       "fetch",
       vi
         .fn()
-        .mockRejectedValueOnce(new Error("provider unavailable"))
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({
-            candidates: [
-              {
-                content: {
-                  parts: [
-                    { inlineData: { mimeType: "image/png", data: "iVBORw0KGgo=" } },
-                  ],
-                },
-              },
-            ],
-          }),
-          text: async () => "",
-        }),
+        .mockResolvedValueOnce(imagesApiBadRequest())
+        .mockResolvedValueOnce(imagesApiOk(tinyTransparentPngBase64())),
     );
 
     const result = await t.action(
-      internal.manipulativeThemeIconActions.generateLabelsWithModel,
+      internal.manipulativeThemeIconActions.regenerateLabels,
       {
         labels: [
           "world:coral reef ecosystem:fish",
           "world:coral reef ecosystem:shark",
         ],
-        model: "gemini-3.1-flash-image-preview",
       },
     );
 
@@ -372,7 +439,7 @@ describe("theme icon generation failures", () => {
       {
         label: "world:coral reef ecosystem:shark",
         status: "ready",
-        model: "gemini-3.1-flash-image-preview",
+        model: "gpt-image-2.5-flare",
       },
     ]);
     const rows = await t.run((ctx) =>
@@ -382,7 +449,7 @@ describe("theme icon generation failures", () => {
     expect(rows.find((row) => row.label.endsWith(":shark"))?.status).toBe("ready");
   });
 
-  test("falls back on primary quota exhaustion and records the actual model", async () => {
+  test("waits out a rate limit and publishes on the retry", async () => {
     const t = convexTest(schema, modules);
     const id = await t.run((ctx) =>
       ctx.db.insert("manipulativeThemeIcons", {
@@ -392,63 +459,30 @@ describe("theme icon generation failures", () => {
         createdAt: Date.now(),
       }),
     );
-    vi.stubEnv("GEMINI_API_KEY", "test-key");
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
     vi.stubGlobal(
       "fetch",
       vi
         .fn()
-        .mockResolvedValueOnce({
-          ok: false,
-          status: 429,
-          text: async () =>
-            JSON.stringify({
-              error: {
-                code: 429,
-                status: "RESOURCE_EXHAUSTED",
-                message: "GenerateRequestsPerDayPerProjectPerModel",
-              },
-            }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({
-            candidates: [
-              {
-                content: {
-                  parts: [
-                    { inlineData: { mimeType: "image/png", data: "iVBORw0KGgo=" } },
-                  ],
-                },
-              },
-            ],
-          }),
-          text: async () => "",
-        }),
+        .mockResolvedValueOnce(imagesApiRateLimited())
+        .mockResolvedValueOnce(imagesApiOk(tinyTransparentPngBase64())),
     );
 
-    const result = await t.action(
-      internal.manipulativeThemeIconActions.generateThemeIcon,
-      { id },
+    // The org's images-per-minute allowance is small, so a 429 is an ordinary
+    // event when several new labels resolve at once — the call waits out the
+    // cooldown the response names instead of leaving the cell on a plain shape.
+    const result = await withoutWaiting(() =>
+      t.action(internal.manipulativeThemeIconActions.generateThemeIcon, { id }),
     );
 
-    expect(result).toEqual({
-      status: "ready",
-      model: "gemini-3.1-flash-image-preview",
-    });
+    expect(result).toEqual({ status: "ready", model: "gpt-image-2.5-flare" });
     const row = await t.run((ctx) => ctx.db.get(id));
     expect(row?.status).toBe("ready");
-    expect(row?.generationModel).toBe("gemini-3.1-flash-image-preview");
+    expect(row?.generationModel).toBe("gpt-image-2.5-flare");
     expect(fetch).toHaveBeenCalledTimes(2);
-    expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain(
-      "gemini-3-pro-image-preview",
-    );
-    expect(String(vi.mocked(fetch).mock.calls[1]?.[0])).toContain(
-      "gemini-3.1-flash-image-preview",
-    );
   });
 
-  test("marks the row failed when the image provider throws", async () => {
+  test("marks the row failed when the provider rejects the request", async () => {
     const t = convexTest(schema, modules);
     const id = await t.run((ctx) =>
       ctx.db.insert("manipulativeThemeIcons", {
@@ -458,8 +492,8 @@ describe("theme icon generation failures", () => {
         createdAt: Date.now(),
       }),
     );
-    vi.stubEnv("GEMINI_API_KEY", "test-key");
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("provider unavailable")));
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(imagesApiBadRequest()));
 
     await expect(
       t.action(internal.manipulativeThemeIconActions.generateThemeIcon, { id }),

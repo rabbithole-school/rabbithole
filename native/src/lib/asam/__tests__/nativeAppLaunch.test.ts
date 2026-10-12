@@ -1,3 +1,4 @@
+import { handoffMessage, handoffTitle } from "../nativeAppLaunch";
 import { describe, it, expect } from "vitest";
 
 import {
@@ -199,5 +200,81 @@ describe("decideNativeLaunchWatch", () => {
       next: "active",
     });
     expect(step.action).toBe("none");
+  });
+});
+
+describe("the watch survives a superseded launch (kiosk-escape regression)", () => {
+  // The hole finding #1 found: a Home-Screen handoff leaves the scholar INSIDE
+  // Rabbithole, free to tap a second tile. If that second launch aborts before
+  // its commit point, a generation-guarded timer from the FIRST launch wakes up
+  // stale and exits without restoring — ASAM stays released with nothing left
+  // to re-arm it. The state machine itself is not what broke; the fix is that
+  // the timer is guarded by this state rather than by a launch generation, so
+  // these assertions pin the contract the armer now relies on.
+  it("still owes a restore after a release with no background", () => {
+    const afterRelease = { mode: "watching" as const, sawBackground: false };
+    // Whoever fires the timer — original launch or a re-armed one — restores.
+    expect(decideNativeLaunchWatch(afterRelease, { kind: "timer" }).action).toBe(
+      "restore",
+    );
+  });
+
+  it("cannot double-restore once it has restored", () => {
+    const afterRelease = { mode: "watching" as const, sawBackground: false };
+    const first = decideNativeLaunchWatch(afterRelease, { kind: "timer" });
+    expect(first.action).toBe("restore");
+    expect(first.mode).toBe("idle");
+    // A second timer (a re-arm racing the original) must be inert — this is
+    // what makes dropping the generation guard safe.
+    const second = decideNativeLaunchWatch(
+      { mode: first.mode, sawBackground: first.sawBackground },
+      { kind: "timer" },
+    );
+    expect(second.action).toBe("none");
+  });
+
+  it("hands the restore to the re-entry path once the scholar really leaves", () => {
+    const left = decideNativeLaunchWatch(
+      { mode: "watching", sawBackground: false },
+      { kind: "appstate", previous: "active", next: "background" },
+    );
+    expect(left.sawBackground).toBe(true);
+    // A timer firing while they are inside the other app must NOT re-enter
+    // ASAM from the background.
+    expect(
+      decideNativeLaunchWatch(
+        { mode: left.mode, sawBackground: left.sawBackground },
+        { kind: "timer" },
+      ).action,
+    ).toBe("none");
+    expect(
+      decideNativeLaunchWatch(
+        { mode: left.mode, sawBackground: left.sawBackground },
+        { kind: "appstate", previous: "background", next: "active" },
+      ).action,
+    ).toBe("restore");
+  });
+});
+
+describe("handoff copy makes no claim it cannot back", () => {
+  // This path has no readiness proof, so the copy must work whether or not the
+  // app has landed yet. A regression here is not cosmetic: it is telling a
+  // six-year-old something false about their own iPad.
+  it("instructs rather than asserting the app is already there", () => {
+    expect(handoffTitle("Mentava Reading")).toBe(
+      "Open Mentava Reading from your Home Screen",
+    );
+    expect(handoffTitle("Mentava Reading")).not.toMatch(/\bis on\b/);
+  });
+
+  it("names the gesture the fleet iPads actually have", () => {
+    const body = handoffMessage("Mentava Reading");
+    expect(body).toMatch(/swipe up/i);
+    // The fleet is iPad A16 — no Home button to press.
+    expect(body).not.toMatch(/home button/i);
+  });
+
+  it("promises no specific duration", () => {
+    expect(handoffMessage("Mentava Reading")).not.toMatch(/\d+\s*(sec|second|min)/i);
   });
 });

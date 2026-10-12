@@ -31,6 +31,24 @@ describe("parent message email", () => {
     expect(rendered.html).not.toContain('href="javascript:');
   });
 
+  test("renders a labelled link as an anchor and keeps its URL in plain text", () => {
+    const rendered = renderParentMessage({
+      teacherName: "Lehua Torres",
+      threadSubjectBody: "[Book a conference](https://calendar.app.google/abc)",
+      body: "Sign up: [Book a conference](https://calendar.app.google/abc?a=1&b=2)",
+      portalUrl: "https://example.com/parent",
+      canReplyByEmail: true,
+    });
+
+    expect(rendered.html).toContain(
+      '<a href="https://calendar.app.google/abc?a=1&amp;b=2" style="color:#1155cc;text-decoration:underline;">Book a conference</a>',
+    );
+    expect(rendered.text).toContain(
+      "Sign up: Book a conference (https://calendar.app.google/abc?a=1&b=2)",
+    );
+    expect(rendered.subject).toBe("Book a conference");
+  });
+
   test("uses the truncated first message as the subject and renders like a normal email", () => {
     const rendered = renderParentMessage({
       teacherName: "Alex Rivera",

@@ -24,6 +24,7 @@ import {
   MessageConversationRow,
   MessageThreadPane,
   MessageWorkspace,
+  threadPreview,
 } from "@/components/messaging/MessageWorkspace";
 import {
   MessageAttachmentPicker,
@@ -130,7 +131,10 @@ export function ParentMessages({
                         ? `about ${thread.scholarName}`
                         : undefined
                     }
-                    preview={`${thread.lastAuthorType === "parent" ? "You: " : ""}${thread.lastPreview}`}
+                    preview={threadPreview(
+                      thread.lastPreview,
+                      thread.lastMessageAuthorName,
+                    )}
                     timestamp={formatRelative(thread.lastMessageAt)}
                     href={threadHref(thread._id)}
                     onNavigate={() => setComposing(false)}

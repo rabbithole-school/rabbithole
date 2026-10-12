@@ -8,7 +8,7 @@ import { runSandboxedCheck as runSandbox, SANDBOX_MAX_RESULT_CHARS } from "./lib
  * Executor for the tutor's `check_work` tool. Runs a short, throwaway snippet of
  * the TUTOR'S OWN verification code inside a locked-down QuickJS WASM VM (see
  * convex/lib/sandbox.ts for the caps + the why). Node runtime because the VM is
- * a WASM module; the /project-stream HTTP action (default runtime) dispatches
+ * a WASM module; the /session-stream HTTP action (default runtime) dispatches
  * here via ctx.runAction(internal.sandboxActions.runSandboxedCheck, …).
  *
  * Internal only — never exposed to a client, and it takes no scholar data: it

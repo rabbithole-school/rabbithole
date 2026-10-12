@@ -98,7 +98,7 @@ export const toggle = authedMutation({
       audience: "institution",
       title: `${scholarName} gave a thumbs-down to a Rabbithole response`,
       body: [
-        `On *${session.title ?? "a session"}*:`,
+        `On **${session.title ?? "a session"}**:`,
         `> ${snippet}`,
         reason ? `Their reason: ${reason}` : "(no reason given — one tap)",
       ].join("\n"),

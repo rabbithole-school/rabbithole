@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   captureSessionIsReusable,
+  captureUploadPause,
   emptyCaptureStationState,
   pendingUploadCannotRetry,
   resetCaptureStationState,
@@ -43,6 +44,54 @@ describe("capture station state", () => {
     expect(pendingUploadCannotRetry(new Error("Network unavailable"))).toBe(
       false,
     );
+  });
+
+  test("pauses capture until the minute the server accepts uploads again", () => {
+    const tz = "Pacific/Honolulu";
+    for (const kind of ["upload_pending_quota", "upload_abandoned_quota"]) {
+      const pause = captureUploadPause(
+        { data: { kind, retryAt: Date.parse("2026-08-18T21:01:37.000Z") } },
+        tz,
+      );
+      // Rounded up: a pause shown as "until 11:01am" would still refuse at
+      // 11:01:05.
+      expect(pause?.until).toBe(Date.parse("2026-08-18T21:02:00.000Z"));
+      expect(pause?.message).toContain("11:02am");
+      expect(pause?.message).not.toMatch(/connection/i);
+    }
+    expect(
+      captureUploadPause(
+        {
+          data: {
+            kind: "upload_abandoned_quota",
+            retryAt: Date.parse("2026-08-18T21:02:00.000Z"),
+          },
+        },
+        tz,
+      )?.until,
+    ).toBe(Date.parse("2026-08-18T21:02:00.000Z"));
+  });
+
+  test("a pause with no usable retry time names no time and holds nothing", () => {
+    for (const retryAt of [
+      undefined,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      1e16,
+      "2026-08-18T21:02:00.000Z",
+    ]) {
+      const pause = captureUploadPause({
+        data: { kind: "upload_abandoned_quota", retryAt },
+      });
+      expect(pause?.until).toBeNull();
+      expect(pause?.message).not.toMatch(/\d:\d\d|undefined|NaN|Infinity/);
+    }
+  });
+
+  test("leaves every other upload failure to the caller", () => {
+    expect(captureUploadPause({ data: { kind: "upload_url_quota" } })).toBeNull();
+    expect(captureUploadPause(new Error("Network request failed"))).toBeNull();
+    expect(captureUploadPause(null)).toBeNull();
   });
 
   test("restores a persisted team, dropping ids no longer on the roster", () => {

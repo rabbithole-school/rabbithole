@@ -76,6 +76,7 @@ import {
   breakerLegacyRecovery,
 } from "../../vendor/shared/practiceLoop";
 import {
+  breakerFreshItemOnScreen,
   breakerEasyItemMatchesCommand,
   isDurableCommand,
   practiceReduce,
@@ -132,6 +133,13 @@ export type PracticeHostBindings = {
   onDispatchCompleted: (receipts: unknown) => void;
   /** Rehearsal's injected client grader. Present only in rehearse mode. */
   gradeLocally?: (entry: OutboxAnswer) => Promise<unknown>;
+  /** The render payload for a provisional fact verdict, installed through
+   *  `onGrade` before the server's own grade replaces it. */
+  provisionalGrade: (entry: OutboxAnswer, correct: boolean) => unknown;
+  /** Run the Next / Try again held while that verdict was confirming. */
+  onHeld: (action: "advance" | "retry") => void;
+  /** That verdict's answer was lost; drop what was rendered and logged. */
+  onProvisionalRetracted: (clientEventId: string) => void;
   /**
    * Native-only extension: an entry was durably queued rather than graded
    * (an offline submit, or a live one that failed ambiguously and fell back
@@ -177,6 +185,8 @@ type MachineHostAction =
 
 type PracticeCommandExecutorDependencies = {
   boundRef: { current: PracticeHostBindings };
+  /** The latest committed machine state (see its hook-side comment). */
+  machineRef: { current: PracticeState };
   online: boolean;
   dispatch: (event: PracticeEvent) => void;
   clearDrainRetry: () => void;
@@ -231,6 +241,7 @@ async function executePracticeCommand(
 ): Promise<void> {
   const {
     boundRef,
+    machineRef,
     clearDrainRetry,
     completeTuneup,
     convex,
@@ -305,6 +316,7 @@ async function executePracticeCommand(
         ? { prepareBreakerRepair: args.prepareBreakerRepair }
         : {}),
       ...(args.dontKnow !== undefined ? { dontKnow: args.dontKnow } : {}),
+      ...(args.servedLane !== undefined ? { servedLane: args.servedLane } : {}),
       ...(args.latencyMs !== undefined ? { firstKeyMs: args.latencyMs } : {}),
       ...(args.thinkTimeMs !== undefined ? { elapsedMs: args.thinkTimeMs } : {}),
     };
@@ -657,7 +669,11 @@ async function executePracticeCommand(
           dispatch({ type: "server:breakerFreshUnavailable", id: command.id });
           return;
         }
-        host.onBreakerItem(item, "fresh");
+        // A re-issued serve of the item already on screen must not
+        // reinstall it: that would wipe an in-flight answer (TRA-376).
+        if (!breakerFreshItemOnScreen(machineRef.current, item.itemId)) {
+          host.onBreakerItem(item, "fresh");
+        }
         dispatch({
           type: "server:breakerFreshServed",
           id: command.id,
@@ -777,6 +793,34 @@ async function executePracticeCommand(
       return;
     }
 
+    case "gradeProvisionally": {
+      // Synchronous on purpose: the verdict is the fact's own arithmetic, so
+      // it lands in the same tick the scholar tapped submit. The machine then
+      // emits the real `submitAnswer`, whose result re-installs the server's
+      // grade over this one.
+      host.onGrade(
+        host.provisionalGrade(command.entry, command.correct),
+        command.entry,
+      );
+      dispatch({
+        type: "local:provisionalGraded",
+        id: command.id,
+        correct: command.correct,
+        entry: command.entry,
+      });
+      return;
+    }
+
+    case "releaseHeld":
+      host.onHeld(command.action);
+      return;
+
+    case "retractProvisional":
+
+      host.onProvisionalRetracted(command.clientEventId);
+
+      return;
+
     default:
       return;
   }
@@ -836,6 +880,12 @@ export function usePracticeMachine(
 
   const boundRef = host;
   const state = hostState.machine;
+  // The latest committed machine state, for an executor that has awaited a
+  // server call and must decide against the state as it is NOW (TRA-376).
+  const machineRef = useRef(state);
+  useEffect(() => {
+    machineRef.current = state;
+  }, [state]);
   const onlineAtMountRef = useRef(options.online);
   const coordinator = useMemo(
     () => (scholarId ? acquirePracticeCoordinator(String(scholarId)) : null),
@@ -946,6 +996,7 @@ export function usePracticeMachine(
     (command: PracticeCommand) =>
       executePracticeCommand(command, {
         boundRef,
+        machineRef,
         online: options.online,
         dispatch,
         clearDrainRetry,
@@ -1009,7 +1060,8 @@ export function usePracticeMachine(
             isDurableCommand(command) ||
             command.kind === "loadRun" ||
             command.kind === "openHandoff" ||
-            command.kind === "gradeLocally";
+            command.kind === "gradeLocally" ||
+            command.kind === "gradeProvisionally";
           if (!replayForCurrentMount) {
             dispatch({ type: "server:commandFailed", id });
             continue;

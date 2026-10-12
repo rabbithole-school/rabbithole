@@ -22,6 +22,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { CameraCaptureDialog } from "@/components/CameraCaptureDialog";
 import { FlairChips } from "./FlairChips";
 import { toaster } from "@/lib/toaster";
+import { capPhotoForUpload } from "@/lib/downscalePhoto";
 
 /**
  * Photo-kind deliverable surface (Phase 1). Replaces the generic "No documents
@@ -64,10 +65,7 @@ export function PhotoDeliverablePanel({
     sessionId,
     activityId,
   });
-  const fileUrl = useQuery(
-    api.files.getUrl,
-    existing?.fileStorageId ? { storageId: existing.fileStorageId } : "skip",
-  );
+  const fileUrl = existing?.fileUrl ?? null;
 
   const generateUploadUrl = useMutation(api.files.generateUploadUrl);
   const submit = useMutation(api.deliverables.submit);
@@ -89,11 +87,12 @@ export function PhotoDeliverablePanel({
     if (uploading) return;
     setUploading(true);
     try {
+      const photo = await capPhotoForUpload(file);
       const uploadUrl = await generateUploadUrl();
       const res = await fetch(uploadUrl, {
         method: "POST",
-        headers: { "Content-Type": file.type },
-        body: file,
+        headers: { "Content-Type": photo.type || file.type },
+        body: photo,
       });
       if (!res.ok) throw new Error(`Upload failed (${res.status})`);
       const { storageId } = (await res.json()) as { storageId: Id<"_storage"> };

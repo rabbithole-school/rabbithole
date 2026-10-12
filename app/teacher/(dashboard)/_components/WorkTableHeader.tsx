@@ -107,7 +107,7 @@ export function HomeworkTableHeader({ reservedLines }: { reservedLines: number }
   return (
     <WorkTableHeader
       title="Homework"
-      subtitle={[{ text: `Tonight's list · ${dayLabel}`, tone: "strong" }]}
+      subtitle={[{ text: `Due · done today · next question · ${dayLabel}`, tone: "strong" }]}
       reservedLines={reservedLines}
     />
   );

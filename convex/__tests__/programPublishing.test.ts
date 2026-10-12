@@ -232,9 +232,7 @@ describe("program publishing", () => {
         groupId,
         query: "solar",
       }),
-    ).toEqual([
-      { kind: "unit", unitId, unitTitle: "Solar engineering" },
-    ]);
+    ).toEqual([{ kind: "unit", unitId, unitTitle: "Solar engineering" }]);
     expect(
       await asSpecialist.query(api.masterSchedule.searchProgramCurriculum, {
         groupId,
@@ -267,6 +265,177 @@ describe("program publishing", () => {
         materialCount: 1,
       },
     ]);
+  });
+
+  test("offers only units the program group can schedule, matching search and the same-school guard", async () => {
+    const t = convexTest(schema, modules);
+    const primarySchool = await seedTestInstitution(t, {
+      slug: "program-units-primary",
+      isPrimary: true,
+    });
+    const groupSchool = await seedTestInstitution(t, {
+      slug: "program-units-group-school",
+    });
+    const author = await seedStaffWithMembership(t, {
+      institutionId: primarySchool,
+      role: "teacher",
+    });
+    // Program staff: a staff member (not a global curriculum role) on staff
+    // and editing curriculum at BOTH schools, publishing to one group.
+    const coach = await seedStaffWithMembership(t, {
+      institutionId: groupSchool,
+      role: "staff",
+    });
+    await grantInstitutionMembership(t, coach, primarySchool, "staff");
+    await giveCurriculumAccess(t, coach, groupSchool);
+    await giveCurriculumAccess(t, coach, primarySchool);
+    const scholar = await seedScholarInInstitution(t, {
+      institutionId: groupSchool,
+    });
+    const groupId = await t.run((ctx) =>
+      ctx.db.insert("scholarGroups", {
+        teacherId: author,
+        institutionId: groupSchool,
+        name: "Robotics",
+        participation: "includes_program_guests",
+        scholarIds: [scholar],
+      }),
+    );
+    await grantProgramPublish(t, {
+      userId: coach,
+      institutionId: groupSchool,
+      groupId,
+    });
+    const schedulable = await seedActivity(t, author, groupSchool, "Gears");
+    const otherSchool = await seedActivity(t, author, primarySchool, "Gearboxes");
+    await t.run(async (ctx) => {
+      await ctx.db.insert("units", {
+        teacherId: author,
+        institutionId: groupSchool,
+        title: "Gear drafts",
+        isActive: false,
+      });
+      // Unstamped legacy unit: implicitly the primary school's, never the
+      // group's, and refused by the guard's explicit-stamp check.
+      await ctx.db.insert("units", {
+        teacherId: author,
+        title: "Gear legacy",
+        isActive: true,
+      });
+      // A scholar's Independent Study unit is stamped to the group's school
+      // too, but is their own work — never program curriculum.
+      await ctx.db.insert("units", {
+        teacherId: scholar,
+        authorScholarId: scholar,
+        institutionId: groupSchool,
+        title: "Gear quest",
+        isActive: true,
+      });
+    });
+    const asCoach = await asUser(t, coach);
+
+    // The coach's general curriculum list spans both schools…
+    const everyUnit = await asCoach.query(api.units.list, { scope: "all" });
+    expect(everyUnit.map((unit) => unit.title)).toEqual(
+      expect.arrayContaining(["Gearboxes", "Gear legacy", "Gears"]),
+    );
+    // …but the program column offers only the group's own active units,
+    const programUnits = await asCoach.query(api.units.list, {
+      programGroupId: groupId,
+    });
+    expect(programUnits.map((unit) => unit._id)).toEqual([schedulable.unitId]);
+    // the same set the program search returns,
+    const searched = await asCoach.query(
+      api.masterSchedule.searchProgramCurriculum,
+      { groupId, query: "gear" },
+    );
+    expect(
+      [...new Set(searched.map((hit) => hit.unitId))],
+    ).toEqual([schedulable.unitId]);
+    expect(
+      await asCoach.query(api.masterSchedule.programGroupCurriculumAccess, {
+        groupId,
+      }),
+    ).toEqual({ hasCurriculumAccess: true });
+    // and exactly what the server guard accepts.
+    await expect(
+      asCoach.mutation(api.assignments.assignProgramActivity, {
+        activityId: otherSchool.activityId,
+        scholarGroupId: groupId,
+      }),
+    ).rejects.toThrow(/same school/i);
+    await expect(
+      asCoach.mutation(api.assignments.assignProgramActivity, {
+        activityId: schedulable.activityId,
+        scholarGroupId: groupId,
+      }),
+    ).resolves.toMatchObject({ shared: true });
+
+    // A publisher without curriculum access at the group's school can schedule
+    // no existing unit, so neither surface offers one.
+    const publisherOnly = await seedStaffWithMembership(t, {
+      institutionId: groupSchool,
+      role: "staff",
+    });
+    await grantProgramPublish(t, {
+      userId: publisherOnly,
+      institutionId: groupSchool,
+      groupId,
+    });
+    const asPublisherOnly = await asUser(t, publisherOnly);
+    expect(
+      await asPublisherOnly.query(api.units.list, { programGroupId: groupId }),
+    ).toEqual([]);
+    expect(
+      await asPublisherOnly.query(api.masterSchedule.searchProgramCurriculum, {
+        groupId,
+        query: "gear",
+      }),
+    ).toEqual([]);
+    // The unit column's own status check names the reason (a caller lacking
+    // curriculum access gets [] from search too, indistinguishable from "no
+    // matches" — this is the query the dialog uses instead).
+    expect(
+      await asPublisherOnly.query(api.masterSchedule.programGroupCurriculumAccess, {
+        groupId,
+      }),
+    ).toEqual({ hasCurriculumAccess: false, institutionName: "Fixture School" });
+    // Nor does the general list hand this non-primary staffer the primary
+    // school's catalog (it used to fall back to the primary institution).
+    expect(
+      (await asPublisherOnly.query(api.units.list, {})).map((unit) => unit.title),
+    ).toEqual(["Gears"]);
+
+    // An older staff membership at a SUSPENDED school does not become the
+    // scope either — the caller stays on their active school's catalog.
+    const suspendedSchool = await seedTestInstitution(t, {
+      slug: "program-units-suspended",
+    });
+    const movedStaffer = await seedStaffWithMembership(t, {
+      institutionId: suspendedSchool,
+      role: "staff",
+    });
+    await grantInstitutionMembership(t, movedStaffer, groupSchool, "staff");
+    await t.run(async (ctx) => {
+      await ctx.db.insert("units", {
+        teacherId: author,
+        institutionId: suspendedSchool,
+        title: "Suspended catalog",
+        isActive: true,
+      });
+      await ctx.db.patch(suspendedSchool, { disabledAt: Date.now() });
+    });
+    expect(
+      (await (await asUser(t, movedStaffer)).query(api.units.list, {})).map(
+        (unit) => unit.title,
+      ),
+    ).toEqual(["Gears"]);
+
+    // A group the caller does not publish to is refused outright.
+    const author2 = await asUser(t, author);
+    await expect(
+      author2.query(api.units.list, { programGroupId: groupId }),
+    ).rejects.toThrow(/program group/i);
   });
 
   test("creates, edits, places, and discards a group-scoped unit-less handout", async () => {

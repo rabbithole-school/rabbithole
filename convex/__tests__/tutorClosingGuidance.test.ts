@@ -1,51 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
-  MARK_ACTIVITY_COMPLETE_SUCCESS_GUIDANCE,
-  MARK_ACTIVITY_COMPLETE_TOOL_DESCRIPTION,
-} from "../lib/activityCompletionTool";
-import {
-  RUBRIC_SCORE_COMPLETE_GUIDANCE,
-  RUBRIC_SCORE_TOOL_DESCRIPTION,
-} from "../lib/rubricScoreTool";
-import {
-  AUTOMATED_COMPLETION_CLOSING_GUIDANCE,
-  SCHOLAR_OWNED_COMPLETION_CLOSING_GUIDANCE,
-  TIME_LIMIT_WRAP_GUIDANCE,
   completionClosingPool,
   selectCompletionClosing,
 } from "../lib/tutorClosingGuidance";
 
 describe("tutor closing guidance", () => {
-  test("completion tools share the automatic closing contract", () => {
-    expect(MARK_ACTIVITY_COMPLETE_TOOL_DESCRIPTION).toContain(
-      AUTOMATED_COMPLETION_CLOSING_GUIDANCE,
-    );
-    expect(RUBRIC_SCORE_TOOL_DESCRIPTION).toContain(
-      AUTOMATED_COMPLETION_CLOSING_GUIDANCE,
-    );
-    expect(MARK_ACTIVITY_COMPLETE_SUCCESS_GUIDANCE).toContain(
-      "app has already written its closing sentence",
-    );
-    expect(RUBRIC_SCORE_COMPLETE_GUIDANCE).toContain(
-      "app has already written its closing sentence",
-    );
-  });
-
-  test("model-authored fallback guidance preserves conclusion ownership", () => {
-    expect(SCHOLAR_OWNED_COMPLETION_CLOSING_GUIDANCE).toContain(
-      "Unless they explicitly asked for a recap",
-    );
-    expect(SCHOLAR_OWNED_COMPLETION_CLOSING_GUIDANCE).toContain(
-      "name at most the shape of the thinking",
-    );
-    expect(SCHOLAR_OWNED_COMPLETION_CLOSING_GUIDANCE).toContain(
-      "never enumerate the components",
-    );
-    expect(SCHOLAR_OWNED_COMPLETION_CLOSING_GUIDANCE).toContain(
-      "If the sentence would remind a reader what the answer was",
-    );
-  });
-
   test("automatic closings are one sentence, content-free, and reading-level aware", () => {
     const levels = ["pre-reader", "K", "2.5", "5", "college"];
     for (const level of levels) {
@@ -56,11 +15,29 @@ describe("tutor closing guidance", () => {
         expect(closing).not.toMatch(
           /\b(?:good|great|solid|strong|correct|answer|evidence|criterion)\b/i,
         );
+        // Completion leaves the chat open, so no closing may claim the
+        // conversation itself is over (TRA-501).
+        expect(closing).not.toMatch(
+          /\b(?:stop|stopping|close|closes|leave|conclusion|concludes|completes|over|bye|goodbye|end|ends)\b/i,
+        );
       }
     }
     expect(completionClosingPool("pre-reader")).not.toEqual(
       completionClosingPool("5"),
     );
+  });
+
+  test("young readers get a young pool, decided by the turn-rules seam", () => {
+    expect(completionClosingPool("pre-reader")).not.toEqual(
+      completionClosingPool("K"),
+    );
+    for (const level of ["K", "1.5", "2.9"]) {
+      expect(completionClosingPool(level)).toEqual(completionClosingPool("K"));
+    }
+    for (const level of ["3", "5", "college", null]) {
+      expect(completionClosingPool(level)).toEqual(completionClosingPool("5"));
+    }
+    expect(completionClosingPool("K")).not.toEqual(completionClosingPool("5"));
   });
 
   test("automatic closing selection is stable but not a single template", () => {
@@ -75,16 +52,4 @@ describe("tutor closing guidance", () => {
     expect(selections.size).toBeGreaterThan(1);
   });
 
-  test("time-limit guidance distinguishes an engaged close from departure", () => {
-    expect(TIME_LIMIT_WRAP_GUIDANCE).toContain(
-      "still engaged and the thought is unfinished",
-    );
-    expect(TIME_LIMIT_WRAP_GUIDANCE).toContain(
-      "one brief content-free goodbye",
-    );
-    expect(TIME_LIMIT_WRAP_GUIDANCE).toContain(
-      "no recap, praise, question, reflection, or suggested next step",
-    );
-    expect(TIME_LIMIT_WRAP_GUIDANCE).not.toContain("Offer a brief summary");
-  });
 });

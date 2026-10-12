@@ -13,10 +13,13 @@ import {
   Box,
   Button,
   Checkbox,
+  Code,
+  Dialog,
   Field,
   Heading,
   HStack,
   Input,
+  Portal,
   Text,
   VStack,
 } from "@chakra-ui/react";
@@ -25,12 +28,14 @@ import { isPlatformAdminRole, type Role } from "@/convex/lib/roles";
 import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { toaster } from "@/lib/toaster";
 import { formatRelative } from "@/lib/relativeTime";
+import { McpConnectorUrl } from "@/components/McpConnections";
 import { TimeZoneField } from "@/components/ui/TimeZoneField";
 import { FieldSelect } from "@/components/ui/FieldSelect";
 import { InstitutionMark } from "@/components/InstitutionMark";
 import { AuthorizationPending } from "@/components/AuthorizationPending";
 import { DeleteSchoolDialog } from "@/components/DeleteSchoolDialog";
 import { DisableSchoolDialog } from "@/components/DisableSchoolDialog";
+import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { disableSchoolCopy } from "@/components/schoolLifecycleCopy";
 import type { Id } from "@/convex/_generated/dataModel";
 
@@ -66,6 +71,287 @@ function canManageSchoolSettings(role: Role | string | undefined): boolean {
   return role === "school_admin" || isPlatformAdminRole(role as Role | undefined);
 }
 
+
+const SERVICE_KIND_LABEL: Record<"teacher" | "staff", string> = {
+  teacher: "Teacher service account",
+  staff: "Staff service account",
+};
+
+/**
+ * Claude and MCP — the school admin issues, views, and revokes the shared
+ * bearer tokens the two per-institution service accounts (Teacher / Staff)
+ * authenticate with on shared surfaces such as Claude Tag channels. Per-teacher
+ * OAuth from claude.ai is a separate path and unchanged. Reads/writes go through
+ * `api.mcpServiceAccounts`, threading the page's institution `scope` so a
+ * platform admin acts on the school they're lensed into.
+ */
+function ClaudeAndMcpSection({ scope }: { scope: string | undefined }) {
+  const rows = useQuery(api.mcpServiceAccounts.list, { scope });
+  const issueToken = useMutation(api.mcpServiceAccounts.issueToken);
+  const revokeToken = useMutation(api.mcpServiceAccounts.revokeToken);
+
+  const [issuing, setIssuing] = useState<"teacher" | "staff" | null>(null);
+  const [issued, setIssued] = useState<{
+    token: string;
+    kind: "teacher" | "staff";
+  } | null>(null);
+  const [tokenCopied, setTokenCopied] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<{
+    id: Id<"mcpServiceTokens">;
+    hint: string;
+  } | null>(null);
+  const [revoking, setRevoking] = useState(false);
+
+  const handleIssue = async (kind: "teacher" | "staff") => {
+    setIssuing(kind);
+    try {
+      const result = await issueToken({ scope, kind });
+      setIssued({ token: result.token, kind });
+      setTokenCopied(false);
+    } catch (e) {
+      toaster.error({
+        title: "Couldn't issue token",
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setIssuing(null);
+    }
+  };
+
+  const handleCopyToken = async () => {
+    if (!issued) return;
+    try {
+      await navigator.clipboard.writeText(issued.token);
+      setTokenCopied(true);
+      setTimeout(() => setTokenCopied(false), 1500);
+    } catch {
+      // Clipboard blocked — the token is still selectable in the dialog.
+    }
+  };
+
+  const handleRevoke = async () => {
+    if (!revokeTarget) return;
+    setRevoking(true);
+    try {
+      await revokeToken({ scope, tokenId: revokeTarget.id });
+      toaster.success({ title: "Token revoked" });
+      setRevokeTarget(null);
+    } catch (e) {
+      toaster.error({
+        title: "Couldn't revoke token",
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setRevoking(false);
+    }
+  };
+
+  return (
+    <Box
+      as="section"
+      borderWidth="1px"
+      borderColor="gray.200"
+      borderRadius="xl"
+      bg="white"
+      p={{ base: 4, md: 6 }}
+    >
+      <VStack align="stretch" gap={4} maxW="xl">
+        <Box>
+          <Heading size="sm" fontFamily="heading" color="charcoal.600">
+            Claude and MCP
+          </Heading>
+          <Text fontFamily="body" fontSize="sm" color="charcoal.400">
+            Teachers connect individually from claude.ai with their own account
+            (see Connect Claude in Account details). The service accounts below
+            are for shared surfaces such as Claude Tag channels, where everyone in
+            the channel acts as the account.
+          </Text>
+        </Box>
+
+        <McpConnectorUrl />
+
+        {rows === undefined ? (
+          <Text fontFamily="body" fontSize="sm" color="charcoal.300">
+            Loading service accounts…
+          </Text>
+        ) : (
+          <VStack align="stretch" gap={4}>
+            {rows.map((row) => (
+              <Box key={row.kind}>
+                <Text fontFamily="heading" fontWeight="600" color="charcoal.600">
+                  {SERVICE_KIND_LABEL[row.kind]}
+                </Text>
+                <VStack align="stretch" gap={2} mt={2}>
+                  {row.activeTokens.length === 0 ? (
+                    <Text fontFamily="body" fontSize="sm" color="charcoal.400">
+                      No active tokens.
+                    </Text>
+                  ) : (
+                    row.activeTokens.map((token) => (
+                      <HStack
+                        key={token._id}
+                        justify="space-between"
+                        gap={3}
+                        wrap="wrap"
+                      >
+                        <VStack align="start" gap={0} minW={0}>
+                          <Text fontFamily="mono" fontSize="sm" color="charcoal.500">
+                            …{token.tokenHint}
+                          </Text>
+                          <Text fontFamily="body" fontSize="xs" color="charcoal.400">
+                            Created {formatRelative(token.createdAt)} by{" "}
+                            {token.createdByName} ·{" "}
+                            {token.lastUsedAt
+                              ? `Last used ${formatRelative(token.lastUsedAt)}`
+                              : "Never used"}
+                          </Text>
+                        </VStack>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          colorPalette="red"
+                          fontFamily="heading"
+                          onClick={() =>
+                            setRevokeTarget({
+                              id: token._id,
+                              hint: token.tokenHint,
+                            })
+                          }
+                        >
+                          Revoke
+                        </Button>
+                      </HStack>
+                    ))
+                  )}
+                  <HStack>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      colorPalette="violet"
+                      fontFamily="heading"
+                      onClick={() => void handleIssue(row.kind)}
+                      loading={issuing === row.kind}
+                      loadingText="Issuing…"
+                    >
+                      Issue token
+                    </Button>
+                  </HStack>
+                </VStack>
+              </Box>
+            ))}
+            <Text fontFamily="body" fontSize="xs" color="charcoal.400">
+              The staff service account holds school operations access: scholar
+              accounts and portfolio, no sensitive data.
+            </Text>
+          </VStack>
+        )}
+      </VStack>
+
+      <Dialog.Root
+        open={issued !== null}
+        onOpenChange={(d) => !d.open && setIssued(null)}
+        placement="center"
+        motionPreset="slide-in-bottom"
+      >
+        <Portal>
+          <Dialog.Backdrop />
+          <Dialog.Positioner>
+            <StyledDialogContent maxW="lg">
+              <Dialog.Header px={6} pt={6} pb={2}>
+                <Dialog.Title fontFamily="heading" color="charcoal.600">
+                  {issued ? SERVICE_KIND_LABEL[issued.kind] : ""} token
+                </Dialog.Title>
+              </Dialog.Header>
+              <Dialog.Body px={6} pb={2}>
+                <VStack align="stretch" gap={3}>
+                  <Code
+                    display="block"
+                    whiteSpace="pre-wrap"
+                    wordBreak="break-all"
+                    fontSize="sm"
+                    p={3}
+                    borderRadius="md"
+                  >
+                    {issued?.token ?? ""}
+                  </Code>
+                  <Text fontFamily="body" fontSize="sm" color="charcoal.500">
+                    Copy it now. Rabbithole stores only a hash and cannot show it
+                    again.
+                  </Text>
+                </VStack>
+              </Dialog.Body>
+              <Dialog.Footer px={6} pb={6} pt={2} gap={2}>
+                <Button
+                  variant="ghost"
+                  fontFamily="heading"
+                  onClick={() => setIssued(null)}
+                >
+                  Done
+                </Button>
+                <Button
+                  colorPalette="violet"
+                  fontFamily="heading"
+                  onClick={() => void handleCopyToken()}
+                >
+                  {tokenCopied ? "Copied" : "Copy token"}
+                </Button>
+              </Dialog.Footer>
+            </StyledDialogContent>
+          </Dialog.Positioner>
+        </Portal>
+      </Dialog.Root>
+
+      <Dialog.Root
+        open={revokeTarget !== null}
+        onOpenChange={(d) => !d.open && !revoking && setRevokeTarget(null)}
+        placement="center"
+        motionPreset="slide-in-bottom"
+      >
+        <Portal>
+          <Dialog.Backdrop />
+          <Dialog.Positioner>
+            <StyledDialogContent maxW="md">
+              <Dialog.Header px={6} pt={6} pb={2}>
+                <Dialog.Title fontFamily="heading" color="charcoal.600">
+                  Revoke token
+                </Dialog.Title>
+              </Dialog.Header>
+              <Dialog.Body px={6} pb={2}>
+                <Text fontFamily="body" fontSize="sm" color="charcoal.500">
+                  Revoke the token ending …{revokeTarget?.hint}? Any shared
+                  surface using it loses access to Rabbithole immediately.
+                </Text>
+              </Dialog.Body>
+              <Dialog.Footer px={6} pb={6} pt={2} gap={2}>
+                <Button
+                  variant="ghost"
+                  fontFamily="heading"
+                  onClick={() => setRevokeTarget(null)}
+                  disabled={revoking}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  bg="red.500"
+                  color="white"
+                  _hover={{ bg: "red.600" }}
+                  fontFamily="heading"
+                  onClick={() => void handleRevoke()}
+                  loading={revoking}
+                  loadingText="Revoking…"
+                >
+                  Revoke
+                </Button>
+              </Dialog.Footer>
+            </StyledDialogContent>
+          </Dialog.Positioner>
+        </Portal>
+      </Dialog.Root>
+    </Box>
+  );
+}
 
 export default function SchoolSettingsPage() {
   const suspensionCopy = disableSchoolCopy("school");
@@ -516,9 +802,9 @@ export default function SchoolSettingsPage() {
                   disabled={cadenceSaving}
                   fieldProps={{ "aria-label": "Academic Rounds meeting day" }}
                 >
-                  {WEEKDAY_OPTIONS.map((option) => (
-                    <option key={option.weekday} value={option.weekday}>
-                      {option.label}
+                  {WEEKDAY_OPTIONS.map((opt) => (
+                    <option key={opt.weekday} value={opt.weekday}>
+                      {opt.label}
                     </option>
                   ))}
                 </FieldSelect>
@@ -561,9 +847,9 @@ export default function SchoolSettingsPage() {
                     disabled={cadenceSaving}
                     fieldProps={{ "aria-label": "SEL Rounds meeting day" }}
                   >
-                    {WEEKDAY_OPTIONS.map((option) => (
-                      <option key={option.weekday} value={option.weekday}>
-                        {option.label}
+                    {WEEKDAY_OPTIONS.map((opt) => (
+                      <option key={opt.weekday} value={opt.weekday}>
+                        {opt.label}
                       </option>
                     ))}
                   </FieldSelect>
@@ -604,6 +890,10 @@ export default function SchoolSettingsPage() {
           </HStack>
         </VStack>
       </Box>
+
+      {school && (
+        <ClaudeAndMcpSection scope={scopeParam} />
+      )}
 
       {/* School access (temporary suspend/resume) — a PLATFORM-admin billing
           control, distinct from delete: nothing is destroyed and it is fully

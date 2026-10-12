@@ -38,22 +38,4 @@ describe("Placement walkthrough single-flight latch", () => {
     expect(advance).toContain("setTutorialIndex((i) => i + 1);");
     expect(advance).not.toContain("tutorialAdvancing.current = false");
   });
-
-  it("keeps the latch closed when the walkthrough exits", () => {
-    const advance = between(
-      "const advanceTutorial = useCallback(() => {",
-      "const skipTutorial = useCallback(() => {",
-    );
-    expect(advance).toMatch(
-      /tutorialAdvancing\.current = true;[\s\S]*?if \(tutorialIndex >= TUTORIAL_BEATS\.length - 1\) \{[\s\S]*?start\(\);[\s\S]*?return;/,
-    );
-
-    const skip = between(
-      "const skipTutorial = useCallback(() => {",
-      "const onTutorialCheck = useCallback(() => {",
-    );
-    expect(skip).toContain("tutorialAdvancing.current = true;");
-    expect(skip).toContain("start();");
-    expect(skip).not.toContain("tutorialAdvancing.current = false");
-  });
 });

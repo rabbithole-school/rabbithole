@@ -35,6 +35,7 @@ import {
   FIND_IMAGE_MAX_QUERY,
   type WebImageSearchResponse,
 } from "../shared/slidesScene";
+import { assertWritableAction } from "./lib/auth";
 
 const MAX_SOURCE_URL_CHARS = 2048;
 
@@ -98,6 +99,7 @@ export const searchWebImages = action({
     if (!uploaderId) {
       return { status: "error", error: "Please sign in and try again." };
     }
+    await assertWritableAction(ctx);
 
     const query = args.query.trim();
     if (!query) {
@@ -175,6 +177,7 @@ export const pickWebImage = action({
     if (!uploaderId) {
       return { status: "error", error: "Please sign in and try again." };
     }
+    await assertWritableAction(ctx);
 
     const searchContext = await ctx.runQuery(
       internal.slidesImageSearch.slideImageSearchContext,

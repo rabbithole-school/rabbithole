@@ -5,65 +5,11 @@ import {
   libraryCardUiReducer,
   publicLibraryCardError,
 } from "./libraryCardState";
-import { LibraryCardForm, ParentLibraryCardView } from "./ParentLibraryCard";
+import { LibraryCardForm } from "./ParentLibraryCard";
 
 const noop = () => undefined;
 
 describe("ParentLibraryCard component states", () => {
-  test("empty state offers the Hawaii State Library card add action", () => {
-    const element = ParentLibraryCardView({
-      status: {
-        onFile: false,
-        maskedCardNumber: null,
-        pinSaved: false,
-        revision: 0,
-      },
-      state: createLibraryCardUiState("child-a"),
-      onStartEdit: noop,
-      onStartRemove: noop,
-      onCancel: noop,
-      onCardNumberChange: noop,
-      onPinChange: noop,
-      onTogglePin: noop,
-      onSave: noop,
-      onRemove: noop,
-    });
-    expect(JSON.stringify(element)).toContain("Hawaii State Library card");
-    expect(JSON.stringify(element)).toContain(
-      "Don’t have one yet? No worries—we’ll sign your child up when our class visits the library.",
-    );
-    expect(JSON.stringify(element)).toContain(
-      "Add Hawaii State Library card",
-    );
-  });
-
-  test("on-file state shows only the masked number and PIN status", () => {
-    const rendered = JSON.stringify(
-      ParentLibraryCardView({
-        status: {
-          onFile: true,
-          maskedCardNumber: "•••• 7890",
-          pinSaved: true,
-          revision: 2,
-        },
-        state: createLibraryCardUiState("child-a"),
-        onStartEdit: noop,
-        onStartRemove: noop,
-        onCancel: noop,
-        onCardNumberChange: noop,
-        onPinChange: noop,
-        onTogglePin: noop,
-        onSave: noop,
-        onRemove: noop,
-      }),
-    );
-    expect(rendered).toContain("•••• 7890");
-    expect(rendered).toContain("PIN saved");
-    expect(rendered).toContain("Update");
-    expect(rendered).not.toContain("Remove card");
-    expect(rendered).not.toContain("1234567890");
-  });
-
   test("replacement form never prefills the card number or PIN", () => {
     const state = libraryCardUiReducer(
       createLibraryCardUiState("child-a"),

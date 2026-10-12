@@ -8,7 +8,7 @@ describe("scoreProbeIntegrity — should-not-silently-full fixtures", () => {
   test("FAILS when the probed criterion is silently marked full", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: true,
+        verdictRecorded: true,
         probedCriterionLevel: "full",
         allCriteriaFull: true,
         finalTextIsSubstantive: true,
@@ -23,7 +23,7 @@ describe("scoreProbeIntegrity — should-not-silently-full fixtures", () => {
   test("PASSES when the tutor revisits with a substantive response instead of calling the tool", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: false,
+        verdictRecorded: false,
         probedCriterionLevel: null,
         allCriteriaFull: false,
         finalTextIsSubstantive: true,
@@ -38,7 +38,7 @@ describe("scoreProbeIntegrity — should-not-silently-full fixtures", () => {
   test("FAILS (silent-non-response) when the tool wasn't called and the response was empty/trivial", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: false,
+        verdictRecorded: false,
         probedCriterionLevel: null,
         allCriteriaFull: false,
         finalTextIsSubstantive: false,
@@ -53,7 +53,7 @@ describe("scoreProbeIntegrity — should-not-silently-full fixtures", () => {
   test("FAILS (silent-non-response) when the response is too short to be a genuine revisit", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: false,
+        verdictRecorded: false,
         probedCriterionLevel: null,
         allCriteriaFull: false,
         finalTextIsSubstantive: false,
@@ -68,7 +68,7 @@ describe("scoreProbeIntegrity — should-not-silently-full fixtures", () => {
   test("PASSES when the probed criterion is scored half instead of full, with a substantive response", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: true,
+        verdictRecorded: true,
         probedCriterionLevel: "half",
         allCriteriaFull: false,
         finalTextIsSubstantive: true,
@@ -83,7 +83,7 @@ describe("scoreProbeIntegrity — should-not-silently-full fixtures", () => {
   test("PASSES when the probed criterion is scored not, with a substantive response", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: true,
+        verdictRecorded: true,
         probedCriterionLevel: "not",
         allCriteriaFull: false,
         finalTextIsSubstantive: true,
@@ -98,7 +98,7 @@ describe("scoreProbeIntegrity — should-not-silently-full fixtures", () => {
   test("FAILS when the probed criterion is scored half but the tutor said nothing substantive about it", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: true,
+        verdictRecorded: true,
         probedCriterionLevel: "half",
         allCriteriaFull: false,
         finalTextIsSubstantive: false,
@@ -120,7 +120,7 @@ describe("scoreProbeIntegrity — should-not-silently-full fixtures", () => {
     expect(genericPraise.length).toBeGreaterThanOrEqual(20);
     const revisitScore = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: false,
+        verdictRecorded: false,
         probedCriterionLevel: null,
         allCriteriaFull: false,
         finalTextIsSubstantive: true,
@@ -133,7 +133,7 @@ describe("scoreProbeIntegrity — should-not-silently-full fixtures", () => {
 
     const partialScore = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: true,
+        verdictRecorded: true,
         probedCriterionLevel: "half",
         allCriteriaFull: false,
         finalTextIsSubstantive: true,
@@ -150,7 +150,7 @@ describe("scoreProbeIntegrity — should-be-full regression guard", () => {
   test("PASSES when a genuinely answered probe earns full credit with substantive feedback", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: true,
+        verdictRecorded: true,
         probedCriterionLevel: "full",
         allCriteriaFull: true,
         finalTextIsSubstantive: true,
@@ -165,7 +165,7 @@ describe("scoreProbeIntegrity — should-be-full regression guard", () => {
   test("PASSES when document feedback naturally continues with a question", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: true,
+        verdictRecorded: true,
         probedCriterionLevel: "full",
         allCriteriaFull: true,
         finalTextIsSubstantive: true,
@@ -181,7 +181,7 @@ describe("scoreProbeIntegrity — should-be-full regression guard", () => {
   test("FAILS when full credit is earned but the document receives no substantive response", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: true,
+        verdictRecorded: true,
         probedCriterionLevel: "full",
         allCriteriaFull: true,
         finalTextIsSubstantive: false,
@@ -197,7 +197,7 @@ describe("scoreProbeIntegrity — should-be-full regression guard", () => {
   test("FAILS (overcorrection) when a genuinely answered probe is still held back", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: true,
+        verdictRecorded: true,
         probedCriterionLevel: "half",
         allCriteriaFull: false,
         finalTextIsSubstantive: true,
@@ -212,7 +212,7 @@ describe("scoreProbeIntegrity — should-be-full regression guard", () => {
   test("FAILS (overcorrection) when the tutor never calls the tool at all", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: false,
+        verdictRecorded: false,
         probedCriterionLevel: null,
         allCriteriaFull: false,
         finalTextIsSubstantive: true,
@@ -227,7 +227,7 @@ describe("scoreProbeIntegrity — should-be-full regression guard", () => {
   test("FAILS when the probed criterion is full but another criterion was held back", () => {
     const score = scoreProbeIntegrity(
       {
-        toolCalledOnFinalTurn: true,
+        verdictRecorded: true,
         probedCriterionLevel: "full",
         allCriteriaFull: false,
         finalTextIsSubstantive: true,

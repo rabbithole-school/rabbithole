@@ -16,7 +16,7 @@
  *   16px per-fact automaticity map
  *   a short contextual explanation
  *   "Your own practice progress"      (the self-reference cue)
- *   Issued / Proctor                  (only while the credential is durable)
+ *   [license card] Issued / Proctor   (only while the credential is durable)
  *   Practice fast math              (bottom slot, always in the same spot)
  *
  * What this surface refuses to be: a score, a threshold, a peer comparison, a
@@ -24,6 +24,11 @@
  * The test is offline and teacher-proctored; the reading here is self-relative
  * automaticity. The state → words mapping lives in shared/calculatorLicense.ts
  * so the native twin renders the same card, not a second dialect.
+ *
+ * Once licensed, the credential row shows the license card itself — the badge
+ * image, rendered server-side from the printed card's design — beside the
+ * Issued / Proctor fields. It is the ONE rendering of the credential (T1);
+ * there is no separate medallion by the title.
  */
 
 import { useState } from "react";
@@ -145,30 +150,15 @@ export function ScholarCalculatorLicenseCard({
           <StatusChip label={card.chip.label} tone={card.chip.tone} />
         </Flex>
 
-        <Flex align="center" gap={3} minW={0}>
-          {badge && (
-            // Celebration art only, and only once there is a credential to
-            // celebrate — small, decorative, never a second credential card.
-            <BadgeArt
-              imageUrl={badge.imageUrl}
-              emoji={badge.icon}
-              status={badge.artStatus as BadgeArtStatus}
-              size="36px"
-              rounded="full"
-              showGeneratingOverlay={false}
-              alt=""
-            />
-          )}
-          <Text
-            fontFamily="heading"
-            fontWeight="800"
-            fontSize="lg"
-            color="navy.500"
-            minW={0}
-          >
-            {card.title}
-          </Text>
-        </Flex>
+        <Text
+          fontFamily="heading"
+          fontWeight="800"
+          fontSize="lg"
+          color="navy.500"
+          minW={0}
+        >
+          {card.title}
+        </Text>
 
         <Flex align="baseline" gap={2} wrap="wrap">
           <Text
@@ -198,17 +188,30 @@ export function ScholarCalculatorLicenseCard({
         </Text>
 
         {card.showCredentialFields && status.license && (
-          <Flex gap={6} wrap="wrap">
-            <CredentialField
-              label="Issued"
-              value={formatIssuedDate(status.license.issuedAt)}
-            />
-            {status.license.issuedByName && (
-              <CredentialField
-                label="Proctor"
-                value={status.license.issuedByName}
+          <Flex gap={4} align="center" wrap="wrap">
+            {badge && (
+              <BadgeArt
+                kind="calculator_license"
+                imageUrl={badge.imageUrl}
+                emoji={badge.icon}
+                status={badge.artStatus as BadgeArtStatus}
+                size="168px"
+                alt="Your Calculator License card"
+                showGeneratingOverlay={false}
               />
             )}
+            <Stack gap={2} minW={0}>
+              <CredentialField
+                label="Issued"
+                value={formatIssuedDate(status.license.issuedAt)}
+              />
+              {status.license.issuedByName && (
+                <CredentialField
+                  label="Proctor"
+                  value={status.license.issuedByName}
+                />
+              )}
+            </Stack>
           </Flex>
         )}
 

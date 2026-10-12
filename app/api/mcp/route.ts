@@ -1,7 +1,10 @@
 // The remote MCP connector: https://rabbithole.school/api/mcp
 //
-// OAuth-authenticated (MCP Authorization spec / OAuth 2.1 + PKCE) — there
-// are no bearer tokens to mint or paste. A user adds this URL in Claude,
+// OAuth-authenticated (MCP Authorization spec / OAuth 2.1 + PKCE) for
+// people; the one exception is the `rhsa_…` SERVICE-ACCOUNT bearer token a
+// school admin issues for shared surfaces such as a Claude Tag channel
+// (convex/mcpServiceAccounts.ts) — exchanged below for a normal Convex Auth
+// session, so it still runs as a real (machine) user. A user adds this URL in Claude,
 // gets the 401 below, and Claude walks the discovery → dynamic
 // registration → /oauth/authorize consent → token exchange flow
 // (app/api/oauth/*, convex/mcpOauth.ts). The access token is a REAL
@@ -30,11 +33,18 @@ import {
 import { isTeacherRole, type Role } from "@/convex/lib/roles";
 import { INCLUDE_EXTENDED_EDUCATION_PROP } from "@/convex/lib/scholarParticipationTooling";
 import { requestOrigin } from "@/lib/oauthHttp";
+import { sha256Hex } from "@/convex/lib/oauthCrypto";
 
 const CONVEX_CLOUD_URL = process.env.NEXT_PUBLIC_CONVEX_URL;
 if (!CONVEX_CLOUD_URL) {
   throw new Error("NEXT_PUBLIC_CONVEX_URL environment variable is required");
 }
+
+// Canonical web origin, mirroring app/layout.tsx. The MCP handshake hands
+// clients ABSOLUTE icon URLs (they fetch them from wherever they run, not
+// relative to this route), so a preview deployment should advertise its own.
+const APP_BASE_URL =
+  process.env.NEXT_PUBLIC_SITE_URL ?? "https://rabbithole.school";
 
 const MCP_CORS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -50,6 +60,61 @@ function bearerToken(request: Request): string | null {
   const header = request.headers.get("authorization");
   if (!header || !/^bearer /i.test(header)) return null;
   return header.slice(7).trim() || null;
+}
+
+// ── Service-account token → session exchange ─────────────────────────
+// An `rhsa_<kind>_…` bearer is not a JWT. Exchange it through the
+// "mcpServiceToken" credentials provider (convex/auth.ts), which mints the
+// JWT on the ONE session the token owns, and reuse the JWT from a
+// module-level cache for most of its lifetime so a busy Claude Tag thread
+// does not re-exchange per request. The cache is per Next instance and
+// best-effort; concurrent misses share one in-flight exchange. Revocation
+// deletes the session server-side, the whoami probe below then 401s, and the
+// handler re-exchanges once before giving up (a token that is still valid
+// but whose session was swept — e.g. a sibling token's revoke — recovers
+// transparently; a revoked token fails the exchange and 401s).
+
+const SERVICE_TOKEN_PREFIX = "rhsa_";
+// Convex Auth's default JWT lifetime is an hour; refresh comfortably inside it.
+const SERVICE_JWT_CACHE_MS = 50 * 60_000;
+const serviceJwtCache = new Map<string, { jwt: string; expiresAt: number }>();
+const serviceExchangesInFlight = new Map<string, Promise<string | null>>();
+
+function isServiceToken(token: string): boolean {
+  return token.startsWith(SERVICE_TOKEN_PREFIX);
+}
+
+async function exchangeServiceToken(
+  token: string,
+  options: { force?: boolean } = {},
+): Promise<string | null> {
+  const key = await sha256Hex(token);
+  if (options.force) serviceJwtCache.delete(key);
+  const cached = serviceJwtCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.jwt;
+  serviceJwtCache.delete(key);
+
+  const inFlight = serviceExchangesInFlight.get(key);
+  if (inFlight) return inFlight;
+  const exchange = (async () => {
+    try {
+      const anon = new ConvexHttpClient(CONVEX_CLOUD_URL!);
+      const result = await anon.action(api.auth.signIn, {
+        provider: "mcpServiceToken",
+        params: { token },
+      });
+      if (!result.tokens) return null;
+      const jwt = result.tokens.token;
+      serviceJwtCache.set(key, { jwt, expiresAt: Date.now() + SERVICE_JWT_CACHE_MS });
+      return jwt;
+    } catch {
+      return null;
+    } finally {
+      serviceExchangesInFlight.delete(key);
+    }
+  })();
+  serviceExchangesInFlight.set(key, exchange);
+  return exchange;
 }
 
 /**
@@ -133,6 +198,7 @@ interface Whoami {
   role: Role;
   scholarNames: string[] | null;
   schoolOperations: boolean;
+  isServiceAccount?: boolean;
 }
 
 function text(s: string) {
@@ -235,12 +301,28 @@ async function buildServer(
   // rosters, archive, plus unit reads + scholar-scoped writes); everyone
   // else is read-only over learning data.
   const surfaceLine = isTeacherRole(me.role)
-    ? "View Rabbithole (an AI classroom) learning data AND run the curriculum — read how a cohort is going, push activities live, schedule/reschedule, edit rosters, archive, read units, and capture scholar directives/seeds."
+    ? "View Rabbithole (an AI classroom) learning data AND run the curriculum — read how a cohort is going, push activities live, schedule/reschedule, edit rosters, archive, read units, capture scholar directives/seeds, and check or control the school's managed iPads."
     : me.role === "staff" && me.schoolOperations
-      ? "Manage the roster and account operations for scholars in your granted schools. You cannot access learning records or curriculum."
+      ? "Manage the roster, account operations, and managed iPads for scholars in your granted schools. You cannot access learning records or curriculum."
     : "Read-only view of Rabbithole (an AI classroom) learning data.";
   const server = new Server(
-    { name: "Rabbithole", version: "2.0.0" },
+    {
+      name: "Rabbithole",
+      // `name` is the protocol identifier; `title` is what a connector UI is
+      // free to show a human. Without `icons` that UI has nothing to render
+      // but a letter avatar, which is exactly what Claude's connector list did.
+      title: "Rabbithole",
+      version: "2.0.0",
+      websiteUrl: APP_BASE_URL,
+      description: "AI that makes you think harder.",
+      icons: [
+        {
+          src: `${APP_BASE_URL}/icon.png`,
+          mimeType: "image/png",
+          sizes: ["256x256"],
+        },
+      ],
+    },
     {
       capabilities: { tools: {} },
       instructions: `${surfaceLine} Connected as ${me.name} (${me.role.replace("_", " ")}).${scopeLine} Look up scholars by (partial) name.`,
@@ -314,11 +396,23 @@ async function buildServer(
 
   addRead({
     name: "get_scholar_signals",
-    description: `See ${whose} learning character signals: curiosity, persistence, collaboration, creativity, and more — with counts and high-intensity counts.`,
+    description: `See ${whose} learning character signals: self-direction, persistence, creativity, intellectual intensity, and more — with counts and high-intensity counts. Not interests (use get_scholar_interests).`,
     inputSchema: SCHOLAR_NAME_SCHEMA,
     handler: async (args) => {
       const scholarName = nameArg(args);
       const result = await convex.query(api.mcp.getScholarSignals, { scholarName });
+      if (!result) return noMatch(scholarName);
+      return json(result);
+    },
+  });
+
+  addRead({
+    name: "get_scholar_interests",
+    description: `What ${isScholar ? "you are" : isParent ? "your child is" : "a scholar is"} into, with how we know it: "said" = in their own words; "picked" = they chose the topic themselves; "menu" = chosen from options inside an assigned activity (engagement, not ownership); "teacher" = a teacher added it. Use this, never seeds or mastery, for what a scholar is interested in.`,
+    inputSchema: SCHOLAR_NAME_SCHEMA,
+    handler: async (args) => {
+      const scholarName = nameArg(args);
+      const result = await convex.query(api.mcp.getScholarInterests, { scholarName });
       if (!result) return noMatch(scholarName);
       return json(result);
     },
@@ -377,7 +471,7 @@ async function buildServer(
 
   addRead({
     name: "get_session_transcript",
-    description: `Read the actual conversation TRANSCRIPT of one ${isScholar ? "of your" : isParent ? "of your child's" : "scholar"} session, plus the context to judge it: its ORIGIN (teacher-assigned vs self-initiated — a Quest, meaning independent study, the scholar chose), the activity's deliverable + rubric, completion status, and any analysis summary. Use this when asked how a session/activity is going or performing, whether a scholar is getting value, or what they're actually discussing — get_scholar_sessions only gives titles + a short preview. Pass scholarName (required); optionally sessionId (the id from get_scholar_sessions) to pick one, else the most recent. Check origin first: a self-initiated Quest is assessed on its own terms (genuine curiosity, depth, value), not against an assignment bar.`,
+    description: `Read the actual conversation TRANSCRIPT of one ${isScholar ? "of your" : isParent ? "of your child's" : "scholar"} session, plus the context to judge it: its ORIGIN (teacher-assigned vs self-initiated — a Quest, meaning independent study, the scholar chose), the activity's deliverable + rubric, completion status, and any analysis summary. Use this when asked how a session/activity is going or performing, whether a scholar is getting value, or what they're actually discussing — get_scholar_sessions only gives titles + a short preview. Pass scholarName (required); optionally sessionId (the id from get_scholar_sessions) to pick one, else the most recent. Check origin first: a self-initiated Quest is assessed on its own terms (genuine curiosity, depth, value), not against an assignment bar. Messages carry inputModality (spoken means speech-to-text dictation sent without editing) when known and createdAt.`,
     inputSchema: SESSION_TRANSCRIPT_SCHEMA,
     handler: async (args) => {
       const scholarName = nameArg(args);
@@ -484,6 +578,14 @@ async function buildServer(
   const unitDesignerTools = await convex.action(api.mcp.listUnitDesignerTools, {});
   const unitDesignerNames = new Set(unitDesignerTools.map((t) => t.name));
 
+  // Managed-iPad operations — the same tools the Slack bot carries, proxied
+  // from the shared factory (convex/lib/deviceOpsTools.ts). Empty for any
+  // caller without school operations, so this registration adds nothing for a
+  // parent, a scholar, or a curriculum designer.
+  const deviceTools = await convex.action(api.mcp.listDeviceTools, {});
+  const deviceNames = new Set(deviceTools.map((t) => t.name));
+
+
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const tools: Tool[] = [
       ...reads.map((entry) => ({
@@ -501,6 +603,11 @@ async function buildServer(
         description: t.description,
         inputSchema: t.inputSchema as Tool["inputSchema"],
       })),
+      ...deviceTools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: t.inputSchema as Tool["inputSchema"],
+      })),
     ];
     return { tools };
   });
@@ -514,6 +621,15 @@ async function buildServer(
       // The proxy re-asserts the role gate; a name outside the caller's set
       // throws "Forbidden: <name>" → surfaced to the client as an error.
       const result = await convex.action(api.mcp.callCurriculumTool, {
+        name,
+        input: args,
+      });
+      return text(result);
+    }
+    if (deviceNames.has(name)) {
+      // Same shape as the curriculum proxy: the action re-asserts the gate,
+      // so a guessed name throws "Forbidden: <name>" rather than running.
+      const result = await convex.action(api.mcp.callDeviceTool, {
         name,
         input: args,
       });
@@ -549,18 +665,43 @@ async function handleMcpRequest(request: Request): Promise<Response> {
   const token = bearerToken(request);
   if (!token) return unauthorized(request);
 
-  const convex = new ConvexHttpClient(CONVEX_CLOUD_URL!);
-  convex.setAuth(token);
+  // A service-account token is exchanged for a session JWT; a person's
+  // OAuth access token already IS one.
+  let jwt = token;
+  if (isServiceToken(token)) {
+    const exchanged = await exchangeServiceToken(token);
+    if (!exchanged) return unauthorized(request, "Invalid or revoked service token");
+    jwt = exchanged;
+  }
 
-  // Auth probe + identity in one query. An expired/forged JWT (or a
-  // deleted user) throws here → 401 → the client refreshes or re-runs
-  // the OAuth flow.
+  // Auth probe + identity in one query. An expired/forged JWT, a deleted
+  // user, or a revoked session throws here → 401 → the client refreshes or
+  // re-runs the OAuth flow. A service token gets ONE fresh exchange first,
+  // since its cached JWT may outlive a swept session.
+  const probe = async (withJwt: string): Promise<Whoami> => {
+    const client = new ConvexHttpClient(CONVEX_CLOUD_URL!);
+    client.setAuth(withJwt);
+    const me = (await client.query(api.mcp.whoami, { probeSession: true })) as Whoami;
+    return me;
+  };
   let me: Whoami;
   try {
-    me = (await convex.query(api.mcp.whoami, {})) as Whoami;
+    me = await probe(jwt);
   } catch {
-    return unauthorized(request, "Invalid or expired access token");
+    if (!isServiceToken(token)) {
+      return unauthorized(request, "Invalid or expired access token");
+    }
+    const fresh = await exchangeServiceToken(token, { force: true });
+    if (!fresh) return unauthorized(request, "Invalid or revoked service token");
+    jwt = fresh;
+    try {
+      me = await probe(jwt);
+    } catch {
+      return unauthorized(request, "Invalid or revoked service token");
+    }
   }
+  const convex = new ConvexHttpClient(CONVEX_CLOUD_URL!);
+  convex.setAuth(jwt);
 
   const server = await buildServer(convex, me);
   const transport = new WebStandardStreamableHTTPServerTransport();

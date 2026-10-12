@@ -64,6 +64,7 @@ import { ONBOARDING_UNIT_SLUG } from "./onboardingData";
 import {
   firstIncompleteLaunchableActivityInUnit,
   firstIncompleteSessionActivityInUnit,
+  isReopenLive,
   isSessionActivityComplete,
   suggestedQuestsForScholar,
   unitLaunchableProgressForScholar,
@@ -83,6 +84,8 @@ import { timeZoneForInstitution } from "./lib/institutionTime";
 import { homeTitleForIndependentStudyUnit } from "./lib/independentStudy";
 import { hasReadableOfflineHomeworkContent } from "./lib/activityResourceReachability";
 import { pickLockingFocus } from "../shared/focusLock";
+import { isFocusShowing } from "../shared/focusShowing";
+import { dayKeyForTimezone } from "../shared/institutionDay";
 import { uniqueSubjects } from "../lib/subjects";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
@@ -101,8 +104,12 @@ export const activeForMe = authedQuery({
     // Native can launch kind="web" activities in the embedded WebView. Web callers
     // keep the historic online-only rows until that surface branches on activityKind.
     includeWebActivities: v.optional(v.boolean()),
+    // Minute-rounded client clock used only to re-arm the reactive query across
+    // institution-local midnight. Plate day semantics still use server time.
+    now: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    void args.now;
     const caller = ctx.user;
     const isTeacher =
       isTeacherRole(caller.role);
@@ -125,6 +132,53 @@ export const activeForMe = authedQuery({
     });
   },
 });
+
+/**
+ * Can a live, not-yet-started assigned activity appear as a plate row at all,
+ * and as what? The ONE definition of that visibility — the plate below and the
+ * end-of-day check-in's past-due homework question (convex/eodCheckin.ts) both
+ * read it, so the teacher is never asked about a row the scholar can't see.
+ */
+export async function unstartedAssignedRowSurface(
+  ctx: QueryCtx,
+  activity: Doc<"activities">,
+  mode: "classFocus" | "homework",
+  includeWebActivities: boolean,
+): Promise<"launchable" | "offlineHomework" | null> {
+  // Offline/share-back activities have no scholar-launched surface here.
+  // Games do (native only — a browser renders a capability notice), so
+  // they ride the same `includeWebActivities` native gate as kind="web".
+  if (
+    includeWebActivities &&
+    (activity.kind === "web" || activity.kind === "game")
+  ) {
+    return "launchable";
+  }
+  if (
+    activity.kind === "online" ||
+    activity.kind === "problem_set" ||
+    activity.kind === "simulator" ||
+    activity.kind === "vibecode"
+  ) {
+    return "launchable";
+  }
+  // Offline HOMEWORK is the one deliberate exception. Work sent home has
+  // to be READABLE at home. It needs authored instructions or at least one
+  // reachable scholar-safe material. The row opens a read-only offline
+  // session without creating tutor chat or completion evidence. `offline` stays OUT of
+  // SCHOLAR_SOLO_STARTABLE_KINDS (convex/assignments.ts) so it is still
+  // never headlined as the live class focus. Offline CLASS FOCUS and shareBack
+  // stay excluded: those are run BY the teacher, in the room, and a card
+  // for them would be a to-do the scholar cannot act on.
+  if (
+    activity.kind === "offline" &&
+    mode === "homework" &&
+    (await hasReadableOfflineHomeworkContent(ctx, activity))
+  ) {
+    return "offlineHomework";
+  }
+  return null;
+}
 
 /**
  * The shared plate-building CORE behind BOTH the scholar's own `activeForMe`
@@ -187,6 +241,7 @@ export async function buildPlateForTarget(
     // currently-live pushes used to surface assigned work not started yet (we
     // don't nag about closed windows).
     const now = Date.now();
+    const todayDayKey = dayKeyForTimezone(now, timeZone);
     const allAssignments = await ctx.db.query("assignments").collect();
     const modeByAssignmentActivity = new Map<
       string,
@@ -240,19 +295,14 @@ export async function buildPlateForTarget(
         } else if (!liveModeKeys.has(key) && !modeByAssignmentActivity.has(key)) {
           modeByAssignmentActivity.set(key, e.mode);
         }
-        // Drives the "not started yet" surfacing below. A class focus counts
-        // while it is SHOWING, not merely while its window is open: a teacher
-        // running long has not wrapped it, so it is still what the room is on
-        // and a scholar who never opened it still needs a way in. Dropping it
-        // here left the iPad with nothing to render — native matches focus
-        // items to plate rows and silently discards the unmatched, where the
-        // web falls back to a synthetic card — so the same overrun focus
-        // appeared on one surface and not the other.
-        //
-        // Homework deliberately keeps the window test. It carries its own
-        // `dueAt` and is surfaced as overdue elsewhere; there is no "running
-        // long" for work sent home.
-        if (!expired || e.mode === "classFocus") {
+        // Synthetic rows exist only while the assignment is showing. Started
+        // sessions keep their mode through the map above, so they survive as
+        // ordinary open work after an unopened focus disappears.
+        const showing =
+          e.mode === "classFocus"
+            ? isFocusShowing(e, now, todayDayKey, timeZone)
+            : !expired;
+        if (showing) {
           liveAssigned.push({
             assignmentId: a._id,
             activityId: e.activityId,
@@ -430,9 +480,10 @@ export async function buildPlateForTarget(
         if (!nextIncomplete) {
           // A scholar who explicitly chose "Keep working on this" is doing new
           // work on top of a completed badge. Keep the session visible on Home
-          // without touching completion state or pretending there is a next
-          // incomplete activity.
-          if (!p.reopenedAt) continue;
+          // — through the day it was reopened or last worked on, then it goes
+          // back to Finished (isReopenLive) — without touching completion
+          // state or pretending there is a next incomplete activity.
+          if (!isReopenLive(p, now, timeZone)) continue;
           pre.push({
             session: p,
             origin,
@@ -525,7 +576,7 @@ export async function buildPlateForTarget(
     // Unit-LESS IS sessions (legacy anchorless quests, from before the Phase-2
     // mint invariant) have no (scholar,unit) identity to collapse into, so each
     // stays its own card.
-    const quests = await questsForScholar(ctx, target._id);
+    const quests = await questsForScholar(ctx, target._id, now);
     const liveQuestUnitIds = new Set(
       quests
         .filter((q) => q.hasLiveSession && q.unitIsActive)
@@ -779,37 +830,16 @@ export async function buildPlateForTarget(
       if (completedAssignedKeys.has(key)) continue;
       if (emittedNotStarted.has(key)) continue; // same activity, two modes
       const activity = await ctx.db.get(ent.activityId);
-      // Offline/share-back activities have no scholar-launched surface here.
-      // Games do (native only — a browser renders a capability notice), so
-      // they ride the same `includeWebActivities` native gate as kind="web".
-      const nativeLaunchable =
-        activity != null &&
-        includeWebActivities &&
-        (activity.kind === "web" || activity.kind === "game");
-      const sessionLaunchable =
-        activity != null &&
-        (activity.kind === "online" ||
-          activity.kind === "problem_set" ||
-          activity.kind === "simulator" ||
-          activity.kind === "vibecode");
-      // Offline HOMEWORK is the one deliberate exception. Work sent home has
-      // to be READABLE at home. It needs authored instructions or at least one
-      // reachable scholar-safe material. The row opens a read-only offline
-      // session without creating tutor chat or completion evidence. `offline` stays OUT of
-      // SCHOLAR_SOLO_STARTABLE_KINDS (convex/assignments.ts) so it is still
-      // never headlined as the live class focus. Offline CLASS FOCUS and shareBack
-      // stay excluded: those are run BY the teacher, in the room, and a card
-      // for them would be a to-do the scholar cannot act on.
-      const offlineHomework =
-        activity != null &&
-        activity.kind === "offline" &&
-        ent.mode === "homework" &&
-        (await hasReadableOfflineHomeworkContent(ctx, activity));
-      if (
-        !activity ||
-        (!sessionLaunchable && !nativeLaunchable && !offlineHomework)
-      )
-        continue;
+      const surface = activity
+        ? await unstartedAssignedRowSurface(
+            ctx,
+            activity,
+            ent.mode,
+            includeWebActivities,
+          )
+        : null;
+      if (!activity || !surface) continue;
+      const offlineHomework = surface === "offlineHomework";
       emittedNotStarted.add(key);
 
       const lesson = activity.lessonId

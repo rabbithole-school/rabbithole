@@ -57,6 +57,7 @@ describe("usage.byInstitution", () => {
         model: MODELS.SONNET,
         inputTokens: 1_000_000,
         cacheWriteTokens: 1_000_000,
+        cacheWrite1hTokens: 400_000,
         cacheReadTokens: 1_000_000,
         outputTokens: 1_000_000,
         createdAt: now - 1_000,
@@ -124,10 +125,11 @@ describe("usage.byInstitution", () => {
     expect(moli.totals).toEqual({
       inputTokens: 1_000_200,
       cacheWriteTokens: 1_000_300,
+      cacheWrite1hTokens: 400_000,
       cacheReadTokens: 1_000_400,
       outputTokens: 1_000_500,
     });
-    expect(moli.estimatedCost).toBeCloseTo(14.70623, 6);
+    expect(moli.estimatedCost).toBeCloseTo(15.30623, 6);
 
     const guests = result.page.find((row) => row.institutionId === guestId)!;
     expect(guests.totals.inputTokens).toBe(500_000);

@@ -22,8 +22,10 @@ const NATIVE_DEEP_LINK_PARAMS = "src/lib/practiceDeepLinkParams.ts";
 
 describe("CheckInHomeCard — Surface 1 mounts above the playlist it accelerates (native)", () => {
   test("index.tsx computes a self-contained CheckInHomeCard element for the math tab", () => {
-    expect(read(NATIVE_INDEX)).toContain(
-      "const mathCheckInCardElevated = isMathTab && <CheckInHomeCard />;",
+    // Wrapped in its own render-error boundary (a thrown query must not abort
+    // the app), but still one self-contained element.
+    expect(read(NATIVE_INDEX)).toMatch(
+      /const mathCheckInCardElevated = isMathTab && \(\s*<MathCardBoundary [^>]*>\s*<CheckInHomeCard \/>/,
     );
   });
 

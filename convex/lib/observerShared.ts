@@ -11,8 +11,11 @@
  * and is also imported directly by the harness.
  */
 
+import { OBSERVER_ORIGIN_LABELS } from "./observerOrigin";
+import type { AppAiContextTurn } from "./appUpdateTools";
 import type { ImageContentPart } from "./imageBytes";
-import { SCHOLAR_NAME_PRONOUN_HINT } from "./scholarPronouns";
+import type { InputModality } from "./inputModality";
+import { scholarNamePronounHint } from "./scholarPronouns";
 import {
   SESSION_SIGNAL_TYPES,
 } from "../../shared/learningSignals";
@@ -24,7 +27,7 @@ export const OBSERVER_TOOL = {
   description: "Record the observer's full analysis of the student session.",
   input_schema: {
     type: "object" as const,
-    required: ["pulse", "observations", "sessionSignals", "crossDomainConnections", "seeds"],
+    required: ["pulse", "observations", "sessionSignals", "interests", "crossDomainConnections", "seeds"],
     properties: {
       inferredReadingLevel: {
         type: "string" as const,
@@ -55,10 +58,11 @@ export const OBSERVER_TOOL = {
             masteryLevel: { type: "number" as const, description: "0.0-5.0 Bloom's float" },
             confidenceScore: { type: "number" as const, description: "0.0-1.0" },
             evidenceSummary: { type: "string" as const },
-            evidenceType: { type: "string" as const, enum: ["direct_demonstration", "indirect_inference", "misconception_signal", "interest_signal"] },
+            evidenceType: { type: "string" as const, enum: ["direct_demonstration", "indirect_inference", "misconception_signal"] },
             attemptContext: { type: "string" as const, enum: ["conversation", "project", "problem_solving", "creative_work", "peer_explanation", "debrief"] },
             studentInitiated: { type: "boolean" as const },
-            transcriptExcerpt: { type: "string" as const },
+            transcriptExcerpt: { type: "string" as const, description: "Short exact quote of the SCHOLAR turn that evidences this observation." },
+            sourceMessageId: { type: "string" as const, description: "Optional: the exact id inside brackets on the SCHOLAR transcript line the excerpt comes from. Never cite a TUTOR line." },
             standardNotations: { type: "array" as const, items: { type: "string" as const }, description: "Optional formal standard codes" },
             fluencyLevel: { type: "integer" as const, enum: [1, 2, 3], description: "OPTIONAL automaticity. Set ONLY when the exchange genuinely shows speed/ease — a quick-recall or routine sub-skill answered instantly and correctly (automatic), smoothly with a little thought (fluent), or correctly but slowly/haltingly (effortful). 1=effortful, 2=fluent, 3=automatic. OMIT for almost every observation: a normal chat is a weak fluency sensor, and a wrong/absent answer says nothing about fluency. Never guess." },
             pcmDimension: { type: "string" as const, enum: ["core", "connections", "practice", "identity"], description: "OPTIONAL PCM dimension tag — set ONLY when this evidence clearly belongs to one: core = grasp of essential knowledge/skills; connections = an interdisciplinary link or systems view; practice = working like a practitioner (designed an investigation, revised on evidence, cited a source); identity = self-awareness/interest/meaning (chose the harder path, tied it to their own life). Omit when it's not clear-cut." },
@@ -86,6 +90,36 @@ export const OBSERVER_TOOL = {
                 "Optional short exact quote from that SCHOLAR message. Do not paraphrase or quote a TUTOR line.",
             },
             pcmDimension: { type: "string" as const, enum: ["core", "connections", "practice", "identity"], description: "OPTIONAL PCM tag — most signals are identity (self-direction, interest) or practice (persistence, metacognition) evidence. Set only when clear-cut; omit otherwise." },
+          },
+        },
+      },
+      interests: {
+        type: "array" as const,
+        description:
+          'What the scholar is INTO, in their own words — separate from mastery and signals. REQUIRED rows: (1) when the "## Origin:" line says the scholar picked or started this session, ONE row with how "picked" for the session topic, citing the scholar line that names it; (2) one row with how "said" for EVERY scholar line where they say they like, love, want, or wonder about something ("I love to do art", "I want to do food art", "I always see rainbows and wonder…"). "menu" = chose one option from a set inside an assigned activity. Enthusiasm inside an assigned topic is NOT an interest. Empty only when none of these occurred.',
+        items: {
+          type: "object" as const,
+          required: ["label", "how", "sourceMessageId"],
+          properties: {
+            label: {
+              type: "string" as const,
+              description:
+                "Short noun phrase for the thing (a topic, activity, place, or experience), ≤ 6 words.",
+            },
+            how: {
+              type: "string" as const,
+              enum: ["said", "picked", "menu"],
+            },
+            words: {
+              type: "string" as const,
+              description:
+                "The SCHOLAR's own words from that line, verbatim, ≤ 200 chars. Never the tutor's.",
+            },
+            sourceMessageId: {
+              type: "string" as const,
+              description:
+                "The bracketed id on the SCHOLAR line. Never a tutor line.",
+            },
           },
         },
       },
@@ -262,11 +296,48 @@ export interface ObserverHistoryMessage {
   id?: string;
   /** Original database role; unlike `role`, this is never transport-normalized. */
   sourceRole?: string;
+  /**
+   * When the turn was written (`_creationTime`). Never rendered to the model —
+   * it exists so the conversational-alert gate can tell whether the moment an
+   * alert quotes is new since the last run that raised one. Optional because the eval
+   * harness and unit fixtures build history without it; absent reads as
+   * "unknown", which the gate treats as new (it never suppresses on a guess).
+   */
+  createdAt?: number;
   role: string;
   content: string;
   generatedImage?: boolean;
+  /** A Magic Corners redraw of a scholar upload — the system's, not the tutor's. */
+  magicRedraw?: boolean;
   imageId?: string | null;
   imagePrompt?: string | null;
+  /**
+   * How a scholar turn was entered. `"spoken"` means `content` is an automatic
+   * speech-to-text transcript rather than anything the child typed, so it is
+   * marked in the transcript and can never be presented as a verbatim quote.
+   */
+  inputModality?: InputModality;
+}
+
+/**
+ * Who a transcript line is attributed to. A dictated scholar turn is marked
+ * SCHOLAR (spoken): the words that follow came out of speech-to-text, and the
+ * observer rubric tells the model those words are not a record of what the
+ * child actually said.
+ */
+function speakerLabel(m: { role: string; inputModality?: string }): string {
+  if (m.role !== "user") return "TUTOR";
+  if (m.inputModality === "spoken") return "SCHOLAR (spoken)";
+  if (m.inputModality === "app") return "APP BUTTON (not scholar speech)";
+  return "SCHOLAR";
+}
+
+function isScholarAuthoredTurn(message: ObserverHistoryMessage): boolean {
+  return (
+    message.sourceRole === "user" &&
+    message.inputModality !== "app" &&
+    !message.generatedImage
+  );
 }
 
 /**
@@ -280,12 +351,17 @@ function transcriptLine(m: {
   role: string;
   content: string;
   generatedImage?: boolean;
+  magicRedraw?: boolean;
   imagePrompt?: string | null;
+  inputModality?: string;
 }): string {
   const messageId = m.id ? `[${m.id}] ` : "";
+  if (m.magicRedraw) {
+    return `${messageId}SYSTEM [automatically redrew the scholar's uploaded photo (Magic Corners detector; may have misfired)${m.imagePrompt ? `; detector instruction: ${m.imagePrompt}` : ""}]`;
+  }
   return m.generatedImage
     ? `${messageId}TUTOR [shared an illustration${m.content ? `: ${m.content}` : ""}${m.imagePrompt ? `; original generation prompt: ${m.imagePrompt}` : ""}]`
-    : `${messageId}${m.role === "user" ? "SCHOLAR" : "TUTOR"}: ${m.content}`;
+    : `${messageId}${speakerLabel(m)}: ${m.content}`;
 }
 
 /** A SCHOLAR upload (their own work) — as opposed to a tutor-generated image. */
@@ -311,6 +387,23 @@ const SCHOLAR_WORK_IMAGE_NOTE =
 export const OBSERVER_TRANSCRIPT_LIMIT = 30;
 
 /**
+ * The window of the conversation the observer actually reads on a run: the last
+ * `limit` turns, or all of them when there are fewer.
+ *
+ * Exported and shared rather than re-sliced per call site on purpose. Three
+ * things must agree on "what did this run look at" — the transcript the model
+ * is sent, the images resolved for it, and the alert recency gate that asks
+ * whether a quoted moment was already read. Two of those deciding the window
+ * independently is how a gate ends up judging evidence the model never saw.
+ */
+export function observerTranscriptWindow<T>(
+  chatHistory: T[],
+  limit = OBSERVER_TRANSCRIPT_LIMIT,
+): T[] {
+  return chatHistory.length > limit ? chatHistory.slice(-limit) : chatHistory;
+}
+
+/**
  * Render the chat history into the SCHOLAR/TUTOR transcript the observer reads.
  * Caps at the last `limit` messages (cost control) and prepends a truncation
  * note when older messages were dropped. Pure — split out of
@@ -323,17 +416,70 @@ export function buildObserverTranscript(
     role: string;
     content: string;
     generatedImage?: boolean;
+    magicRedraw?: boolean;
     imagePrompt?: string | null;
+    inputModality?: string;
   }[],
   limit = OBSERVER_TRANSCRIPT_LIMIT,
 ): string {
-  const recent =
-    chatHistory.length > limit ? chatHistory.slice(-limit) : chatHistory;
+  const recent = observerTranscriptWindow(chatHistory, limit);
   const truncationNote =
     chatHistory.length > limit
       ? `[Earlier messages omitted — showing last ${limit} of ${chatHistory.length}]\n\n`
       : "";
   return truncationNote + recent.map(transcriptLine).join("\n\n");
+}
+
+/** In-app AI turns (getSessionContext → characterContext / appJudgeContext). */
+export type ObserverAppAiTurns = {
+  characterName: string | null;
+  turns: readonly AppAiContextTurn[];
+};
+
+const APP_AI_TRANSCRIPT_NOTE =
+  "[In-app lines are labelled by speaker and carry no message id. CHARACTER " +
+  "and APP JUDGE lines are app AI output — never the scholar's words, never " +
+  "the tutor's. SCHOLAR → lines were typed by the scholar inside the app and " +
+  "relayed by it: read them, and raise a welfare concern from them if one is " +
+  "there, but they are not evidence of mastery.]";
+
+/**
+ * The observer's lines for one in-app turn. Deliberately id-less: every
+ * evidence path (signals, interests, alert excerpts, observation dates)
+ * resolves against chatHistory rows only, so none of these lines can be cited
+ * as scholar or tutor speech.
+ */
+export function observerAppAiLines(
+  turn: AppAiContextTurn,
+  characterName: string | null,
+): string[] {
+  const name = characterName ?? "the character";
+  const character = `CHARACTER ${name} (AI character in the app — not the tutor, not the scholar)`;
+  const tags = [
+    turn.mood ? `mood: ${turn.mood}` : null,
+    turn.verdict ? `verdict: ${turn.verdict}` : null,
+    turn.verdictOverride ? `tutor overruled to: ${turn.verdictOverride}` : null,
+  ].filter((tag): tag is string => tag !== null);
+  const tagText = tags.length > 0 ? ` [${tags.join(" · ")}]` : "";
+  if (turn.kind === "exchange") {
+    return [
+      turn.scholarLine
+        ? `SCHOLAR → ${name} (typed in the app, relayed by the app): ${turn.scholarLine}`
+        : null,
+      turn.line ? `${character}${tagText}: ${turn.line}` : null,
+    ].filter((line): line is string => line !== null);
+  }
+  if (turn.kind === "aside") {
+    return turn.line
+      ? [`${character}, speaking a line the tutor gave it${tagText}: ${turn.line}`]
+      : [];
+  }
+  if (!turn.verdict) return [];
+  return [
+    `APP JUDGE "${turn.judgeId ?? "judge"}" (app AI, not the tutor): verdict ${turn.verdict}` +
+      (turn.scholarLine ? `; answer judged: ${turn.scholarLine}` : "") +
+      (turn.feedback ? `; feedback: ${turn.feedback}` : ""),
+  ];
 }
 
 /**
@@ -352,9 +498,23 @@ export function buildObserverTranscriptBlocks(
   chatHistory: ObserverHistoryMessage[],
   scholarImages: Map<string, ImageContentPart>,
   limit = OBSERVER_TRANSCRIPT_LIMIT,
+  appAi: ObserverAppAiTurns | null = null,
 ): ObserverContentBlock[] {
-  const recent =
-    chatHistory.length > limit ? chatHistory.slice(-limit) : chatHistory;
+  const recent = observerTranscriptWindow(chatHistory, limit);
+
+  // In-app turns ride in the same window: those anchored to a chat row the
+  // window shows, or after the last row. Older ones age out with their rows.
+  const windowIds = new Set(
+    recent.flatMap((m) => (m.id ? [m.id] : [])),
+  );
+  const appAiBefore = new Map<string | null, string[]>();
+  for (const turn of appAi?.turns ?? []) {
+    const anchor = turn.placeBeforeMessageId;
+    if (anchor !== null && !windowIds.has(anchor)) continue;
+    const lines = observerAppAiLines(turn, appAi?.characterName ?? null);
+    if (lines.length === 0) continue;
+    appAiBefore.set(anchor, [...(appAiBefore.get(anchor) ?? []), ...lines]);
+  }
 
   const blocks: ObserverContentBlock[] = [];
   let textBuf: string[] = [];
@@ -363,6 +523,7 @@ export function buildObserverTranscriptBlocks(
       `[Earlier messages omitted — showing last ${limit} of ${chatHistory.length}]`,
     );
   }
+  if (appAiBefore.size > 0) textBuf.push(APP_AI_TRANSCRIPT_NOTE);
   const flushText = () => {
     if (textBuf.length > 0) {
       blocks.push({ type: "text", text: textBuf.join("\n\n") });
@@ -371,6 +532,7 @@ export function buildObserverTranscriptBlocks(
   };
 
   for (const m of recent) {
+    if (m.id) textBuf.push(...(appAiBefore.get(m.id) ?? []));
     const scholarImage =
       isScholarImageUpload(m) && m.imageId
         ? scholarImages.get(m.imageId)
@@ -380,7 +542,7 @@ export function buildObserverTranscriptBlocks(
       // following image is the kid's own work), flush the text run, then attach
       // the real image as its own block.
       textBuf.push(
-        `${m.id ? `[${m.id}] ` : ""}${m.role === "user" ? "SCHOLAR" : "TUTOR"}: ${m.content}${SCHOLAR_WORK_IMAGE_NOTE}`,
+        `${m.id ? `[${m.id}] ` : ""}${speakerLabel(m)}: ${m.content}${SCHOLAR_WORK_IMAGE_NOTE}`,
       );
       flushText();
       blocks.push(scholarImage);
@@ -388,6 +550,7 @@ export function buildObserverTranscriptBlocks(
       textBuf.push(transcriptLine(m));
     }
   }
+  textBuf.push(...(appAiBefore.get(null) ?? []));
   flushText();
   return blocks;
 }
@@ -460,6 +623,7 @@ export function parseObserverResponse(
     sessionSignals: Array.isArray(parsed.sessionSignals)
       ? parsed.sessionSignals
       : [],
+    interests: Array.isArray(parsed.interests) ? parsed.interests : [],
     crossDomainConnections: Array.isArray(parsed.crossDomainConnections)
       ? parsed.crossDomainConnections
       : [],
@@ -505,9 +669,19 @@ export interface SessionSignalDoc {
 /** Shape of the context object from sessionHelpers.getSessionContext */
 export interface ObserverContext {
   scholarName: string | null;
+  /**
+   * Staff-only ground truth from `users.pronouns`; null falls back to the
+   * they/them default. Observer output is teacher-facing, which is why it
+   * consumes this at all — see schema.ts for the surfaces that must not.
+   */
+  scholarPronouns?: string | null;
   scholarId: string;
   title: string;
   unitContext: { title: string } | null;
+  origin: {
+    kind: "assigned" | "seed" | "scholarStarted" | "onboarding";
+    label: string;
+  };
   /** The unit's keyed EQ/EU list — attribution targets. */
   granules?: { key: string; kind: "eq" | "eu"; text: string }[] | null;
   appStateContext?: {
@@ -520,7 +694,18 @@ export interface ObserverContext {
     version: number;
     updatedAt: number;
   } | null;
+  /** The app's AI character and its turns; rendered into the transcript. */
+  characterContext?: {
+    name: string;
+    turns: readonly AppAiContextTurn[];
+  } | null;
+  /** An app with judges but no character: its rulings. */
+  appJudgeContext?: { turns: readonly AppAiContextTurn[] } | null;
 }
+
+type ObserverMessageContext = Omit<ObserverContext, "origin"> & {
+  origin?: ObserverContext["origin"];
+};
 
 // ─── User-Message Builder ────────────────────────────────────────────
 
@@ -594,7 +779,7 @@ function buildObserverHeader(
   currentObservations: MasteryObservationDoc[],
   activeSeeds: SeedDoc[],
   recentSignals: SessionSignalDoc[],
-  context: ObserverContext,
+  context: ObserverMessageContext,
   pendingSeeds?: PendingSeedDoc[],
 ): string {
   const parts: string[] = [];
@@ -602,13 +787,18 @@ function buildObserverHeader(
   // The name is the model's only gender-suggestive input, so the pronoun rule
   // rides on the same line (see convex/lib/scholarPronouns.ts).
   parts.push(
-    `## Scholar: ${context.scholarName || "Unknown"} ${SCHOLAR_NAME_PRONOUN_HINT}`,
+    `## Scholar: ${context.scholarName || "Unknown"} ${scholarNamePronounHint(context.scholarPronouns)}`,
   );
   parts.push(`## Project: "${context.title}"`);
 
   if (context.unitContext) {
     parts.push(`## Unit: "${context.unitContext.title}"`);
   }
+  // Callers that predate the origin line (tests, fixtures) get the strictest
+  // reading — assigned — so an unknown origin can never mint a "picked".
+  parts.push(
+    `## Origin: ${context.origin?.label ?? OBSERVER_ORIGIN_LABELS.assigned}`,
+  );
 
   // Unit granules — the EQ/EU attribution targets. Keys are what the
   // model must echo back in granuleAttributions.
@@ -672,7 +862,7 @@ export function buildObserverUserMessage(
   currentObservations: MasteryObservationDoc[],
   activeSeeds: SeedDoc[],
   recentSignals: SessionSignalDoc[],
-  context: ObserverContext,
+  context: ObserverMessageContext,
   pendingSeeds?: PendingSeedDoc[],
 ): string {
   const header = buildObserverHeader(
@@ -699,7 +889,7 @@ export function buildObserverUserMessageBlocks(
   currentObservations: MasteryObservationDoc[],
   activeSeeds: SeedDoc[],
   recentSignals: SessionSignalDoc[],
-  context: ObserverContext,
+  context: ObserverMessageContext,
   pendingSeeds?: PendingSeedDoc[],
   limit = OBSERVER_TRANSCRIPT_LIMIT,
 ): ObserverContentBlock[] {
@@ -711,10 +901,18 @@ export function buildObserverUserMessageBlocks(
     pendingSeeds,
   );
   const prefix = `${header}\n\n## Transcript\n\n`;
+  const appAiTurns =
+    context.characterContext?.turns ?? context.appJudgeContext?.turns ?? null;
   const transcriptBlocks = buildObserverTranscriptBlocks(
     chatHistory,
     scholarImages,
     limit,
+    appAiTurns
+      ? {
+          characterName: context.characterContext?.name ?? null,
+          turns: appAiTurns,
+        }
+      : null,
   );
 
   const blocks: ObserverContentBlock[] = [];
@@ -773,9 +971,10 @@ export interface ObserverResult {
    * Deliberately fires even when the tutor de-escalates successfully and the
    * session recovers, which is exactly the case `stuckAlert` omits (it
    * requires the difficulty to be unresolved at the end of the transcript).
-   * Routes a calm "chat_overwhelm" alert (convex/alerts.ts). The observer
-   * emits at most one of these two per session; see the precedence rule in
-   * the prompt. Absent in the vast majority of sessions.
+   * Routes a calm "chat_overwhelm" alert (convex/alerts.ts). The prompt asks
+   * for at most one of these two per session, but the code no longer breaks
+   * the tie when it gets both — see `resolveChatAlerts` below for why.
+   * Absent in the vast majority of sessions.
    */
   overwhelmAlert?: {
     severity: "info" | "warning";
@@ -802,6 +1001,7 @@ export interface ObserverResult {
     attemptContext: string;
     studentInitiated: boolean;
     transcriptExcerpt: string;
+    sourceMessageId?: string | null;
     standardNotations?: string[];
     supersedesObservationId?: string | null;
     fluencyLevel?: number | null;
@@ -814,6 +1014,12 @@ export interface ObserverResult {
     sourceMessageId: string;
     transcriptExcerpt?: string;
     pcmDimension?: "core" | "connections" | "practice" | "identity";
+  }>;
+  interests: Array<{
+    label: string;
+    how: "said" | "picked" | "menu";
+    words?: string;
+    sourceMessageId: string;
   }>;
   crossDomainConnections: Array<{
     domains: string[];
@@ -847,6 +1053,113 @@ export interface ObserverResult {
 
 const MAX_SESSION_SIGNAL_EXCERPT_LENGTH = 500;
 
+/** An alert excerpt is meant to be "a short verbatim quote", not a whole turn. */
+const MAX_ALERT_EXCERPT_LENGTH = 500;
+
+/**
+ * Fold a candidate quote and a source turn to a comparable form: curly quotes
+ * become straight, whitespace runs collapse, case is ignored. Deliberately
+ * narrow — it absorbs rendering noise, never a paraphrase. Anything that still
+ * fails containment after this is the model's own words, not the scholar's.
+ */
+function normalizeExcerptForMatch(text: string): string {
+  return (
+    text
+      .replace(/[‘’‛′]/g, "'")
+      .replace(/[“”″]/g, '"')
+      // Strip apostrophes entirely rather than merely straightening them: the
+      // scholars this guard protects write "cant" and "im", while the model
+      // quotes the tidy form — a genuine quote must not fail to ground over
+      // the one character a young writer most reliably omits.
+      .replace(/'/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase()
+  );
+}
+
+const QUOTE_PAIRS: [string, string][] = [
+  ['"', '"'],
+  ["“", "”"],
+  ["'", "'"],
+  ["‘", "’"],
+];
+
+/**
+ * Strip framing the model added AROUND the quote — a matched pair of wrapping
+ * quote marks, and a leading/trailing elision. The scholar's words are what is
+ * left; that trimmed form is both what we match and what we display, so a
+ * teacher never reads punctuation the child didn't produce.
+ */
+function trimQuoteFraming(text: string): string {
+  let out = text.trim();
+  for (const [open, close] of QUOTE_PAIRS) {
+    if (out.length >= 2 && out.startsWith(open) && out.endsWith(close)) {
+      out = out.slice(1, -1).trim();
+      break;
+    }
+  }
+  return out
+    .replace(/^(?:\.\.\.|…)\s*/, "")
+    .replace(/\s*(?:\.\.\.|…)$/, "")
+    .trim();
+}
+
+/** A model-supplied alert quote that was found in a real scholar turn. */
+export interface GroundedAlertExcerpt {
+  /** The verified quote, exactly as it will be shown to a teacher. */
+  excerpt: string;
+  /** How the scholar turn it came from was entered. */
+  inputModality?: InputModality;
+}
+
+/**
+ * Resolve an alert's model-supplied `excerpt` to a real scholar turn.
+ *
+ * The observer contract already says "a short verbatim quote of the SCHOLAR's
+ * own words. No genuine quote → omit the whole signal" — this enforces it,
+ * because a prompt rule is not a guarantee. An excerpt that is not literally
+ * contained in some non-empty scholar message is not a quote; it is the model's
+ * paraphrase, the TUTOR's words, or an invention, and it must never reach a
+ * teacher inside quote marks attributed to a child.
+ *
+ * When the match lands on a DICTATED turn the quote is returned with
+ * `inputModality: "spoken"`. That text came out of speech-to-text, so it is a
+ * record of what a machine heard, not of what the child said; the caller labels
+ * it as such rather than presenting it as the scholar's words. This is not
+ * hypothetical: a mis-transcribed turn was quoted verbatim to teachers in a
+ * "Going in circles" alert, alongside a claim that the scholar's replies were
+ * incoherent. The scholar was not incoherent; the transcription was wrong.
+ *
+ * Only genuine scholar rows are searched — `sourceRole` is the pre-transport
+ * role, so tool/system rows carried as role "user" (whispers, instruction
+ * markers) and tutor-generated images can never launder into a scholar quote.
+ */
+export function groundAlertExcerpt(
+  excerpt: unknown,
+  chatHistory: ObserverHistoryMessage[],
+): GroundedAlertExcerpt | null {
+  if (typeof excerpt !== "string") return null;
+  const trimmed = trimQuoteFraming(excerpt);
+  if (!trimmed || trimmed.length > MAX_ALERT_EXCERPT_LENGTH) return null;
+
+  const needle = normalizeExcerptForMatch(trimmed);
+  if (!needle) return null;
+
+  const source = chatHistory.find(
+    (message) =>
+      isScholarAuthoredTurn(message) &&
+      message.content.trim() !== "" &&
+      normalizeExcerptForMatch(message.content).includes(needle),
+  );
+  if (!source) return null;
+
+  return {
+    excerpt: trimmed,
+    ...(source.inputModality ? { inputModality: source.inputModality } : {}),
+  };
+}
+
 /**
  * Normalize the bracketed form the transcript renders while accepting the raw id
  * the observer contract asks the model to return.
@@ -877,8 +1190,7 @@ export function groundSessionSignalEvidence(
   const source = chatHistory.find(
     (message) =>
       message.id === sourceMessageId &&
-      message.sourceRole === "user" &&
-      !message.generatedImage &&
+      isScholarAuthoredTurn(message) &&
       message.content.trim() !== "",
   );
   if (!source) return null;
@@ -895,4 +1207,352 @@ export function groundSessionSignalEvidence(
       : source.content;
 
   return { sourceMessageId, transcriptExcerpt };
+}
+
+/**
+ * Which of the two conversational alerts (`chat_stuck` / `chat_overwhelm`) the
+ * observer should actually raise this run.
+ *
+ * The rule is one sentence: **each alert is raised on its own merits, and
+ * neither can suppress the other.** "Own merits" means the verbatim scholar
+ * quote both specs already make mandatory ("No genuine quote → omit the whole
+ * signal") — an alert the model could not attribute to the scholar's own words
+ * is off-spec on its face and is dropped rather than shown to a teacher.
+ *
+ * Why there is no tie-break any more. The code used to give `overwhelmAlert`
+ * blanket precedence, discarding `stuckAlert` whenever both were emitted. On a
+ * real session that inverted the truth: the observer re-read a days-old moment,
+ * emitted an `overwhelmAlert` whose own summary stated the scholar had NOT
+ * opted out emotionally, and that alert silently deleted an accurate "going in
+ * circles" signal. Its excerpt was a genuine scholar quote (a claim of having
+ * finished the work), so no code-checkable validity predicate — quote presence,
+ * or resolving the quote against a real scholar turn — would have caught it.
+ * The alert was wrong only in what its prose ASSERTED, which code cannot
+ * adjudicate. So the code stops adjudicating: when the model hands us two
+ * readings of one session, both go to the teacher and the session decides.
+ *
+ * The prompt still asks for at most one, so a spec-compliant run is unaffected;
+ * a double-raise only happens on a run that already broke that rule.
+ */
+export function resolveChatAlerts(
+  result: Pick<ObserverResult, "stuckAlert" | "overwhelmAlert">,
+): { raiseStuck: boolean; raiseOverwhelm: boolean } {
+  return {
+    raiseStuck: hasScholarQuote(result.stuckAlert),
+    raiseOverwhelm: hasScholarQuote(result.overwhelmAlert),
+  };
+}
+
+/**
+ * Both alert specs require a short verbatim quote of the SCHOLAR's own words
+ * and say to omit the whole signal without one. This enforces exactly that and
+ * nothing more: presence, not authenticity. Proving the quote is really the
+ * scholar's needs the transcript, and that check belongs with the excerpt
+ * grounding being added separately (`groundAlertExcerpt`); when it lands, this
+ * predicate deepens from "has a quote" to "has a quote that resolves to a real
+ * scholar turn" without any other part of the rule changing.
+ */
+function hasScholarQuote(alert: { excerpt?: string } | undefined): boolean {
+  return typeof alert?.excerpt === "string" && alert.excerpt.trim() !== "";
+}
+
+// ─── Alert recency (the "new since we last looked" bound) ────────────
+
+/**
+ * Normalize a quote for comparison against the turn it was taken from.
+ * Smart quotes, wrapping quote marks, collapsed whitespace, case and
+ * apostrophes are all things that vary freely between a scholar's typing and a
+ * model's rendering of it; none of them change which moment is being cited.
+ *
+ * The apostrophe is the one that matters most here. Young scholars write in
+ * invented spelling — "im", "dont", "cant" — and a model quoting them
+ * routinely repairs the contraction to "I'm", "don't", "can't" (or the reverse
+ * on a turn that did have one). Dropping apostrophes on BOTH sides makes those
+ * the same string. Left in, a newer turn can fail to match while an older one
+ * still does, which is the only way this gate produces a false `stale`.
+ *
+ * Both sides go through this function, so widening it never lets a quote match
+ * a turn whose words differ — only one whose punctuation does. Anything this
+ * still fails to match stays UNGROUNDED, and an ungrounded alert is never
+ * suppressed.
+ */
+function normalizeQuote(text: string): string {
+  return text
+    .replace(/[‘’‛]/g, "'")
+    .replace(/[“”‟]/g, '"')
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .trim()
+    .replace(/['`]/g, "")
+    .toLowerCase();
+}
+
+/**
+ * How an alert's supporting quote relates to what the last ALERTING pass read.
+ *
+ * - `fresh`      — it resolves to a scholar turn the last pass that raised a
+ *                  conversational alert had not yet seen (or we cannot date
+ *                  the turn, which reads as new).
+ * - `stale`      — every scholar turn it resolves to was already read by a
+ *                  pass that raised an alert. This is the re-alerting failure.
+ * - `ungrounded` — no quote, or no scholar turn contains it. Undecidable, so
+ *                  the gate leaves the alert alone.
+ */
+export type AlertEvidenceRecency = "fresh" | "stale" | "ungrounded";
+
+/**
+ * Classify an alert's evidence against the alerting watermark.
+ *
+ * `observedThrough` is the `createdAt` of the newest message read by the last
+ * pass that actually RAISED a conversational alert on this session
+ * (`sessions.alertEvidenceThrough` — advanced fire-only; see observer.ts §6.9).
+ * It is a WATERMARK, not a duration: there is no "too old" threshold anywhere
+ * here, and nothing to calibrate. The question is only ever "did an alert we
+ * already sent a teacher cover this moment?" — which is exactly the property
+ * that failed in prod, where a five-day-old, already-alerted turn was re-read
+ * as if it had just happened.
+ *
+ * Every ambiguity resolves toward RAISING: a missing watermark (no alert ever
+ * raised — including any number of quiet passes before this one), an
+ * undateable turn, a quote no turn contains, and a quote that also matches a
+ * newer turn all return something other than `stale`.
+ */
+export function classifyAlertEvidence(
+  alert: { excerpt?: string } | undefined,
+  chatHistory: ObserverHistoryMessage[],
+  observedThrough: number | null | undefined,
+): AlertEvidenceRecency {
+  const quote = normalizeQuote(alert?.excerpt ?? "");
+  if (!quote) return "ungrounded";
+  // No previous pass ⇒ nothing has been considered before ⇒ nothing is stale.
+  if (typeof observedThrough !== "number") return "fresh";
+
+  let grounded = false;
+  for (const message of chatHistory) {
+    // Same rule the signal grounding uses: only the scholar's own turns can
+    // substantiate a quote the specs require to be the scholar's own words.
+    // (This alone also excludes generated-image rows — they are built with
+    // sourceRole "tool"; see getSessionContext.)
+    if (!isScholarAuthoredTurn(message)) continue;
+    if (!normalizeQuote(message.content).includes(quote)) continue;
+    grounded = true;
+    if (typeof message.createdAt !== "number") return "fresh";
+    if (message.createdAt > observedThrough) return "fresh";
+  }
+  return grounded ? "stale" : "ungrounded";
+}
+
+/**
+ * The conversational alerts (`chat_stuck` / `chat_overwhelm`) that survive the
+ * recency bound this run. Both make a claim about the state of the conversation
+ * NOW — "going in circles", "asked to stop" — so a teacher reading one is
+ * entitled to assume it happened since the last alert they were sent about
+ * this session. Re-reading a week-old, already-alerted turn and re-raising it
+ * breaks exactly that promise.
+ *
+ * Deliberately NOT applied to the other two observer alert producers:
+ *   • `welfare` — a disclosure of possible ongoing harm is not a claim about
+ *     the current turn, and the cost of suppressing one on a matching
+ *     technicality is not a cost worth trading for tidiness.
+ *   • `parasocial_reliance` — its whole subject is a pattern accumulating over
+ *     days, and it already coalesces on a multi-day dedup window.
+ *
+ * Composes with `resolveChatAlerts` rather than replacing it: that decides
+ * whether an alert is substantiated at all, this decides whether what it is
+ * substantiated BY is new. An alert must pass both.
+ */
+export function resolveChatAlertRecency(
+  result: Pick<ObserverResult, "stuckAlert" | "overwhelmAlert">,
+  chatHistory: ObserverHistoryMessage[],
+  observedThrough: number | null | undefined,
+): { stuck: AlertEvidenceRecency; overwhelm: AlertEvidenceRecency } {
+  return {
+    stuck: classifyAlertEvidence(result.stuckAlert, chatHistory, observedThrough),
+    overwhelm: classifyAlertEvidence(
+      result.overwhelmAlert,
+      chatHistory,
+      observedThrough,
+    ),
+  };
+}
+
+/**
+ * The watermark an ALERTING run leaves behind: the newest datable turn in the
+ * window the observer just read. The caller records it only on a pass that
+ * actually raised a conversational alert (observer.ts §6.9) — a quiet pass
+ * leaves the mark alone, so evidence is never "implicitly cleared" by mere
+ * reading. Returns null when nothing is datable, in which case the caller
+ * advances nothing and the next run is unbounded — the safe direction.
+ */
+export function alertEvidenceWatermark(
+  chatHistory: ObserverHistoryMessage[],
+): number | null {
+  let newest: number | null = null;
+  for (const message of chatHistory) {
+    if (typeof message.createdAt !== "number") continue;
+    if (newest === null || message.createdAt > newest) newest = message.createdAt;
+  }
+  return newest;
+}
+
+// ─── Observation evidence time (TRA-101) ──────────────────────────────
+
+/**
+ * When the evidence behind a mastery observation actually happened.
+ *
+ * The observer re-reads a fixed transcript window on every run, and a session
+ * can span days, so the same scholar turn is re-derived into a fresh observation
+ * many times over. Stamping each of those `Date.now()` makes "how recent is this
+ * mastery signal" quietly lie: on prod, one in eight grounded observations was
+ * dated more than an hour after the turn it quotes, and one in fourteen more
+ * than a day after (measured 2026-09-02 over ~2,000 rows). This resolves the
+ * observation back to the turn that evidences it, the way `masteryReDerive`
+ * already dates rebuilt rows by the session rather than the rerun.
+ *
+ * Resolution order, most trustworthy first:
+ *   1. The scholar turns whose text contains the observation's verbatim
+ *      `transcriptExcerpt` (same normalization as the alert recency gate). If
+ *      the model's `sourceMessageId` is one of them it wins; otherwise the
+ *      NEWEST match — for a short quote that recurs, the latest turn is the
+ *      closest to what today's `Date.now()` stamp would have said, so the
+ *      change can only move a date toward the evidence, never past it.
+ *   2. `sourceMessageId` alone, when it names a real scholar turn and the
+ *      excerpt grounds nowhere (the model paraphrased).
+ *   3. `null` — the caller falls back to now. No threshold, no guess (T6).
+ *
+ * Only SCHOLAR turns date evidence, matching every other grounding rule in this
+ * file: the record is of what the child showed, and a tutor line that happens
+ * to contain the quote is not that.
+ */
+export function resolveObservationEvidenceTime(
+  observation: { transcriptExcerpt?: string; sourceMessageId?: string | null },
+  chatHistory: ObserverHistoryMessage[],
+): number | null {
+  const sourceMessageId = normalizeObserverSourceMessageId(
+    observation.sourceMessageId,
+  );
+  const quote = normalizeQuote(observation.transcriptExcerpt ?? "");
+  const scholarTurns = chatHistory.filter(
+    (m) =>
+      isScholarAuthoredTurn(m) &&
+      typeof m.createdAt === "number",
+  );
+
+  if (quote) {
+    const matches = scholarTurns.filter((m) =>
+      normalizeQuote(m.content).includes(quote),
+    );
+    if (matches.length > 0) {
+      const cited = sourceMessageId
+        ? matches.find((m) => m.id === sourceMessageId)
+        : undefined;
+      if (cited) return cited.createdAt as number;
+      return Math.max(...matches.map((m) => m.createdAt as number));
+    }
+  }
+
+  if (sourceMessageId) {
+    const cited = scholarTurns.find((m) => m.id === sourceMessageId);
+    if (cited) return cited.createdAt as number;
+  }
+  return null;
+}
+
+// ─── Observer trigger debounce (TRA-152) ──────────────────────────────
+
+/**
+ * Trailing-edge debounce for the automatic per-turn observer trigger.
+ *
+ * `finalizeStream` used to schedule `observer.analyzeSession` after EVERY
+ * assistant turn. Every run reads the same last-`OBSERVER_TRANSCRIPT_LIMIT`
+ * window, so a burst of quick exchanges produces N near-identical analyses
+ * where one — the last — would have seen every turn the others did. On prod the
+ * observer was a quarter of all AI spend (2026-08-21 → 09-02: 909 runs, $81);
+ * replaying these two constants against that real message timing keeps 481 runs
+ * and 45% of the spend.
+ *
+ * IDLE is how long a session must go quiet before the pending run fires; every
+ * new turn inside it pushes the run out again. MAX_WAIT caps that from the first
+ * turn of the burst, so a scholar who never pauses still gets a reading every
+ * three minutes. Not tunable per deployment on purpose — the binding constraint
+ * is the roster pulse, not cost: `rosterPulse` refuses to draw a trend below
+ * `TREND_MIN_POINTS` readings, and 60s/180s is the widest setting that still
+ * clears that floor inside one class block (review/observer-cadence-plan.html).
+ * Safety latency is NOT a constraint: welfare alerts ride the observer, but a
+ * disclosure mid-burst is read by the run that fires at most three minutes
+ * later, and the end-of-session `requestRecap` flush runs synchronously.
+ */
+export const OBSERVER_DEBOUNCE_IDLE_MS = 60_000;
+export const OBSERVER_DEBOUNCE_MAX_WAIT_MS = 180_000;
+/**
+ * Never cancel a job due within this margin. The trigger reads the job's state
+ * and cancels it in one mutation, but a job that is due (or overdue because the
+ * scheduler is lagging) can be claimed between the read and the commit, and
+ * Convex treats cancelling an executing function as cancel-or-fail. A job this
+ * close to firing will read the current turn anyway, so leaving it costs nothing.
+ */
+export const OBSERVER_DEBOUNCE_CANCEL_GRACE_MS = 5_000;
+
+/** What the trigger knows about the run it last queued for this session. */
+export interface PendingObserverRun {
+  jobId: string;
+  /** When the current burst opened — the first turn that queued this window. */
+  since: number;
+  /** Live scheduler state of the job; anything but `pending` means it will not read new turns. */
+  state: "pending" | "inProgress" | "success" | "failed" | "canceled" | "missing";
+  /** When the pending job is due, if known. */
+  scheduledTime?: number;
+}
+
+export type ObserverRunPlan =
+  | { kind: "leave" }
+  | { kind: "schedule"; runAt: number; since: number; cancelJobId: string | null };
+
+/**
+ * Decide what a new assistant turn does to the session's pending observer run.
+ *
+ * - No pending job, or one that has already started/finished/been canceled: it
+ *   will never read this turn, so open a new window — schedule at `now + IDLE`.
+ * - A genuinely pending job: push it out to `now + IDLE`, but never past the
+ *   burst's `since + MAX_WAIT` deadline. If that would not move it any later —
+ *   it already sits on the deadline — or it is due within
+ *   `OBSERVER_DEBOUNCE_CANCEL_GRACE_MS` (including overdue, when the scheduler
+ *   lags), leave it: it fires soon and reads this turn, and cancelling a job
+ *   that is about to run only risks racing its start (Convex does not treat
+ *   cancelling an executing function as a safe no-op).
+ *
+ * Pure so the burst/idle/starvation cases are unit-testable without a scheduler.
+ */
+export function planObserverRun(
+  now: number,
+  pending: PendingObserverRun | null,
+): ObserverRunPlan {
+  if (!pending || pending.state !== "pending") {
+    return {
+      kind: "schedule",
+      runAt: now + OBSERVER_DEBOUNCE_IDLE_MS,
+      since: now,
+      cancelJobId: null,
+    };
+  }
+  const deadline = pending.since + OBSERVER_DEBOUNCE_MAX_WAIT_MS;
+  const runAt = Math.min(now + OBSERVER_DEBOUNCE_IDLE_MS, deadline);
+  // Leave the job alone when we would not push it any later (it already sits
+  // on the burst's deadline) or when it is due within the cancel grace — due,
+  // overdue, or about to be claimed. Either way it fires soon and reads this
+  // turn. Otherwise this is the trailing edge: cancel and push out.
+  if (
+    typeof pending.scheduledTime === "number" &&
+    (runAt <= pending.scheduledTime ||
+      pending.scheduledTime <= now + OBSERVER_DEBOUNCE_CANCEL_GRACE_MS)
+  ) {
+    return { kind: "leave" };
+  }
+  return {
+    kind: "schedule",
+    runAt,
+    since: pending.since,
+    cancelJobId: pending.jobId,
+  };
 }

@@ -480,7 +480,10 @@ describe("slides artifacts — scholar path", () => {
       assetId: storageId,
       alt: "A photo",
     });
-    const urls = await asScholar.query(api.files.getUrls, { storageIds: [storageId] });
+    const urls = await asScholar.query(api.artifacts.slideAssetUrls, {
+      artifactId: created.artifactId,
+      storageIds: [storageId],
+    });
     expect(urls).toEqual([{ storageId, url: expect.any(String) }]);
     const asset = await t.run(async (ctx) =>
       ctx.db.query("slideAssets")

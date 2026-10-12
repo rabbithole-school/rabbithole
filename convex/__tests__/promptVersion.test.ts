@@ -13,8 +13,8 @@ describe("computePromptVersion", () => {
   });
 
   test("is stable across calls when code + env are unchanged", async () => {
-    // The runtime clock line no longer lives in the base prompt (it moved to the
-    // per-turn dynamic tail via buildClockLine, which the hash material doesn't
+    // The runtime clock line no longer lives in the base prompt (it moved to
+    // per-turn message context via buildClockLine, which the hash material doesn't
     // render), so the material is inherently free of volatile wall-clock text.
     // Both the material and the hash must be byte-for-byte identical.
     expect(buildVersionMaterial()).toEqual(buildVersionMaterial());
@@ -29,31 +29,25 @@ describe("computePromptVersion", () => {
 // ── buildVersionMaterial — what feeds the hash ───────────────────────
 
 describe("buildVersionMaterial", () => {
-  test("covers the static tutor-visible prompt constants", () => {
-    const material = buildVersionMaterial();
-    // Base tutor prompt.
-    expect(material).toContain(
-      "You are an AI learning companion for gifted scholars at",
-    );
-    // Rendered with the fixed synthetic name (name-handling template covered).
-    expect(material).toContain("SCHOLAR NAME: Reference Scholar");
-    // Soul doc (default variant "L").
-    expect(material).toContain("stands for");
-    // First-session self-introduction.
-    expect(material).toContain("Introduce yourself (first-ever session)");
-    // Tool affordances.
-    expect(material).toContain("CODE ARTIFACTS");
-  });
-
   test("the hash material carries no live date/time line", () => {
     const material = buildVersionMaterial();
     // The volatile clock line moved out of buildBasePrompt to the per-turn
-    // dynamic tail (buildClockLine), which the hash material deliberately does
+    // message context (buildClockLine), which the hash material deliberately does
     // NOT render — so no "Current date and time" text appears at all, and the
     // hash never varies with the wall clock. (The DATE_LINE normalizer is kept
     // as a defensive no-op should a clock line ever reappear in the base prompt.)
     expect(material).not.toMatch(/Current date and time:/);
     expect(material).not.toMatch(/Current date and time: \w+day,/);
+  });
+
+  test("covers all three opening-turn directives (TRA-234)", () => {
+    // These moved out of the cached stable prefix into the dynamic tail; an
+    // edit to any of them must still bump the version. A falsy lastSessionAt
+    // silently yields null for the two returning variants, so assert on text.
+    const material = buildVersionMaterial();
+    expect(material).toContain("FIRST MESSAGE:");
+    expect(material).toContain("in this same sitting");
+    expect(material).toContain("The scholar has used Rabbithole before");
   });
 });
 

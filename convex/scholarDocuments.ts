@@ -15,7 +15,12 @@ import { scholarFormsAllowed } from "./lib/formInstitutionGate";
 import {
   documentKindUsesExtraction,
   requireKindAccess,
+  roleMayHandleKind,
 } from "./lib/documentKinds";
+import {
+  hasAnySchoolOperationsAccess,
+  hasSchoolOperationsAccessAtInstitution,
+} from "./lib/staffCapabilities";
 import {
   attachableHealthKinds,
   hasSignedHealthRecord,
@@ -26,14 +31,18 @@ import {
 /**
  * Scholar Documents — Phase 2, cognitive-assessment-first onboarding.
  *
- * HARD RULE: every read of a scholarDocuments ROW is gated to teacher + admin.
- * Scholars must NEVER read any field of scholarDocuments — especially not
- * extractedText or redactedSummary. Treat the role gate as load-bearing.
+ * HARD RULE: every read of a scholarDocuments ROW is gated by
+ * `requireDocumentAccess`: teacher + admin for everything, and — for the
+ * administrative kinds the registry marks `capability: "operations"` (incident
+ * reports, transfer records, conference notes, doctor's notes, report cards)
+ * — also staff holding `school:operations` at the scholar's institution, so
+ * the front office can see what it filed from the scanner. A cognitive
+ * assessment or an IEP is never reachable by operations staff. Scholars must
+ * NEVER read any field of scholarDocuments — especially not extractedText or
+ * redactedSummary. Treat the gate as load-bearing.
  *
- * The one endpoint here that a non-teacher may call is
- * `listDocumentsForStaff`, and it enforces exactly that rule: a health-authorized
- * staffer gets the HEALTH half of the merged list and this table is never queried
- * on their behalf.
+ * The raw extracted text, the audit trail and the teacher-authored document
+ * writes stay teacher-only regardless of kind.
  *
  * The extracted text is raw PDF OCR (may contain subscores, medical history,
  * etc). The redactedSummary feeds downstream AI calls that generate directives
@@ -53,6 +62,35 @@ async function requireTeacherOrAdmin(
     throw new Error("Forbidden: teacher or admin role required");
   }
   return ctx.user;
+}
+
+/**
+ * Throw unless the current user may handle this EXISTING row. Teacher roles:
+ * scholar access is the only boundary. Operations staff: the row's kind must
+ * be one the registry lets them file (`roleMayHandleKind`) AND they must hold
+ * `school:operations` at the scholar's institution. Same denial message as
+ * `requireTeacherOrAdmin` so a refusal never reveals which kind was probed.
+ */
+async function requireDocumentAccess(
+  ctx: { user: Doc<"users"> } & QueryCtx,
+  doc: Doc<"scholarDocuments">,
+): Promise<Doc<"users">> {
+  const user = ctx.user;
+  if (!isTeacherRole(user.role)) {
+    const scholar = await ctx.db.get(doc.scholarId);
+    const hasOperationsAccess =
+      !!scholar?.institutionId &&
+      (await hasSchoolOperationsAccessAtInstitution(
+        ctx,
+        user,
+        scholar.institutionId,
+      ));
+    if (!roleMayHandleKind(user.role, doc.kind, hasOperationsAccess)) {
+      throw new Error("Forbidden: teacher or admin role required");
+    }
+  }
+  await requireActiveScholarAccess(ctx, user, doc.scholarId);
+  return user;
 }
 
 async function logAccess(
@@ -77,19 +115,27 @@ async function logAccess(
 // ── Mutations (public, teacher + admin only) ────────────────────────────
 
 /**
- * Generate a short-lived upload URL for the client to PUT bytes to.
- * Teacher/admin only.
+ * Generate a short-lived upload URL for the client to POST bytes to (the
+ * response body carries the resulting `storageId`). Teacher
+ * roles, plus operations staff (who may file the administrative kinds via
+ * `registerUpload`). The URL carries no scholar data; `registerUpload` is
+ * where the kind and scholar are gated.
  */
 export const generateUploadUrl = authedMutation({
   args: {},
   handler: async (ctx) => {
-    await requireTeacherOrAdmin(ctx);
+    if (
+      !isTeacherRole(ctx.user.role) &&
+      !(await hasAnySchoolOperationsAccess(ctx, ctx.user))
+    ) {
+      throw new Error("Forbidden: teacher or admin role required");
+    }
     return await ctx.storage.generateUploadUrl();
   },
 });
 
 /**
- * Register an uploaded document. Called by the client after it has PUT the
+ * Register an uploaded document. Called by the client after it has POSTed the
  * bytes to the upload URL.
  *
  * NOTE on consent: we assume consent to upload cognitive/assessment documents
@@ -106,6 +152,10 @@ export const registerUpload = authedMutation({
       v.literal("identity_document"),
       v.literal("parent_email"),
       v.literal("observation"),
+      v.literal("incident_report"),
+      v.literal("transfer_record"),
+      v.literal("conference_notes"),
+      v.literal("doctor_note"),
       v.literal("other"),
     ),
     title: v.string(),
@@ -114,13 +164,40 @@ export const registerUpload = authedMutation({
     fileSizeBytes: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const user = await requireTeacherOrAdmin(ctx);
-    requireKindAccess(user.role, args.kind);
-
+    const user = ctx.user;
     // Verify scholar exists and is a scholar role (don't allow uploading
     // "documents" against a teacher/admin account by mistake).
     const scholar = await ctx.db.get(args.scholarId);
-    if (!scholar) throw new Error("Scholar not found");
+    if (!scholar || scholar.role !== "scholar") {
+      // Teacher-only callers keep their historical denial; anyone else is
+      // refused as a non-teacher before the target is even described.
+      if (!isTeacherRole(user.role)) {
+        throw new Error("Forbidden: teacher or admin role required");
+      }
+      throw new Error("Scholar not found");
+    }
+    // Operations staff may file the administrative kinds (registry
+    // `capability: "operations"`); every other kind stays teacher-only. The
+    // registry is consulted FIRST so a hand-crafted request for a kind the
+    // menu never offered is refused before any scholar access is resolved.
+    const hasOperationsAccess =
+      !isTeacherRole(user.role) &&
+      !!scholar.institutionId &&
+      (await hasSchoolOperationsAccessAtInstitution(
+        ctx,
+        user,
+        scholar.institutionId,
+      ));
+    // A non-teacher asking for a kind outside their registry rows gets the
+    // role-gate denial, never a kind-specific one (same as reads: a refusal
+    // must not reveal which kind was probed).
+    if (
+      !isTeacherRole(user.role) &&
+      !roleMayHandleKind(user.role, args.kind, hasOperationsAccess)
+    ) {
+      throw new Error("Forbidden: teacher or admin role required");
+    }
+    requireKindAccess(user.role, args.kind, hasOperationsAccess);
     await requireActiveScholarAccess(ctx, user, args.scholarId);
 
     const documentId = await ctx.db.insert("scholarDocuments", {
@@ -244,6 +321,8 @@ export const updateTextReport = authedMutation({
       bodyText?: string;
       extractedText?: string;
       processingStatus?: "pending";
+      processingError?: undefined;
+      pendingSince?: number;
     } = {};
     if (args.title !== undefined) updates.title = args.title.trim() || doc.title;
     let bodyChanged = false;
@@ -253,6 +332,9 @@ export const updateTextReport = authedMutation({
       updates.bodyText = body;
       updates.extractedText = body;
       updates.processingStatus = "pending";
+      // The previous attempt's error belongs to that attempt, not this one.
+      updates.processingError = undefined;
+      updates.pendingSince = Date.now();
       bodyChanged = true;
     }
     await ctx.db.patch(args.documentId, updates);
@@ -328,10 +410,12 @@ export const addGoogleDocLink = authedMutation({
 export const deleteDocument = authedMutation({
   args: { documentId: v.id("scholarDocuments") },
   handler: async (ctx, args) => {
-    const user = await requireTeacherOrAdmin(ctx);
     const doc = await ctx.db.get(args.documentId);
-    if (!doc) return;
-    await requireActiveScholarAccess(ctx, user, doc.scholarId);
+    if (!doc) {
+      await requireTeacherOrAdmin(ctx);
+      return;
+    }
+    const user = await requireDocumentAccess(ctx, doc);
 
     if (doc.fileStorageId) {
       try {
@@ -358,6 +442,50 @@ export const deleteDocument = authedMutation({
 
 // ── Queries (public, teacher + admin only) ──────────────────────────────
 
+// How long a document may sit "pending"/"extracting"/"redacting" before the
+// UI stops showing an eternal spinner and degrades it to "error". The
+// extract→redact pipeline is one "use node" action (extractAndRedact) with
+// Convex's hard 10-minute action-runtime cap, so real generation finishing
+// later than that is impossible — a row still in-progress past this bound had
+// its action HARD-KILLED (a deploy, the action cap, a crash) before it could
+// reach aiPatchProcessingStatus's ready/error, and nothing else re-drives it
+// (unlike flairArt/classDigests, this pipeline has no auto-retry path — the
+// only recovery today is a teacher deleting the stuck row and re-uploading).
+// Same pattern as THUMB_PENDING_STALE_MS in portfolio.ts: derive a truthful
+// status at read time rather than lie with a spinner forever. A later,
+// impossible-but-hypothetical late write still WINS on the next read, since
+// this never touches the stored row.
+const PROCESSING_STALE_MS = 10 * 60_000;
+
+/** Derive the UI-facing processingStatus/processingError, degrading a
+ *  stuck-in-progress row (its action was hard-killed) to "error" so the
+ *  existing error badge + explanatory text show instead of spinning forever.
+ *  `pendingSince` is stamped on a re-trigger of an EXISTING row
+ *  (updateTextReport); a fresh row's own `_creationTime` already marks the
+ *  same moment, so that's the fallback anchor. */
+function derivedProcessing(
+  r: Pick<
+    Doc<"scholarDocuments">,
+    "_creationTime" | "processingStatus" | "processingError" | "pendingSince"
+  >,
+): { processingStatus: Doc<"scholarDocuments">["processingStatus"]; processingError: string | undefined } {
+  const inProgress =
+    r.processingStatus === "pending" ||
+    r.processingStatus === "extracting" ||
+    r.processingStatus === "redacting";
+  if (
+    inProgress &&
+    Date.now() - (r.pendingSince ?? r._creationTime) > PROCESSING_STALE_MS
+  ) {
+    return {
+      processingStatus: "error",
+      processingError:
+        "Processing did not finish (interrupted before it could complete). Delete and re-upload to retry.",
+    };
+  }
+  return { processingStatus: r.processingStatus, processingError: r.processingError };
+}
+
 /** The metadata-only shape returned by every list endpoint. No extractedText,
  * no redactedSummary — hoisted so the two lists can't drift apart. */
 function scholarDocumentRow(r: Doc<"scholarDocuments">) {
@@ -377,8 +505,7 @@ function scholarDocumentRow(r: Doc<"scholarDocuments">) {
     fileMimeType: r.fileMimeType,
     fileSizeBytes: r.fileSizeBytes,
     uploadedBy: r.uploadedBy,
-    processingStatus: r.processingStatus,
-    processingError: r.processingError,
+    ...derivedProcessing(r),
     hasFile: r.fileStorageId != null,
     hasExtractedText: r.extractedText != null,
     // Teacher-facing existence flag + bullets (fall back to legacy fields for
@@ -425,14 +552,17 @@ export const listForScholar = authedQuery({
  *     BEST-EFFORT: a school_admin viewing the all-institutions lens resolves to
  *     zero health candidates today, and hard-throwing there would take away the
  *     document list they already have.
- *   • staff with health:manage — the health half ONLY, and
- *     `scholarDocuments` is never even queried for them. That is the whole
- *     point of keeping `requireTeacherOrAdmin` untouched: an operations staffer filing an
- *     immunization card gains no sight of a cognitive assessment.
- *   • staff with school:operations but no health capability — a valid caller
- *     with scholar access and NO health half: the list returns normally with
- *     `healthDocumentsVisible: false` and the health half empty. It does NOT
- *     throw; the health capability governs only whether that half is shown.
+ *   • staff with health:manage only — the health half ONLY; no
+ *     `scholarDocuments` row is ever read for them.
+ *   • staff with school:operations — the ADMINISTRATIVE `scholarDocuments`
+ *     kinds (registry `capability: "operations"`: the records the front
+ *     office files from the scanner) plus, with health:manage, the health
+ *     half. Rows are filtered by kind before they leave the handler, so an
+ *     operations staffer filing an immunization card or an incident report
+ *     still gains no sight of a cognitive assessment. Without the health
+ *     capability the list returns normally with `healthDocumentsVisible:
+ *     false` and the health half empty. It does NOT throw; the health
+ *     capability governs only whether that half is shown.
  *   • a caller with NEITHER scholar access nor the health half over this
  *     scholar — refused at the scholar-access boundary.
  */
@@ -465,6 +595,29 @@ export const listDocumentsForStaff = authedQuery({
         .order("desc")
         .collect();
       documents = rows.map(scholarDocumentRow);
+    }
+    // Operations staff see the administrative kinds they may file (registry
+    // `capability: "operations"`) and nothing else from this table — the rows
+    // are filtered by kind BEFORE they leave the handler, so an assessment or
+    // an IEP is never even counted for them. Access resolved below, together
+    // with the health half, before anything is returned.
+    const hasOperationsAccess =
+      !canReadScholarDocuments &&
+      !!target.institutionId &&
+      (await hasSchoolOperationsAccessAtInstitution(
+        ctx,
+        user,
+        target.institutionId,
+      ));
+    if (hasOperationsAccess) {
+      const rows = await ctx.db
+        .query("scholarDocuments")
+        .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
+        .order("desc")
+        .collect();
+      documents = rows
+        .filter((r) => roleMayHandleKind(user.role, r.kind, true))
+        .map(scholarDocumentRow);
     }
 
     let healthVisible: boolean;
@@ -512,6 +665,9 @@ export const listDocumentsForStaff = authedQuery({
       : [];
 
     return {
+      // `true` only for teacher roles: the full table plus the write-text /
+      // link-a-doc affordances. Operations staff get their filtered
+      // administrative rows in `documents` with this `false`.
       canReadScholarDocuments,
       // Whether the health half of this list is being shown at all. A caller
       // who can read scholarDocuments still gets the rest of their list when
@@ -557,16 +713,18 @@ export const listDocumentsForStaff = authedQuery({
 export const get = authedQuery({
   args: { documentId: v.id("scholarDocuments") },
   handler: async (ctx, args) => {
-    const user = await requireTeacherOrAdmin(ctx);
     const doc = await ctx.db.get(args.documentId);
-    if (!doc) return null;
-    await requireActiveScholarAccess(ctx, user, doc.scholarId);
+    if (!doc) {
+      await requireTeacherOrAdmin(ctx);
+      return null;
+    }
+    await requireDocumentAccess(ctx, doc);
 
     // Never return extractedText from `get`. That's gated behind the
     // separately-audited getExtractedText endpoint.
     const { extractedText, ...rest } = doc;
     void extractedText;
-    return rest;
+    return { ...rest, ...derivedProcessing(doc) };
   },
 });
 
@@ -577,10 +735,12 @@ export const get = authedQuery({
 export const logSummaryView = authedMutation({
   args: { documentId: v.id("scholarDocuments") },
   handler: async (ctx, args) => {
-    const user = await requireTeacherOrAdmin(ctx);
     const doc = await ctx.db.get(args.documentId);
-    if (!doc) throw new Error("Document not found");
-    await requireActiveScholarAccess(ctx, user, doc.scholarId);
+    if (!doc) {
+      await requireTeacherOrAdmin(ctx);
+      throw new Error("Document not found");
+    }
+    const user = await requireDocumentAccess(ctx, doc);
     await logAccess(ctx, {
       documentId: args.documentId,
       scholarId: doc.scholarId,
@@ -634,10 +794,12 @@ export const logExtractedView = authedMutation({
 export const getDownloadUrl = authedQuery({
   args: { documentId: v.id("scholarDocuments") },
   handler: async (ctx, args) => {
-    const user = await requireTeacherOrAdmin(ctx);
     const doc = await ctx.db.get(args.documentId);
-    if (!doc) return null;
-    await requireActiveScholarAccess(ctx, user, doc.scholarId);
+    if (!doc) {
+      await requireTeacherOrAdmin(ctx);
+      return null;
+    }
+    await requireDocumentAccess(ctx, doc);
     if (!doc.fileStorageId) return null;
     return await ctx.storage.getUrl(doc.fileStorageId);
   },
@@ -646,10 +808,12 @@ export const getDownloadUrl = authedQuery({
 export const logDownload = authedMutation({
   args: { documentId: v.id("scholarDocuments") },
   handler: async (ctx, args) => {
-    const user = await requireTeacherOrAdmin(ctx);
     const doc = await ctx.db.get(args.documentId);
-    if (!doc) throw new Error("Document not found");
-    await requireActiveScholarAccess(ctx, user, doc.scholarId);
+    if (!doc) {
+      await requireTeacherOrAdmin(ctx);
+      throw new Error("Document not found");
+    }
+    const user = await requireDocumentAccess(ctx, doc);
     await logAccess(ctx, {
       documentId: args.documentId,
       scholarId: doc.scholarId,

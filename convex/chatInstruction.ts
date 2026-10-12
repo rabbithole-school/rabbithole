@@ -78,6 +78,17 @@ async function persistInstructionMessage(
     perspectiveId: currentMessage?.perspectiveId,
     processId: currentMessage?.processId,
     promptVersion: currentMessage?.promptVersion,
+    // App designer (TRA-301): rows a tool splits off stay in the turn's thread.
+    thread: currentMessage?.thread,
+  };
+  // The replacement placeholder IS the stream's next active row, so it must
+  // carry the live stream identity — exactly as the generic finalizeAndSplit
+  // does (sessionHelpers.ts). Without this, stream-bound operations after the
+  // split (a render-check stamp, the universal placeholder binding) reject the
+  // legitimate continuation because its streamId no longer matches the body's.
+  const streamState = {
+    streamId: currentMessage?.streamId,
+    stopRequestedAt: currentMessage?.stopRequestedAt,
   };
 
   if (!args.contentSoFar.trim()) {
@@ -120,6 +131,7 @@ async function persistInstructionMessage(
     role: "assistant",
     content: "",
     ...dims,
+    ...streamState,
     flagged: false,
     lastStreamActivityAt: Date.now(),
   });

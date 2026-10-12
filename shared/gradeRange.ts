@@ -2,26 +2,50 @@
  * Grade-range formatting for the Math Skills surfaces.
  *
  * Grade tokens in this repo are strings: "K" (kindergarten) then "1".."12"
- * (`knowledgeNodes.grade`, `masteryDial` grade hints, seed graphs). These
+ * (`knowledgeNodes.grade`, `masteryDial` grade hints, seed graphs). Admissions
+ * candidates may also be "PreK" (rank -1), which no scholar grade uses. These
  * helpers map a token to a sortable rank and render a compact min–max label
  * ("Grade K–6", "Grade 4–5", or just "Grade 4" when a single grade covers the
  * set). Shared so the domain rail (via a Convex query) and the strand headers
  * (client-side, from the visible skill nodes) produce identical wording.
  */
 
-/** Map a grade token to a sortable rank: "K" → 0, "1".."12" → 1..12, else null. */
+/** The rank of "PreK" (admissions candidates only). */
+export const PREK_RANK = -1;
+
+function isPreK(token: string): boolean {
+  const upper = token.toUpperCase();
+  return upper === "PREK" || upper === "PRE-K";
+}
+
+/**
+ * Map a grade token to a sortable rank: "PreK" → -1, "K" → 0, "1".."12" →
+ * 1..12, else null.
+ */
 export function gradeRank(grade: string | null | undefined): number | null {
   if (grade == null) return null;
   const token = grade.trim();
   if (token === "") return null;
+  if (isPreK(token)) return PREK_RANK;
   if (token.toUpperCase() === "K") return 0;
   const n = Number(token);
   return Number.isFinite(n) ? n : null;
 }
 
-/** Render a single rank back to its display token: 0 (or below) → "K". */
+/** Render a single rank back to its display token: -1 → "PreK", 0 (or below) → "K". */
 export function gradeLabelFromRank(rank: number): string {
+  if (rank === PREK_RANK) return "PreK";
   return rank <= 0 ? "K" : String(rank);
+}
+
+/** "Kindergarten" / "Grade 4" / "Pre-K" — the house long-form grade label. */
+export function gradeLabel(grade: string | null | undefined): string | null {
+  if (!grade) return null;
+  const trimmed = grade.trim();
+  if (!trimmed) return null;
+  if (trimmed.toUpperCase() === "K") return "Kindergarten";
+  if (isPreK(trimmed)) return "Pre-K";
+  return `Grade ${trimmed}`;
 }
 
 /**

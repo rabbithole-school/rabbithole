@@ -49,6 +49,22 @@ export type FormRegistryEntry = {
    * counted as an outstanding item or included in a reminder.
    */
   applicabilityKey: FormApplicabilityKey;
+  /**
+   * Optional last day the form is open, as a school-local "YYYY-MM-DD" day
+   * key — INCLUSIVE: the form closes at the end of this day in the school's
+   * timezone. For one-off event forms (a field-trip permission slip) that
+   * would otherwise sit on every family's list, the staff dashboard, and
+   * reminder emails forever after the event.
+   *
+   * Once closed (`isFormExpired`), the form is treated as not applicable for
+   * outstanding-ness everywhere a family or staff member is nagged: it leaves
+   * the parent Forms list (a submitted copy stays as a read-only card), refuses
+   * new drafts and submissions, reads N/A instead of missing on the Form
+   * Completion Dashboard, and is never included in a reminder. Responses
+   * already on file stay readable to staff (the aide's form-responses tool,
+   * the dashboard export, the printable form). Absent = never closes.
+   */
+  expiresOn?: string;
 };
 
 export const REQUIRED_FORMS: FormRegistryEntry[] = [
@@ -67,6 +83,35 @@ export const REQUIRED_FORMS: FormRegistryEntry[] = [
       "A signed parent or guardian liability and allergy waiver before cooking class participation.",
     formPath: "/parent/forms/keiki-cooking-lab-liability-waiver",
     applicabilityKey: "always",
+  },
+  {
+    id: "chuseok_field_trip_permission_slip",
+    label: "Chuseok Field Trip Permission Slip",
+    description:
+      "A signed parent or guardian permission slip before the Chuseok field trip.",
+    formPath: "/parent/forms/chuseok-field-trip-permission-slip",
+    applicabilityKey: "always",
+    expiresOn: "2026-10-04",
+  },
+  {
+    id: "waimanalo_country_farms_field_trip_permission_slip",
+    label: "Waimānalo Country Farms Field Trip Permission Slip",
+    description:
+      "A signed parent or guardian permission slip and transportation choice for the Waimānalo Country Farms field trip.",
+    formPath: "/parent/forms/waimanalo-country-farms-field-trip-permission-slip",
+    applicabilityKey: "always",
+    // Open through the day after the Oct 20 trip, then off families' lists.
+    expiresOn: "2026-10-21",
+  },
+  {
+    id: "molii_gardens_field_trip_permission_slip",
+    label: "Mōliʻi Gardens Field Trip Permission Slip",
+    description:
+      "A signed parent or guardian permission slip, transportation choice, and Kualoa Ranch release for the Mōliʻi Gardens field trip.",
+    formPath: "/parent/forms/molii-gardens-field-trip-permission-slip",
+    applicabilityKey: "always",
+    // Open through the day after the Nov 17 trip, then off families' lists.
+    expiresOn: "2026-11-18",
   },
   {
     id: "annual_program_participation",
@@ -132,4 +177,35 @@ export const REQUIRED_FORMS: FormRegistryEntry[] = [
 /** Look up a registered form by id. Returns undefined if not found. */
 export function getFormEntry(formId: string): FormRegistryEntry | undefined {
   return REQUIRED_FORMS.find((f) => f.id === formId);
+}
+
+/**
+ * Whether a form has closed as of `todayDayKey` — the school-local
+ * "YYYY-MM-DD" day key for now (`dayKeyForTimezone` in
+ * shared/institutionDay.ts). `expiresOn` is the last OPEN day, so the form is
+ * expired only once today is strictly after it. Day keys compare correctly as
+ * strings. Pure: the caller owns the clock (see T11 in
+ * .claude/rules/rabbithole-product-taste.md).
+ */
+export function isFormExpired(
+  form: { expiresOn?: string | null },
+  todayDayKey: string,
+): boolean {
+  return !!form.expiresOn && todayDayKey > form.expiresOn;
+}
+
+/** "October 4, 2026" for a "YYYY-MM-DD" day key, with no timezone shift. */
+export function formatFormDayKey(dayKey: string): string {
+  const [year, month, day] = dayKey.split("-").map(Number);
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(Date.UTC(year, month - 1, day));
+}
+
+/** The plain sentence a family sees for a closed form. */
+export function formClosedMessage(expiresOn: string): string {
+  return `This form closed on ${formatFormDayKey(expiresOn)}.`;
 }

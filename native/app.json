@@ -19,7 +19,9 @@
         "CFBundleDisplayName": "Rabbithole",
         "LSApplicationQueriesSchemes": [
           "googlesheets",
-          "spike"
+          "spike",
+          "stopmotionstudio",
+          "com.google.stella"
         ]
       }
     },

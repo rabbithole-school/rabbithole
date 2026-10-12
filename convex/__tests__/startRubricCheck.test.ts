@@ -9,7 +9,7 @@ import { computePromptVersion } from "../lib/promptVersion";
 // The bug it fixes: clicking "Check my work" used to send a real user message
 // (`ok check "<title>"`), so the transcript showed a message the scholar never
 // typed. startRubricCheck instead persists ONLY an assistant placeholder; the
-// re-check instruction is injected ephemerally in /project-stream and never
+// re-check instruction is injected ephemerally in /session-stream and never
 // stored. So the core invariant proven here: NO user message is created.
 
 const modules = (

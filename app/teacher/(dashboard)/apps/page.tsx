@@ -17,6 +17,7 @@
  * grant here is followed as membership churns — never fanned out per scholar.
  */
 
+import type { ManagedNativeAppKey } from "@/convex/lib/managedNativeApps";
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import {
@@ -51,6 +52,7 @@ import { FieldSelect } from "@/components/ui/FieldSelect";
 import { MakeFocusDialog } from "@/components/MakeFocusDialog";
 import { LiveFocusBar } from "@/components/LiveFocusBar";
 import { AppTileIcon } from "@/components/ui/AppTileIcon";
+import { AppPreviewButton } from "@/components/AppPreviewButton";
 import {
   AppTileEditorDialog,
   AppTileFields,
@@ -61,17 +63,21 @@ import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { isTeacherRole } from "@/convex/lib/roles";
 import { serverErrorMessage } from "@/lib/serverErrorMessage";
+import { ContextTabs } from "@/components/ui/ContextTabs";
+import type { ExternalAppKind } from "@/shared/appKind";
 
 type AppRow = {
   _id: Id<"externalApps">;
   name: string;
   webUrl: string;
+  nativeUrlScheme: string | null;
   iconUrl: string | null;
   iconEmoji: string | null;
   color: string | null;
   credentialSource: "scholarApp" | "libraryCard" | null;
   defaultForNewScholars: boolean;
-  managedNativeAppKey: "google-sheets" | "lego-spike" | null;
+  managedNativeAppKey: ManagedNativeAppKey | null;
+  appKind: ExternalAppKind;
   audiences: {
     grantId: Id<"appAudiences">;
     audienceKind: "group" | "institution";
@@ -108,6 +114,20 @@ function launchSummary(row: AppRow): string {
   });
 }
 
+const KIND_FILTERS: { value: "all" | ExternalAppKind; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "web", label: "Web" },
+  { value: "custom", label: "Custom" },
+  { value: "native", label: "Native iPad" },
+];
+
+// One sentence-case line per empty filtered view (no CTA).
+const KIND_EMPTY_LINE: Record<ExternalAppKind, string> = {
+  web: "No web apps yet.",
+  custom: "No custom apps yet.",
+  native: "No native iPad apps yet.",
+};
+
 export default function TeacherAppsPage() {
   const { user } = useCurrentUser();
   const apps = useQuery(api.appAudiences.listAppsWithAudiences, {}) as
@@ -131,6 +151,10 @@ export default function TeacherAppsPage() {
   const [composeLink, setComposeLink] = useState(false);
   const [newTile, setNewTile] = useState<AppTileDraft>({ emoji: "", color: "" });
   const [tileApp, setTileApp] = useState<AppRow | null>(null);
+  // Narrow the standing-apps list by what each app IS. Ephemeral local state —
+  // the Apps tab keeps no URL params, and the kind filter is a transient
+  // narrowing, not a deep-linkable view like the Scholars/Assignments boards.
+  const [kindFilter, setKindFilter] = useState<"all" | ExternalAppKind>("all");
 
   const guarded = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -325,13 +349,43 @@ export default function TeacherAppsPage() {
             </Text>
           </Surface>
         ) : (
-          <Surface p={0} overflow="hidden">
-            <VStack gap={0} align="stretch">
-              {apps.map((row) => {
+          (() => {
+            const filtered =
+              kindFilter === "all"
+                ? apps
+                : apps.filter((row) => row.appKind === kindFilter);
+            return (
+              <>
+                <Box mb={3}>
+                  <ContextTabs<"all" | ExternalAppKind>
+                    ariaLabel="Filter apps by kind"
+                    value={kindFilter}
+                    onChange={setKindFilter}
+                    items={KIND_FILTERS}
+                  />
+                </Box>
+                {filtered.length === 0 ? (
+                  <Surface p={8}>
+                    <Text
+                      fontSize="sm"
+                      color="charcoal.400"
+                      fontFamily="body"
+                      textAlign="center"
+                    >
+                      {kindFilter === "all"
+                        ? "No apps yet. Add one with “New app.”"
+                        : KIND_EMPTY_LINE[kindFilter]}
+                    </Text>
+                  </Surface>
+                ) : (
+                  <Surface p={0} overflow="hidden">
+                    <VStack gap={0} align="stretch">
+                      {filtered.map((row) => {
                 const target: AppAccessTarget = {
                   _id: row._id,
                   name: row.name,
                   webUrl: row.webUrl,
+                  nativeUrlScheme: row.nativeUrlScheme,
                   credentialSource: row.credentialSource,
                   managedNativeAppKey: row.managedNativeAppKey,
                 };
@@ -497,6 +551,13 @@ export default function TeacherAppsPage() {
                           kept as its own labeled button, not folded into an
                           overflow menu, so it's visible at a glance. */}
                       <HStack gap={1} flexShrink={0}>
+                        <AppPreviewButton
+                          app={{
+                            name: row.name,
+                            webUrl: row.webUrl,
+                            nativeUrlScheme: row.nativeUrlScheme,
+                          }}
+                        />
                         <Button
                           size="xs"
                           variant="outline"
@@ -569,8 +630,12 @@ export default function TeacherAppsPage() {
                   </Box>
                 );
               })}
-            </VStack>
-          </Surface>
+                    </VStack>
+                  </Surface>
+                )}
+              </>
+            );
+          })()
         )}
 
         {isTeacherRole(user?.role) && <SharedRoomsPanel />}

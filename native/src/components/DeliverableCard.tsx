@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type Ref } from "react";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { Image } from "expo-image";
 import * as Haptics from "expo-haptics";
@@ -22,9 +22,18 @@ import { useImageAttachment } from "@/hooks/useImageAttachment";
 import { api, type Doc, type Id } from "@/lib/convex";
 import { fonts, useColors } from "@/theme";
 import { isTextArtifact } from "../../vendor/shared/textArtifacts";
-import { CodeArtifactWebView } from "@/components/CodeArtifactWebView";
+import {
+  CodeArtifactWebView,
+  type CodeArtifactWebViewHandle,
+} from "@/components/CodeArtifactWebView";
+import type { AppTutorRequest } from "../../vendor/shared/appTutorRequest";
 import { SlidesDeliverable } from "./slides/SlidesDeliverable";
 import { FlairChips } from "./FlairChips";
+import {
+  artifactIdForDeliverableLookup,
+  dedicatedDeliverableArtifact,
+  workSurfaceFor,
+} from "@/lib/deliverableArtifactSelection";
 type DeliverableKind =
   | "photo"
   | "artifact"
@@ -40,7 +49,12 @@ export type DeliverableCardArtifact = ArtifactDoc;
 
 export type DeliverableCardProps = {
   sessionId: Id<"sessions">;
-  activityId: Id<"activities">;
+  /**
+   * Absent for a session with no activity. Without a deliverable the card shows
+   * only the session's documents — no prompt, status, flair, check, or
+   * hand-in (TRA-463, `workSurfaceFor`).
+   */
+  activityId?: Id<"activities">;
   /**
    * Triggers a rubric check for the active artifact ("Check my work"). The
    * parent runs the check as a silent tutor stream —
@@ -57,6 +71,13 @@ export type DeliverableCardProps = {
   isCheckingRubric?: boolean;
   initiallyExpanded?: boolean;
   style?: ViewStyle;
+  codeArtifactRef?: Ref<CodeArtifactWebViewHandle>;
+  onAskTutor?: (request: AppTutorRequest) => void | Promise<void>;
+  /** A character exchange or judgment finished in the app (→ tutor queue). */
+  onAppAiTurn?: () => void;
+  /** False for a non-owner viewer: the app's character/judges answer
+   *  `unavailable` without a server call. */
+  appAiEnabled?: boolean;
 };
 
 export function DeliverableCard({
@@ -69,6 +90,10 @@ export function DeliverableCard({
   isCheckingRubric = false,
   initiallyExpanded = false,
   style,
+  codeArtifactRef,
+  onAskTutor,
+  onAppAiTurn,
+  appAiEnabled,
 }: DeliverableCardProps) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -77,7 +102,10 @@ export function DeliverableCard({
   const [busy, setBusy] = useState(false);
   const [setupRepairFailed, setSetupRepairFailed] = useState(false);
 
-  const activity = useQuery(api.activities.getPublic, { id: activityId });
+  const activity = useQuery(
+    api.activities.getPublic,
+    activityId ? { id: activityId } : "skip",
+  );
   const snapshot = useQuery(api.sessions.getDeliverableSnapshot, { sessionId });
   const artifactsResult = useQuery(api.artifacts.getBySession, { sessionId });
   const createArtifact = useMutation(api.artifacts.scholarCreate);
@@ -112,60 +140,103 @@ export function DeliverableCard({
     () => artifacts.filter(isTextArtifact),
     [artifacts],
   );
+  // A slides/map deliverable's work is its deck/map, never a side document
+  // from `textArtifacts` (TRA-339); `undefined` means the kind has no
+  // dedicated artifact type.
+  const dedicatedArtifact = dedicatedDeliverableArtifact(
+    artifacts,
+    activity?.deliverable?.kind,
+  );
   const activeArtifact =
-    activity?.deliverable?.kind === "map"
-      ? (artifacts.find((artifact) => artifact.type === "map") ?? null)
-      : (textArtifacts.find((artifact) => artifact._id === selectedArtifactId) ??
-        textArtifacts[textArtifacts.length - 1] ??
-        null);
+    // A PHOTO deliverable's work is the photo. Falling through to "newest text
+    // artifact" gave the card a stray document the activity never asked for —
+    // so before any photo was taken it rendered that document's title, its
+    // "Drafted with Rabbithole" byline and its content in place of "No photo
+    // yet", and flipped the card's status to draft off content the scholar had
+    // not written. The tutor can create documents in any session
+    // (artifacts.aiCreate is not kind-gated), so this is reachable whenever the
+    // tutor makes a note first.
+    activity?.deliverable?.kind === "photo"
+      ? null
+      : dedicatedArtifact !== undefined
+        ? dedicatedArtifact
+        : (textArtifacts.find(
+            (artifact) => artifact._id === selectedArtifactId,
+          ) ??
+          textArtifacts[textArtifacts.length - 1] ??
+          null);
   const textCheckDisabled = checkDisabled || !activeArtifact?.content.trim();
+  const deliverableArtifactId = artifactIdForDeliverableLookup(
+    activeArtifact?._id,
+    activity?.deliverable?.kind,
+  );
 
+  const surface = workSurfaceFor({
+    hasActivity: !!activityId,
+    activity,
+    textArtifactCount:
+      artifactsResult === undefined ? undefined : textArtifacts.length,
+  });
   const deliverable = useQuery(
     api.deliverables.getForSessionActivity,
-    activeArtifact
-      ? { sessionId, activityId, artifactId: activeArtifact._id }
-      : { sessionId, activityId },
+    !activityId || surface === "documents" || surface === "none"
+      ? "skip"
+      : deliverableArtifactId
+        ? { sessionId, activityId, artifactId: deliverableArtifactId }
+        : { sessionId, activityId },
   );
-  const fileUrl = useQuery(
-    api.files.getUrl,
-    deliverable?.fileStorageId ? { storageId: deliverable.fileStorageId } : "skip",
-  );
+  // Served beside the row by getForSessionActivity.
+  const fileUrl = deliverable?.fileUrl ?? null;
 
-  if (activity === null || (activity && !activity.deliverable)) return null;
+  // Nothing to show: no deliverable and no documents.
+  if (surface === "none") return null;
 
   if (
-    activity === undefined ||
-    snapshot === undefined ||
-    artifactsResult === undefined ||
-    deliverable === undefined
+    surface === "loading" ||
+    (surface === "deliverable" &&
+      (snapshot === undefined ||
+        artifactsResult === undefined ||
+        deliverable === undefined))
   ) {
     return <DeliverableCardSkeleton style={style} />;
   }
 
-  const spec = activity.deliverable as {
-    kind: DeliverableKind;
-    prompt: string;
-    mode: DeliverableMode;
-    criteria: Criterion[];
-  };
-  const isMap = spec.kind === "map";
-  const criteria = criteriaFor(spec, snapshot);
+  // `null` in documents mode: the session's documents with nothing to check
+  // or hand in.
+  const spec =
+    surface === "deliverable"
+      ? (activity?.deliverable as {
+          kind: DeliverableKind;
+          prompt: string;
+          mode: DeliverableMode;
+          criteria: Criterion[];
+        })
+      : null;
+  const isMap = spec?.kind === "map";
+  const criteria = spec ? criteriaFor(spec, snapshot ?? null) : [];
   const criteriaPending =
-    spec.mode === "auto" &&
+    spec?.mode === "auto" &&
     snapshot?.status !== "ready" &&
     snapshot?.status !== "error" &&
     !setupRepairFailed;
   const criteriaFailed =
-    spec.mode === "auto" &&
+    spec?.mode === "auto" &&
     (snapshot?.status === "error" || setupRepairFailed);
-  const isPhoto = spec.kind === "photo";
-  const isSlides = spec.kind === "slides";
-  const isPendingKind = spec.kind === "audio";
+  const isPhoto = spec?.kind === "photo";
+  // On a photo activity the box only opens once there is a photo (no active
+  // artifact, no textContent), so the header describes the photo whenever it
+  // renders at all. Deliberately NOT keyed on `fileUrl`: it is null whenever
+  // the stored file is missing, and keying on it let the header fall back to
+  // a document's title — permanently, for a photo whose file was lost.
+  const showingPhoto = isPhoto;
+  const isSlides = spec?.kind === "slides";
+  const isPendingKind = spec?.kind === "audio";
   const textContent = (activeArtifact?.content ?? deliverable?.textContent ?? "").trim();
   const hasWork = textContent.length > 0 || !!fileUrl;
   const status = deliverableStatus({
     criteria,
-    deliverable,
+    // Undefined only in documents mode (query skipped), where no status shows.
+    deliverable: deliverable ?? null,
     hasWork,
     criteriaPending,
     isCheckingRubric,
@@ -178,7 +249,7 @@ export function DeliverableCard({
     try {
       const artifactId = await createArtifact({
         sessionId,
-        title: defaultArtifactTitle(spec.kind),
+        title: defaultArtifactTitle(spec?.kind ?? "text"),
       });
       setSelectedArtifactId(artifactId);
       onArtifactCreated?.(artifactId);
@@ -220,7 +291,7 @@ export function DeliverableCard({
   // deliverables row with fileStorageId (the same backend path as web). No
   // artifact document is involved.
   const handleCapturePhoto = async (source: "camera" | "library") => {
-    if (busy || uploading) return;
+    if (busy || uploading || !activityId) return;
     void Haptics.selectionAsync();
     setBusy(true);
     try {
@@ -256,20 +327,24 @@ export function DeliverableCard({
       entering={FadeIn.duration(180)}
       layout={LinearTransition.springify().damping(22).stiffness(260)}
     >
-      <View style={styles.headerRow}>
-        <View style={styles.kindPill}>
-          <SymbolView name={kindIcon(spec.kind)} size={16} tintColor={colors.violetSolid} />
-          <Text style={styles.kindText}>{kindLabel(spec.kind)} deliverable</Text>
-        </View>
-        <StatusPill status={status} />
-      </View>
+      {spec && activity ? (
+        <>
+          <View style={styles.headerRow}>
+            <View style={styles.kindPill}>
+              <SymbolView name={kindIcon(spec.kind)} size={16} tintColor={colors.violetSolid} />
+              <Text style={styles.kindText}>{kindLabel(spec.kind)} deliverable</Text>
+            </View>
+            <StatusPill status={status} />
+          </View>
 
-      <View style={styles.titleGroup}>
-        <Text style={styles.title}>{activity.title}</Text>
-        <Text style={styles.prompt} numberOfLines={expanded ? undefined : 2}>
-          {spec.prompt}
-        </Text>
-      </View>
+          <View style={styles.titleGroup}>
+            <Text style={styles.title}>{activity.title}</Text>
+            <Text style={styles.prompt} numberOfLines={expanded ? undefined : 2}>
+              {spec.prompt}
+            </Text>
+          </View>
+        </>
+      ) : null}
 
       {!isMap && !isSlides && textArtifacts.length > 1 && (
         <ScrollView
@@ -333,14 +408,18 @@ export function DeliverableCard({
               />
               <View style={styles.artifactTitleWrap}>
                 <Text style={styles.artifactTitle} numberOfLines={1}>
-                  {activeArtifact?.title ?? "Submitted work"}
+                  {showingPhoto
+                    ? "Your photo"
+                    : (activeArtifact?.title ?? "Submitted work")}
                 </Text>
                 <Text style={styles.artifactMeta}>
-                  {activeArtifact?.lastEditedBy === "ai"
+                  {!showingPhoto && activeArtifact?.lastEditedBy === "ai"
                     ? "Drafted with Rabbithole"
                     : deliverable?.submittedAt
                       ? `Submitted ${formatShortDate(deliverable.submittedAt)}`
-                      : "Ready when you are"}
+                      : spec
+                        ? "Ready when you are"
+                        : "Your document"}
                 </Text>
               </View>
               {hasWork && (
@@ -352,7 +431,7 @@ export function DeliverableCard({
               )}
             </View>
 
-            {fileUrl && spec.kind === "photo" ? (
+            {fileUrl && isPhoto ? (
               <Image source={{ uri: fileUrl }} style={styles.photoPreview} contentFit="cover" alt="Photo deliverable" />
             ) : fileUrl ? (
               <Pressable
@@ -367,9 +446,13 @@ export function DeliverableCard({
                 textContent ? (
                   <View style={styles.codePreviewFrame}>
                     <CodeArtifactWebView
+                      ref={codeArtifactRef}
                       key={activeArtifact._id}
-                      artifactId={activeArtifact._id}
+                      scope={{ kind: "session", artifactId: activeArtifact._id }}
                       content={activeArtifact.content ?? ""}
+                      onAskTutor={onAskTutor}
+                      onAppAiTurn={onAppAiTurn}
+                      appAiEnabled={appAiEnabled}
                     />
                   </View>
                 ) : (
@@ -427,6 +510,8 @@ export function DeliverableCard({
         </View>
       )}
 
+      {spec ? (
+      <>
       <FlairChips
         // Keyed by the work this card is showing, so switching documents can
         // never treat the other one's flair as arriving.
@@ -540,6 +625,8 @@ export function DeliverableCard({
           />
         )}
       </View>
+      </>
+      ) : null}
       </>
       )}
     </Animated.View>

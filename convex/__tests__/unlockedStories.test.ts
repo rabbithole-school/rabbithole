@@ -1,9 +1,21 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import { UNLOCKED_STORY_SECTION_CAP } from "../lib/scholarReads";
+
+// A story is only offered when it carries a card question (see
+// convex/lib/practice/storyCardQuestions.ts). These fixture edges aren't in
+// the real question table, so give every edge one.
+vi.mock("../lib/practice/storyCardQuestions", () => ({
+  storyCardQuestion: () => ({
+    prompt: "Which is bigger?",
+    choices: ["A", "B"],
+    answerIndex: 0,
+    reveal: "A is bigger.",
+  }),
+}));
 
 const modules = (
   import.meta as ImportMeta & {
@@ -391,7 +403,7 @@ describe("seeds.unlockedStoriesForSelf", () => {
     expect(await asMe.query(api.seeds.unlockedStoriesForSelf, {})).toEqual([]);
   });
 
-  test("a governor-dismissed invitation is never re-offered, but its story is not lost", async () => {
+  test("an older invitation stays open when newer stories arrive, and is not re-offered while reserved", async () => {
     const t = makeHarness();
     const scholarId = await seedUser(t);
     await seedStoryEdge(t, {
@@ -436,7 +448,9 @@ describe("seeds.unlockedStoriesForSelf", () => {
       if (!events) throw new Error("oldest story event missing");
       return events;
     });
-    expect(retiredEvent.outcome).toBe("dismissed");
+    // No eviction: the oldest card waits in the Quests list instead of being
+    // auto-dismissed (it would silently close an open question there).
+    expect(retiredEvent.outcome).toBe("offered");
 
     await advancePastOfferCooldown(t, scholarId);
 

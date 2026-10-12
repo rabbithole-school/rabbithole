@@ -14,15 +14,21 @@
  * launcher tile must behave identically for the same app.
  */
 
+import { isUnlockManagedApp } from "@/lib/asam/managedAppSchemes";
 import { useEffect, useState } from "react";
 import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { useConvexAuth } from "@convex-dev/auth/react";
 import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
 
 import { api, type Id } from "@/lib/convex";
-import { openExternalApp, openEmbeddedWebContent } from "@/lib/externalAppHost";
+import {
+  openExternalApp,
+  openEmbeddedWebContent,
+  openYouTubeVideo,
+} from "@/lib/externalAppHost";
 import { AppTileMark } from "@/components/AppTileMark";
 import { useNativeAppLauncher } from "@/hooks/useNativeAppLauncher";
 import { colors, fonts, palette } from "@/theme";
@@ -48,6 +54,8 @@ type LivePush = {
   externalAppId?: Id<"externalApps">;
   webAllowedHosts?: string[];
   nativeUrlScheme?: string;
+  /** Identity for a managed native app with no URL scheme. */
+  nativeBundleId?: string;
   note?: string;
   blocking: boolean;
   endsAt: number | null;
@@ -66,12 +74,13 @@ function useNow(active: boolean, intervalMs = 15_000): number {
 
 export function FocusStrip() {
   const { isAuthenticated } = useConvexAuth();
-  const pushes = useQuery(
+  const now = useNow(isAuthenticated);
+  const minuteNow = Math.floor(now / 60_000) * 60_000;
+  // Smoothed so the minute re-arm doesn't blank the strip for a round-trip.
+  const pushes = useSmoothedQuery(
     api.pushes.livePushesForMe,
-    isAuthenticated ? {} : "skip",
+    isAuthenticated ? { now: minuteNow } : "skip",
   ) as LivePush[] | undefined;
-
-  const now = useNow(!!pushes && pushes.length > 0);
 
   if (!pushes || pushes.length === 0) return null;
 
@@ -118,11 +127,14 @@ function FocusCard({ push, now }: { push: LivePush; now: number }) {
       return;
     }
     if (push.kind === "app" && push.externalAppId) {
-      if (push.nativeUrlScheme) {
+      // Managed-only, same reasoning as AppLauncher: an unknown bundle id
+      // must not reach the native path and release ASAM.
+      if (push.nativeUrlScheme || isUnlockManagedApp(push)) {
         void launchNativeApp({
-          nativeUrlScheme: push.nativeUrlScheme,
+          nativeUrlScheme: push.nativeUrlScheme ?? null,
+          nativeBundleId: push.nativeBundleId ?? null,
           appName: push.title,
-          appId: push.externalAppId,
+          externalAppId: String(push.externalAppId),
           iconUrl: push.iconUrl ?? null,
           iconEmoji: push.iconEmoji ?? null,
           color: push.color ?? null,
@@ -138,6 +150,11 @@ function FocusCard({ push, now }: { push: LivePush; now: number }) {
       return;
     }
     if (push.url) {
+      // A YouTube link plays in the SAME sandboxed player video resources use
+      // (nocookie embed, locked hosts, no related / Shorts / search) rather
+      // than a host-locked WebView on youtube.com. Non-YouTube links fall
+      // through to the generic locked overlay.
+      if (openYouTubeVideo({ url: push.url, title: push.title })) return;
       // A link/resource push opens in the same locked webview overlay an
       // app does — a scholar never leaves the managed surface.
       openEmbeddedWebContent({

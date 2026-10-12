@@ -4,6 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { action } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import { isTeacherRole, ROLES } from "./lib/roles";
+import { assertWritableAction } from "./lib/auth";
 import { MODELS } from "./lib/models";
 import { recordAnthropicUsage } from "./usage";
 import { normalizeReadingLevel } from "./lib/readingLevels";
@@ -43,6 +44,8 @@ export const analyzeReadingLevelAI = action({
     if (!user || (!isTeacherRole(user.role))) {
       throw new Error("Forbidden: teacher or admin role required");
     }
+    // It spends AI and stores a suggestion on the scholar row (TRA-494).
+    await assertWritableAction(ctx);
 
     const texts = await ctx.runQuery(api.messages.getScholarUserMessages30d, {
       scholarId: args.scholarId,
@@ -55,6 +58,9 @@ export const analyzeReadingLevelAI = action({
     const countWords = (text: string) =>
       text.split(/\s+/).filter((w) => /[a-zA-Z]/.test(w)).length;
     const wordCount = countWords(chatCombined) + countWords(portfolioCombined);
+    // Chat input is typed turns only (spoken ones are filtered upstream), so a
+    // scholar who mostly dictates can land here with no estimate — the honest
+    // answer, rather than grading the speech-to-text engine (TRA-495).
     if (wordCount < 10) return null;
 
     const evidenceSections = [

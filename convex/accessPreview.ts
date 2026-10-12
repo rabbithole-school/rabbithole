@@ -18,7 +18,7 @@ import {
   accessibleScholarIds,
   resolveActiveMembership,
 } from "./lib/access";
-import { ROLES, type Role } from "./lib/roles";
+import { ROLES, SCHOOL_STANDING_ROLES, type Role } from "./lib/roles";
 
 export const previewAccessibleScholars = internalQuery({
   // Pass exactly one of { userId } or { username }.
@@ -122,12 +122,7 @@ export const previewAccessibleScholars = internalQuery({
 // so a missing institution membership for a designer is harmless. Each row's
 // `role` distinguishes a load-bearing gap (teacher/school_admin) from
 // a benign one (curriculum_designer).
-const INSTITUTION_SCOPED_STAFF_ROLES: readonly Role[] = [
-  ROLES.TEACHER,
-  ROLES.STAFF,
-  ROLES.SCHOOL_ADMIN,
-  ROLES.CURRICULUM_DESIGNER,
-];
+const INSTITUTION_SCOPED_STAFF_ROLES = SCHOOL_STANDING_ROLES;
 
 export const auditEnforcementReadiness = internalQuery({
   args: {},

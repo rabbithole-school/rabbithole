@@ -29,9 +29,11 @@ import {
   CAPTURE_STATION_PENDING_UPLOAD_KEY,
   captureErrorKind,
   captureStationTeamKey,
+  captureUploadPause,
   pendingUploadCannotRetry,
   restoreTeamSelection,
   toggleRosterSelection,
+  type CaptureUploadPause,
 } from "@/lib/captureStationState";
 import { CaptureStationScholarPicker } from "@/components/CaptureStationScholarPicker";
 import {
@@ -210,6 +212,14 @@ export function CaptureStationScreen({
   const [pendingTile, setPendingTile] = useState<PendingCaptureTile | null>(
     null,
   );
+  // Set when the server refuses new upload URLs until a known time. Until
+  // then, a tap shows why instead of opening the camera for a photo the server
+  // would throw away. Best effort: the server stays authoritative, a remount
+  // forgets the pause, and it holds only for the station that refused (null is
+  // the kiosk's one station), since each station keeps its own upload budget.
+  const [uploadPause, setUploadPause] = useState<
+    (CaptureUploadPause & { captureStationId: string | null }) | null
+  >(null);
   const rosterIdsKey = useMemo(
     () => bootstrap?.roster.map((scholar) => scholar.id).join(",") ?? "",
     [bootstrap],
@@ -487,7 +497,11 @@ export function CaptureStationScreen({
         }
       }
       const kind = captureErrorKind(uploadError);
-      if (isQuotaExceededErrorKind(kind)) {
+      const pause = captureUploadPause(uploadError);
+      if (pause !== null) {
+        setUploadPause({ ...pause, captureStationId: assignedCaptureStationId });
+        setSubmitError(pause.message);
+      } else if (isQuotaExceededErrorKind(kind)) {
         try {
           await refreshSession();
           setSubmitError("Capture session refreshed. Take that photo again.");
@@ -511,6 +525,15 @@ export function CaptureStationScreen({
     }
     if (!team.length) {
       setSubmitError("Tap who’s at this station first.");
+      return;
+    }
+    if (
+      uploadPause &&
+      uploadPause.captureStationId === assignedCaptureStationId &&
+      uploadPause.until !== null &&
+      Date.now() < uploadPause.until
+    ) {
+      setSubmitError(uploadPause.message);
       return;
     }
     setSubmitError(null);

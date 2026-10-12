@@ -17,7 +17,7 @@ import {
  * null for unknown codes (defensive — don't render arbitrary strings
  * from the URL).
  */
-function describeGoogleError(code: string): string | null {
+export function describeGoogleError(code: string): string | null {
   if (code === "already_linked") {
     return "That Google account is already linked to a different Rabbithole user. Sign in to that user, or pick a different Google account.";
   }

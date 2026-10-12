@@ -101,6 +101,6 @@ describe("HomeworkTableHeader", () => {
     expect(el.props.reservedLines).toBe(2); // matches a non-scoped Rounds header
     const subtitle = el.props.subtitle as { text: string }[];
     // The subtitle names today's date (deterministic via the mocked clock).
-    expect(subtitle[0].text).toBe("Tonight's list · Tue 25 Aug");
+    expect(subtitle[0].text).toBe("Due · done today · next question · Tue 25 Aug");
   });
 });

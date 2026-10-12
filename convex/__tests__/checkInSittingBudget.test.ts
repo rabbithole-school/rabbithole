@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -25,6 +25,23 @@ const modules = (import.meta as ImportMeta & { glob: (p: string) => Record<strin
 afterEach(() => {
   vi.useRealTimers();
 });
+
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
 
 const REGISTERED = [
   "whole-number-arithmetic",
@@ -59,7 +76,7 @@ const DAY1_NOON = new Date("2026-06-15T22:00:00Z").getTime();
  *  entirely. That restriction has its own test below; these budget/ordering
  *  tests want the full graph. */
 async function seedScholar(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   username: string,
   // `null` (not `undefined` — that would fall back to the default) means "no
   // grade on file", the state the K-ring test below exercises.
@@ -75,7 +92,7 @@ async function seedScholar(
   );
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     // A far-future expiration so a multi-day (fake-clock) test never expires auth.
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
@@ -87,7 +104,7 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
   return t.withIdentity({ subject: `${userId}|${sessionId}`, issuer: "https://convex.dev" });
 }
 
-async function completedPlacementDomains(t: ReturnType<typeof convexTest>, scholarId: Id<"users">) {
+async function completedPlacementDomains(t: TestConvex<typeof schema>, scholarId: Id<"users">) {
   return await t.run(async (ctx) => {
     const rows = (await ctx.db.query("practicePlacements").collect()).filter(
       (r) => r.scholarId === scholarId,
@@ -96,7 +113,7 @@ async function completedPlacementDomains(t: ReturnType<typeof convexTest>, schol
   });
 }
 
-async function totalProbeLogLen(t: ReturnType<typeof convexTest>, scholarId: Id<"users">) {
+async function totalProbeLogLen(t: TestConvex<typeof schema>, scholarId: Id<"users">) {
   return await t.run(async (ctx) => {
     const rows = (await ctx.db.query("practicePlacements").collect()).filter(
       (r) => r.scholarId === scholarId,
@@ -131,8 +148,7 @@ describe("practiceSkills — mixed check-in per-sitting probe budget", () => {
   test("PAUSES exactly at the budget mid-check-in, and never withholds a probe", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(DAY1_NOON);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "sit_pause");
     const asScholar = await asUser(t, scholar);
 
@@ -187,8 +203,7 @@ describe("practiceSkills — mixed check-in per-sitting probe budget", () => {
   test("a paused, incomplete mixed check-in still serves a real practice session on the placed domain(s)", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(DAY1_NOON);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "sit_drill_gate");
     const asScholar = await asUser(t, scholar);
 
@@ -229,8 +244,7 @@ describe("practiceSkills — mixed check-in per-sitting probe budget", () => {
   test("resumes the NEXT sitting with state intact — nothing restarts, unplaced domains continue to completion", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(DAY1_NOON);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "sit_resume");
     const asScholar = await asUser(t, scholar);
 
@@ -311,8 +325,7 @@ describe("practiceSkills — mixed check-in per-sitting probe budget", () => {
 
     // Behavioral: the first probe is whole-number, and fractions FULLY place
     // before any non-priority domain is probed.
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "sit_priority");
     const asScholar = await asUser(t, scholar);
     const { cur, served } = await runToDone(asScholar, scholar);
@@ -330,8 +343,7 @@ describe("practiceSkills — mixed check-in per-sitting probe budget", () => {
   });
 
   test("prereq gating stays unbroken under the new priority ordering", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "sit_gating");
     const asScholar = await asUser(t, scholar);
     const { cur, served } = await runToDone(asScholar, scholar);
@@ -387,8 +399,7 @@ describe("practiceSkills — mixed check-in per-sitting probe budget", () => {
     // roster carries no enrolled grade. Automatic eligibility therefore reads a
     // missing grade as the most restrictive real one (K → the grade+2 ring), so
     // only domains with a node at grade ≤ 2 open by themselves.
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "sit_no_grade", null);
     const asScholar = await asUser(t, scholar);
 

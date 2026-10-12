@@ -41,7 +41,37 @@ export type MessageAttachment<TStorageId extends string = string> = {
   fileName: string;
   mimeType?: string;
   sizeBytes?: number;
+  /** Whisper transcript of a recorded audio clip or a video's audio track,
+   *  produced ONCE at attach time (`audioActions.transcribeAttachment`) so the
+   *  model can read what was said — Claude cannot ingest audio or video. */
+  transcript?: string;
+  /** Video only: a client-rendered contact sheet (up to 4 evenly spaced
+   *  frames) so the model gets one glance at what the camera saw. */
+  posterStorageId?: TStorageId;
+  /** Audio/video only: recorded length, for the "0:42" chip label. */
+  durationMs?: number;
 };
+
+// Recording caps for the composer's Capture Video / Record Audio dialogs.
+// Calibrated to the caps this file already enforces and to Whisper's 25 MB
+// per-file limit: 60 s of video at 2.5 Mbps ≈ 19 MB, under
+// MESSAGE_ATTACHMENT_MAX_BYTES; 5 min of Opus at 64 kbps ≈ 2.4 MB.
+export const MESSAGE_VIDEO_MAX_MS = 60_000;
+export const MESSAGE_VIDEO_BITS_PER_SECOND = 2_500_000;
+export const MESSAGE_AUDIO_MAX_MS = 5 * 60_000;
+export const MESSAGE_AUDIO_BITS_PER_SECOND = 64_000;
+
+export type MessageAttachmentMediaKind = "audio" | "video";
+
+/** "audio" / "video" for a recorded clip, null for every other attachment. */
+export function messageAttachmentMediaKind(
+  mimeType: string | null | undefined,
+): MessageAttachmentMediaKind | null {
+  const mime = (mimeType ?? "").split(";")[0].trim().toLowerCase();
+  if (mime.startsWith("audio/")) return "audio";
+  if (mime.startsWith("video/")) return "video";
+  return null;
+}
 
 export type MessageAttachmentFileDescriptor = {
   name: string;

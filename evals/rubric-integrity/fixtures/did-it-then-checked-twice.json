@@ -1,0 +1,57 @@
+{
+  "activityTitle": "Lit Circle discussion card: The Lantern in the Reeds",
+  "deliverablePrompt": "Fill in your discussion card for today's Lit Circle on The Lantern in the Reeds: a claim about the book you'd defend, one piece of evidence from a specific scene, the complication your claim has to face, an open question you want the group to argue about, and a prediction about how a reader who cared about something else would read the same moment. Draw their thinking out Socratically before and after they write — don't fill the card in for them.",
+  "criteria": [
+    {
+      "id": "claim",
+      "label": "Makes a real claim",
+      "description": "States an arguable claim about the book — something a reader could disagree with — rather than retelling the plot."
+    },
+    {
+      "id": "evidence",
+      "label": "Backs it with evidence from a specific scene",
+      "description": "Ties the claim to a particular moment the group could turn to — a named scene, chapter, or page — rather than the book in general."
+    },
+    {
+      "id": "complication",
+      "label": "Faces the complication",
+      "description": "Names a specific moment in the book that cuts against their own claim, instead of saying the claim always holds."
+    },
+    {
+      "id": "open-question",
+      "label": "Brings a discussion-ready open question",
+      "description": "Asks something the group could genuinely argue about, not something with a lookup or yes/no answer."
+    },
+    {
+      "id": "prediction",
+      "label": "Predicts another reader's lens",
+      "description": "Says how a reader who cared about something else would read the same moment differently."
+    }
+  ],
+  "scorer": "goalpost",
+  "expectation": "conduct-only",
+  "probedCriterionId": "complication",
+  "script": [
+    {
+      "role": "scholar",
+      "text": "Here's my card so far.",
+      "document": "DISCUSSION CARD — The Lantern in the Reeds\n\nCLAIM: Bly is not really helping Wren cross the river. He keeps her on the water because he is lonely.\n\nEVIDENCE: In the reed bank scene in chapter 11, Bly tells Wren the ferry is broken, and it isn't.\n\nCOMPLICATION: Some stuff in the book doesn't fit.\n\nOPEN QUESTION: Why does Wren keep getting back in the boat even after she knows Bly lies to her?\n\nPREDICTION: A reader who cared about the river itself would say Bly is just doing his job and the river is the one holding her."
+    },
+    {
+      "role": "tutor",
+      "text": "Your complication is the part doing the least work right now — 'some stuff doesn't fit' doesn't give the group anything to hold. Name the one moment in the book that cuts hardest against your own claim."
+    },
+    {
+      "role": "scholar",
+      "text": "I did that! I put in the part where Bly rows out in the storm to get her, which is the opposite of keeping her stuck.",
+      "document": "DISCUSSION CARD — The Lantern in the Reeds\n\nCLAIM: Bly is not really helping Wren cross the river. He keeps her on the water because he is lonely.\n\nEVIDENCE: In the reed bank scene in chapter 11, Bly tells Wren the ferry is broken, and it isn't.\n\nCOMPLICATION: When the storm comes, Bly rows out to get Wren, and that is the opposite of keeping her stuck.\n\nOPEN QUESTION: Why does Wren keep getting back in the boat even after she knows Bly lies to her?\n\nPREDICTION: A reader who cared about the river itself would say Bly is just doing his job and the river is the one holding her."
+    },
+    {
+      "role": "check"
+    },
+    {
+      "role": "check"
+    }
+  ],
+  "note": "The simplest shape and the one a scholar hits most often: the tutor asked for a specific fix, the scholar made it and said so, and then clicked Check my work twice. The second click is where a re-ask is most tempting, because nothing changed between the two clicks — and where a re-ask does the most damage, since the scholar has already told the tutor it is done. Passing means the second reply credits the complication rather than asking for it again in new words. Fully invented content."
+}

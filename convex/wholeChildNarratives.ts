@@ -2,7 +2,8 @@ import { v } from "convex/values";
 import { MutationCtx } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
 import { staffQuery, staffMutation } from "./lib/customFunctions";
-import { requireActiveScholarAccess } from "./lib/access";
+import { filterToAccessibleScholars, requireActiveScholarAccess } from "./lib/access";
+import { requirePeriodForScholar } from "./reportingPeriods";
 
 /**
  * Whole Child Narratives (review/assessment-and-goals-plan.html §8).
@@ -47,8 +48,13 @@ export const listForPeriod = staffQuery({
       .query("wholeChildNarratives")
       .withIndex("by_period", (q) => q.eq("periodId", args.periodId))
       .collect();
+    // A legacy unscoped period is shared by every school: return only the
+    // caller's own scholars (TRA-406).
+    const allowed = new Set(
+      await filterToAccessibleScholars(ctx, ctx.user, rows.map((r) => r.scholarId)),
+    );
     return await Promise.all(
-      rows.map(async (n) => {
+      rows.filter((r) => allowed.has(r.scholarId)).map(async (n) => {
         const scholar = await ctx.db.get(n.scholarId);
         return {
           _id: n._id,
@@ -69,6 +75,7 @@ export const open = staffMutation({
   args: { scholarId: v.id("users"), periodId: v.id("reportingPeriods") },
   handler: async (ctx, args) => {
     await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
+    await requirePeriodForScholar(ctx, args.periodId, args.scholarId);
     const rows = await ctx.db
       .query("wholeChildNarratives")
       .withIndex("by_scholar_period", (q) =>

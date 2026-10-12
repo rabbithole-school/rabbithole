@@ -2,11 +2,13 @@ import { v } from "convex/values";
 import { internalMutation, type MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { assertNotImpersonating, requireUser } from "./lib/auth";
+import { assertCanWrite, requireUser } from "./lib/auth";
 import { requireActiveScholarAccess } from "./lib/access";
 import {
   documentKindUsesExtraction,
   requireKindAccess,
+  type ScholarDocumentUploadKind,
+  type UploadableDocumentKind,
 } from "./lib/documentKinds";
 import {
   hasHealthAccessAtInstitution,
@@ -17,10 +19,14 @@ import { deletePortfolioItem } from "./portfolio";
 import { attachStaffHealthDocumentFromStorage } from "./scholarHealthRecords";
 import { HEALTH_DOCUMENT_MAX_BYTES } from "../shared/healthDocuments";
 
+// Mirrors `DOCUMENT_KINDS` in lib/documentKinds.ts (the registry is the
+// authority; `requireKindAccess` below refuses anything it doesn't list).
 const refileKindValidator = v.union(
   v.literal("assessment"), v.literal("iep"), v.literal("report_card"),
   v.literal("identity_document"), v.literal("parent_email"),
-  v.literal("observation"), v.literal("other"),
+  v.literal("observation"), v.literal("incident_report"),
+  v.literal("transfer_record"), v.literal("conference_notes"),
+  v.literal("doctor_note"), v.literal("other"),
   v.literal("immunization_record"), v.literal("medication_authorization"),
   v.literal("action_plan_document"),
   v.literal("action_plan_document_allergy"),
@@ -28,19 +34,14 @@ const refileKindValidator = v.union(
   v.literal("support_plan_document"),
 );
 
-type RefileKind =
-  | "assessment" | "iep" | "report_card" | "identity_document"
-  | "parent_email" | "observation" | "other" | "immunization_record"
-  | "medication_authorization" | "action_plan_document"
-  | "action_plan_document_allergy" | "action_plan_document_asthma"
-  | "custody_document" | "support_plan_document";
+type RefileKind = UploadableDocumentKind;
 
 async function refileContext(
   ctx: MutationCtx,
   args: { itemId: Id<"portfolioItems">; kind: RefileKind; institutionScope?: string },
 ) {
   const user = await requireUser(ctx);
-  await assertNotImpersonating(ctx);
+  await assertCanWrite(ctx);
   const item = await ctx.db.get(args.itemId);
   if (!item?.fileStorageId) throw new Error("Scanned file is unavailable");
   const scholarIds = await attributedScholarIds(ctx, item);
@@ -63,10 +64,13 @@ async function refileContext(
   const hasHealthAccess = await hasHealthAccessAtInstitution(
     ctx, user, scholar.institutionId,
   );
+  // The caller has just proven `school:operations` at this scholar's
+  // institution, so the administrative Scholar-documents kinds are theirs to
+  // file; the health flag alone still decides the Health record group.
   const spec = requireKindAccess(
     user.role,
     args.kind,
-    false,
+    true,
     hasHealthAccess,
   );
   return { user, item, scholar, scholarId, spec };
@@ -121,7 +125,7 @@ export const commit = internalMutation({
     if (spec.store === "scholarDocuments") {
       const documentId = await ctx.db.insert("scholarDocuments", {
         scholarId,
-        kind: args.kind as Extract<RefileKind, "assessment" | "iep" | "report_card" | "identity_document" | "parent_email" | "observation" | "other">,
+        kind: args.kind as ScholarDocumentUploadKind,
         format: "file",
         title: item.label?.trim() || item.title || "Scanned document",
         fileStorageId: args.copiedStorageId,

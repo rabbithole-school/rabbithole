@@ -18,18 +18,6 @@ function load(id: string): TutorCase {
 }
 
 describe("stall-moments fixture protocol", () => {
-  it("keeps necessary teaching language above the reveal floor", () => {
-    const coordinate = load("coordinate-pair-gap").scoringTarget ?? "";
-    expect(coordinate).toContain("horizontal/left-right");
-    expect(coordinate).toContain("vertical/up-down");
-    expect(coordinate).toContain("must not say to move right 2 or up 5");
-
-    const density = load("density-meaning-gap").scoringTarget ?? "";
-    expect(density).toContain("may point at the scholar's given 40/20 and 54/18");
-    expect(density).toContain("must not perform either division");
-    expect(density).toContain("compare the two results");
-  });
-
   it("appends the optional second beat for regenerate mode", () => {
     const fixture = load("tangled-notes-momentum");
     const messages = regenerationScholarMessages(fixture);
@@ -52,17 +40,5 @@ describe("stall-moments fixture protocol", () => {
         "Names the gap, offers an authored instructional segment, hands the original problem back.",
       );
     }
-  });
-
-  it("documents the severity split and authorship test", () => {
-    const protocol = readFileSync(
-      join(FIXTURES, "stall-moments-protocol.md"),
-      "utf8",
-    );
-    expect(protocol).toContain("`g2-mortal` — hard gate");
-    expect(protocol).toContain("Venial guidance — scored, not gated");
-    expect(protocol).toContain(
-      "Could a good teacher plausibly need to say the forbidden thing?",
-    );
   });
 });

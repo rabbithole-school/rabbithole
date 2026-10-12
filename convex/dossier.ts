@@ -4,6 +4,17 @@ import { authedQuery, authedMutation } from "./lib/customFunctions";
 import { requireTeacherOrSelf } from "./lib/auth";
 import { requireActiveScholarAccess } from "./lib/access";
 import { attributedScholarIds } from "./lib/portfolioAttributions";
+import {
+  mergeInterests,
+  normalizeInterestLabel,
+} from "./lib/interests";
+import { readScholarInterests } from "./lib/scholarReads";
+
+const observerInterestValidator = v.object({
+  label: v.string(),
+  how: v.union(v.literal("said"), v.literal("picked"), v.literal("menu")),
+  words: v.optional(v.string()),
+});
 
 /**
  * Learner-stated interests and self-reflections from profile surveys. The
@@ -93,6 +104,34 @@ export const aiUpdate = internalMutation({
   },
 });
 
+export const mergeObserverInterests = internalMutation({
+  args: {
+    scholarId: v.id("users"),
+    sessionId: v.id("sessions"),
+    at: v.number(),
+    incoming: v.array(observerInterestValidator),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("scholarDossiers")
+      .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
+      .first();
+    const interests = mergeInterests(existing?.interests, args.incoming, {
+      sessionId: args.sessionId,
+      at: args.at,
+    });
+    if (existing) {
+      await ctx.db.patch(existing._id, { interests });
+      return existing._id;
+    }
+    return await ctx.db.insert("scholarDossiers", {
+      scholarId: args.scholarId,
+      content: "",
+      interests,
+    });
+  },
+});
+
 /**
  * Get dossier for teacher UI (ScholarProfile).
  */
@@ -107,6 +146,56 @@ export const getForTeacher = authedQuery({
       .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
       .first();
     return dossier?.content ?? null;
+  },
+});
+
+export const interestsForTeacher = authedQuery({
+  args: { scholarId: v.id("users") },
+  handler: async (ctx, args) => {
+    const isTeacher = requireTeacherOrSelf(ctx.user, args.scholarId);
+    if (isTeacher) await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
+
+    // A scholar reading their own row gets the same projection a parent does:
+    // no menu picks, no dates, no session ids, no observer bookkeeping.
+    return await readScholarInterests(
+      ctx,
+      args.scholarId,
+      isTeacher ? "teacher" : "parent",
+    );
+  },
+});
+
+export const setInterestState = authedMutation({
+  args: {
+    scholarId: v.id("users"),
+    label: v.string(),
+    state: v.union(v.literal("active"), v.literal("past")),
+  },
+  handler: async (ctx, args) => {
+    // Teacher-only: the Learner profile card is the only caller. A scholar
+    // never edits their own record here (the correction path is the adult in
+    // the room), so the self branch of requireTeacherOrSelf is refused.
+    const isTeacher = requireTeacherOrSelf(ctx.user, args.scholarId);
+    if (!isTeacher) throw new Error("Forbidden");
+    await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
+
+    const dossier = await ctx.db
+      .query("scholarDossiers")
+      .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
+      .first();
+    if (!dossier) throw new Error("Interest not found");
+    const target = normalizeInterestLabel(args.label);
+    const index = (dossier.interests ?? []).findIndex(
+      (interest) => normalizeInterestLabel(interest.label) === target,
+    );
+    if (index < 0) throw new Error("Interest not found");
+    const interests = [...(dossier.interests ?? [])];
+    interests[index] = {
+      ...interests[index],
+      state: args.state,
+      changedBy: "teacher",
+    };
+    await ctx.db.patch(dossier._id, { interests });
   },
 });
 

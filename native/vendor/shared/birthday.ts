@@ -9,7 +9,9 @@
 type DateParts = { year: number; month: number; day: number };
 
 /** Parse an ISO "YYYY-MM-DD" (leading portion) into numeric parts, or null. */
-function parseIsoDate(iso: string | null | undefined): DateParts | null {
+export function parseIsoDate(
+  iso: string | null | undefined,
+): DateParts | null {
   if (!iso || typeof iso !== "string") return null;
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso.trim());
   if (!match) return null;

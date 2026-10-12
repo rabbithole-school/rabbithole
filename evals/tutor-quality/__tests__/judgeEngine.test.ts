@@ -7,8 +7,9 @@
  *     API-judged one.
  */
 import { afterEach, describe, expect, test } from "vitest";
-import { JUDGE_MODEL } from "../../../convex/lib/models";
+import { MODELS, TUTOR_JUDGE_MODEL } from "../../../convex/lib/models";
 import {
+  assertJudgeNotWeaker,
   buildCopilotPrompt,
   extractJson,
   judgeEngineName,
@@ -34,9 +35,12 @@ const TOOL: JudgeTool = {
 
 const ENV_KEY = "JUDGE_ENGINE";
 const original = process.env[ENV_KEY];
+const originalModel = process.env.JUDGE_MODEL;
 afterEach(() => {
   if (original === undefined) delete process.env[ENV_KEY];
   else process.env[ENV_KEY] = original;
+  if (originalModel === undefined) delete process.env.JUDGE_MODEL;
+  else process.env.JUDGE_MODEL = originalModel;
 });
 
 describe("extractJson", () => {
@@ -95,16 +99,23 @@ describe("validateToolInput", () => {
 });
 
 describe("judgeEngineName / judgeProvenance", () => {
-  test("defaults to anthropic and the pinned JUDGE_MODEL", () => {
+  test("defaults to anthropic and the pinned TUTOR_JUDGE_MODEL", () => {
     delete process.env[ENV_KEY];
+    delete process.env.JUDGE_MODEL;
     expect(judgeEngineName()).toBe("anthropic");
-    expect(judgeProvenance()).toBe(JUDGE_MODEL);
+    expect(judgeProvenance()).toBe(TUTOR_JUDGE_MODEL);
+  });
+
+  test("JUDGE_MODEL overrides the anthropic judge, dotted or dashed", () => {
+    delete process.env[ENV_KEY];
+    process.env.JUDGE_MODEL = "claude-opus-4.8";
+    expect(judgeProvenance()).toBe(MODELS.OPUS);
   });
 
   test("copilot provenance is the normalised copilot-cli id", () => {
     process.env[ENV_KEY] = "copilot";
     expect(judgeEngineName()).toBe("copilot");
-    expect(judgeProvenance()).toBe("copilot-cli:claude-opus-4-8");
+    expect(judgeProvenance()).toBe("copilot-cli:claude-fable-5-1");
   });
 
   test("rejects an unknown engine", () => {
@@ -125,5 +136,34 @@ describe("buildCopilotPrompt", () => {
     expect(prompt).toContain("CASE-TEXT");
     expect(prompt).toContain('"socratic"');
     expect(prompt).toContain("EXACTLY ONE JSON object");
+  });
+});
+
+describe("assertJudgeNotWeaker", () => {
+  test("the default judge can grade every tutor model we run", () => {
+    delete process.env[ENV_KEY];
+    delete process.env.JUDGE_MODEL;
+    expect(() => assertJudgeNotWeaker([MODELS.SONNET, MODELS.OPUS_5_5, MODELS.FABLE])).not.toThrow();
+  });
+
+  test("refuses a judge weaker than either compared model", () => {
+    expect(() => assertJudgeNotWeaker([MODELS.SONNET, MODELS.OPUS_5_5], MODELS.OPUS)).toThrow(
+      /weaker than tutor model "claude-opus-5-5"/,
+    );
+  });
+
+  test("allows a judge equal to the strongest compared model", () => {
+    expect(() => assertJudgeNotWeaker([MODELS.OPUS_5_5], MODELS.OPUS_5_5)).not.toThrow();
+  });
+
+  test("refuses a model it cannot rank instead of guessing", () => {
+    expect(() => assertJudgeNotWeaker(["claude-unknown-9"], MODELS.FABLE)).toThrow(/no capability rank/);
+  });
+});
+
+describe("assertJudgeNotWeaker id normalisation", () => {
+  test("accepts dotted ids for both judge and tutor", () => {
+    expect(() => assertJudgeNotWeaker(["claude-opus-5.5"], "claude-fable-5.1")).not.toThrow();
+    expect(() => assertJudgeNotWeaker(["claude-opus-5.5"], "claude-opus-4.8")).toThrow(/weaker/);
   });
 });

@@ -7,6 +7,7 @@ import { Flex, Spinner } from "@chakra-ui/react";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { isTeacherRole } from "@/convex/lib/roles";
 import type { Id } from "@/convex/_generated/dataModel";
+import { withInstitutionScope } from "@/lib/institutionLinks";
 
 /**
  * Teacher Reports route — SCHOLAR-FIRST IA (assessment-and-goals).
@@ -17,6 +18,7 @@ import type { Id } from "@/convex/_generated/dataModel";
  *                                           (0+ course narratives, 0-1 Whole Child)
  *   /teacher/report/<scholarId>?n=<id>   -> the course-narrative composer
  *   /teacher/report/<scholarId>?wc=1     -> the Whole Child (meeting-mode) editor
+ *   /teacher/report/<scholarId>?ic=1     -> the Interim check-in editor
  *
  * `?period=<id>` scopes to a reporting period (defaults to the current one).
  * The shared (dashboard) layout gates non-staff away; this adds the narrower
@@ -32,6 +34,10 @@ const ScholarReportDetail = dynamic(
 );
 const ScholarWholeChildEditor = dynamic(
   () => import("@/components/narrative/ScholarWholeChildEditor").then((m) => m.ScholarWholeChildEditor),
+  { ssr: false },
+);
+const InterimCheckinEditor = dynamic(
+  () => import("@/components/narrative/InterimCheckinEditor").then((m) => m.InterimCheckinEditor),
   { ssr: false },
 );
 const NarrativeComposer = dynamic(
@@ -68,6 +74,7 @@ function ReportPageInner() {
   const scholarId = (rest ? rest.split("/").filter(Boolean)[0] ?? null : null) as Id<"users"> | null;
   const narrativeId = searchParams.get("n") as Id<"courseNarratives"> | null;
   const wc = searchParams.get("wc");
+  const ic = searchParams.get("ic");
   const periodParam = searchParams.get("period");
 
   if (isLoading || !user || !isTeacherRole(user.role)) {
@@ -76,13 +83,21 @@ function ReportPageInner() {
 
   let view: React.ReactNode;
   if (narrativeId) {
-    const backHref = scholarId
-      ? `/teacher/report/${String(scholarId)}${periodParam ? `?period=${periodParam}` : ""}`
-      : "/teacher/report";
-    const rosterHref = `/teacher/report${periodParam ? `?period=${periodParam}` : ""}`;
+    // Keep the active school (?inst=) on the way back, so a multi-school
+    // staffer returns to the same school's roster and period.
+    const inst = searchParams.get("inst");
+    const backHref = withInstitutionScope(
+      scholarId
+        ? `/teacher/report/${String(scholarId)}${periodParam ? `?period=${periodParam}` : ""}`
+        : "/teacher/report",
+      inst,
+    );
+    const rosterHref = withInstitutionScope(`/teacher/report${periodParam ? `?period=${periodParam}` : ""}`, inst);
     view = <NarrativeComposer narrativeId={narrativeId} backHref={backHref} rosterHref={rosterHref} />;
   } else if (scholarId && wc) {
     view = <ScholarWholeChildEditor scholarId={scholarId} periodParam={periodParam} />;
+  } else if (scholarId && ic) {
+    view = <InterimCheckinEditor scholarId={scholarId} periodParam={periodParam} />;
   } else if (scholarId) {
     view = <ScholarReportDetail scholarId={scholarId} periodParam={periodParam} />;
   } else {

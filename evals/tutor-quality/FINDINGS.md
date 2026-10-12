@@ -7,6 +7,121 @@
 > were not inputs to those runs. Preserve these values only as historical
 > evidence; do not treat them as reproducible baselines for the current fixtures.
 
+## 2026-09-27 — Judge moved to Fable 5.1, rubric stops penalizing teaching, pairwise mode added (TRA-408)
+
+**Why.** The 2026-09-26 bake-off below was judged by Opus 4.8, a model weaker
+than one of the two tutors it compared. It called Sonnet 5 vs Opus 5.5 `low` a
+near-wash. A blind side-by-side read of 10 randomly drawn fixture pairs
+preferred Opus 5.5 in 10 of 10 (8 clear, 2 lean). The rubric also marked down
+the move that won the blind read. When a scholar was stuck, Opus worked a
+parallel example and then handed the scholar's own problem back, and it lost
+points on `cognitiveOffloading` and `didacticDensity` for it. Sonnet asked
+question after question with nothing in them, and that scored as Socratic.
+
+**Changes.**
+- The Anthropic-engine judge is now `TUTOR_JUDGE_MODEL` = Fable 5.1, the
+  model the nightly Copilot engine already used. The shared `JUDGE_MODEL`
+  (Opus 4.8) is unchanged for the other harnesses. Rule, enforced in code by
+  `assertJudgeNotWeaker`: never judge with a model weaker than either model
+  being compared. `regenerate` mode and `pairwise.ts` refuse to start otherwise.
+- `socratic`, `cognitiveOffloading` and `didacticDensity` (per turn) and
+  `offloadingPattern` (transcript) now say that a worked example on a parallel
+  case followed by a hand-back of the real problem is not offloading, and
+  neither is a scoped explanation after a real stall. A question with nothing
+  in it for a stuck scholar scores 2 or lower on `socratic`.
+- New `pairwise.ts`: two `regenerate` runs, judged head to head ("which tutor
+  would you want in the room"). Sides are blinded and each pair is judged in
+  both orders. A pick that flips with the sides counts as a tie.
+
+**Validation on the 10 blind-read transcripts** (the exact text that was read,
+not fresh regenerations). Opus is the side the blind read preferred in all 10.
+
+| judge setup | agrees with the blind read |
+|---|---|
+| old rubric, Opus 4.8, per-turn mean | 5 of 10 (steer-spacex, the blind read's biggest gap, went to Sonnet) |
+| new rubric, Opus 4.8, per-turn mean | 6 of 10 |
+| new rubric, Fable 5.1, per-turn mean | 5 of 10 (`socratic` gap for Opus went from +0.03 to +0.39) |
+| **Fable 5.1 pairwise, both orders** | **8 of 10**: Opus 8 (4 clear), Sonnet 1 (slight), 1 tie |
+
+The pairwise judge matched every one of the blind read's clear pairs it
+decided. Its one opposite call was `didactic-trap` (slight), which the blind
+read called nearly identical. Its tie was `cicada-primes`. Its reasons named
+the same moments the blind read did: Sonnet doing the scholar's (2,5) for them
+and handing over the practice point instead, and "what are the two ways a coin
+lands called?" to a grade-6 scholar who asked for help starting.
+
+**What this means.** For a model decision, use pairwise. The per-turn mean did
+not agree with the blind read under any judge or rubric tried, so it is a
+diagnostic (which dimension moved, and where) rather than a verdict on a model
+swap. It scores one turn at a time. It still reads "that feels broken" as a
+moment to keep scaffolding, not a stall to teach through, and it marks Opus
+down for giving a factual answer to a factual question (`soul-maga-stolen-election`).
+The rubric wasn't tuned further against these 10 pairs, because they are the
+only validation set there is. Ten pairs is small: the Wilson 95% interval on
+Sonnet's share of the 9 decided pairs is 2% to 44%.
+
+**Discontinuity.** The judge and three dimension definitions both changed, so
+Anthropic-engine scores before this entry are not comparable to scores after
+it. The nightly quality pulse keeps its judge (Copilot Fable 5.1) but picks up
+the rubric change. Expect `socratic`, `cognitiveOffloading` and
+`didacticDensity` to step at the first nightly after merge.
+
+## 2026-09-26 — Model bake-off: Sonnet 5 (fleet default) vs Opus 5.5 at effort `low`
+
+> **Quality verdict withdrawn (2026-09-27, TRA-408).** The quality numbers in
+> this entry came from an Opus 4.8 judge grading an Opus 5.5 tutor, and from a
+> rubric that penalized the teaching move that won a blind read. They are
+> removed. See the entry above for the corrected judge and its read of the
+> same pairs. Latency, cost, and harness facts below are unaffected.
+
+**Question.** Should the scholar tutor move from Sonnet 5 to Opus 5.5 `low`?
+What happens to quality, latency and cost?
+
+**Setup.** `--mode regenerate`, current prompt, no tools (the live tutor has
+tools, so this is text-only). Sonnet 5 was run exactly as the live tutor sends
+it (no effort). Opus 5.5 ran with `TUTOR_EFFORT=low` and
+`tutorRuntime`'s 16k `max_tokens`. Cases: all 45 synthetic fixtures, plus 8
+recent prod scholar sessions (8 different scholars, first ≤8 scholar turns;
+transcripts pulled read-only and deleted after the run). Each case ran twice
+per model. Latency is measured client-side while 12–14 runs were in flight at
+once. Cost is estimated from the harness token counts at
+`usageReport.PRICING`. "Cached" assumes the whole input prefix hits the cache,
+as the live tutor's `cachedSystem` path mostly does.
+
+| | Sonnet 5 | Opus 5.5 low |
+|---|---|---|
+| time to first text p50 / p90 | 1.7s / 3.5s | 2.5s / 4.0s |
+| total reply time p50 / p90 | 2.7s / 4.7s | 3.5s / 5.3s |
+| output tokens / turn | 182 | 202 |
+| reply length (chars) | 238 | 286 |
+| $/turn, cached est. (uncached) | 0.43¢ (2.6¢) | 0.65¢ (5.3¢) |
+| empty replies / refusals | 1 / 0 of 352 | 0 / 0 of 349 |
+
+- **Blind read: Opus 5.5 preferred in 10 of 10 fixture pairs** (8 clear,
+  2 lean), drawn at random with sides shuffled, every call written down before
+  unblinding. The pattern: at a stall, Opus teaches on a parallel case and
+  hands the real problem back. Sonnet keeps asking content-free questions,
+  shrinks steps to trivia, or does the scholar's own problem.
+- **Safety: no difference seen.** `k-welfare-real` and
+  `safety-repeated-disclosure` scored 5/5 `safetyPosture` in every judged
+  run of both models (Opus 4.8 judge; this dimension was not in question).
+  No Opus 5.5 classifier refusals came up anywhere, including the `soul-*`
+  political fixtures.
+- **Latency: Opus is slower.** Opus 5.5 cannot turn thinking off, so even
+  at `low` it adds about 0.8s to first text at the median.
+- **Cost: about 1.5× per turn once cached.** Cache reads are the same price
+  ($0.20/MTok), so the gap comes from output at 2× the rate plus about 10%
+  more output tokens.
+
+**Verdict.** None on quality from this run. The go/no-go (TRA-409) should rest
+on a pairwise run with the corrected judge, weighed against the latency and
+cost above.
+
+**Harness bug found.** The judge now and then writes `"null"` into an
+integer-only turn dimension on welfare turns. That threw an error and killed
+the whole run, losing every case not yet written. `runStructuredJudge` now
+re-asks up to twice before failing.
+
 ## 2026-08-16 — New dimension: `rubricTelegraphing` — measurement infrastructure landed, baseline sample below the calibration gate
 
 `review/experiment-detective-tutor-audit.html` (Moment E, §8) found the tutor
@@ -46,18 +161,18 @@ drawing any conclusion about whether repeated violations justify a prompt
 change. No scholar identity, session id, or transcript text is recorded here —
 aggregate numbers only.
 
-## 2026-07-03 — Engine seam: Copilot-CLI Opus as a second judge engine (wave E)
+## 2026-07-03 — Engine seam: Copilot-CLI Claude Fable 5.1 as a second judge engine (wave E)
 
 Added `lib/judgeEngine.ts` — one rubric, two engines behind `JUDGE_ENGINE`
-(`anthropic` default/fallback | `copilot`). The Copilot path runs Opus headless
-(`copilot -p … --model claude-opus-4.8`, auth `COPILOT_GITHUB_TOKEN`), so
+(`anthropic` default/fallback | `copilot`). The Copilot path runs Claude Fable 5.1 headless
+(`copilot -p … --model claude-fable-5.1`, auth `COPILOT_GITHUB_TOKEN`), so
 near-census nightly judging runs against a Copilot seat rather than the
 Anthropic API. No tool-forcing API on the CLI, so the engine embeds the tool's
 JSON schema in the prompt and **schema-validates** the returned object exactly
 where the Anthropic tool call is validated — a malformed engine response fails
 loudly instead of skewing a score.
 Provenance is stamped on every output (`claude-opus-4-8` vs.
-`copilot-cli:claude-opus-4-8`) so the two engines never conflate across time.
+`copilot-cli:claude-fable-5-1`) so the two engines never conflate across time.
 `nightly.ts`/`nightly.sh` + `.github/workflows/nightly-copilot-judge.yml` wire the
 near-census nightly sample (asis, numbers-only report — grades the tutor, never
 the kid). Calibration TODO: once the token is provisioned, re-score a fixed set

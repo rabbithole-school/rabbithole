@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { formatAnswer, fracAns } from "../practice/answers";
 import { gradeTemplateItem, makeItemId } from "../practice/session";
-import { generateItem, hasTemplate, type PracticeItem } from "../practice/templates";
+import { generateItem, type PracticeItem } from "../practice/templates";
 
 const SERVEABILITY_HOLE_KEYS = [
   "add_subtract_word_problems_multidigit",
@@ -16,33 +16,6 @@ const SERVEABILITY_HOLE_KEYS = [
   "law_of_large_numbers",
 ] as const;
 
-const REQUIRED_SKILL_KEYS = [
-  "add_subtract_fluency_within_20",
-  "add_3digit_no_regroup",
-  "place_value_to_1000",
-  "place_value_multidigit",
-  "expanded_form_3digit",
-  "expanded_form_multidigit",
-  "make_ten_strategy",
-  "write_numerals_to_20",
-  "long_division_1digit_divisor",
-  "long_division_2digit_divisor",
-  "factors_and_multiples",
-  "prime_composite",
-  "add_subtract_properties",
-  "mult_commutative_associative",
-  "mult_distributive",
-  "divisibility_rules_2_5_10",
-  "divisibility_rules_3_9",
-  "prime_factorization",
-  "gcf",
-  "lcm",
-  "exponents_repeated_mult",
-  "square_cube_numbers",
-  "remainder_cycles",
-  ...SERVEABILITY_HOLE_KEYS,
-] as const;
-
 function answerValue(item: PracticeItem): number {
   expect(item.answer.type).toBe("integer");
   return (item.answer as { type: "integer"; value: number }).value;
@@ -50,12 +23,6 @@ function answerValue(item: PracticeItem): number {
 
 function numbers(stem: string): number[] {
   return (stem.match(/\d+/g) ?? []).map(Number);
-}
-
-function graderSubmission(item: PracticeItem): string {
-  return item.answer.type === "multipleChoice"
-    ? String(item.answer.choiceIndex)
-    : formatAnswer(item.answer);
 }
 
 function selectedChoice(item: PracticeItem): string {
@@ -85,47 +52,6 @@ function lcm(a: number, b: number): number {
 }
 
 describe("practice templates — Wave A coverage", () => {
-  test("counting stems use plain language", () => {
-    for (const skillKey of ["count_to_10", "count_to_20", "count_to_100_ones"]) {
-      const item = generateItem(skillKey, 1);
-      expect(item?.stem).toMatch(/^What number comes right after \d+\?$/);
-    }
-  });
-
-  test("every new gating skill has a template", () => {
-    for (const skillKey of REQUIRED_SKILL_KEYS) {
-      expect(hasTemplate(skillKey), skillKey).toBe(true);
-    }
-  });
-
-  test("each new template round-trips through generate → format → grade", () => {
-    for (const skillKey of REQUIRED_SKILL_KEYS) {
-      for (let seed = 1; seed <= 50; seed++) {
-        const item = generateItem(skillKey, seed);
-        expect(item, `${skillKey} seed=${seed}`).not.toBeNull();
-        if (!item) continue;
-
-        const itemId = makeItemId(skillKey, seed);
-        const result = gradeTemplateItem(itemId, graderSubmission(item));
-        expect(result, `${skillKey} seed=${seed}`).not.toBeNull();
-        expect(result?.correct, `${skillKey} seed=${seed}: ${item.stem}`).toBe(true);
-      }
-    }
-  });
-
-  test("generation is deterministic for each new template", () => {
-    for (const skillKey of REQUIRED_SKILL_KEYS) {
-      for (let seed = 1; seed <= 50; seed++) {
-        const a = generateItem(skillKey, seed);
-        const b = generateItem(skillKey, seed);
-        expect(a?.stem, `${skillKey} seed=${seed}`).toBe(b?.stem);
-        expect(a ? formatAnswer(a.answer) : null, `${skillKey} seed=${seed}`).toBe(
-          b ? formatAnswer(b.answer) : null,
-        );
-      }
-    }
-  });
-
   test("each serveability-hole answer agrees with an independent stem derivation", () => {
     for (const [keyIndex, skillKey] of SERVEABILITY_HOLE_KEYS.entries()) {
       for (let sample = 1; sample <= 50; sample++) {

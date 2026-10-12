@@ -1,6 +1,6 @@
 /**
  * Pure helpers for the HTTP routes in `convex/http.ts` — chiefly the tutor
- * `/project-stream` route and the `/analyze` route.
+ * `/session-stream` route and the `/analyze` route.
  *
  * `http.ts` is a stack of long `httpAction` handlers that interleave request
  * parsing, auth, prompt building, Anthropic streaming, tool loops, and SSE
@@ -49,11 +49,42 @@ import {
   type TutorRuntimeCapabilities,
 } from "./sessionHelpers";
 import type { DocumentNote, PhysicalEnvironmentContext } from "./prompts";
+import type { Interest } from "./lib/interests";
 import {
   DEFAULT_INSTITUTION_PROMPT_PROFILE,
   type InstitutionPromptProfile,
 } from "./lib/institutionPromptProfile";
-import type { ParsedObserverResponse } from "./lib/observerShared";
+import {
+  normalizeAppTutorContext,
+  type AppTutorRequest,
+} from "../shared/appTutorRequest";
+
+// ── Mid-stream persistence ──────────────────────────────────────────────
+
+/** Characters of new text between mid-stream content writes. */
+export const STREAM_PERSIST_INTERVAL_CHARS = 200;
+
+/**
+ * Should the stream write its text to the placeholder row now?
+ *
+ * Every ~200 characters, AND the moment the placeholder first has visible
+ * text. The first-text write is what makes "the stored row is empty" mean
+ * "the scholar has seen nothing from it": a stop or steer deletes an empty
+ * row and keeps (stamps) a non-empty one (sessions.stampLatestStreamingAssistant).
+ * Without it, a reply under 200 characters — a young reader's whole turn — was
+ * never stored mid-stream, so Stop deleted words already on the screen
+ * (TRA-501). `lastPersistLength` resets to 0 when a tool split opens a new
+ * placeholder, so each placeholder gets its own first-text write.
+ */
+export function shouldPersistStreamContent(
+  contentLength: number,
+  lastPersistLength: number,
+): boolean {
+  return (
+    contentLength - lastPersistLength > STREAM_PERSIST_INTERVAL_CHARS ||
+    (lastPersistLength === 0 && contentLength > 0)
+  );
+}
 
 // ── SSE formatting ──────────────────────────────────────────────────────
 
@@ -66,13 +97,30 @@ export function sseEvent(payload: unknown): string {
   return `data: ${JSON.stringify(payload)}\n\n`;
 }
 
+/**
+ * Convex may end an HTTP action as soon as its response stream closes. Settle
+ * the lease release first so the cleanup mutation cannot be abandoned.
+ */
+export async function releaseLeaseBeforeClosingStream({
+  release,
+  close,
+}: {
+  release: () => Promise<void>;
+  close: () => void;
+}): Promise<void> {
+  await release();
+  close();
+}
+
 // ── Request parsing ─────────────────────────────────────────────────────
 
-/** Pull the fields the `/project-stream` handler needs off the parsed body. */
+/** Pull the fields the `/session-stream` handler needs off the parsed body. */
 export function parseSessionStreamBody(body: unknown): {
   sessionId: string;
   assistantMsgId: string;
   platform: "web" | "native";
+  supportsRenderCheck?: true;
+  appRequest?: Pick<AppTutorRequest, "context">;
   /**
    * Present when the turn was triggered by the "Check my work" button rather
    * than a scholar message. The handler injects an ephemeral (never-persisted)
@@ -85,19 +133,55 @@ export function parseSessionStreamBody(body: unknown): {
    * The instruction is model-visible only and never enters the transcript.
    */
   kickoff?: boolean;
+  /**
+   * The App-designer screen mode (Edit | Play). In Play the tutor talks about
+   * the running app and MUST NOT rewrite it, so the server drops the code tools
+   * (F9). Defaults to "edit" — the tutor keeps its full tool set everywhere
+   * else, and a build kickoff is always an edit.
+   *
+   * This is a REQUEST, not the mode the turn runs in: `/session-stream`
+   * derives the effective mode from `activities.editAccess`, the caller's role,
+   * and the scholar's completion (`lib/workshopPolicy.ts`, TRA-301) and clamps
+   * a forged Edit to Play.
+   */
+  mode: "edit" | "play";
 } {
-  const { sessionId, assistantMsgId, platform, rubricCheck, kickoff } = body as {
+  const {
+    sessionId,
+    assistantMsgId,
+    platform,
+    supportsRenderCheck,
+    appRequest,
+    rubricCheck,
+    kickoff,
+    mode,
+  } = body as {
     sessionId: string;
     streamId: string;
     assistantMsgId: string;
     platform?: unknown;
+    supportsRenderCheck?: unknown;
+    appRequest?: { context?: unknown };
     rubricCheck?: { artifactTitle?: string };
     kickoff?: boolean;
+    mode?: unknown;
   };
+  const normalizedAppContext = normalizeAppTutorContext(appRequest?.context);
+  const validAppRequest =
+    appRequest !== null &&
+    typeof appRequest === "object" &&
+    !Array.isArray(appRequest);
   return {
     sessionId,
     assistantMsgId,
     platform: platform === "native" ? "native" : "web",
+    supportsRenderCheck:
+      supportsRenderCheck === true ? true : undefined,
+    appRequest: validAppRequest
+      ? {
+          ...(normalizedAppContext ? { context: normalizedAppContext } : {}),
+        }
+      : undefined,
     rubricCheck:
       rubricCheck && typeof rubricCheck === "object"
         ? {
@@ -108,7 +192,163 @@ export function parseSessionStreamBody(body: unknown): {
           }
         : undefined,
     kickoff: kickoff === true ? true : undefined,
+    mode: mode === "play" ? "play" : "edit",
   };
+}
+
+/**
+ * App-designer build tools the tutor holds only in Edit; Play drops them (F9).
+ * The character/judge definitions are part of the app, so they go too.
+ */
+export const WORKSHOP_CODE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "create_code",
+  "edit_document",
+  "define_character",
+  "define_judge",
+]);
+
+/**
+ * The tool set for a workshop turn: in Play, the tutor watches the running app
+ * and must not rewrite it, so the code tools are removed; Edit keeps them all.
+ */
+export function toolsForWorkshopMode<T extends { name: string }>(
+  tools: readonly T[],
+  mode: "edit" | "play",
+): T[] {
+  return mode === "play"
+    ? tools.filter((tool) => !WORKSHOP_CODE_TOOL_NAMES.has(tool.name))
+    : [...tools];
+}
+
+export const RENDER_CHECK_MAX_PER_TURN = 2;
+export const RENDER_CHECK_POLL_INTERVAL_MS = 400;
+export const RENDER_CHECK_TIMEOUT_MS = 8_000;
+
+const BUILD_TOOL_TRUNCATION_MESSAGE =
+  "Your tool call was cut off by the output limit before the code arrived. Build a SMALLER first version now (a working core under roughly 300 lines), then add features with edit_document in later calls.";
+const BUILD_TOOL_TRUNCATION_STOP_MESSAGE =
+  "Do not call create_code again this turn: reply to the teacher in one short paragraph describing what you will build and ask them to say go.";
+
+type GuardedBuildToolRunResult<T> =
+  | {
+      blocked: false;
+      result: T;
+      truncationsThisTurn: number;
+    }
+  | {
+      blocked: true;
+      result: string;
+      truncationsThisTurn: number;
+    };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function hasNonEmptyString(
+  input: Record<string, unknown>,
+  key: string,
+): boolean {
+  const value = input[key];
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function editDocumentMutationIsIncomplete(input: unknown): boolean {
+  if (!isRecord(input)) return true;
+  switch (input.command) {
+    // Text documents are always created EMPTY (the scholar writes the words),
+    // so a create carries no payload that an output-limit cut could lose.
+    case "create":
+      return false;
+    case "rename":
+      return !hasNonEmptyString(input, "title");
+    case "str_replace":
+      return (
+        !hasNonEmptyString(input, "old_str") ||
+        typeof input.new_str !== "string"
+      );
+    case "insert":
+      return !hasNonEmptyString(input, "insert_text");
+    case "view":
+      return false;
+    default:
+      return true;
+  }
+}
+
+function isMutatingBuildToolCall(toolName: string, input: unknown): boolean {
+  if (toolName === "create_code") return true;
+  return (
+    toolName === "edit_document" &&
+    (!isRecord(input) || input.command !== "view")
+  );
+}
+
+/**
+ * Refuse incomplete build mutations before they reach Convex. The injected
+ * runner keeps this helper independent of the HTTP action and easy to test.
+ */
+export async function runBuildToolWithTruncationGuard<T>({
+  toolName,
+  input,
+  stopReason,
+  truncationsThisTurn,
+  run,
+}: {
+  toolName: string;
+  input: unknown;
+  stopReason?: string | null;
+  truncationsThisTurn: number;
+  run: () => T | Promise<T>;
+}): Promise<GuardedBuildToolRunResult<T>> {
+  const missingPayload =
+    toolName === "create_code"
+      ? !isRecord(input) || !hasNonEmptyString(input, "code")
+      : toolName === "edit_document"
+        ? editDocumentMutationIsIncomplete(input)
+        : false;
+  const hitOutputLimit =
+    stopReason === "max_tokens" && isMutatingBuildToolCall(toolName, input);
+
+  if (!missingPayload && !hitOutputLimit) {
+    return {
+      blocked: false,
+      result: await run(),
+      truncationsThisTurn,
+    };
+  }
+
+  const nextCount = truncationsThisTurn + 1;
+  return {
+    blocked: true,
+    result:
+      nextCount >= 2
+        ? `${BUILD_TOOL_TRUNCATION_MESSAGE} ${BUILD_TOOL_TRUNCATION_STOP_MESSAGE}`
+        : BUILD_TOOL_TRUNCATION_MESSAGE,
+    truncationsThisTurn: nextCount,
+  };
+}
+
+export function canRequestRenderCheck(renderChecksThisTurn: number): boolean {
+  return (
+    Number.isInteger(renderChecksThisTurn) &&
+    renderChecksThisTurn >= 0 &&
+    renderChecksThisTurn < RENDER_CHECK_MAX_PER_TURN
+  );
+}
+
+export function renderChecksEnabled({
+  supportsRenderCheck,
+  sessionMode,
+}: {
+  supportsRenderCheck?: true;
+  platform: "web" | "native";
+  sessionMode?: "conversation" | "workbench" | "vibecode" | null;
+}): boolean {
+  return (
+    supportsRenderCheck === true &&
+    sessionMode === "vibecode"
+  );
 }
 
 /**
@@ -134,7 +374,21 @@ export function rubricCheckInstruction(artifactTitle?: string): string {
     `one thing they've nailed, then ask a single Socratic question about the ` +
     `biggest remaining gap — do NOT recite the rubric, list the criteria, or ` +
     `hand them a template. If the work already meets every criterion, ` +
-    `celebrate briefly.]`
+    `celebrate briefly. Before you reply, re-read every earlier ask you made in ` +
+    `this conversation about the criterion you are about to probe, and what the ` +
+    `scholar did with it. If they did what you asked, it is done — credit it and ` +
+    `do not ask for it again in new words. If you told them to leave something as ` +
+    `it is, leave it. If the gap you are about to name is something you ` +
+    `earlier called enough, your reply MUST ` +
+    `open with that admission in its first sentence — "I told you X was ` +
+    `enough. I was too quick." — before any question. Do not present it as a ` +
+    `part you cannot find: you found it, you accepted it, and you are the ` +
+    `one raising the bar now. If their work has not changed since ` +
+    `your last ask, a scholar clicking this button again is telling you your last ` +
+    `ask did not land — change the move: say what you can actually see in their ` +
+    `work, name the part you cannot find, and ask them to point you at it. ` +
+    `If their work changed ` +
+    `somewhere else, look at THAT part; do not reopen a settled one.]`
   );
 }
 
@@ -152,6 +406,17 @@ export function kickoffInstruction(): string {
   );
 }
 
+/** The ephemeral opening instruction for a teacher's app build hand-off. */
+export function teacherBuildKickoffInstruction(): string {
+  return (
+    `[SYSTEM — not a message the teacher typed. The teacher just opened this ` +
+    `build session. Build the first working version of the app described in ` +
+    `your APP BUILDER MODE lead-in NOW with create_code, then describe what ` +
+    `you built and the judgment calls they may want to steer. Do not greet or ` +
+    `ask what to build.]`
+  );
+}
+
 // ── System-prompt assembly ──────────────────────────────────────────────
 
 /**
@@ -164,6 +429,25 @@ export type TutorPromptContext = {
   readingLevel: string | null;
   scholarName: string | null;
   sessionMode?: "conversation" | "workbench" | "vibecode" | null;
+  vibecodeStarterUsedAt?: number | null;
+  /** True on a teacher test-drive session. In a vibecode session it flips the
+   *  tutor into the build-partner stance (Move B). Optional so positional/
+   *  offline callers default to the scholar stance. */
+  isTestDrive?: boolean;
+  /** The scholar's screen shows the open-exploration "Wrap up" button (see
+   *  getSessionContext). Optional so guest/offline callers default to off. */
+  offersWrapUp?: boolean;
+  /** Rendered SCHOLAR'S PRIOR WORK IN THIS UNIT section (vibecode only). */
+  priorUnitWork?: string | null;
+  /** The App designer's parking lot (vibecode; sessions.parkingLot). */
+  parkingLot?: ReadonlyArray<{ text: string; reason?: string }> | null;
+  /** A free-play session (sessions.freePlay, TRA-489). Optional; offline
+   *  callers default to the assignment designer. */
+  freePlay?: boolean;
+  /** The streaming caller owns the session (set by the stream route). Gates
+   *  the contract steering's stay_silent branch. Offline callers default to
+   *  true. */
+  callerIsSessionOwner?: boolean;
   unitContext: UnitContext | null;
   personaContext: PersonaContext | null;
   perspectiveContext: PerspectiveContext | null;
@@ -172,6 +456,7 @@ export type TutorPromptContext = {
   artifactData: ArtifactData[] | null;
   appStateContext: AppStateContext | null;
   dossierContent: string | null;
+  dossierInterests?: Interest[];
   documentNotes: DocumentNote[] | null;
   seeds: SeedData[];
   masteryContext: MasteryContextEntry[] | null;
@@ -210,7 +495,37 @@ export type TutorPromptContext = {
    *  existing callers/tests default to the byte-identical primary profile. */
   institutionProfile?: InstitutionPromptProfile;
   runtimeCapabilities?: TutorRuntimeCapabilities;
+  /** App designer Play mode: the code tools are not offered this turn, so the
+   *  vibecode lead-in collapses to a "switch to Edit" line and the CODE
+   *  ARTIFACTS tool section is dropped (G5). Optional; defaults to Edit. Only
+   *  the live tutor stream threads it. */
+  playMode?: boolean;
 };
+
+type TeacherBuildContext = {
+  isTestDrive?: boolean;
+  lessonActivityContext:
+    | Pick<LessonActivityContext, "starterAppId" | "appRequest">
+    | null;
+};
+
+/** Whether this turn uses the teacher build-partner stance. */
+export function isTeacherBuildContext(ctx: TeacherBuildContext): boolean {
+  const activity = ctx.lessonActivityContext;
+  return (
+    ctx.isTestDrive === true &&
+    (activity?.starterAppId != null || activity?.appRequest != null)
+  );
+}
+
+/** Select the model-only opening instruction without changing scholar copy. */
+export function kickoffInstructionForContext(
+  ctx: TeacherBuildContext,
+): string {
+  return isTeacherBuildContext(ctx)
+    ? teacherBuildKickoffInstruction()
+    : kickoffInstruction();
+}
 
 /**
  * Map a project context to the tutor system prompt. Wraps `buildSystemPrompt`'s
@@ -219,20 +534,29 @@ export type TutorPromptContext = {
  * when empty) are the kind of thing that's easy to get wrong inline.
  */
 export function buildTutorSystemPrompt(ctx: TutorPromptContext): string {
-  const { stable, dynamic } = buildTutorSystemPromptParts(ctx);
-  return stable + dynamic;
+  const { stable, dynamic, turnContext } = buildTutorSystemPromptParts(ctx);
+  return stable + dynamic + "\n\n" + turnContext;
 }
 
 /**
  * Cache-split form of {@link buildTutorSystemPrompt}: returns the byte-stable
- * leading run and the per-turn-varying remainder separately so the tutor route
- * can set a prompt-cache breakpoint (via `cachedSystem`) after the large stable
- * prefix. `stable + dynamic` is byte-identical to `buildTutorSystemPrompt(ctx)`.
+ * leading run, per-turn-varying system remainder, and minute-varying message
+ * suffix separately. The tutor route places the latter after the rolling
+ * conversation cache breakpoint.
  */
 export function buildTutorSystemPromptParts(ctx: TutorPromptContext): {
   stable: string;
   dynamic: string;
+  turnContext: string;
 } {
+  // Teacher build-partner stance (Move B) turns on ONLY for a teacher
+  // test-drive of a COACHED activity — one seeded with a starter app or
+  // carrying a hand-off appRequest. A teacher rehearsing a plain kids-build
+  // vibecode activity (no starter, no request) keeps the scholar stance so the
+  // rehearsal previews exactly what scholars will see. The request travels via
+  // the dedicated, never-scholar-facing `appRequest` field, never `description`.
+  const activity = ctx.lessonActivityContext;
+  const teacherBuild = isTeacherBuildContext(ctx);
   return buildSystemPromptParts(
     ctx.teacherWhisper,
     ctx.readingLevel,
@@ -278,7 +602,56 @@ export function buildTutorSystemPromptParts(ctx: TutorPromptContext): {
     ctx.institutionProfile ?? DEFAULT_INSTITUTION_PROMPT_PROFILE,
     ctx.runtimeCapabilities,
     ctx.sessionCreatedAt ?? null,
+    ctx.vibecodeStarterUsedAt ?? null,
+    teacherBuild,
+    teacherBuild ? (activity?.appRequest ?? null) : null,
+    ctx.playMode ?? false,
+    ctx.dossierInterests ?? null,
+    ctx.offersWrapUp ?? false,
+    ctx.priorUnitWork ?? null,
+    ctx.parkingLot ?? null,
+    ctx.callerIsSessionOwner ?? true,
+    ctx.freePlay ?? false,
   );
+}
+
+export const TURN_CONTEXT_PREFIX =
+  "[Turn context from the app, not written by the scholar]\n";
+
+type TurnContextMessage = {
+  role: string;
+  content: string | Array<{ type: string } & Record<string, unknown>>;
+};
+
+/**
+ * Append app-authored turn context after the latest user message's cache
+ * breakpoint. Returns a new array and leaves the input messages untouched.
+ */
+export function appendTurnContext<M extends TurnContextMessage>(
+  messages: readonly M[],
+  turnContext: string,
+): M[] {
+  let lastUser = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      lastUser = i;
+      break;
+    }
+  }
+  if (lastUser === -1) return [...messages];
+
+  const target = messages[lastUser];
+  const originalBlocks =
+    typeof target.content === "string"
+      ? [{ type: "text", text: target.content }]
+      : target.content;
+  const content: M["content"] = [
+    ...originalBlocks,
+    { type: "text", text: TURN_CONTEXT_PREFIX + turnContext },
+  ];
+  const out = [...messages];
+  out[lastUser] = { ...target, content };
+  return out;
 }
 
 // ── Pending whisper ─────────────────────────────────────────────────────
@@ -309,79 +682,4 @@ export function injectPendingWhisper(
   }
 }
 
-// ── Magic annotation ────────────────────────────────────────────────────
-
-/**
- * Augment the tutor's system prompt for the turn after a "Magic Corners"
- * drawing was brought to life — the new illustration is already shown to the
- * scholar, so the tutor should react to it rather than generate another.
- */
-export function magicAnnotationSystemPrompt(
-  baseSystemPrompt: string,
-  instruction: string | undefined,
-): string {
-  return (
-    `${baseSystemPrompt}\n\n[MAGIC ANNOTATION] The scholar's uploaded drawing had ` +
-    `"Magic Corners" (a hand-drawn frame), and you just brought the framed area ` +
-    `to life as: "${instruction}". That new illustration is already shown ` +
-    `to the scholar directly above your reply. React with genuine delight, ` +
-    `briefly describe what you made, and connect it to what they're learning. ` +
-    `Do NOT call generate_image — the image already exists.`
-  );
-}
-
 // ── /analyze route: observer result → legacy "detailed" shape ───────────
-
-/** Map a Bloom's float (0-5) to a named level string. */
-export function bloomFromFloat(level: number): string {
-  if (level >= 4.5) return "create";
-  if (level >= 3.5) return "evaluate";
-  if (level >= 2.5) return "analyze";
-  if (level >= 1.5) return "apply";
-  if (level >= 0.5) return "understand";
-  return "remember";
-}
-
-export type DetailedAnalysis = {
-  summary: string;
-  topics: string[];
-  bloomLevel: string;
-  bloomDescription: string;
-  nudges: { type: string; message: string }[];
-  suggestedFollowUps: { topic: string; rationale: string }[];
-};
-
-/**
- * Map an observer result to the backward-compatible "detailed" analysis shape
- * the SessionViewer expects from `/analyze`. Returns null when the observer
- * produced nothing usable for this view — no result, or a degraded pulse
- * (`pulse === null`), which carries no summary/topics to render.
- */
-export function mapObserverResultToDetailed(
-  result: ParsedObserverResponse | null,
-): DetailedAnalysis | null {
-  if (!result || !result.pulse) return null;
-  const hasObservations = result.observations.length > 0;
-  return {
-    summary: result.pulse.summary,
-    topics: result.pulse.topics,
-    bloomLevel: hasObservations
-      ? bloomFromFloat(
-          Math.max(...result.observations.map((o) => o.masteryLevel)),
-        )
-      : "remember",
-    bloomDescription: hasObservations
-      ? [...result.observations]
-          .sort((a, b) => b.masteryLevel - a.masteryLevel)
-          .slice(0, 3)
-          .map((o) => `${o.conceptLabel}: ${o.masteryLevel.toFixed(1)}`)
-          .join(", ")
-      : "No observations yet",
-    nudges: result.seeds
-      .filter((s) => s.suggestionType === "depth_probe")
-      .map((s) => ({ type: "challenge", message: s.rationale })),
-    suggestedFollowUps: result.seeds
-      .filter((s) => s.suggestionType === "frontier")
-      .map((s) => ({ topic: s.topic, rationale: s.rationale })),
-  };
-}

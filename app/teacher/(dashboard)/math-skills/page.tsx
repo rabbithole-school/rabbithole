@@ -770,8 +770,14 @@ function PracticePoolInner() {
   // I mean it". Captured at first render so the default can't re-fire off its
   // own URL write.
   const [scopeCameFromUrl] = useState(() => params.has("scope"));
+  // A `?scholar=` link is just as explicit about who to show, so it wins over
+  // the default too: applying an owned cohort on top of it can scope the named
+  // scholar straight off the matrix (the shell resolves the focus out of the
+  // SCOPED roster), which is the same clobber the Scholars tab guards against
+  // at its own apply. Sharpest for a program guest, who is in no math cohort.
+  const [scholarCameFromUrl] = useState(() => !!params.get("scholar"));
   useDefaultGroupScope({
-    enabled: !scopeCameFromUrl,
+    enabled: !scopeCameFromUrl && !scholarCameFromUrl,
     subject: "math",
     // The studio's participation filter starts enrolled-only and apply can't
     // widen it, so a guest-inclusive default would land hidden by its own
@@ -1009,6 +1015,21 @@ function PracticePoolInner() {
   useEffect(() => {
     if (userLoading || !mayView || !(domain || isAllDomains || isFastMath)) return;
     const q = new URLSearchParams();
+    // This rebuild starts from an EMPTY param set, so every param the page
+    // does not own has to be carried across explicitly or the first write
+    // after an external navigation silently drops it. Read them off the LIVE
+    // URL rather than `params`: they arrive through navigations this effect
+    // isn't keyed on, and the href guard at the bottom compares against the
+    // live address too.
+    const liveParams = new URLSearchParams(window.location.search);
+    // `inst=` is the institution lens, owned by the account menu and read by
+    // every roster query on this page through `useScholarRoster`. Dropping it
+    // is why Math Skills could not show a non-home school's scholars: the
+    // switch landed on `/teacher/math-skills?inst=<slug>`, this effect
+    // replaced that with `?domain=…&lens=…`, and the roster snapped back to
+    // the home school before the matrix ever drew the one you asked for.
+    const liveInst = liveParams.get("inst");
+    if (liveInst) q.set("inst", liveInst);
     q.set(
       "domain",
       isAllDomains
@@ -1047,13 +1068,11 @@ function PracticePoolInner() {
     const serializedStatuses = serializeMasteryFilters(masteryStatuses);
     if (serializedStatuses !== null) q.set("statuses", serializedStatuses);
     // `colorBy` (the matrix's "Level coloring" mode) is owned and written by
-    // MathSkillsMasteryView, not page state — read the live URL at write time
-    // and pass it through so this rebuild doesn't strip it. Not a reactive
-    // dep: the view's own router.replace echoes back through the guard below.
+    // MathSkillsMasteryView, not page state — carried through for the same
+    // reason as `inst` above. Not a reactive dep: the view's own
+    // router.replace echoes back through the guard below.
     if (effectiveLens === "mastery") {
-      const liveColorBy = new URLSearchParams(window.location.search).get(
-        "colorBy",
-      );
+      const liveColorBy = liveParams.get("colorBy");
       if (liveColorBy) q.set("colorBy", liveColorBy);
     }
     if (effectiveLens === "content") {

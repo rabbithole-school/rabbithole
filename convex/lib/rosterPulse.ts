@@ -55,7 +55,8 @@ export const TREND_CONCERN_DROP = 0.15; // 0–1 scale
 const LOW_ENGAGEMENT = 0.5;
 const CONCERN_ENGAGEMENT = 0.4;
 const LOW_ON_TASK = 0.6;
-const CONCERN_ON_TASK = 0.45;
+/** Also the on-task floor for the app off-track alert (convex/appOffTrackAlert.ts). */
+export const CONCERN_ON_TASK = 0.45;
 
 /** How many distinct concern flags to carry to the UI (most recent first). */
 const CONCERN_FLAG_CAP = 3;

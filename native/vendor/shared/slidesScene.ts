@@ -131,7 +131,7 @@ export type Deck = {
 
 // ─── Defaults ────────────────────────────────────────────────────────────
 
-const DEFAULT_TEXT_STYLE: TextStyle = {
+export const DEFAULT_TEXT_STYLE: TextStyle = {
   fontSize: 28,
   bold: false,
   italic: false,
@@ -155,7 +155,7 @@ function clampNum(n: unknown, lo: number, hi: number, fallback: number): number 
   return Math.min(hi, Math.max(lo, v));
 }
 
-function normColor(c: unknown, fallback: string): string {
+export function normColor(c: unknown, fallback: string): string {
   return typeof c === "string" && HEX.test(c) ? c : fallback;
 }
 
@@ -315,6 +315,10 @@ export const SLIDES_COPY = {
   deleteSlide: "Delete slide",
   deleteElement: "Delete",
   speakerNotes: "Speaker notes",
+  textStyle: "Text style",
+  textSize: "Size",
+  color: "Color",
+  backgroundColor: "Slide background",
   present: "Present",
   printNotes: "Print notes",
   undo: "Undo",
@@ -325,6 +329,54 @@ export const SLIDES_COPY = {
   corruptDeck: "These slides couldn't be opened. Ask your teacher for help.",
   saveFailed: "That change didn't save — try again.",
 } as const;
+
+/**
+ * Author-pickable colors for slide TEXT and slide BACKGROUND.
+ *
+ * A closed, curated palette — deliberately NOT a free color wheel / hex input,
+ * so every choice stays legible on a projected slide. Both the web and native editors
+ * import the SAME arrays so the two surfaces never drift, the same reason
+ * `SLIDES_COPY` lives here. Values are 6-digit lowercase hex so they round-trip
+ * through `normColor` unchanged.
+ *
+ * Text: the FIRST entry is the deck default navy (`DEFAULT_TEXT_STYLE.color`),
+ * followed by black/white and a few saturated, kid-friendly hues chosen to read
+ * well on a white slide. Background: the FIRST entry is white (the slide
+ * default), then soft light tints that keep navy text legible, plus two dark
+ * options for white text.
+ */
+export const SLIDE_TEXT_COLORS: readonly { label: string; value: string }[] = [
+  { label: "Navy", value: "#222656" },
+  { label: "Black", value: "#000000" },
+  { label: "White", value: "#ffffff" },
+  { label: "Red", value: "#d1352b" },
+  { label: "Orange", value: "#d9660a" },
+  { label: "Green", value: "#217a3a" },
+  { label: "Blue", value: "#1565c0" },
+  { label: "Purple", value: "#6d3bbf" },
+] as const;
+
+export const SLIDE_BACKGROUND_COLORS: readonly { label: string; value: string }[] = [
+  { label: "White", value: "#ffffff" },
+  { label: "Cream", value: "#fff7e0" },
+  { label: "Blush", value: "#ffe6e6" },
+  { label: "Mint", value: "#e4f7ea" },
+  { label: "Sky", value: "#e3f1fd" },
+  { label: "Lavender", value: "#efe8fb" },
+  { label: "Navy", value: "#222656" },
+  { label: "Charcoal", value: "#1a1a1a" },
+] as const;
+
+/**
+ * The three author-pickable text sizes, shared by the web and native editors so
+ * the "Text style" popover's Size row is identical on both surfaces. `fontSize`
+ * values patch `TextStyle.fontSize` directly.
+ */
+export const SLIDE_TEXT_SIZES: readonly { label: string; fontSize: number }[] = [
+  { label: "Small", fontSize: 28 },
+  { label: "Medium", fontSize: 40 },
+  { label: "Large", fontSize: 56 },
+] as const;
 
 /**
  * "Make a picture" — the scholar-authored illustration source.

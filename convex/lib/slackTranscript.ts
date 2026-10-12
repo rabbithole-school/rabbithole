@@ -323,8 +323,21 @@ export function buildSlackTranscript(args: {
   /** slackFileId → text extracted from a Word/RTF/plain-text file, shown
    *  inline as a text document block. */
   texts?: TextAttachmentMap;
+  /** Image ids left out because the request can only carry so many images —
+   *  NOT because anything failed. Rendered with different wording so the model
+   *  reports a per-turn limit as a limit instead of diagnosing an outage. */
+  imagesSkippedForCapacity?: ReadonlySet<string>;
 }): TranscriptTurn[] {
-  const { messages, botUserId, names, fileRefs, images, documents, texts } = args;
+  const {
+    messages,
+    botUserId,
+    names,
+    fileRefs,
+    images,
+    documents,
+    texts,
+    imagesSkippedForCapacity,
+  } = args;
 
   // Internal accumulator: text + any inline media (images/PDFs/parsed docs),
   // merged per role run. `media` preserves the order the blocks were appended.
@@ -407,15 +420,24 @@ export function buildSlackTranscript(args: {
         !emittedMediaIds.has(f.id) &&
         imageMediaType(f.mimetype ?? "") !== null
       ) {
-        // An image we could NOT hand to the model as a vision block — a download
-        // failure, an undecodable/unsupported raster, or one too large to shrink
-        // under the per-image limit. Say so EXPLICITLY: a generic
-        // "[attached file: …]" line let the bot assume it had actually seen the
-        // screenshot (and, in the wild, hallucinate its contents). Keep the
-        // slackFileId (and any storageRef) so a later turn can still reference it.
+        // An image we could NOT hand to the model as a vision block. Say so
+        // EXPLICITLY: a generic "[attached file: …]" line let the bot assume it
+        // had actually seen the screenshot (and, in the wild, hallucinate its
+        // contents). Keep the slackFileId (and any storageRef) so a later turn
+        // can still reference it.
+        //
+        // Two REASONS, worded differently on purpose. A capacity skip is normal
+        // operation — the thread simply holds more images than one request can
+        // carry, and the newest won the slots. A failure is a download error, an
+        // undecodable raster, or one too large to shrink under the per-image
+        // limit. Saying "could not load it" for both taught the bot to report a
+        // routine limit as a broken system and escalate it to a human.
         const size = f.size ? ` ${Math.round(f.size / 1024)}KB` : "";
+        const tail = `${f.name ?? "image"} (${f.mimetype ?? "image"},${size} slackFileId=${f.id}${refToken})`;
         pieces.push(
-          `[attached image (NOT shown to you — could not load it): ${f.name ?? "image"} (${f.mimetype ?? "image"},${size} slackFileId=${f.id}${refToken})]`,
+          imagesSkippedForCapacity?.has(f.id)
+            ? `[older attached image (NOT shown to you — this thread holds more images than one reply can carry, so the most recent ones were shown instead; nothing is broken, and asking for it to be re-posted in a new message will show it): ${tail}]`
+            : `[attached image (NOT shown to you — could not load it): ${tail}]`,
         );
       } else {
         // No decoded payload for this occurrence — unsupported non-image files,

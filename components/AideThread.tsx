@@ -6,7 +6,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { remarkHardBreaks } from "@/lib/remarkHardBreaks";
 import { Box, Flex, IconButton, Spinner, Text, VStack, Textarea } from "@chakra-ui/react";
-import { PaperPlaneTilt } from "@phosphor-icons/react";
+import { PaperPlaneTilt, Square } from "@phosphor-icons/react";
 import { StreamingTurn } from "./StreamingTurn";
 import { DictationMicButton } from "./DictationMicButton";
 import type { ToolActivity } from "@/hooks/useAgentStream";
@@ -71,6 +71,9 @@ export interface AideMessage {
   _id: string;
   role: string;
   content: string;
+  /** Set (and never cleared) when the user cut this reply short — drives the
+   *  muted "Stopped" caption under a finalized assistant bubble. */
+  stopRequestedAt?: number | null;
 }
 
 /**
@@ -86,6 +89,7 @@ export function AideMessageBubble({
   content,
   prefix,
   density = "staff",
+  stopRequestedAt,
 }: {
   role: string;
   content: string;
@@ -93,6 +97,9 @@ export function AideMessageBubble({
   prefix?: React.ReactNode;
   /** Type scale — see AideDensity. Defaults to staff (no visual change). */
   density?: AideDensity;
+  /** When set, the user cut this reply short — renders a muted "Stopped"
+   *  caption under the assistant bubble (finalized turns only). */
+  stopRequestedAt?: number | null;
 }) {
   const isScholar = density === "scholar";
   if (role === "user") {
@@ -116,6 +123,11 @@ export function AideMessageBubble({
             {content}
           </ReactMarkdown>
         </Box>
+        {stopRequestedAt && (
+          <Text fontFamily="heading" fontSize="xs" color="fg.muted" mt={1}>
+            Stopped
+          </Text>
+        )}
       </Box>
     );
   }
@@ -126,6 +138,11 @@ export function AideMessageBubble({
           {content}
         </ReactMarkdown>
       </Text>
+      {stopRequestedAt && (
+        <Text fontFamily="heading" fontSize="xs" color="fg.muted" mt={1}>
+          Stopped
+        </Text>
+      )}
     </Box>
   );
 }
@@ -143,6 +160,11 @@ export interface AideThreadProps<M extends AideMessage = AideMessage> {
   input: string;
   onInputChange: (v: string) => void;
   onSend: () => void;
+  /** Called when the user clicks the Stop control (shown in place of Send
+   *  while streaming). The host stops the server loop + aborts the local
+   *  fetch; the partial text stays on screen. Omit on surfaces without a
+   *  stoppable stream — the Send control then simply disables while streaming. */
+  onStop?: () => void;
   placeholder?: string;
   /** Shown when there are no messages and nothing is streaming. */
   emptyState?: React.ReactNode;
@@ -189,6 +211,7 @@ export function AideThread<M extends AideMessage = AideMessage>({
   input,
   onInputChange,
   onSend,
+  onStop,
   placeholder = "Ask a question…",
   emptyState,
   topNote,
@@ -280,6 +303,7 @@ export function AideThread<M extends AideMessage = AideMessage>({
               role={m.role}
               content={m.content}
               density={density}
+              stopRequestedAt={m.stopRequestedAt}
               prefix={m.role === "user" ? renderUserPrefix?.(m) : undefined}
             />
           ))}
@@ -339,26 +363,38 @@ export function AideThread<M extends AideMessage = AideMessage>({
             fontSize={composerFontSize}
             py={2}
             px={3}
-            disabled={isStreaming}
           />
           <DictationMicButton
             size="sm"
-            disabled={isStreaming}
             onTranscript={(text) => onInputChange(input ? `${input.trimEnd()} ${text}` : text)}
           />
-          <IconButton
-            aria-label="Send message"
-            size="sm"
-            bg="violet.500"
-            color="white"
-            _hover={{ bg: "violet.600" }}
-            _disabled={{ opacity: 0.4, cursor: "not-allowed" }}
-            borderRadius="lg"
-            onClick={onSend}
-            disabled={!input.trim() || isStreaming}
-          >
-            <PaperPlaneTilt size={14} />
-          </IconButton>
+          {isStreaming && onStop ? (
+            <IconButton
+              aria-label="Stop generating"
+              size="sm"
+              variant="ghost"
+              color="charcoal.400"
+              _hover={{ bg: "gray.100" }}
+              borderRadius="lg"
+              onClick={onStop}
+            >
+              <Square size={14} weight="fill" />
+            </IconButton>
+          ) : (
+            <IconButton
+              aria-label="Send message"
+              size="sm"
+              bg="violet.500"
+              color="white"
+              _hover={{ bg: "violet.600" }}
+              _disabled={{ opacity: 0.4, cursor: "not-allowed" }}
+              borderRadius="lg"
+              onClick={onSend}
+              disabled={!input.trim() || (isStreaming && !onStop)}
+            >
+              <PaperPlaneTilt size={14} />
+            </IconButton>
+          )}
         </Flex>
         {belowInput}
       </Box>

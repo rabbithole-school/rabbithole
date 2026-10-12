@@ -46,6 +46,11 @@ export interface ParentPortfolioItem {
   pageRange?: { start: number; end: number };
   attributionCount: number;
   hasTutorTranscription?: boolean;
+  /** The scholarGroup this work's course belongs to; null when unfiled. */
+  courseId?: string | null;
+  /** Poster still for a capture-station video. */
+  videoThumbUrl?: string | null;
+  videoDurationMs?: number | null;
 }
 
 export function ParentPortfolioViewer({
@@ -210,6 +215,7 @@ export function ParentPortfolioViewer({
                 ) : video && fileUrl && !mediaFailed ? (
                   <video
                     controls
+                    poster={item.videoThumbUrl ?? undefined}
                     preload="metadata"
                     onError={() => setFailedMediaKey(mediaKey)}
                     style={{

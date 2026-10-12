@@ -5,9 +5,17 @@
 import { useSyncExternalStore } from "react";
 
 import type { Id } from "@/lib/convex";
-import { rabbitholeWebUrl } from "@/lib/webEmbedConfig";
+import { youTubePlayerContent } from "@/lib/activityResourcePlayer";
+import {
+  rabbitholeWebBaseUrl,
+  rabbitholeWebUrl,
+} from "@/lib/webEmbedConfig";
 
 export type EmbeddedWebGestureMode = "page" | "interactive";
+
+export type ExternalAppHostRequest =
+  | { kind: "url" }
+  | { kind: "customApp"; token: string };
 
 export type EmbeddedWebBase = {
   title: string;
@@ -31,6 +39,7 @@ export type EmbeddedWebBase = {
 export type OpenExternalApp = EmbeddedWebBase & {
   kind: "externalApp";
   appId: Id<"externalApps">;
+  hostRequest: ExternalAppHostRequest;
 };
 
 export type OpenWebActivity = EmbeddedWebBase & {
@@ -75,6 +84,38 @@ export function openEmbeddedWebContent(content: OpenEmbeddedWebContent) {
   emit();
 }
 
+export function externalAppHostRequestForUrl(
+  pathOrUrl: string,
+): ExternalAppHostRequest {
+  try {
+    const candidate = new URL(rabbitholeWebUrl(pathOrUrl));
+    const webOrigin = new URL(rabbitholeWebBaseUrl).origin;
+    const pathname = candidate.pathname.replace(/\/+$/, "") || "/";
+    const token = candidate.searchParams.get("token")?.trim();
+    if (
+      candidate.origin === webOrigin &&
+      pathname === "/custom-apps" &&
+      token
+    ) {
+      return { kind: "customApp", token };
+    }
+  } catch {
+    // Invalid values remain on the existing URL-host path.
+  }
+  return { kind: "url" };
+}
+
+export function nativeCustomAppHeartbeatArgs(
+  sessionId: Id<"webActivitySessions">,
+) {
+  return {
+    sessionId,
+    // The launcher URL contains the bearer token and has no analytic value once
+    // the live static app is running from srcdoc.
+    lastUrl: undefined,
+  };
+}
+
 export function openExternalApp(app: {
   appId: Id<"externalApps">;
   name: string;
@@ -82,6 +123,7 @@ export function openExternalApp(app: {
   webAllowedHosts?: string[] | null;
   allowedHosts?: string[] | null;
 }) {
+  const url = rabbitholeWebUrl(app.url);
   openEmbeddedWebContent({
     kind: "externalApp",
     appId: app.appId,
@@ -89,17 +131,26 @@ export function openExternalApp(app: {
     // A custom app's webUrl is a domain-agnostic path ("/custom-apps?token=…");
     // resolve it against the configured Rabbithole web origin. An absolute
     // external URL (a third-party practice site, etc.) passes through rabbitholeWebUrl unchanged.
-    url: rabbitholeWebUrl(app.url),
+    url,
+    hostRequest: externalAppHostRequestForUrl(app.url),
     allowedHosts: app.allowedHosts ?? app.webAllowedHosts ?? null,
     gestureMode: "page",
   });
 }
 
 export function openWebActivity(activity: Omit<OpenWebActivity, "kind">) {
+  // A web activity whose URL is a YouTube video must play in the SAME sandboxed
+  // player video resources use (nocookie embed, locked hosts, no related /
+  // Shorts / search), not the generic host-locked WebView on youtube.com. Keep
+  // kind "webActivity" so the webActivitySessions lifecycle is unchanged; only
+  // the embed document + allowlist + navigation policy swap in. Non-YouTube
+  // activities keep their exact prior shape (`youTubePlayerContent` → null).
+  const youTubePlayer = youTubePlayerContent(activity.url);
   openEmbeddedWebContent({
     ...activity,
+    ...youTubePlayer,
     kind: "webActivity",
-    gestureMode: activity.gestureMode ?? "page",
+    gestureMode: youTubePlayer?.gestureMode ?? activity.gestureMode ?? "page",
   });
 }
 
@@ -109,6 +160,30 @@ export function openInteractiveWebContent(content: Omit<OpenInteractiveWebConten
     kind: "interactive",
     gestureMode: content.gestureMode ?? "interactive",
   });
+}
+
+/**
+ * Open a YouTube link in the same sandboxed, locked-down player that activity
+ * video resources use — no browser chrome, no end-screen, no way to wander into
+ * open YouTube. Returns true when the URL was a playable YouTube video (and the
+ * player was opened); returns false when it is not YouTube, so callers can fall
+ * back to their normal link handling.
+ */
+export function openYouTubeVideo(args: {
+  url: string;
+  title: string;
+  subtitle?: string;
+  id?: string;
+}): boolean {
+  const content = youTubePlayerContent(args.url);
+  if (!content) return false;
+  openInteractiveWebContent({
+    id: args.id ?? `youtube-video:${args.url}`,
+    title: args.title,
+    subtitle: args.subtitle,
+    ...content,
+  });
+  return true;
 }
 
 /**

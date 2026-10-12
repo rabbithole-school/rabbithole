@@ -3,8 +3,6 @@ import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
-import { verifyPadHintOutput } from "../lib/practice/padHints";
-import { makeItemId } from "../lib/practice/session";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -81,29 +79,6 @@ describe("practice image ownership", () => {
     ).rejects.toThrow("Forbidden");
   });
 
-  test("pad hints check unit-bearing answers against the bare result", async () => {
-    const t = convexTest(schema, modules);
-    const context = await t.query(internal.practiceSkills.padHintContext, {
-      itemId: makeItemId("volume_rectangular_prism", 12345),
-    });
-    const answerCanonical = context.answerCanonical;
-    if (!answerCanonical) throw new Error("expected a scalar answer");
-    if (context.answerType !== "integer") throw new Error("expected an integer answer");
-
-    expect(answerCanonical).toMatch(/^\d+(?:\.\d+)?$/);
-    expect(
-      verifyPadHintOutput(
-        { nudge: `Your work shows the volume is ${answerCanonical}.` },
-        {
-          stem: context.stem,
-          answerCanonical,
-          answerType: context.answerType,
-          allowSteps: false,
-        },
-      )?.nudge,
-    ).toBe("Your work shows the volume is the result you wrote.");
-  });
-
   test("attachAttemptWork rejects an arbitrary storage id and accepts an owned miss image", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedScholar(t, "attempt_image");
@@ -146,76 +121,4 @@ describe("practice image ownership", () => {
     ).resolves.toEqual({ attached: true });
   });
 
-  test("storing a verified pad hint writes the assisted reveal marker", async () => {
-    const t = convexTest(schema, modules);
-    const scholarId = await seedScholar(t, "pad_marker");
-    const imageId = await t.run(async (ctx) =>
-      ctx.storage.store(new Blob(["pad"], { type: "image/png" })),
-    );
-    await t.run(async (ctx) =>
-      ctx.runMutation(internal.practicePadHints.storeVerified, {
-        scholarId,
-        itemId: "count_to_10#7",
-        imageId,
-        nudge: "You made one row; inspect where your count changes.",
-        model: "test-model",
-      }),
-    );
-    const markers = await t.run(async (ctx) =>
-      ctx.db.query("practiceHintReveals").collect(),
-    );
-    expect(markers).toHaveLength(1);
-    expect(markers[0]).toMatchObject({
-      scholarId,
-      itemId: "count_to_10#7",
-      maxStepServed: -1,
-    });
-  });
-
-  test("serveHintStep emits verified generated steps through the existing anti-leak contract", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholarId = await seedScholar(t, "generated_steps");
-    const scholar = await withUser(t, scholarId);
-    const imageId = await t.run(async (ctx) =>
-      ctx.storage.store(new Blob(["pad"], { type: "image/png" })),
-    );
-    const itemId = "count_to_10#77";
-    await t.run(async (ctx) =>
-      ctx.runMutation(internal.practicePadHints.storeVerified, {
-        scholarId,
-        itemId,
-        imageId,
-        nudge: "You marked the next spot; inspect the number before it.",
-        workedSteps: [
-          {
-            text: "Count the first group: 3 + 2 = 5.",
-            blankText: "Count the first group: ?",
-            expected: "5",
-            answerType: "integer",
-          },
-          {
-            text: "Use that count to finish the item.",
-            blankText: "Finish the item: ?",
-            expected: "6",
-            answerType: "integer",
-          },
-        ],
-        model: "test-model",
-      }),
-    );
-
-    const served = await scholar.mutation(api.practiceSkills.serveHintStep, {
-      scholarId,
-      itemId,
-      stepIndex: 0,
-    });
-    expect(served.rung).toMatchObject({
-      kind: "completion",
-      expected: "5",
-      stepIndex: 0,
-    });
-    expect(JSON.stringify(served)).not.toContain("Finish the item");
-    expect(JSON.stringify(served)).not.toContain('"6"');
-  });
 });

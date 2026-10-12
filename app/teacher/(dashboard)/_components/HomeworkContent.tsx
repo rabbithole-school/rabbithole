@@ -1,14 +1,14 @@
 "use client";
 
 /**
- * The per-scholar CONTENT cell of a Homework row — the tonight/homework chips
- * plus last night's outcome. Extracted from the old HomeworkList so the shared
+ * The per-scholar CONTENT cell of a Homework row (Scholar's Prep) — what is due,
+ * what they closed today, their best next question, and last night's outcome. Extracted from the old HomeworkList so the shared
  * `ScholarWorkTable` can render the grade + name columns once and swap only
  * this cell as the tab changes. The windowed read + row layout moved to the
  * table; only the chip/outcome rendering lives here.
  */
 
-import { Box, Flex, Text, Wrap } from "@chakra-ui/react";
+import { Box, Flex, Stack, Text, Wrap } from "@chakra-ui/react";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useNow } from "@/hooks/useNow";
@@ -82,11 +82,15 @@ export function HomeworkChips({
       </Text>
     );
   }
-  if (plan.emptyList) {
-    return <HomeworkChip text="Nothing on the list yet" bg="gray.100" color="charcoal.400" />;
-  }
+  // Due (the scholar's Prep → Due list) then what they closed today (their
+  // "Done today?" close-outs). The retired tonight plan ("Chosen" items and
+  // notes) is not rendered: the scholar can no longer choose items.
   return (
     <Wrap gap={2}>
+      {/* "Nothing due" would contradict a later-dated question chip beside it. */}
+      {plan.emptyList && (plan.later ?? []).length === 0 && (
+        <HomeworkChip text="Nothing due" bg="gray.100" color="charcoal.400" />
+      )}
       {plan.assigned.map((item) => {
         const { text, overdue } = assignedChipText(item, plan.timeZone, nowMs);
         return (
@@ -98,14 +102,52 @@ export function HomeworkChips({
           />
         );
       })}
-      {plan.selected.map((item) =>
-        item.kind === "note" ? (
-          <HomeworkChip key={item.id} text={item.text} bg="amber.50" color="amber.700" />
-        ) : (
-          <HomeworkChip key={item.id} text={item.label} bg="violet.50" color="violet.700" />
-        ),
-      )}
+      {/* Question homework set for a day past the Due window (TRA-476): the
+          same chip composition, so "due Thursday" reads like any deadline.
+          `?? []`: an older backend's row (deploy skew) has no `later`. */}
+      {(plan.later ?? []).map((item) => {
+        const { text, overdue } = assignedChipText(item, plan.timeZone, nowMs);
+        return (
+          <HomeworkChip
+            key={item.id}
+            text={text}
+            bg={overdue ? "orange.100" : "gray.100"}
+            color={overdue ? "orange.700" : "charcoal.600"}
+          />
+        );
+      })}
+      {/* `?? []`: an older backend's row (deploy skew) has no closedToday. */}
+      {(plan.closedToday ?? []).map((item) => (
+        <HomeworkChip
+          key={item.itemId}
+          text={`✓ ${item.label} · done today`}
+          bg="green.50"
+          color="green.700"
+        />
+      ))}
     </Wrap>
+  );
+}
+
+/** The scholar's single best next question (top question of their queue),
+ *  one line. The "Assign…" control sits outside the row's anchor. */
+export function BestNextQuestion({ plan }: { plan: HomeworkPlanRow | undefined }) {
+  if (!plan?.bestNext) return null;
+  return (
+    <Text
+      fontFamily="body"
+      fontSize="sm"
+      color="charcoal.500"
+      lineHeight="1.35"
+      lineClamp={1}
+      title={plan.bestNext.prompt}
+      data-testid="prep-best-next"
+    >
+      <Text as="span" aria-hidden="true" mr={1.5}>
+        {plan.bestNext.emoji}
+      </Text>
+      {plan.bestNext.prompt}
+    </Text>
   );
 }
 
@@ -138,7 +180,8 @@ export function LastNight({ plan }: { plan: HomeworkPlanRow | undefined }) {
   );
 }
 
-/** The Homework tab's content cell: chips (flex) + last night's outcome. */
+/** The Homework (Scholar's Prep) tab's content cell: due + closed-today chips
+ *  and the best next question (flex), then last night's outcome. */
 export function HomeworkContent({
   plan,
   planLoading,
@@ -153,9 +196,10 @@ export function HomeworkContent({
       direction={{ base: "column", md: "row" }}
       minW={0}
     >
-      <Box flex={1} minW={0}>
+      <Stack flex={1} minW={0} gap={1.5}>
         <HomeworkChips plan={plan} planLoading={planLoading} />
-      </Box>
+        <BestNextQuestion plan={plan} />
+      </Stack>
       <Box w={{ md: "180px" }} flexShrink={0}>
         <LastNight plan={plan} />
       </Box>

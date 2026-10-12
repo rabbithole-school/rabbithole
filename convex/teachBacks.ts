@@ -2,7 +2,7 @@
  * Teach-the-Tutor — "explain it back" viva mode — the Convex wiring.
  *
  * The tutor's start_teach_back / finish_teach_back tools call the INTERNAL
- * mutations here from the /project-stream handler (which has already authed the
+ * mutations here from the /session-stream handler (which has already authed the
  * caller + verified session access). A teach-back row records that the scholar
  * TAUGHT a concept to the tutor; a scheduled grading action
  * (teachBackGrading.gradeTeachBack) later scores the explanation and writes the
@@ -180,7 +180,13 @@ export const getForGrading = internalQuery({
       if (m.role !== "user" && m.role !== "assistant") continue;
       const text = m.content.trim();
       if (!text) continue;
-      lines.push(`${m.role === "user" ? "Scholar" : "Tutor"}: ${text}`);
+      const speaker =
+        m.role === "assistant"
+          ? "Tutor"
+          : m.inputModality === "app"
+            ? "App (not scholar speech)"
+            : "Scholar";
+      lines.push(`${speaker}: ${text}`);
     }
     // Cap for cost — a teach-back is a short exchange; keep the tail if long.
     const transcript = lines.slice(-40).join("\n\n");

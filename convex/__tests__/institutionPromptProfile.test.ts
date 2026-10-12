@@ -30,8 +30,8 @@ describe("Foundation institution prompt profile", () => {
 
     expect(profile.schoolName).toBe("Kestrel Academy");
     expect(profile.baseLocation).toBe("New York");
-    expect(buildBasePrompt("Ana", false, profile)).toContain("Kestrel Academy");
-    expect(buildBasePrompt("Ana", false)).toContain("Rabbithole");
+    expect(buildBasePrompt("Ana", profile)).toContain("Kestrel Academy");
+    expect(buildBasePrompt("Ana")).toContain("Rabbithole");
     expect(buildClockLine()).toMatch(/ UTC$/);
   });
 });

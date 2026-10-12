@@ -3,8 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   activeSimulatorRunLabel,
   findActiveSimulatorRun,
-  firstRunHint,
-  START_SIMULATION_LABEL,
 } from "./simulatorRunLauncher";
 
 describe("simulator run launcher", () => {
@@ -33,15 +31,5 @@ describe("simulator run launcher", () => {
         targetTicks: 40,
       }),
     ).toBe("Running · day 12 of 40");
-  });
-
-  it("keeps launch copy identical across surfaces", () => {
-    expect(START_SIMULATION_LABEL).toBe("Start simulation");
-    expect(firstRunHint(1)).toBe(
-      "Start with the starter deck. This first simulation becomes your baseline.",
-    );
-    expect(firstRunHint(2)).toBe(
-      "Start this simulation to set a baseline for your deck.",
-    );
   });
 });

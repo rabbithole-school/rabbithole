@@ -40,14 +40,16 @@ import { SectionStatusIcon } from "@/components/narrative/SectionStatusIcon";
 import { reportSectionState, reportShared, SharedCountTag } from "@/components/narrative/reportStatus";
 import { useScholarRoster, type RosterScholar } from "@/hooks/useScholarRoster";
 import { toaster } from "@/lib/toaster";
+import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 
 export function ScholarReportRoster() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const periodParam = searchParams.get("period");
 
-  const current = useQuery(api.reportingPeriods.current, {});
-  const periods = useQuery(api.reportingPeriods.list, {});
+  const { scopeParam, hrefWithActiveInstitution } = useActiveInstitution();
+  const current = useQuery(api.reportingPeriods.current, { scope: scopeParam });
+  const periods = useQuery(api.reportingPeriods.list, { scope: scopeParam });
 
   const activePeriod = periods
     ? (periodParam && periods.find((p) => String(p._id) === periodParam)) || current || periods[0] || null
@@ -61,6 +63,10 @@ export function ScholarReportRoster() {
   );
   const wholeChild = useQuery(
     api.wholeChildNarratives.listForPeriod,
+    activePeriodId ? { periodId: activePeriodId } : "skip",
+  );
+  const checkins = useQuery(
+    api.interimCheckins.listForPeriod,
     activePeriodId ? { periodId: activePeriodId } : "skip",
   );
 
@@ -82,6 +88,10 @@ export function ScholarReportRoster() {
   for (const w of wholeChild ?? []) {
     wcByScholar.set(String(w.scholarId), { status: w.status, hasContent: w.hasContent });
   }
+  const checkinByScholar = new Map<string, { status: string; hasContent: boolean }>();
+  for (const c of checkins ?? []) {
+    checkinByScholar.set(String(c.scholarId), { status: c.status, hasContent: c.hasContent });
+  }
 
   const doneCount = (narratives ?? []).filter((n) => n.status === "final" || n.status === "shared").length;
   // The finalized (not-yet-shared) narratives "Share with parents" will publish.
@@ -90,7 +100,7 @@ export function ScholarReportRoster() {
   const sorted = [...scholars].sort((a, b) => a.name.localeCompare(b.name));
   const dataLoading =
     periods === undefined ||
-    (activePeriodId !== null && (narratives === undefined || wholeChild === undefined || rosterLoading));
+    (activePeriodId !== null && (narratives === undefined || wholeChild === undefined || checkins === undefined || rosterLoading));
 
   const setPeriod = (id: string) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -99,7 +109,9 @@ export function ScholarReportRoster() {
   };
 
   const scholarHref = (id: string) =>
-    `/teacher/report/${id}${activePeriodId ? `?period=${String(activePeriodId)}` : ""}`;
+    hrefWithActiveInstitution(
+      `/teacher/report/${id}${activePeriodId ? `?period=${String(activePeriodId)}` : ""}`,
+    );
 
   const handleSharePeriod = async () => {
     if (!activePeriodId) return;
@@ -169,6 +181,7 @@ export function ScholarReportRoster() {
                 href={scholarHref(s.id)}
                 courseReports={courseByScholar.get(s.id) ?? []}
                 wc={wcByScholar.get(s.id)}
+                checkin={checkinByScholar.get(s.id)}
               />
             ))}
           </VStack>
@@ -201,20 +214,24 @@ function ScholarRow({
   href,
   courseReports,
   wc,
+  checkin,
 }: {
   scholar: RosterScholar;
   href: string;
   courseReports: { key: string; label: string; status: string; hasContent: boolean }[];
   wc: { status: string; hasContent: boolean } | undefined;
+  checkin: { status: string; hasContent: boolean } | undefined;
 }) {
-  // A status dot per report. Course narratives float left; the whole-child dot
-  // is pinned far right (just before the caret) so every row's WC dot lines up.
+  // A status dot per report. Course narratives float left; the interim check-in
+  // and whole-child dots are pinned far right (just before the caret) so every
+  // row's dots line up.
   const courseDots = courseReports.map((r) => ({
     key: r.key,
     label: r.label,
     state: reportSectionState(r.status, r.hasContent),
   }));
   const wcState = wc ? reportSectionState(wc.status, wc.hasContent) : ("empty" as const);
+  const checkinState = checkin ? reportSectionState(checkin.status, checkin.hasContent) : ("empty" as const);
   const sharedCount =
     courseReports.filter((r) => reportShared(r.status)).length + (wc && reportShared(wc.status) ? 1 : 0);
 
@@ -225,8 +242,8 @@ function ScholarRow({
         <Text fontFamily="heading" fontWeight="700" fontSize="sm" color="navy.600" truncate flex={1} minW={0}>
           {scholar.name}
         </Text>
-        {/* Right group, in order: [shared tag] | [course dots] | [whole-child dot].
-            The WC dot is pinned rightmost so it aligns down the column. */}
+        {/* Right group, in order: [shared tag] | [course dots] | [interim check-in dot] | [whole-child dot].
+            The check-in + WC dots are pinned rightmost so they align down the column. */}
         <HStack gap={2} flexShrink={0}>
           <SharedCountTag count={sharedCount} />
           {sharedCount > 0 && <RowDivider />}
@@ -240,6 +257,9 @@ function ScholarRow({
             </HStack>
           )}
           {courseDots.length > 0 && <RowDivider />}
+          <Box as="span" display="inline-flex" alignItems="center" title="Interim check-in">
+            <SectionStatusIcon state={checkinState} size={13} />
+          </Box>
           <Box as="span" display="inline-flex" alignItems="center" title="Whole Child">
             <SectionStatusIcon state={wcState} size={13} />
           </Box>

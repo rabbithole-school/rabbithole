@@ -1,13 +1,34 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  base64ToBytes,
   imageBytesToContentPart,
+  isIntactImage,
   MAX_MODEL_IMAGE_BYTES,
 } from "../lib/imageBytes";
 
-/** Minimal byte headers the MIME sniffer recognizes. */
-const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+/** A minimal JPEG header. JPEG gets no integrity check (see isIntactImage). */
 const JPEG_MAGIC = [0xff, 0xd8, 0xff, 0xe0];
+
+/** Real, decodable 2x2 images. */
+const VALID_PNG = base64ToBytes(
+  "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGM8EaDBwMDAxAAGAA/KAUR0s/I7AAAAAElFTkSuQmCC",
+);
+const VALID_WEBP = base64ToBytes(
+  "UklGRjoAAABXRUJQVlA4IC4AAADQAQCdASoCAAIAAUAmJaACdLoB+AADsAD+6Di/+YJX5Bu1D/7B384D84D+igAA",
+);
+const VALID_GIF = base64ToBytes(
+  "R0lGODdhAgACAIEAAMhQKAAAAAAAAAAAACwAAAAAAgACAAAIBgABCAQQEAA7",
+);
+
+/**
+ * The exact bytes a hotlink-blocked search_image result stored in production
+ * (2026-09-21): a 1x1 PNG whose IDAT CRC and zlib checksum are both wrong.
+ * Anthropic answers it with "Could not process image".
+ */
+const HOTLINK_PLACEHOLDER_PNG = base64ToBytes(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9sXsdrgAAAAASUVORK5CYII=",
+);
 
 function bytesWith(magic: number[], totalLength = 64): Uint8Array {
   const bytes = new Uint8Array(totalLength);
@@ -20,7 +41,7 @@ describe("imageBytesToContentPart", () => {
   // before it describes it. Without it the model can only narrate its hopes,
   // which is the exact confidently-wrong failure the tool exists to prevent.
   test("builds an Anthropic base64 image block", () => {
-    const part = imageBytesToContentPart(bytesWith(PNG_MAGIC));
+    const part = imageBytesToContentPart(VALID_PNG);
     expect(part).not.toBeNull();
     expect(part?.type).toBe("image");
     expect(part?.source.type).toBe("base64");
@@ -33,7 +54,7 @@ describe("imageBytesToContentPart", () => {
     // absent on the open web, and Anthropic rejects a block whose declared
     // type does not match its payload — so the magic bytes are the ONLY
     // source of truth. No caller can override them.
-    expect(imageBytesToContentPart(bytesWith(PNG_MAGIC))?.source.media_type)
+    expect(imageBytesToContentPart(VALID_PNG)?.source.media_type)
       .toBe("image/png");
     expect(imageBytesToContentPart(bytesWith(JPEG_MAGIC))?.source.media_type)
       .toBe("image/jpeg");
@@ -58,13 +79,13 @@ describe("imageBytesToContentPart", () => {
     // oversize block fails the WHOLE request. Returning null lets the caller
     // degrade to text instead of killing the tutor's turn mid-sentence.
     const huge = new Uint8Array(MAX_MODEL_IMAGE_BYTES + 1);
-    huge.set(PNG_MAGIC, 0);
+    huge.set(JPEG_MAGIC, 0);
     expect(imageBytesToContentPart(huge)).toBeNull();
   });
 
   test("accepts an image exactly at the ceiling", () => {
     const atLimit = new Uint8Array(MAX_MODEL_IMAGE_BYTES);
-    atLimit.set(PNG_MAGIC, 0);
+    atLimit.set(JPEG_MAGIC, 0);
     expect(imageBytesToContentPart(atLimit)).not.toBeNull();
   });
 
@@ -73,8 +94,52 @@ describe("imageBytesToContentPart", () => {
     // actually travels. Guards against someone raising the raw limit without
     // redoing the 4/3 arithmetic.
     const atLimit = new Uint8Array(MAX_MODEL_IMAGE_BYTES);
-    atLimit.set(PNG_MAGIC, 0);
+    atLimit.set(JPEG_MAGIC, 0);
     const part = imageBytesToContentPart(atLimit);
     expect(part?.source.data.length).toBeLessThan(5_000_000);
+  });
+});
+
+describe("isIntactImage", () => {
+  // Anthropic 400s the whole request on an undecodable image, and image rows
+  // replay into every later turn — so one corrupt picture silences a session
+  // permanently. Each case below was checked against the live API.
+  test("accepts real images of every checked type", () => {
+    expect(isIntactImage(VALID_PNG)).toBe(true);
+    expect(isIntactImage(VALID_WEBP)).toBe(true);
+    expect(isIntactImage(VALID_GIF)).toBe(true);
+  });
+
+  test("rejects the hotlink placeholder that silenced a session", () => {
+    expect(isIntactImage(HOTLINK_PLACEHOLDER_PNG)).toBe(false);
+    expect(imageBytesToContentPart(HOTLINK_PLACEHOLDER_PNG)).toBeNull();
+  });
+
+  test("rejects a truncated PNG", () => {
+    expect(isIntactImage(VALID_PNG.subarray(0, VALID_PNG.length - 12))).toBe(false);
+    expect(isIntactImage(VALID_PNG.subarray(0, 40))).toBe(false);
+  });
+
+  test("rejects a PNG whose chunk CRC does not match", () => {
+    const flipped = VALID_PNG.slice();
+    flipped[40] ^= 0xff; // inside the IDAT payload
+    expect(isIntactImage(flipped)).toBe(false);
+  });
+
+  test("rejects a truncated WebP", () => {
+    expect(isIntactImage(VALID_WEBP.subarray(0, 40))).toBe(false);
+  });
+
+  test("judges a GIF by whether its first frame is complete", () => {
+    // Measured live: cut inside the first frame is rejected; missing only the
+    // trailer (or anything after a complete first frame) is decoded fine.
+    expect(isIntactImage(VALID_GIF.subarray(0, 30))).toBe(false);
+    expect(isIntactImage(VALID_GIF.subarray(0, VALID_GIF.length - 1))).toBe(true);
+    expect(isIntactImage(new Uint8Array([...VALID_GIF, 0, 0, 0]))).toBe(true);
+    expect(isIntactImage(new Uint8Array([0x47, 0x49, 0x3b]))).toBe(false);
+  });
+
+  test("leaves JPEG alone, because the API decodes a truncated one", () => {
+    expect(isIntactImage(bytesWith(JPEG_MAGIC))).toBe(true);
   });
 });

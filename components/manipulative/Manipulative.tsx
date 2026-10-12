@@ -11,6 +11,15 @@
  *   • neither  → "Explore" badge, no pass/fail, free play.
  *   • goal     → "Challenge" badge + a self-correcting Done check.
  *   • answer   → the material is a scaffold; the typed number is the verdict.
+ *
+ * QUESTION FIRST, STRATEGY OPTIONAL. A goal whose board has a derivable
+ * numeric answer (`derivedQuestion` — `distribute`, exact `distributor`) is
+ * presented as that question ("What is 6 × 13?") with the strategy demoted to
+ * a muted line, plus a numeric answer box that is always live alongside Done.
+ * We grade problem solving, not the performance of a strategy; the board is
+ * there to show WHY the strategy helps. The typed value rides inside the same
+ * state JSON (`withTypedValue`) so the server grader is unchanged. Twin of
+ * native/src/components/manipulatives/NativeManipulativeItem.tsx.
  */
 import { Box, Field, Flex, Input, Text } from "@chakra-ui/react";
 import { useCallback, useState } from "react";
@@ -18,7 +27,7 @@ import "mafs/core.css";
 import "./mafs-theme.css";
 import { isChallenge, type ManipulativeSpec } from "@/lib/manipulative/types";
 import { C, wash } from "./colors";
-import { answerSolved } from "@/lib/manipulative/logic";
+import { answerSolved, derivedQuestion, isSolved, withTypedValue } from "@/lib/manipulative/logic";
 import { PartitionManipulative } from "./kinds/PartitionManipulative";
 import { NumberLineManipulative } from "./kinds/NumberLineManipulative";
 import { ArrayManipulative } from "./kinds/ArrayManipulative";
@@ -38,6 +47,7 @@ import { RulerManipulative } from "./kinds/RulerManipulative";
 import { ClockManipulative } from "./kinds/ClockManipulative";
 import { LiquidManipulative } from "./kinds/LiquidManipulative";
 import { MoneyManipulative } from "./kinds/MoneyManipulative";
+import { MoleculeManipulative } from "./kinds/MoleculeManipulative";
 
 export interface KindProps<S extends ManipulativeSpec = ManipulativeSpec> {
   spec: S;
@@ -112,6 +122,8 @@ export function ManipulativeStage({ spec, onSolvedChange, onStateChange, typedAn
       return <LiquidManipulative spec={spec} onSolvedChange={onSolvedChange} onStateChange={onStateChange} />;
     case "money":
       return <MoneyManipulative spec={spec} onSolvedChange={onSolvedChange} onStateChange={onStateChange} />;
+    case "molecule":
+      return <MoleculeManipulative spec={spec} onSolvedChange={onSolvedChange} onStateChange={onStateChange} />;
   }
 }
 
@@ -144,6 +156,7 @@ function ModeBadge({ spec, challenge }: { spec: ManipulativeSpec; challenge: boo
 export function Manipulative({
   spec,
   onCommit,
+  onInteractionStart,
 }: {
   spec: ManipulativeSpec;
   /**
@@ -157,9 +170,28 @@ export function Manipulative({
    * chip below behaves exactly as before.
    */
   onCommit?: (stateJson: string) => void;
+  /**
+   * Fired on EVERY pointer-down on the stage (and every edit of the typed
+   * answer, when the spec has one) — the manipulative twin of a keystroke, so
+   * the caller can stamp the render→first-interaction latency `computeTiming`
+   * reads as `firstKeyMs` (TRA-221). Callers dedupe to the first call; kinds
+   * report their initial state on mount, so state changes can't serve as the
+   * signal — only a real pointer can.
+   */
+  onInteractionStart?: () => void;
 }) {
   const challenge = isChallenge(spec);
   const practiceMode = onCommit != null;
+  // The one-number question this board can answer, if any (see header).
+  const question = derivedQuestion(spec);
+  const strategyLine = question ? question.strategy.replace(/\.$/, "") : null;
+  // Does the frame show a typed-answer box? Either the spec asks for one
+  // (`spec.answer`) or the kind's goal derives one.
+  const answerField = spec.answer
+    ? { prompt: spec.answer.prompt, unit: spec.answer.unit }
+    : question
+      ? { prompt: "Your answer", unit: undefined }
+      : null;
   // liveSolved = whether the CURRENT state satisfies the goal (never shown directly
   // for a challenge). verdict = what we reveal, and only on an explicit "Done":
   // "idle" until they commit; any subsequent change clears it back to "idle" so a
@@ -177,7 +209,6 @@ export function Manipulative({
   // guarantee for free — see onSolvedChange — since any post-Done edit there
   // resets verdict to "idle", forcing a fresh Done before green can show.)
   const [committed, setCommitted] = useState(false);
-
   const onSolvedChange = useCallback((s: boolean) => {
     setLiveSolved(s);
     setVerdict("idle"); // any manipulation invalidates the last check — re-commit required
@@ -185,14 +216,35 @@ export function Manipulative({
   const onStateChange = useCallback((s: unknown) => {
     setState(s);
   }, []);
+
+  // Idle = nothing has happened on the card yet. While idle, a kind whose only
+  // affordance is one handle (Distribute's divider) breathes it via CSS so a
+  // scholar who does not realise the line moves gets a nudge; ends for good on
+  // the first pointer-down, keystroke, or Done. Reduce-motion turns it off.
+  const [everInteracted, setEverInteracted] = useState(false);
+  const idlePulse =
+    spec.kind === "distribute" && !!question && !everInteracted && !committed;
+  const onStageInteract = () => {
+    setEverInteracted(true);
+    onInteractionStart?.();
+  };
+  // With a derived question, Done is ALWAYS live: a typed number or an
+  // untouched board is a legitimate submission (the board is the hint, not
+  // the task). Without one, a kind must first report a state.
+  const doneBlocked = practiceMode && state === null && !question;
   const check = () => {
+    setEverInteracted(true);
     if (practiceMode) {
-      if (committed || state === null) return;
+      if (committed || doneBlocked) return;
       setCommitted(true);
-      onCommit(JSON.stringify(state));
+      onCommit(JSON.stringify(question ? withTypedValue(state, typedAnswer) : state));
       return;
     }
-    const solved = spec.answer ? answerSolved(spec.answer, typedAnswer) : liveSolved;
+    const solved = spec.answer
+      ? answerSolved(spec.answer, typedAnswer)
+      : question && state !== null
+        ? isSolved(spec, withTypedValue(state, typedAnswer))
+        : liveSolved;
     setVerdict(solved ? "correct" : "incorrect");
   };
   const reset = () => {
@@ -205,6 +257,8 @@ export function Manipulative({
   return (
     <Box
       className="manip-root"
+      onPointerDownCapture={onStageInteract}
+      onKeyDownCapture={onStageInteract}
       borderWidth="1px"
       borderColor="border.default"
       borderRadius="18px"
@@ -220,14 +274,22 @@ export function Manipulative({
             {spec.concept}
           </Text>
           <Text fontSize={{ base: "17px", md: "19px" }} fontWeight="700" color="brand.primary" lineHeight="1.25">
-            {spec.prompt}
+            {question ? question.question : spec.prompt}
           </Text>
+          {/* The strategy: offered, not required — parenthesised and muted so
+              it reads as a way in, never as the thing being graded. */}
+          {question && (
+            <Text fontSize="14px" color="fg.muted" lineHeight="1.35" mt={1}>
+              ({strategyLine})
+            </Text>
+          )}
         </Box>
         <ModeBadge spec={spec} challenge={challenge} />
       </Flex>
 
       <Box
         mt={3}
+        className={idlePulse ? "manip-idle-pulse" : undefined}
         css={{ touchAction: "none", userSelect: "none" }}
         // Practice mode's anti-scrub lock: once Done is tapped the stage
         // freezes solid (no more pointer/touch input reaches it) — a scholar
@@ -247,15 +309,16 @@ export function Manipulative({
         />
       </Box>
 
-      {spec.answer && (
+      {answerField && (
         <Field.Root mt={4}>
           <Field.Label fontSize="14px" fontWeight="700" color="brand.primary">
-            {spec.answer.prompt}
+            {answerField.prompt}
           </Field.Label>
           <Flex gap={2} align="center">
             <Input
               value={typedAnswer}
               onChange={(e) => {
+                onStageInteract();
                 setTypedAnswer(e.currentTarget.value);
                 setVerdict("idle");
               }}
@@ -264,7 +327,7 @@ export function Manipulative({
               }}
               disabled={committed}
               inputMode="numeric"
-              type="number"
+              type={question ? "text" : "number"}
               minW="130px"
               maxW="180px"
               h="48px"
@@ -274,11 +337,11 @@ export function Manipulative({
               borderRadius="14px"
               borderColor="border.default"
               color="brand.primary"
-              aria-label={spec.answer.prompt}
+              aria-label={answerField.prompt}
             />
-            {spec.answer.unit && (
+            {answerField.unit && (
               <Text fontSize="15px" fontWeight="700" color="fg.muted">
-                {spec.answer.unit}
+                {answerField.unit}
               </Text>
             )}
           </Flex>
@@ -318,16 +381,20 @@ export function Manipulative({
             {practiceMode
               ? committed
                 ? "Submitted — checking…"
-                : spec.answer
-                  ? "Type your answer, then tap Done."
-                  : "Set it up, then tap Done."
+                : question
+                  ? "Type the answer, or work it out on the model, then tap Done."
+                  : spec.answer
+                    ? "Type your answer, then tap Done."
+                    : "Set it up, then tap Done."
               : verdict === "correct"
                 ? "That's it! ✓"
                 : verdict === "incorrect"
                   ? "Not quite — take another look."
-                  : spec.answer
-                    ? "Type your answer, then tap Done."
-                    : "Set your answer, then tap Done."}
+                  : question
+                    ? "Type the answer, or work it out on the model, then tap Done."
+                    : spec.answer
+                      ? "Type your answer, then tap Done."
+                      : "Set your answer, then tap Done."}
           </Box>
         ) : (
           <Text fontSize="13px" color="fg.subtle">
@@ -339,8 +406,8 @@ export function Manipulative({
             <Box
               as="button"
               onClick={check}
-              aria-disabled={practiceMode && state === null}
-              opacity={practiceMode && state === null ? 0.5 : 1}
+              aria-disabled={doneBlocked}
+              opacity={doneBlocked ? 0.5 : 1}
               fontSize="14px"
               fontWeight="700"
               color="white"
@@ -349,7 +416,7 @@ export function Manipulative({
               py="8px"
               borderRadius="10px"
               _hover={{ bg: "navy.700" }}
-              css={{ cursor: practiceMode && state === null ? "not-allowed" : "pointer" }}
+              css={{ cursor: doneBlocked ? "not-allowed" : "pointer" }}
             >
               Done
             </Box>

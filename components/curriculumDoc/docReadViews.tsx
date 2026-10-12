@@ -21,8 +21,17 @@ import { createContext, useContext, useEffect, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { Box, Button, Flex, HStack, Skeleton, Stack, Text } from "@chakra-ui/react";
 import { Plus } from "@phosphor-icons/react";
+import { formatDistanceToNow } from "date-fns";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { MODELS, modelLabel } from "@/convex/lib/models";
+import { TUTOR_DEFAULT_MODEL } from "@/convex/lib/tutorModel";
+import { toaster } from "@/lib/toaster";
+import {
+  contractLines,
+  nextBuildContract,
+  type BuildContract,
+} from "@/components/nodeEditor/VibecodeContractFields";
 import type { NodeStatus } from "@/convex/lib/unitMaturity";
 import { normalizeGranules } from "@/convex/lib/granules";
 import { ACTIVITY_KIND, type ActivityKind } from "@/lib/activityKinds";
@@ -188,6 +197,19 @@ const ANGLES_OPTIONS: EditableChipSelectOption<boolean>[] = [
     value: true,
     label: "On",
     description: "Each scholar picks their own angle",
+  },
+];
+
+const SPELLING_OPTIONS: EditableChipSelectOption<boolean>[] = [
+  {
+    value: false,
+    label: "Off",
+    description: "Dictated work earns full credit",
+  },
+  {
+    value: true,
+    label: "On",
+    description: "Spelling and typing count in the rubric",
   },
 ];
 
@@ -1080,6 +1102,11 @@ export function ActivityReadView({
   const processes = useQuery(api.processes.list, {});
   const updateActivity = useMutation(api.activities.update);
   const setArchived = useMutation(api.activities.setArchived);
+  const clearVibecodeStarter = useMutation(api.activities.clearVibecodeStarter);
+  const setScholarsStartFrom = useMutation(
+    api.activities.setScholarsStartFrom,
+  );
+  const [clearingStarter, setClearingStarter] = useState(false);
   const lessonHeaderH = useLessonHeaderHeight();
   if (activity === undefined) return <LoadingLines />;
   if (activity === null) {
@@ -1099,6 +1126,51 @@ export function ActivityReadView({
   const isProblemSet = kind === "problem_set";
   const isArchived = !!activity.archivedAt;
   const missingSystemPrompt = (isOnline || isVibecode) && !activity.systemPrompt?.trim();
+  const starterApp = activity.starterAppId ? activity.starterApp : null;
+
+  const handleClearStarter = async () => {
+    if (clearingStarter) return;
+    setClearingStarter(true);
+    try {
+      await clearVibecodeStarter({ activityId });
+    } catch (err) {
+      console.error(err);
+      toaster.error({ title: "Couldn't remove activity starter" });
+    } finally {
+      setClearingStarter(false);
+    }
+  };
+
+  const handleScholarsStartFrom = async (value: "blank" | "starter") => {
+    try {
+      await setScholarsStartFrom({ activityId, value });
+    } catch (err) {
+      console.error(err);
+      toaster.error({ title: "Couldn't change how scholars start" });
+    }
+  };
+
+  // Vibecode model contract: each part edits as its own block and saves the
+  // whole contract (lib/buildContract.ts validates it server-side).
+  const commitContract = async (patch: Partial<BuildContract>) => {
+    const next = nextBuildContract(activity.buildContract, patch);
+    if (next === "needsInvariant") {
+      toaster.error({
+        title: "Add a “must be true” line first",
+        description: "A model contract needs at least one.",
+      });
+      return;
+    }
+    try {
+      await updateActivity({ id: activityId, buildContract: next });
+    } catch (err) {
+      console.error(err);
+      toaster.error({
+        title: "Couldn't save the model contract",
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
 
   const deliverableSummary = activity.deliverable?.prompt?.trim()
     ? "Deliverable set"
@@ -1196,6 +1268,28 @@ export function ActivityReadView({
             options: ANGLES_OPTIONS,
             onCommit: (v) =>
               updateActivity({ id: activityId, hasScholarAngles: v }),
+          } satisfies NodeOptionRow,
+        ]
+      : []),
+    // Online activities (typed/dictated deliverables) AND offline ones (scanned
+    // paper work is judged by the scan assessor) can carry a rubric.
+    ...(isOnline || kind === "offline"
+      ? [
+          {
+            label: "Assesses spelling and typing",
+            hint: "Leave off unless the activity is about spelling or typing. Scholars can dictate, and dictated work earns full credit.",
+            summary: activity.assessesWritingMechanics
+              ? "Spelling and typing assessed"
+              : undefined,
+            value: activity.assessesWritingMechanics ?? false,
+            valueLabel: selectValueLabel(
+              SPELLING_OPTIONS,
+              activity.assessesWritingMechanics ?? false,
+              "Off",
+            ),
+            options: SPELLING_OPTIONS,
+            onCommit: (v) =>
+              updateActivity({ id: activityId, assessesWritingMechanics: v }),
           } satisfies NodeOptionRow,
         ]
       : []),
@@ -1476,6 +1570,127 @@ export function ActivityReadView({
             onCommit={noop}
           />
         )}
+        {isVibecode && (
+          <EditableChip<"fable" | null>
+            type="select"
+            label="Tutor model"
+            value={activity.tutorModel === "fable" ? "fable" : null}
+            options={[
+              {
+                value: null,
+                label: `Default (${modelLabel(TUTOR_DEFAULT_MODEL).replace(/^Claude /, "")})`,
+              },
+              {
+                value: "fable",
+                label: modelLabel(MODELS.FABLE).replace(/^Claude /, ""),
+              },
+            ]}
+            onCommit={(next) =>
+              updateActivity({ id: activityId, tutorModel: next })
+            }
+          />
+        )}
+        {isVibecode && (
+          <>
+            <EditableChip<"blank" | "starter">
+              type="select"
+              label="Scholars start from"
+              value={
+                activity.scholarsStartFrom === "starter" &&
+                starterApp
+                  ? "starter"
+                  : "blank"
+              }
+              options={[
+                {
+                  value: "blank",
+                  label: "Blank slate",
+                  description:
+                    "Saving a starter does not switch scholars to it.",
+                },
+                {
+                  value: "starter",
+                  label: "Saved app",
+                  disabled: !starterApp,
+                  description: starterApp
+                    ? "Open each session with a clone of the saved app."
+                    : "Save an app from manual rehearsal first.",
+                },
+              ]}
+              onCommit={handleScholarsStartFrom}
+            />
+            <EditableChip<"silent" | "replies">
+              type="select"
+              label="Designer may stay silent until a question is answered"
+              value={
+                activity.allowSilence && activity.buildContract
+                  ? "silent"
+                  : "replies"
+              }
+              // Silence only applies under a model contract (the server
+              // drops allowSilence without one), so the control waits for it.
+              readOnly={!activity.buildContract}
+              readOnlyHint="Needs a model contract"
+              options={[
+                {
+                  value: "replies",
+                  label: "Always replies",
+                  description: "The designer answers every message.",
+                },
+                {
+                  value: "silent",
+                  label: "May stay silent",
+                  description:
+                    "After a learning question, it waits for a real answer instead of building past it.",
+                },
+              ]}
+              onCommit={(next) =>
+                void updateActivity({
+                  id: activityId,
+                  allowSilence: next === "silent",
+                }).catch((err: unknown) => {
+                  console.error(err);
+                  toaster.error({ title: "Couldn't change the setting" });
+                })
+              }
+            />
+            {starterApp && (
+              <>
+                <Text
+                  fontSize="xs"
+                  color="charcoal.400"
+                  fontFamily="heading"
+                >
+                  Starter app: {starterApp.name}
+                  {starterApp.updatedAt !== undefined && (
+                    <>
+                      {" "}
+                      · saved{" "}
+                      {formatDistanceToNow(starterApp.updatedAt, {
+                        addSuffix: true,
+                      })}
+                    </>
+                  )}
+                </Text>
+                <Button
+                  size="xs"
+                  variant="plain"
+                  h="26px"
+                  minH="auto"
+                  px={1}
+                  colorPalette="violet"
+                  fontFamily="heading"
+                  fontSize="xs"
+                  fontWeight="650"
+                  loading={clearingStarter}
+                  onClick={handleClearStarter}
+                >
+                  Remove
+                </Button>
+              </>
+            )}
+          </>
+        )}
       </MetaChipRow>
 
       {isOnline && (
@@ -1506,6 +1721,31 @@ export function ActivityReadView({
             updateActivity({ id: activityId, systemPrompt: v || null })
           }
         />
+      )}
+      {isVibecode && (
+        <>
+          <EditableProseBlock
+            label="Model contract · must be true"
+            value={(activity.buildContract?.invariants ?? []).join("\n")}
+            placeholder="One per line, up to 5: what the scholar's app must get right, as a mechanic you could check by running it…"
+            ariaLabel="Must be true"
+            onCommit={(v) => void commitContract({ invariants: contractLines(v) })}
+          />
+          <EditableProseBlock
+            label="Model contract · scholar owns"
+            value={(activity.buildContract?.freedoms ?? []).join("\n")}
+            placeholder="One per line, up to 8: setting, characters, genre, visuals, side quests…"
+            ariaLabel="Scholar owns"
+            onCommit={(v) => void commitContract({ freedoms: contractLines(v) })}
+          />
+          <EditableProseBlock
+            label="Model contract · gate"
+            value={activity.buildContract?.gate ?? ""}
+            placeholder="What must exist and have run once before the designer builds cosmetic requests…"
+            ariaLabel="Gate"
+            onCommit={(v) => void commitContract({ gate: v })}
+          />
+        </>
       )}
       {kind === "shareBack" && (
         <DocSection

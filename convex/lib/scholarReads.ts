@@ -18,7 +18,9 @@ import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { internalQuery } from "../_generated/server";
 import type { Doc, Id } from "../_generated/dataModel";
 import { ROLES, isTeacherRole, type Role } from "./roles";
+import { liveSeedsForScholar } from "./seeds";
 import { normalizeName } from "./scholarMatch";
+import { classifySessionOrigin } from "./sessionOrigin";
 import { isEnrolledScholar } from "./enrollmentStanding";
 import { extendedEducationTag } from "./scholarParticipationTooling";
 import {
@@ -31,6 +33,7 @@ import {
   type SkillState,
 } from "./practice/scheduler";
 import { eligibleStoryApplication } from "./practice/applicationEligibility";
+import { seedCardCopy } from "./practice/crossDomainSeeds";
 import {
   domainMayServe,
   type DomainMapStatus,
@@ -40,6 +43,7 @@ import { buildStoredServable, buildTemplateServable } from "./practice/servable"
 import { parseItemId } from "./practice/session";
 import { loadScholarMapSummaryWithNodes } from "../practiceSkills";
 import { timeZoneForInstitution } from "./institutionTime";
+import { scholarInstitutionId } from "./scholarEnrollment";
 import type { StoryKind } from "./practice/storyRegistry";
 import { ageOnDayKey } from "../../shared/birthday";
 import { practiceDomainLabel } from "../../shared/practiceDomainLabels";
@@ -53,6 +57,11 @@ import {
   SESSION_ACTIVITY_KINDS,
   type SessionActivityKind,
 } from "../../lib/activityKinds";
+import {
+  INTERESTS_LEGEND,
+  PARENT_INTERESTS_LEGEND,
+  renderInterestsForPrompt,
+} from "./interests";
 
 type OrderedOnlineActivity = {
   activity: Doc<"activities">;
@@ -680,20 +689,48 @@ export interface UnlockedStoryForScholar {
   hasApplication: boolean;
 }
 
-export interface StandingStoryInvitationForScholar {
+/** Fields every standing invitation carries, regardless of `kind`. The
+ *  discriminated variants below add the kind-specific payload. */
+interface StandingStoryInvitationShared {
   seedId: Id<"seeds">;
   eventId: Id<"momentEvents">;
+  /** The one-line headline the card led with (story hook / seed card title). */
+  hook: string;
+  offeredAt: number;
+}
+
+/** A world-connection STORY thread, unlocked by a fluency transition. */
+export interface StandingStoryInvitation extends StandingStoryInvitationShared {
+  kind: "story";
   fromKey: string;
   toKey: string;
   skillLabel: string;
-  hook: string;
   teaser?: string;
   visualEmoji?: string;
   artUrl?: string;
   kindLabel: string;
   hasApplication: boolean;
-  offeredAt: number;
 }
+
+/** A cross-domain SEED moment (Sky constellation preview). Seeds have no
+ *  unlocking skill, no story art, and no application — so the seed variant
+ *  carries none of those fields. Card copy resolves through `seedCardCopy`,
+ *  identical to `storyMomentForScholar`. */
+export interface StandingSeedInvitation extends StandingStoryInvitationShared {
+  kind: "seed";
+  /** The seed card teaser (registry copy by topic; the row's invitation, then
+   *  rationale, for seeds the registry doesn't carry). */
+  teaser: string;
+  /** The registry's hero emoji; absent for seeds the registry doesn't carry. */
+  visualEmoji?: string;
+}
+
+/** One standing "New quests" invitation — a story thread or a cross-domain
+ *  seed the scholar was shown on the practice done screen but has not yet
+ *  followed or let go. */
+export type StandingStoryInvitationForScholar =
+  | StandingStoryInvitation
+  | StandingSeedInvitation;
 
 /** Resolve only ready, scholar-safe story art to its public serving URL. Raw
  * storage ids and attachment bookkeeping never cross the scholar boundary. */
@@ -710,27 +747,36 @@ export async function storyArtUrlForNode(
 }
 
 /**
- * Active story seeds whose latest ledger event is still non-terminal and which
- * have not started a session. The public query uses the two-card cap; the offer
- * governor reads the full set through the same core so eligibility cannot drift.
+ * Standing "New quests" invitations for a scholar: world-connection STORY
+ * threads AND cross-domain SEED moments that were carded on the practice done
+ * screen but not yet followed or let go. A candidate's latest ledger event is
+ * still non-terminal (offered/opened/probed) and no session has started from
+ * its seed. Stories and seeds merge into ONE list, newest offer first, sharing
+ * the two-card cap. The public query uses that cap; the offer governor reads
+ * the full set through the same core so eligibility cannot drift.
  */
 export async function standingStoryInvitationsForScholar(
   ctx: QueryCtx | MutationCtx,
   scholarId: Id<"users">,
   limit = STANDING_STORY_INVITATION_CAP,
 ): Promise<StandingStoryInvitationForScholar[]> {
-  const activeStorySeeds = (
-    await ctx.db
-      .query("seeds")
-      .withIndex("by_scholar_status", (q) =>
-        q.eq("scholarId", scholarId).eq("status", "active"),
-      )
-      .collect()
-  ).filter(
-    (seed) =>
-      seed.origin === "story" && seed.storyFromKey && seed.storyToKey,
+  if (limit <= 0) return [];
+
+  const activeSeeds = await ctx.db
+    .query("seeds")
+    .withIndex("by_scholar_status", (q) =>
+      q.eq("scholarId", scholarId).eq("status", "active"),
+    )
+    .collect();
+  const storySeeds = activeSeeds.filter(
+    (seed) => seed.origin === "story" && seed.storyFromKey && seed.storyToKey,
   );
-  if (activeStorySeeds.length === 0 || limit <= 0) return [];
+  const crossDomainSeeds = activeSeeds.filter(
+    // Same rule the done-screen card uses (isEligibleCrossDomainSeedMoment),
+    // so anything that can be carded can be followed from here.
+    (seed) => seed.suggestionType === "cross_domain",
+  );
+  if (storySeeds.length === 0 && crossDomainSeeds.length === 0) return [];
 
   const [sessions, events] = await Promise.all([
     ctx.db
@@ -750,20 +796,45 @@ export async function standingStoryInvitationsForScholar(
     (a, b) =>
       b.offeredAt - a.offeredAt || b._creationTime - a._creationTime,
   );
+  // One scan of the ledger feeds both kinds: the newest STORY event per edge,
+  // and the newest SEED event per seedId.
   const latestEventByEdge = new Map<string, Doc<"momentEvents">>();
+  const latestEventBySeedId = new Map<string, Doc<"momentEvents">>();
   for (const event of newestEvents) {
-    const edgeKey = `${event.fromKey}\u0000${event.toKey}`;
-    if (!latestEventByEdge.has(edgeKey)) {
-      latestEventByEdge.set(edgeKey, event);
+    if (event.kind === "story") {
+      const edgeKey = `${event.fromKey}\u0000${event.toKey}`;
+      if (!latestEventByEdge.has(edgeKey)) {
+        latestEventByEdge.set(edgeKey, event);
+      }
+    } else if (event.kind === "seed" && event.seedId) {
+      const seedKey = String(event.seedId);
+      if (!latestEventBySeedId.has(seedKey)) {
+        latestEventBySeedId.set(seedKey, event);
+      }
     }
   }
 
-  const joined = activeStorySeeds
+  type StoryCandidate = {
+    kind: "story";
+    seed: Doc<"seeds">;
+    fromKey: string;
+    toKey: string;
+    edgeKey: string;
+    event: Doc<"momentEvents">;
+  };
+  type SeedCandidate = {
+    kind: "seed";
+    seed: Doc<"seeds">;
+    event: Doc<"momentEvents">;
+  };
+
+  const storyCandidates = storySeeds
     .filter((seed) => !startedSeedIds.has(String(seed._id)))
     .map((seed) => {
       const fromKey = seed.storyFromKey!;
       const toKey = seed.storyToKey!;
       return {
+        kind: "story" as const,
         seed,
         fromKey,
         toKey,
@@ -772,22 +843,56 @@ export async function standingStoryInvitationsForScholar(
       };
     })
     .filter(
-      (
-        candidate,
-      ): candidate is typeof candidate & { event: Doc<"momentEvents"> } =>
+      (candidate): candidate is StoryCandidate =>
         candidate.event !== undefined &&
         STANDING_STORY_OUTCOMES.has(candidate.event.outcome),
-    )
-    .sort(
-      (a, b) =>
-        b.event.offeredAt - a.event.offeredAt ||
-        b.event._creationTime - a.event._creationTime ||
-        b.seed._creationTime - a.seed._creationTime,
     );
+
+  const seedCandidates = crossDomainSeeds
+    .filter((seed) => !startedSeedIds.has(String(seed._id)))
+    .map((seed) => ({
+      kind: "seed" as const,
+      seed,
+      event: latestEventBySeedId.get(String(seed._id)),
+    }))
+    .filter(
+      (candidate): candidate is SeedCandidate =>
+        candidate.event !== undefined &&
+        STANDING_STORY_OUTCOMES.has(candidate.event.outcome),
+    );
+
+  const candidates: (StoryCandidate | SeedCandidate)[] = [
+    ...storyCandidates,
+    ...seedCandidates,
+  ].sort(
+    (a, b) =>
+      b.event.offeredAt - a.event.offeredAt ||
+      b.event._creationTime - a.event._creationTime ||
+      b.seed._creationTime - a.seed._creationTime,
+  );
 
   const invitations: StandingStoryInvitationForScholar[] = [];
   const seenEdges = new Set<string>();
-  for (const candidate of joined) {
+  for (const candidate of candidates) {
+    if (candidate.kind === "seed") {
+      // Same read-time resolution as storyMomentForScholar, so the Quests row
+      // matches the card the scholar was shown.
+      const card = seedCardCopy(candidate.seed);
+      invitations.push({
+        kind: "seed",
+        seedId: candidate.seed._id,
+        eventId: candidate.event._id,
+        hook: card.title,
+        teaser: card.teaser,
+        ...(card.visualEmoji === undefined
+          ? {}
+          : { visualEmoji: card.visualEmoji }),
+        offeredAt: candidate.event.offeredAt,
+      });
+      if (invitations.length >= limit) break;
+      continue;
+    }
+
     if (seenEdges.has(candidate.edgeKey)) continue;
     seenEdges.add(candidate.edgeKey);
 
@@ -813,6 +918,7 @@ export async function standingStoryInvitationsForScholar(
       storyArtUrlForNode(ctx, candidate.toKey),
     ]);
     invitations.push({
+      kind: "story",
       seedId: candidate.seed._id,
       eventId: candidate.event._id,
       fromKey: candidate.fromKey,
@@ -983,6 +1089,52 @@ export async function isSessionActivityComplete(
       c.unitId &&
       String(c.unitId) === String(session.unitId ?? ""),
   );
+}
+
+/**
+ * Is a "Keep working on this" re-entry (`sessions.reopen` → `reopenedAt`) still
+ * live? Reopened work is FINISHED work the scholar chose to revisit. It rides
+ * the active plate — and keeps its quest in progress — only through the school
+ * day it was reopened or last worked on; after that it returns to Finished.
+ *
+ * Without the day bound a reopen was permanent: tapping "Review" on a finished
+ * quest once parked it on Home as "1 in progress · 3 of 3 · Continue" forever,
+ * with no way for the scholar to put it back (scholar bug report, 2026-09-23).
+ *
+ * Every reader of `reopenedAt` (scholarPlate, questLifecycle,
+ * sessions.finishedForScholar) must go through this so a session is always on
+ * exactly one of Home or Finished.
+ */
+export function isReopenLive(
+  session: Pick<Doc<"sessions">, "reopenedAt" | "lastMessageAt">,
+  now: number,
+  timeZone: string,
+): boolean {
+  if (session.reopenedAt == null) return false;
+  const lastTouched = Math.max(session.reopenedAt, session.lastMessageAt ?? 0);
+  return (
+    dayKeyForTimezone(lastTouched, timeZone) === dayKeyForTimezone(now, timeZone)
+  );
+}
+
+/**
+ * `isReopenLive` for callers that don't already hold the scholar's timezone.
+ * Resolves it lazily, so the common case (no reopened session) costs no reads.
+ */
+export function reopenLiveChecker(
+  ctx: Pick<QueryCtx, "db">,
+  scholarId: Id<"users">,
+  now: number,
+): (session: Doc<"sessions">) => Promise<boolean> {
+  let timeZone: string | undefined;
+  return async (session) => {
+    if (session.reopenedAt == null) return false;
+    timeZone ??= await timeZoneForInstitution(
+      ctx,
+      await scholarInstitutionId(ctx, scholarId),
+    );
+    return isReopenLive(session, now, timeZone);
+  };
 }
 
 /**
@@ -1183,10 +1335,15 @@ export async function readScholarMastery(
     )
     .collect();
 
-  // Tier-1 callers never see misconception observations.
+  // Tier-1 callers never see misconception observations or legacy rows that
+  // encoded interest as mastery.
   const observations = isTeacherRole(role)
     ? allObservations
-    : allObservations.filter((o) => o.evidenceType !== "misconception_signal");
+    : allObservations.filter(
+        (o) =>
+          o.evidenceType !== "misconception_signal" &&
+          o.evidenceType !== "interest_signal",
+      );
 
   // The scan `source` label is a portfolio item's documentHeading/title, which
   // can name a STAFF-ONLY artifact (e.g. a capture_station capture is
@@ -1258,19 +1415,16 @@ export async function readScholarSeeds(
   ctx: QueryCtx,
   scholarId: Id<"users">,
 ) {
-  const seeds = await ctx.db
-    .query("seeds")
-    .withIndex("by_scholar_status", (q) => q.eq("scholarId", scholarId))
-    .collect();
+  // Same bounded live read the human seed list uses, so an agent never sees a
+  // live seed a person can't.
+  const seeds = await liveSeedsForScholar(ctx, scholarId);
 
-  return seeds
-    .filter((s) => s.status === "active" || s.status === "pending")
-    .map((s) => ({
-      topic: s.topic,
-      domain: s.domain ?? null,
-      rationale: s.rationale,
-      status: s.status,
-    }));
+  return seeds.map((s) => ({
+    topic: s.topic,
+    domain: s.domain ?? null,
+    rationale: s.rationale,
+    status: s.status,
+  }));
 }
 
 /** Most recent 20 teacher observations. */
@@ -1303,64 +1457,40 @@ export async function readScholarDossier(
   return dossier?.content ?? "No dossier data available yet.";
 }
 
-/**
- * Classify a session as teacher-ASSIGNED (cohort work) vs SELF-INITIATED
- * (a Quest / Independent Study the scholar chose). Pure — takes the
- * already-resolved unit doc so callers that already loaded it (the session
- * list, the transcript reader) don't re-query.
- *
- * The rule mirrors scholarPlate's origin buckets: a session anchored to an
- * `assignmentId` is assigned; everything else is self-initiated — whether
- * that's the scholar's own Independent Study unit (`unit.authorScholarId`),
- * a seed-spawned exploration (`seedId` / anchorless), or a teacher unit the
- * scholar opened on their own without an assignment. This is what lets the
- * bot stop calling a self-started Quest "an assigned project" — and assess
- * it on its own terms (is the scholar getting value?) instead of against an
- * assignment bar that doesn't exist.
- */
-export type SessionOrigin = "assigned" | "selfInitiated";
-
-export function classifySessionOrigin(
-  session: Pick<
-    Doc<"sessions">,
-    "assignmentId" | "seedId" | "activityId" | "unitId"
-  >,
-  unit: Doc<"units"> | null,
-): {
-  origin: SessionOrigin;
-  originLabel: string;
-  isIndependentStudyUnit: boolean;
-  fromSeed: boolean;
-} {
-  const isIndependentStudyUnit = unit?.authorScholarId != null;
-  const fromSeed =
-    session.seedId != null || (!session.activityId && !session.unitId);
-
-  if (session.assignmentId != null) {
+export async function readScholarInterests(
+  ctx: QueryCtx,
+  scholarId: Id<"users">,
+  audience: "teacher" | "parent",
+) {
+  const dossier = await ctx.db
+    .query("scholarDossiers")
+    .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
+    .first();
+  const interests = dossier?.interests ?? [];
+  if (audience === "parent") {
+    const projected = interests
+      .filter(
+        (interest) =>
+          interest.state === "active" &&
+          (interest.how === "said" ||
+            interest.how === "picked" ||
+            interest.how === "teacher"),
+      )
+      .map((interest) => ({
+        label: interest.label,
+        how: interest.how,
+        ...(interest.words ? { words: interest.words } : {}),
+      }));
     return {
-      origin: "assigned",
-      originLabel: "Teacher-assigned (part of a cohort assignment)",
-      isIndependentStudyUnit,
-      fromSeed,
+      legend: PARENT_INTERESTS_LEGEND,
+      interests: projected,
+      rendered: renderInterestsForPrompt(interests, "parent"),
     };
   }
-
-  let originLabel: string;
-  if (isIndependentStudyUnit) {
-    originLabel =
-      "Self-initiated — the scholar's OWN Independent Study unit (they chose this, it was not assigned)";
-  } else if (fromSeed) {
-    originLabel =
-      "Self-initiated — an open exploration the scholar started by following their own curiosity (not assigned)";
-  } else {
-    originLabel =
-      "Self-initiated — the scholar opened this on their own, not through a teacher assignment";
-  }
   return {
-    origin: "selfInitiated",
-    originLabel,
-    isIndependentStudyUnit,
-    fromSeed,
+    legend: INTERESTS_LEGEND,
+    interests,
+    rendered: renderInterestsForPrompt(interests, "teacher"),
   };
 }
 
@@ -1568,6 +1698,10 @@ export async function readSessionTranscript(
     messages: shown.map((m) => ({
       role: m.role as "user" | "assistant",
       content: m.content,
+      ...(m.inputModality !== undefined
+        ? { inputModality: m.inputModality }
+        : {}),
+      createdAt: m._creationTime,
     })),
   };
 }

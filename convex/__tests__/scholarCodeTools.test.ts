@@ -7,26 +7,29 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
-  isCodeExplorerEnabled,
-  codeExplorerLoopConfig,
   CODE_EXPLORER_MAX_ITERATIONS,
   CODE_EXPLORER_REPO,
+  CODE_EXPLORER_REF,
+  CODE_EXPLORER_PROTECTED_TERM_MESSAGE,
+  guardCodeToolArguments,
+  inputMentionsProtectedTerm,
+  protectedTermsFromNames,
   MAX_FILE_CHARS,
   MAX_LIST_ENTRIES,
   CODE_EXPLORER_RATE_LIMIT_MESSAGE,
-  CODE_EXPLORER_SEARCH_UNAVAILABLE_MESSAGE,
+  CODE_EXPLORER_UNAVAILABLE_MESSAGE,
+  codeSearchCredentialsPresent,
+  formatCodeSearchHits,
   validateRepoPath,
   fileExtension,
   hasAllowedExtension,
   truncateForModel,
-  friendlySearchError,
+  friendlyFetchError,
   rawUrlForPath,
-  codeSearchUrl,
   treeUrl,
   normalizeListPrefix,
   filterTreePaths,
   fetchRabbitholeFile,
-  searchRabbitholeCode,
   listRabbitholeFiles,
   makeScholarCodeTools,
 } from "../lib/scholarCodeTools";
@@ -37,44 +40,11 @@ function stubFetch(res: Response): typeof fetch {
 }
 
 afterEach(() => {
-  delete process.env.WORKSHOP_CODE_EXPLORER_ENABLED;
   vi.unstubAllGlobals();
 });
 
-describe("isCodeExplorerEnabled", () => {
-  test("off by default (unset) — ships dark", () => {
-    delete process.env.WORKSHOP_CODE_EXPLORER_ENABLED;
-    expect(isCodeExplorerEnabled()).toBe(false);
-  });
-
-  test("off for anything but true/on/1", () => {
-    for (const v of ["false", "nope", "0", "  "]) {
-      process.env.WORKSHOP_CODE_EXPLORER_ENABLED = v;
-      expect(isCodeExplorerEnabled()).toBe(false);
-    }
-  });
-
-  test("on for true/on/1 (case-insensitive)", () => {
-    for (const v of ["true", "TRUE", "on", "1"]) {
-      process.env.WORKSHOP_CODE_EXPLORER_ENABLED = v;
-      expect(isCodeExplorerEnabled()).toBe(true);
-    }
-  });
-});
-
-describe("codeExplorerLoopConfig — the off-path is a behavioral no-op", () => {
-  test("flag off → no tools, no iteration cap (exactly today's tool-less v1)", () => {
-    expect(codeExplorerLoopConfig(false)).toEqual({
-      withTools: false,
-      maxIterations: undefined,
-    });
-  });
-
-  test("flag on → tools + the small cost cap", () => {
-    expect(codeExplorerLoopConfig(true)).toEqual({
-      withTools: true,
-      maxIterations: CODE_EXPLORER_MAX_ITERATIONS,
-    });
+describe("CODE_EXPLORER_MAX_ITERATIONS — the cost cap", () => {
+  test("stays small (≤4 tool rounds + a synthesis turn)", () => {
     expect(CODE_EXPLORER_MAX_ITERATIONS).toBeLessThanOrEqual(5);
   });
 });
@@ -176,39 +146,32 @@ describe("truncateForModel", () => {
   });
 });
 
-describe("friendlySearchError — 403/429 → friendly, never a dump", () => {
+describe("friendlyFetchError — 403/429 → friendly, never a dump", () => {
   test("429 → catch-its-breath", () => {
-    expect(friendlySearchError(429, null)).toBe(CODE_EXPLORER_RATE_LIMIT_MESSAGE);
+    expect(friendlyFetchError(429, null)).toBe(CODE_EXPLORER_RATE_LIMIT_MESSAGE);
   });
 
   test("403 with an exhausted rate budget → catch-its-breath", () => {
-    expect(friendlySearchError(403, "0")).toBe(CODE_EXPLORER_RATE_LIMIT_MESSAGE);
+    expect(friendlyFetchError(403, "0")).toBe(CODE_EXPLORER_RATE_LIMIT_MESSAGE);
   });
 
   test("403 with budget remaining, 401, 5xx → pivot-to-file (still friendly)", () => {
-    expect(friendlySearchError(403, "17")).toBe(CODE_EXPLORER_SEARCH_UNAVAILABLE_MESSAGE);
-    expect(friendlySearchError(401, null)).toBe(CODE_EXPLORER_SEARCH_UNAVAILABLE_MESSAGE);
-    expect(friendlySearchError(500, null)).toBe(CODE_EXPLORER_SEARCH_UNAVAILABLE_MESSAGE);
+    expect(friendlyFetchError(403, "17")).toBe(CODE_EXPLORER_UNAVAILABLE_MESSAGE);
+    expect(friendlyFetchError(401, null)).toBe(CODE_EXPLORER_UNAVAILABLE_MESSAGE);
+    expect(friendlyFetchError(500, null)).toBe(CODE_EXPLORER_UNAVAILABLE_MESSAGE);
   });
 });
 
 describe("URL builders", () => {
-  test("rawUrlForPath pins the public repo + master + encodes segments", () => {
+  test("rawUrlForPath pins the public repo + its default branch + encodes segments", () => {
     expect(rawUrlForPath("convex/schema.ts")).toBe(
-      `https://raw.githubusercontent.com/${CODE_EXPLORER_REPO}/master/convex/schema.ts`,
+      `https://raw.githubusercontent.com/${CODE_EXPLORER_REPO}/${CODE_EXPLORER_REF}/convex/schema.ts`,
     );
   });
 
-  test("codeSearchUrl scopes to the repo and encodes the query", () => {
-    const url = codeSearchUrl("twinkle");
-    expect(url.startsWith("https://api.github.com/search/code?q=")).toBe(true);
-    expect(decodeURIComponent(url)).toContain(`repo:${CODE_EXPLORER_REPO}`);
-    expect(decodeURIComponent(url)).toContain("twinkle");
-  });
-
-  test("treeUrl points at the public recursive git-trees API at master", () => {
+  test("treeUrl points at the public recursive git-trees API at the default branch", () => {
     expect(treeUrl()).toBe(
-      `https://api.github.com/repos/${CODE_EXPLORER_REPO}/git/trees/master?recursive=1`,
+      `https://api.github.com/repos/${CODE_EXPLORER_REPO}/git/trees/${CODE_EXPLORER_REF}?recursive=1`,
     );
   });
 });
@@ -291,11 +254,13 @@ describe("fetchRabbitholeFile (fetch stubbed)", () => {
     expect(out).toContain("doesn't look like a file inside Rabbithole's code");
   });
 
-  test("404 → a friendly offer to search", async () => {
+  test("404 → a friendly offer to list the folder (never to search)", async () => {
     const res = new Response("Not Found", { status: 404 });
     const out = await fetchRabbitholeFile("convex/nope.ts", stubFetch(res));
     expect(out).toContain("couldn't find a file");
-    expect(out).toContain("want me to search for it");
+    expect(out).toContain("list what's in that folder");
+    // There is no code-search tool to offer — see the file header.
+    expect(out).not.toContain("search");
   });
 
   test("403 rate-limited → catch-its-breath, not an error dump", async () => {
@@ -312,44 +277,6 @@ describe("fetchRabbitholeFile (fetch stubbed)", () => {
     const out = await fetchRabbitholeFile("convex/schema.ts", stubFetch(res));
     expect(out).toContain("File: convex/schema.ts (truncated)");
     expect(out).toContain("…truncated");
-  });
-});
-
-describe("searchRabbitholeCode (fetch stubbed)", () => {
-  test("200 with items → a compact list of paths", async () => {
-    const res = new Response(
-      JSON.stringify({ items: [{ path: "components/StarMap.tsx" }, { path: "convex/seeds.ts" }] }),
-      { status: 200 },
-    );
-    const out = await searchRabbitholeCode("twinkle", stubFetch(res));
-    expect(out).toContain("components/StarMap.tsx");
-    expect(out).toContain("convex/seeds.ts");
-    expect(out).toContain("read_rabbithole_file");
-  });
-
-  test("200 with no items → a gentle no-match nudge", async () => {
-    const res = new Response(JSON.stringify({ items: [] }), { status: 200 });
-    const out = await searchRabbitholeCode("zzzznope", stubFetch(res));
-    expect(out).toContain("No files in the code matched");
-  });
-
-  test("401 (public search needs sign-in) → pivot-to-file message", async () => {
-    const res = new Response("", { status: 401 });
-    const out = await searchRabbitholeCode("twinkle", stubFetch(res));
-    expect(out).toBe(CODE_EXPLORER_SEARCH_UNAVAILABLE_MESSAGE);
-  });
-
-  test("429 → catch-its-breath", async () => {
-    const res = new Response("", { status: 429 });
-    const out = await searchRabbitholeCode("twinkle", stubFetch(res));
-    expect(out).toBe(CODE_EXPLORER_RATE_LIMIT_MESSAGE);
-  });
-
-  test("empty query → asks for a term (no network)", async () => {
-    const spy = vi.fn();
-    const out = await searchRabbitholeCode("   ", spy as unknown as typeof fetch);
-    expect(spy).not.toHaveBeenCalled();
-    expect(out).toContain("word or symbol");
   });
 });
 
@@ -412,12 +339,11 @@ describe("listRabbitholeFiles (fetch stubbed)", () => {
 });
 
 describe("makeScholarCodeTools", () => {
-  test("exposes exactly the three scholar-facing repo tools", async () => {
+  test("exposes exactly the two public repo tools when no search credential is present", async () => {
     const tools = await makeScholarCodeTools(vi.fn());
     expect(tools.map((t) => t.name)).toEqual([
       "list_rabbithole_files",
       "read_rabbithole_file",
-      "search_rabbithole_code",
     ]);
   });
 
@@ -433,5 +359,95 @@ describe("makeScholarCodeTools", () => {
     expect(emit).toHaveBeenCalledWith({
       toolComplete: { name: "read_rabbithole_file", result: "convex/lib/models.ts" },
     });
+  });
+});
+
+describe("protected-name guard (parent aide composition)", () => {
+  test("names split into lowercase tokens, dropping fragments under 3 chars", () => {
+    expect(protectedTermsFromNames(["Kai Kahale", "Al B. Stone", "Lani Kahale"])).toEqual([
+      "kai",
+      "kahale",
+      "stone",
+      "lani",
+    ]);
+  });
+
+  test("any string in the input trips the guard, case-insensitively", () => {
+    const terms = protectedTermsFromNames(["Kai Kahale"]);
+    expect(inputMentionsProtectedTerm({ query: "KAHALE mastery" }, terms)).toBe(true);
+    expect(inputMentionsProtectedTerm({ path: "convex/lib/practice/scheduler.ts" }, terms)).toBe(false);
+    expect(inputMentionsProtectedTerm({ path: "convex/kai/x.ts" }, [])).toBe(false);
+  });
+
+  test("a guarded tool returns the refusal instead of running", async () => {
+    const run = vi.fn(async (_input: { query: string }) => "ran");
+    const [guarded] = guardCodeToolArguments(
+      [{ name: "read_rabbithole_file", run }],
+      protectedTermsFromNames(["Kai Kahale"]),
+    );
+    expect(await guarded.run({ query: "how is Kai placed" })).toBe(
+      CODE_EXPLORER_PROTECTED_TERM_MESSAGE,
+    );
+    expect(run).not.toHaveBeenCalled();
+    expect(await guarded.run({ query: "becameFluentAt" })).toBe("ran");
+    expect(guarded.name).toBe("read_rabbithole_file");
+  });
+
+  test("no protected terms → the tools pass through untouched", () => {
+    const tools = [{ name: "x", run: async () => "" }];
+    expect(guardCodeToolArguments(tools, [])).toBe(tools);
+  });
+});
+
+describe("code search — credentialed and conditionally registered (TRA-305)", () => {
+  const APP_ENV = [
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_APP_INSTALLATION_ID",
+  ] as const;
+
+  test("all three App vars present → available; any one missing → not", () => {
+    for (const v of APP_ENV) vi.stubEnv(v, "x");
+    expect(codeSearchCredentialsPresent()).toBe(true);
+    for (const missing of APP_ENV) {
+      vi.stubEnv(missing, "");
+      expect(codeSearchCredentialsPresent()).toBe(false);
+      vi.stubEnv(missing, "x");
+    }
+  });
+
+  test("without the App env the tool is NOT registered — the surface loses a tool, never keeps a dead one", async () => {
+    for (const v of APP_ENV) vi.stubEnv(v, "");
+    const names = (await makeScholarCodeTools(() => {}, { runAction: async () => ({ totalCount: 0, items: [] }) })).map(
+      (t) => t.name,
+    );
+    expect(names).toEqual(["list_rabbithole_files", "read_rabbithole_file"]);
+  });
+
+  test("no ctx → no search tool even with the env set", async () => {
+    for (const v of APP_ENV) vi.stubEnv(v, "x");
+    const names = (await makeScholarCodeTools(() => {})).map((t) => t.name);
+    expect(names).toEqual(["list_rabbithole_files", "read_rabbithole_file"]);
+  });
+
+
+  test("a throwing search degrades to the friendly line, never an error dump", async () => {
+    for (const v of APP_ENV) vi.stubEnv(v, "x");
+    const runAction = vi.fn(async () => {
+      throw new Error("GitHub 403: secondary rate limit, token abcd1234");
+    });
+    const tools = await makeScholarCodeTools(() => {}, { runAction });
+    // The builder's return is a union of tool shapes; narrow to this one's args.
+    const search = tools.find((t) => t.name === "search_rabbithole_code") as unknown as {
+      run: (input: { query: string }) => Promise<string>;
+    };
+    const out = await search.run({ query: "x" });
+    expect(out).toBe(CODE_EXPLORER_UNAVAILABLE_MESSAGE);
+    expect(out).not.toContain("abcd1234");
+  });
+
+  test("formatCodeSearchHits renders paths, and says so plainly on zero", () => {
+    expect(formatCodeSearchHits("twinkle", ["a/b.ts", "c/d.tsx"])).toContain("- a/b.ts");
+    expect(formatCodeSearchHits("zzz", [])).toContain('No files in the code matched "zzz"');
   });
 });

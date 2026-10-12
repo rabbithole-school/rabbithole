@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import { api } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import schema from "../schema";
+import { makeStaff, makeUnit, makeWorld } from "./factories/world";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -25,85 +26,73 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 }
 
 async function seedWorld(t: ReturnType<typeof convexTest>) {
-  return await t.run(async (ctx) => {
-    const moli = await ctx.db.insert("institutions", {
-      name: "Moli School",
-      slug: "moli",
-      kind: "school",
-      isPrimary: true,
-    });
-    const guests = await ctx.db.insert("institutions", {
-      name: "Guests",
-      slug: "guests",
-      kind: "guest",
-    });
-    const teacher = await ctx.db.insert("users", {
-      name: "Teacher",
-      username: "teacher",
-      role: "teacher",
-    });
-    const supplemental = await ctx.db.insert("users", {
-      name: "Supplemental",
-      username: "supplemental",
+  const world = await makeWorld(t, {
+    schools: 2,
+    scholarsPerSchool: 0,
+    parentsPerSchool: 0,
+    includePlatformAdmin: false,
+  });
+  const moli = world.schools[0];
+  const guests = world.schools[1];
+
+  await t.run(async (ctx) => {
+    await ctx.db.patch(moli.id, { slug: "moli" });
+    await ctx.db.patch(guests.id, { name: "Guests", slug: "guests", kind: "guest" });
+  });
+
+  const supplemental = moli.ops.id;
+  const registrar = await makeStaff(t, moli, "staff", {
+    name: "Staff",
+    username: "staff-role",
+  });
+  const foreignDesigner = await makeStaff(t, guests, "staff", {
+    name: "Foreign Designer",
+    username: "foreign-designer",
+  });
+
+  await t.run(async (ctx) => {
+    await ctx.db.patch(supplemental, { name: "Supplemental", username: "supplemental" });
+    await ctx.db.insert("memberships", {
+      userId: supplemental,
       role: "staff",
+      institutionId: guests.id,
     });
-    const registrar = await ctx.db.insert("users", {
-      name: "Staff",
-      username: "staff-role",
-      role: "staff",
-    });
-    const foreignDesigner = await ctx.db.insert("users", {
-      name: "Foreign designer",
-      username: "foreign-designer",
-      role: "staff",
-    });
-    const membershipRows = [
-      { userId: supplemental, role: "staff" as const, institutionId: moli },
-      {
-        userId: supplemental,
-        role: "staff" as const,
-        institutionId: guests,
-      },
-      { userId: registrar, role: "staff" as const, institutionId: moli },
-      {
-        userId: foreignDesigner,
-        role: "staff" as const,
-        institutionId: moli,
-      },
-    ];
-    for (const membership of membershipRows) {
-      await ctx.db.insert("memberships", membership);
-    }
     await ctx.db.insert("staffCapabilityGrants", {
       granteeUserId: supplemental,
-      institutionId: moli,
+      institutionId: moli.id,
       capability: "curriculum:edit",
-      grantedBy: teacher,
+      grantedBy: moli.teacher.id,
       grantedAt: Date.now(),
     });
-    const unit = await ctx.db.insert("units", {
-      teacherId: teacher,
-      institutionId: moli,
-      title: "Inactive design catalog",
-      subject: "Design",
-      isActive: false,
-    });
-    const foreignUnit = await ctx.db.insert("units", {
-      teacherId: teacher,
-      institutionId: guests,
-      title: "Foreign design catalog",
-      subject: "Private foreign subject",
-      isActive: false,
-    });
-    return { supplemental, registrar, foreignDesigner, unit, foreignUnit };
   });
+
+  const unit = await makeUnit(t, moli.teacher, moli, {
+    title: "Inactive design catalog",
+    subject: "Design",
+    isActive: false,
+  });
+  const foreignUnit = await makeUnit(t, moli.teacher, guests, {
+    title: "Foreign design catalog",
+    subject: "Private foreign subject",
+    isActive: false,
+  });
+
+  return {
+    world,
+    moli,
+    supplemental,
+    registrar: registrar.id,
+    foreignDesigner: foreignDesigner.id,
+    unit,
+    foreignUnit,
+  };
 }
 
 describe("scoped curriculum capability", () => {
   test("a staff member with a same-institution curriculum:edit grant may design and edit units", async () => {
     const t = convexTest(schema, modules);
-    const { supplemental, unit, foreignUnit } = await seedWorld(t);
-    const asSupplemental = await asUser(t, supplemental);
+    const { world, moli, unit, foreignUnit } = await seedWorld(t);
+    const asSupplemental = await world.as.staffOf(moli, "staff");
 
     const me = await asSupplemental.query(api.users.currentUser, {});
     expect(me?.role).toBe("staff");
@@ -158,7 +147,7 @@ describe("scoped curriculum capability", () => {
     await expect(
       asSupplemental.mutation(
         api.activityCompletions.clearForScholarInUnit,
-        { scholarId: supplemental, unitId: unit },
+        { scholarId: world.schools[0].ops.id, unitId: unit },
       ),
     ).rejects.toThrow(/teacher or admin role required/i);
     await expect(

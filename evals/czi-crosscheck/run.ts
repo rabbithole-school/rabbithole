@@ -12,7 +12,7 @@
  *   • grade-level calibration gauge   (band vs the scholar's reading level)
  *
  * Writes out/{report.md, runs.json}. This is an ad-hoc cross-check, deliberately
- * separate from our own Opus judge (external provenance) — see ./README.md.
+ * separate from our own tutor-quality judge (external provenance) — see ./README.md.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -164,7 +164,7 @@ function renderReport(results: CziCaseResult[]): string {
   const header = `# CZI cross-check report
 
 External second opinion from vendored Learning Commons rubrics (CC BY 4.0), run
-on our own models — telemetry-free. NOT a replacement for the Opus tutor-quality
+on our own models — telemetry-free. NOT a replacement for the tutor-quality
 judge; a cross-provenance sanity check. See \`evals/czi-crosscheck/README.md\`.
 
 Judge: \`${judgeProvenance()}\` (engine: ${judgeEngineName()})

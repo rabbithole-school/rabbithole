@@ -33,8 +33,7 @@ import { Megaphone, Moon, PaperPlaneTilt, Sun } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useScholarRoster } from "@/hooks/useScholarRoster";
-import { GroupScopePicker } from "@/components/GroupScopePicker";
-import { ManageGroupsDialog } from "@/components/ManageGroupsDialog";
+import { ScholarScopePicker } from "@/components/ScholarScopePicker";
 import { toaster } from "@/lib/toaster";
 import { formatReturnAtClock } from "@/shared/roomCueCopy";
 
@@ -54,17 +53,17 @@ function nextOccurrenceOf(hhmm: string): number | null {
 }
 
 export function RoomCueControl() {
-  const { groups } = useScholarRoster();
+  const { scholars, groups } = useScholarRoster();
   const [scopeKey, setScopeKey] = useState(""); // "" = whole room
-  const [manageOpen, setManageOpen] = useState(false);
   const [note, setNote] = useState("");
   const [returnTime, setReturnTime] = useState("");
   const [busy, setBusy] = useState(false);
 
   const groupId = scopeKey ? (scopeKey as Id<"scholarGroups">) : undefined;
   const scopeGroup = groups.find((g) => g.id === scopeKey);
+  // Same scope vocabulary as the picker (components/scopeRows.ts), so the
+  // toast names the selected scope consistently with the control.
   const scopeLabel = scopeKey ? (scopeGroup?.name ?? "Group") : "All scholars";
-  const scopeEmoji = scopeKey ? (scopeGroup?.emoji ?? null) : "🏫";
 
   const activeCues = useQuery(api.roomCues.activeForScope, { groupId });
   const restCue = activeCues?.find((c) => c.kind === "rest") ?? null;
@@ -146,15 +145,12 @@ export function RoomCueControl() {
                   <Text fontSize="2xs" textTransform="uppercase" letterSpacing="0.04em" color="charcoal.300" fontFamily="heading" fontWeight="700">
                     Send to
                   </Text>
-                  <GroupScopePicker
+                  <ScholarScopePicker
                     groups={groups}
                     scopeKey={scopeKey}
-                    scopeLabel={scopeLabel}
-                    scopeEmoji={scopeEmoji}
                     hasMine={false}
                     onSelectScope={setScopeKey}
-                    onManageGroups={() => setManageOpen(true)}
-                    variant="compact"
+                    visibleScholarIds={scholars.map((s) => s.id)}
                     portalled={false}
                   />
                 </Stack>
@@ -246,7 +242,6 @@ export function RoomCueControl() {
           </Popover.Content>
         </Popover.Positioner>
       </Portal>
-      <ManageGroupsDialog open={manageOpen} onClose={() => setManageOpen(false)} />
     </Popover.Root>
   );
 }

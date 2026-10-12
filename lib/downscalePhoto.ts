@@ -1,10 +1,17 @@
 "use client";
 
+import {
+  DOWNSCALED_JPEG_QUALITY,
+  downscaleTarget,
+  type ImageSize,
+} from "@/shared/imageDownscale";
+
 /**
- * Downscale a camera photo before upload: phone photos are 3–12 MB and
- * Anthropic image blocks cap at 5 MB / ~1568px useful resolution. Longest
- * side → 1568px, JPEG q0.85 (typically 200–500 KB). Used by the School Space
- * add-by-photo page and the equipment edit dialog.
+ * Downscale a camera photo before upload: phone photos are 3–12 MB, and the
+ * model can only use ~1568 px of long edge (`MODEL_IMAGE_MAX_EDGE_PX`, shared
+ * with the native resizer). `createImageBitmap` applies EXIF orientation, and a
+ * canvas re-encode writes no EXIF, so the result is upright and carries no
+ * location data.
  */
 /**
  * Downscale + upload an equipment photo to Convex storage. Shared by the
@@ -28,19 +35,59 @@ export async function uploadEquipmentPhoto(
   return { storageId, previewUrl: URL.createObjectURL(blob) };
 }
 
+/** Always re-encodes to JPEG (capped at the model's size); throws on failure. */
 export async function downscalePhoto(file: File): Promise<Blob> {
-  const MAX_DIM = 1568;
   const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, MAX_DIM / Math.max(bitmap.width, bitmap.height));
-  const w = Math.round(bitmap.width * scale);
-  const h = Math.round(bitmap.height * scale);
+  const size = { width: bitmap.width, height: bitmap.height };
+  return encodeBitmap(bitmap, downscaleTarget(size) ?? size, "image/jpeg");
+}
+
+/**
+ * The photo a scholar attaches to a tutor chat or a photo deliverable, capped
+ * at the model's size. Returns the original file untouched when it already
+ * fits, isn't a still photo, or can't be resized: a full-size upload is better
+ * than a lost photo. A PNG stays a PNG (it may have transparency).
+ */
+export async function capPhotoForUpload(file: File): Promise<Blob> {
+  if (!file.type.startsWith("image/") || file.type === "image/gif" || file.type === "image/svg+xml") {
+    return file;
+  }
+  try {
+    const bitmap = await createImageBitmap(file);
+    const target = downscaleTarget({ width: bitmap.width, height: bitmap.height });
+    if (!target) {
+      bitmap.close();
+      return file;
+    }
+    return await encodeBitmap(
+      bitmap,
+      target,
+      file.type === "image/png" ? "image/png" : "image/jpeg",
+    );
+  } catch (error) {
+    console.warn("[image] downscale failed, uploading the original", error);
+    return file;
+  }
+}
+
+async function encodeBitmap(
+  bitmap: ImageBitmap,
+  size: ImageSize,
+  type: "image/jpeg" | "image/png",
+): Promise<Blob> {
   const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  canvas.getContext("2d")!.drawImage(bitmap, 0, 0, w, h);
+  canvas.width = size.width;
+  canvas.height = size.height;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    bitmap.close();
+    throw new Error("Could not process the photo");
+  }
+  context.imageSmoothingQuality = "high";
+  context.drawImage(bitmap, 0, 0, size.width, size.height);
   bitmap.close();
   const blob = await new Promise<Blob | null>((resolve) =>
-    canvas.toBlob(resolve, "image/jpeg", 0.85),
+    canvas.toBlob(resolve, type, DOWNSCALED_JPEG_QUALITY),
   );
   if (!blob) throw new Error("Could not process the photo");
   return blob;

@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { internalQuery, internalMutation } from "./_generated/server";
-import type { QueryCtx } from "./_generated/server";
-import { Id } from "./_generated/dataModel";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
+import type { Doc, Id } from "./_generated/dataModel";
 import { curriculumQuery, curriculumMutation, staffQuery, staffMutation } from "./lib/customFunctions";
 import {
   ROLES,
@@ -20,6 +20,7 @@ import {
   readScholarSeeds,
   readScholarObservations,
   readScholarDossier,
+  readScholarInterests,
   readScholarSessions,
   readSessionTranscript,
   readScholarWebActivity,
@@ -34,6 +35,21 @@ import {
 import { toKeyedGranules } from "./lib/granules";
 import { activityHasScholarWork, deleteActivityCascade } from "./lib/activityCascade";
 import { presentationState } from "./lib/activityPresentationResources";
+import { renderStoppedAssistantContent } from "../shared/stoppedTurn";
+
+async function stampLatestStreamingCurriculumMessage(
+  ctx: Pick<MutationCtx, "db">,
+  messages: Doc<"curriculumMessages">[],
+): Promise<boolean> {
+  const streaming = messages.find(
+    (message) => message.role === "assistant" && message.streamId,
+  );
+  if (!streaming) return false;
+  if (streaming.stopRequestedAt === undefined) {
+    await ctx.db.patch(streaming._id, { stopRequestedAt: Date.now() });
+  }
+  return true;
+}
 
 // Validator for a Google Drive doc LINKED via the composer's Drive picker
 // (reference-only; the file stays in the teacher's Drive). Shared by both send
@@ -48,6 +64,18 @@ const driveAttachmentValidator = v.array(
   }),
 );
 
+const messageAttachmentValidator = v.array(
+  v.object({
+    storageId: v.id("_storage"),
+    fileName: v.string(),
+    mimeType: v.optional(v.string()),
+    sizeBytes: v.optional(v.number()),
+    transcript: v.optional(v.string()),
+    posterStorageId: v.optional(v.id("_storage")),
+    durationMs: v.optional(v.number()),
+  }),
+);
+
 // ── Shared scholar-context loader ───────────────────────────────────
 // The redacted, prompt-ready snapshot of a scholar we pre-load so the aide
 // doesn't have to tool-call to remember who it's talking about. Used in
@@ -58,6 +86,8 @@ const driveAttachmentValidator = v.array(
 export type ScholarPromptContext = {
   scholarId: Id<"users">;
   scholarName: string;
+  /** Staff-only ground truth; null falls back to the they/them default. */
+  pronouns: string | null;
   readingLevel: string | null;
   dateOfBirth: string | null;
   currentAge: number | null;
@@ -116,6 +146,7 @@ async function loadScholarPromptContext(
   return {
     scholarId,
     scholarName: scholar.name ?? "this scholar",
+    pronouns: scholar.pronouns ?? null,
     readingLevel: scholar.readingLevel ?? null,
     ...chronology,
     dossier: dossier?.content ?? "No dossier data available yet.",
@@ -186,6 +217,21 @@ export const sendMessage = curriculumMutation({
   },
   handler: async (ctx, args) => {
     const label = args.threadLabel?.trim() || undefined;
+    const recentMessages = await ctx.db
+      .query("curriculumMessages")
+      .withIndex("by_teacher", (q) => q.eq("teacherId", ctx.user._id))
+      .order("desc")
+      .take(50);
+    await stampLatestStreamingCurriculumMessage(
+      ctx,
+      recentMessages.filter(
+        (message) =>
+          message.scholarId === args.scholarId &&
+          message.unitId === undefined &&
+          message.chatId === undefined &&
+          (message.threadLabel ?? undefined) === label,
+      ),
+    );
 
     // Insert user message
     await ctx.db.insert("curriculumMessages", {
@@ -281,6 +327,18 @@ export const sendMessageForUnit = curriculumMutation({
     ),
   },
   handler: async (ctx, args) => {
+    const recentMessages = await ctx.db
+      .query("curriculumMessages")
+      .withIndex("by_teacher_unit", (q) =>
+        q.eq("teacherId", ctx.user._id).eq("unitId", args.unitId),
+      )
+      .order("desc")
+      .take(20);
+    await stampLatestStreamingCurriculumMessage(
+      ctx,
+      recentMessages.filter((message) => message.chatId === undefined),
+    );
+
     await ctx.db.insert("curriculumMessages", {
       teacherId: ctx.user._id,
       unitId: args.unitId,
@@ -305,39 +363,18 @@ export const sendMessageForUnit = curriculumMutation({
   },
 });
 
-/**
- * Mark an in-flight assistant message as stopped by the user.
- * Appends a "[stream stopped by user]" marker so the next turn picks up cleanly,
- * and clears the streamId so the message is no longer considered in-progress.
- * If the message has no content yet, it is deleted.
- */
-export const markMessageStopped = curriculumMutation({
+export const requestStop = staffMutation({
   args: { messageId: v.id("curriculumMessages") },
   handler: async (ctx, args) => {
     const message = await ctx.db.get(args.messageId);
-    if (!message) return;
-    // If the stream already finalized between the client calling stop()
-    // and this mutation reaching the DB, leave the completed message alone
-    // — don't append a "stopped" marker to text the bot finished writing.
-    if (!message.streamId) return;
+    if (!message || !message.streamId) return { stopped: false };
     if (message.teacherId !== ctx.user._id && !isPlatformAdminRole(ctx.user.role)) {
-      return;
+      throw new Error("Forbidden");
     }
-    const trimmed = (message.content ?? "").trim();
-    if (!trimmed) {
-      await ctx.db.delete(args.messageId);
-    } else {
-      await ctx.db.patch(args.messageId, {
-        content: `${message.content}\n\n_[stream stopped by user]_`,
-        streamId: undefined,
-      });
+    if (message.stopRequestedAt === undefined) {
+      await ctx.db.patch(args.messageId, { stopRequestedAt: Date.now() });
     }
-    if (message.chatId) {
-      const session = await ctx.db.get(message.chatId);
-      if (session?.activeStreamId) {
-        await ctx.db.patch(message.chatId, { activeStreamId: undefined });
-      }
-    }
+    return { stopped: true };
   },
 });
 
@@ -436,7 +473,10 @@ export const getUnitDesignerContext = internalQuery({
       })),
       messages: messages.map((m) => ({
         role: m.role as "user" | "assistant",
-        content: m.content,
+        content:
+          m.role === "assistant"
+            ? renderStoppedAssistantContent(m.content, m.stopRequestedAt)
+            : m.content,
       })),
     };
   },
@@ -537,7 +577,10 @@ export const getContext = internalQuery({
       teacherName: teacher?.name ?? "Teacher",
       messages: messages.map((m) => ({
         role: m.role as "user" | "assistant",
-        content: m.content,
+        content:
+          m.role === "assistant"
+            ? renderStoppedAssistantContent(m.content, m.stopRequestedAt)
+            : m.content,
         attachments: [] as {
           storageId: Id<"_storage">;
           fileName: string;
@@ -557,7 +600,18 @@ export const updateStreamContent = internalMutation({
     content: v.string(),
   },
   handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.messageId);
+    if (!message) return { stopRequested: false };
     await ctx.db.patch(args.messageId, { content: args.content });
+    return { stopRequested: message.stopRequestedAt !== undefined };
+  },
+});
+
+export const isStopRequested = internalQuery({
+  args: { messageId: v.id("curriculumMessages") },
+  handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.messageId);
+    return message?.stopRequestedAt !== undefined;
   },
 });
 
@@ -739,16 +793,7 @@ export const sendSessionMessage = staffMutation({
   args: {
     sessionId: v.id("chats"),
     message: v.string(),
-    attachments: v.optional(
-      v.array(
-        v.object({
-          storageId: v.id("_storage"),
-          fileName: v.string(),
-          mimeType: v.optional(v.string()),
-          sizeBytes: v.optional(v.number()),
-        }),
-      ),
-    ),
+    attachments: v.optional(messageAttachmentValidator),
     driveAttachments: v.optional(driveAttachmentValidator),
   },
   handler: async (ctx, args) => {
@@ -756,6 +801,13 @@ export const sendSessionMessage = staffMutation({
     if (!session || (session.teacherId !== ctx.user._id && !isPlatformAdminRole(ctx.user.role))) {
       throw new Error("Session not found");
     }
+
+    const recentMessages = await ctx.db
+      .query("curriculumMessages")
+      .withIndex("by_chat", (q) => q.eq("chatId", args.sessionId))
+      .order("desc")
+      .take(20);
+    await stampLatestStreamingCurriculumMessage(ctx, recentMessages);
 
     await ctx.db.insert("curriculumMessages", {
       teacherId: ctx.user._id,
@@ -887,16 +939,7 @@ export const sendUnitSessionMessage = curriculumMutation({
     ),
     // Parity with sendSessionMessage — the unified composer can attach files
     // in unit scope too (the /aide-stream unit branch reads them the same way).
-    attachments: v.optional(
-      v.array(
-        v.object({
-          storageId: v.id("_storage"),
-          fileName: v.string(),
-          mimeType: v.optional(v.string()),
-          sizeBytes: v.optional(v.number()),
-        }),
-      ),
-    ),
+    attachments: v.optional(messageAttachmentValidator),
     driveAttachments: v.optional(driveAttachmentValidator),
   },
   handler: async (ctx, args) => {
@@ -908,6 +951,13 @@ export const sendUnitSessionMessage = curriculumMutation({
     ) {
       throw new Error("Session not found");
     }
+
+    const recentMessages = await ctx.db
+      .query("curriculumMessages")
+      .withIndex("by_chat", (q) => q.eq("chatId", args.sessionId))
+      .order("desc")
+      .take(20);
+    await stampLatestStreamingCurriculumMessage(ctx, recentMessages);
 
     await ctx.db.insert("curriculumMessages", {
       teacherId: ctx.user._id,
@@ -1044,12 +1094,16 @@ export const getUnitDesignerContextForSession = internalQuery({
           .filter(
             (m) =>
               m.content.trim() !== "" ||
+              (m.role === "assistant" && m.stopRequestedAt !== undefined) ||
               (m.attachments && m.attachments.length > 0) ||
               (m.driveAttachments && m.driveAttachments.length > 0),
           )
           .map(async (m) => ({
             role: m.role as "user" | "assistant",
-            content: m.content,
+            content:
+              m.role === "assistant"
+                ? renderStoppedAssistantContent(m.content, m.stopRequestedAt)
+                : m.content,
             attachments: m.attachments
               ? await Promise.all(
                   m.attachments.map(async (a) => ({
@@ -1057,6 +1111,12 @@ export const getUnitDesignerContextForSession = internalQuery({
                     fileName: a.fileName,
                     mimeType: a.mimeType ?? null,
                     sizeBytes: a.sizeBytes ?? null,
+                    transcript: a.transcript ?? null,
+                    posterStorageId: a.posterStorageId ?? null,
+                    posterUrl: a.posterStorageId
+                      ? await ctx.storage.getUrl(a.posterStorageId)
+                      : null,
+                    durationMs: a.durationMs ?? null,
                     url: await ctx.storage.getUrl(a.storageId),
                   })),
                 )
@@ -1152,12 +1212,16 @@ export const getContextForChat = internalQuery({
           .filter(
             (m) =>
               m.content.trim() !== "" ||
+              (m.role === "assistant" && m.stopRequestedAt !== undefined) ||
               (m.attachments && m.attachments.length > 0) ||
               (m.driveAttachments && m.driveAttachments.length > 0),
           )
           .map(async (m) => ({
             role: m.role as "user" | "assistant",
-            content: m.content,
+            content:
+              m.role === "assistant"
+                ? renderStoppedAssistantContent(m.content, m.stopRequestedAt)
+                : m.content,
             attachments: m.attachments
               ? await Promise.all(
                   m.attachments.map(async (a) => ({
@@ -1165,6 +1229,12 @@ export const getContextForChat = internalQuery({
                     fileName: a.fileName,
                     mimeType: a.mimeType ?? null,
                     sizeBytes: a.sizeBytes ?? null,
+                    transcript: a.transcript ?? null,
+                    posterStorageId: a.posterStorageId ?? null,
+                    posterUrl: a.posterStorageId
+                      ? await ctx.storage.getUrl(a.posterStorageId)
+                      : null,
+                    durationMs: a.durationMs ?? null,
                     url: await ctx.storage.getUrl(a.storageId),
                   })),
                 )
@@ -1294,6 +1364,15 @@ export const getScholarMastery = internalQuery({
     readScholarMastery(ctx, args.scholarId, args.role as Role | undefined),
 });
 
+export const getScholarInterests = internalQuery({
+  args: {
+    scholarId: v.id("users"),
+    audience: v.union(v.literal("teacher"), v.literal("parent")),
+  },
+  handler: async (ctx, args) =>
+    readScholarInterests(ctx, args.scholarId, args.audience),
+});
+
 export const getScholarSignals = internalQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args) => readScholarSignals(ctx, args.scholarId),
@@ -1366,6 +1445,8 @@ export const listUnitsInternal = internalQuery({
         description: u.description ?? null,
         targetBloomLevel: u.targetBloomLevel ?? null,
         isActive: u.isActive,
+        // Teachers only until published or assigned (TRA-490).
+        unpublished: u.unpublished === true,
         personaTitle: persona?.title ?? null,
         perspectiveTitle: perspective?.title ?? null,
         processTitle: process?.title ?? null,
@@ -1646,6 +1727,8 @@ export const getUnitDetails = internalQuery({
 
     return {
       title: unit.title,
+      // Teachers only until published or assigned (TRA-490).
+      unpublished: unit.unpublished === true,
       description: unit.description ?? null,
       systemPrompt: unit.systemPrompt ?? null,
       rubric: unit.rubric ?? null,

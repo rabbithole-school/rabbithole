@@ -27,6 +27,7 @@ on:
       - "convex/lib/customAppTools.ts"
       - "convex/lib/deliverable.ts"
       - "convex/lib/institutionPromptProfile.ts"
+      - "convex/lib/observerOrigin.ts"
       - "convex/lib/observerShared.ts"
       - "convex/lib/pcm.ts"
       - "convex/lib/practice/chatInstruction.ts"
@@ -60,35 +61,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  prompt-source-contract:
-    name: Prompt source coverage contract
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v5
-        with:
-          version: 10.33.0
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 22.16.0
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm exec vitest run evals/observer/__tests__/promptSourceManifest.test.ts
-
-  observer-gates:
-    name: Eval gates (observer rigor + fluency)
+  eval-gates:
+    name: Eval gates (prompt-source contract + observer rigor/fluency)
     runs-on: ubuntu-latest
     # The gates make real (sequential) Anthropic calls over the fixtures; give
     # them headroom without letting a hung run burn the whole budget.
     timeout-minutes: 20
     steps:
-      # ── Setup: mirror ci.yml exactly ──
       - uses: actions/checkout@v5
         with:
           # The scope detector compares the PR's base with the checked-out merge
           # revision, so it needs both commits rather than checkout's shallow tip.
           fetch-depth: 0
+
+      # ── Setup: mirror ci.yml exactly ──
       - uses: pnpm/action-setup@v5
         with:
           version: 10.33.0
@@ -96,7 +82,6 @@ jobs:
         with:
           node-version: 22.16.0
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
 
       # Tutor-only assembly changes must be covered by the deterministic contract,
       # but the observer's live capability thresholds are not evidence about
@@ -124,6 +109,11 @@ jobs:
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
+
+      # Dependencies are installed once, after scope detection, so the install
+      # is paid once per run regardless of whether the paid gates fire.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run evals/observer/__tests__/promptSourceManifest.test.ts
 
       # Fail early (before spending any API budget) with a clear pointer if the
       # repo secret is missing.

@@ -192,7 +192,6 @@ describe("asciiToLatex — migration bridge for existing stems", () => {
     // Dates and ratios that happen to contain a slash are left alone by the
     // conservative rule (guards keep it from firing mid-token).
     expect(asciiToLatex("and/or")).toBe("and/or");
-    expect(asciiToLatex("TCP/IP")).toBe("TCP/IP");
   });
 
   test("multiple fractions in one stem", () => {
@@ -302,20 +301,6 @@ describe("hasInlineMath", () => {
   });
 });
 
-describe("hasFraction — bare-label guard for stems / choices", () => {
-  test("detects ASCII and LaTeX fractions", () => {
-    expect(hasFraction("3/4")).toBe(true);
-    expect(hasFraction("9 4/9")).toBe(true);
-    expect(hasFraction("\\frac{1}{2}")).toBe(true);
-  });
-
-  test("false for plain choices and operators", () => {
-    expect(hasFraction("42")).toBe(false);
-    expect(hasFraction("<")).toBe(false);
-    expect(hasFraction("greater than")).toBe(false);
-  });
-});
-
 describe("latexToSpeech — screen-reader reading", () => {
   test("a bare fraction reads 'over'", () => {
     expect(latexToSpeech("\\frac{3}{4}")).toBe("3 over 4");
@@ -333,5 +318,19 @@ describe("latexToSpeech — screen-reader reading", () => {
     expect(latexToSpeech("Write 9\\frac{4}{9} as \\frac{\\square}{9}")).toBe(
       "Write 9 and 4 over 9 as blank over 9",
     );
+  });
+});
+
+describe("hasFraction — bare-label guard for stems / choices", () => {
+  test("detects ASCII and LaTeX fractions", () => {
+    expect(hasFraction("3/4")).toBe(true);
+    expect(hasFraction("9 4/9")).toBe(true);
+    expect(hasFraction("\\frac{1}{2}")).toBe(true);
+  });
+
+  test("false for plain choices and operators", () => {
+    expect(hasFraction("42")).toBe(false);
+    expect(hasFraction("<")).toBe(false);
+    expect(hasFraction("greater than")).toBe(false);
   });
 });

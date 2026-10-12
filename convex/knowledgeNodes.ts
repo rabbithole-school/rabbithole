@@ -103,7 +103,7 @@ import { deleteCacheOwnedEdge } from "./lib/knowledgeNodeEdges";
  * but never gate. Absorbed alongside buildsOn, but structurally invisible to the
  * frontier gate and prereq recommendations.
  */
-const PRACTICE_GRAPHS: {
+export const PRACTICE_GRAPHS: readonly {
   domain: string;
   skills: typeof WHOLE_NUMBER_ARITHMETIC_SKILLS;
   edges: typeof WHOLE_NUMBER_ARITHMETIC_EDGES;
@@ -208,14 +208,23 @@ export async function rebuildPracticeNodes(ctx: MutationCtx) {
     PRACTICE_GRAPHS.flatMap((g) => g.skills.map((s) => ({ nodeKey: s.skillKey, domain: g.domain }))),
     PRACTICE_GRAPHS.flatMap((g) => [...g.edges, ...(g.impliesEdges ?? [])]),
   );
+  const [firstKnowledgeNode, firstKnowledgeNodeEdge] = await Promise.all([
+    ctx.db.query("knowledgeNodes").first(),
+    ctx.db.query("knowledgeNodeEdges").first(),
+  ]);
+  const knowledgeNodesEmpty = firstKnowledgeNode === null;
+  const knowledgeNodeEdgesEmpty = firstKnowledgeNodeEdge === null;
+  const emptyKnowledgeStore = knowledgeNodesEmpty && knowledgeNodeEdgesEmpty;
   let nodes = 0;
   let edges = 0;
   for (const graph of PRACTICE_GRAPHS) {
     for (const [i, s] of graph.skills.entries()) {
-      const existing = await ctx.db
-        .query("knowledgeNodes")
-        .withIndex("by_nodeKey", (q) => q.eq("nodeKey", s.skillKey))
-        .first();
+      const existing = emptyKnowledgeStore
+        ? null
+        : await ctx.db
+            .query("knowledgeNodes")
+            .withIndex("by_nodeKey", (q) => q.eq("nodeKey", s.skillKey))
+            .first();
       const row = {
         nodeKey: s.skillKey,
         label: s.label,
@@ -248,10 +257,12 @@ export async function rebuildPracticeNodes(ctx: MutationCtx) {
     // across the clear+reinsert by pair. Do NOT gate deletion on isDurableEdge here
     // — every reinserted edge is method:"curated", so that predicate would make the
     // practice graph append-only (fixture removals would never propagate).
-    const prior = await ctx.db
-      .query("knowledgeNodeEdges")
-      .withIndex("by_domain", (q) => q.eq("domain", graph.domain))
-      .collect();
+    const prior = emptyKnowledgeStore
+      ? []
+      : await ctx.db
+          .query("knowledgeNodeEdges")
+          .withIndex("by_domain", (q) => q.eq("domain", graph.domain))
+          .collect();
     const storyByPair = new Map(
       prior
         .filter((e) => (e.kind === "buildsOn" || e.kind === "implies") && e.story !== undefined)

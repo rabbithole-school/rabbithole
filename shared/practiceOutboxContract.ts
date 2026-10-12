@@ -76,6 +76,12 @@ export type OutboxAnswer = {
    *  Mapping uses a separate placement path and never enters this outbox, so
    *  this flag only ever appears on general-practice/Quick-Facts entries. */
   dontKnow?: boolean;
+  /** Which list the item was SERVED from (TRA-250): "challenge" for the
+   *  opt-in challenge tail, "required" for everything else. Decides whether the
+   *  server may record the attempt as "challenge" (outside the spiral breaker).
+   *  Carried through an outage/replay like every other flag; rows queued before
+   *  this field existed omit it and still load. */
+  servedLane?: "challenge" | "required";
   /** The replay mode used by the first server attempt. An ambiguous live
    *  failure persists `false`; new offline-first rows persist `true`. Rows from
    *  before this field existed default to `false`, which is compatible with an
@@ -100,6 +106,9 @@ function isOutboxAnswer(value: unknown): value is OutboxAnswer {
     (v.submissionReplay === undefined ||
       typeof v.submissionReplay === "boolean") &&
     (v.dontKnow === undefined || typeof v.dontKnow === "boolean") &&
+    (v.servedLane === undefined ||
+      v.servedLane === "challenge" ||
+      v.servedLane === "required") &&
     (v.latencyMs === undefined || typeof v.latencyMs === "number") &&
     (v.thinkTimeMs === undefined || typeof v.thinkTimeMs === "number")
   );
@@ -183,6 +192,7 @@ export type OutboxSubmitArgs = {
   suppressBreaker?: OutboxAnswer["suppressBreaker"];
   prepareBreakerRepair?: OutboxAnswer["prepareBreakerRepair"];
   dontKnow?: OutboxAnswer["dontKnow"];
+  servedLane?: OutboxAnswer["servedLane"];
   latencyMs?: OutboxAnswer["latencyMs"];
   thinkTimeMs?: OutboxAnswer["thinkTimeMs"];
 };
@@ -217,6 +227,7 @@ function buildSubmitArgs(
       ? { prepareBreakerRepair: entry.prepareBreakerRepair }
       : {}),
     ...(entry.dontKnow !== undefined ? { dontKnow: entry.dontKnow } : {}),
+    ...(entry.servedLane !== undefined ? { servedLane: entry.servedLane } : {}),
     ...(entry.latencyMs !== undefined ? { latencyMs: entry.latencyMs } : {}),
     ...(entry.thinkTimeMs !== undefined ? { thinkTimeMs: entry.thinkTimeMs } : {}),
   };

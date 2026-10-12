@@ -41,7 +41,11 @@ import {
   parseManipulativeSpec,
   redactManipulativeSpecForClient,
 } from "../../../lib/manipulative/grade";
-import { goalText as manipulativeGoalText } from "../../../lib/manipulative/logic";
+import {
+  derivedQuestion as manipulativeDerivedQuestion,
+  derivedWorkedSteps as manipulativeDerivedWorkedSteps,
+  goalText as manipulativeGoalText,
+} from "../../../lib/manipulative/logic";
 import { resolveRegion } from "../../../lib/geomap/registry";
 import type { ManipulativeSpec } from "../../../lib/manipulative/types";
 import { isCurrentManipulativeKind } from "../../../lib/manipulative/types";
@@ -498,6 +502,16 @@ export function buildStoredServable(
           ? { manipulativeSpec: redactManipulativeSpecForClient(doc.manipulativeSpec) ?? undefined }
           : {}),
         ...(doc.promptVisual ? { promptVisual: doc.promptVisual } : {}),
+        // Question-first kinds (`derivedQuestion`) get deterministic worked
+        // steps from the spec, so the teaching moment can fade the last step
+        // ("60 + 18 = ___") instead of degrading to reveal-only. Authored steps
+        // win when a row has them. Server-only text, like every workedStep.
+        ...(doc.workedSteps
+          ? { workedSteps: doc.workedSteps }
+          : (() => {
+              const steps = spec ? manipulativeDerivedWorkedSteps(spec) : null;
+              return steps ? { workedSteps: steps } : {};
+            })()),
       },
       verifier: { kind: "manipulative", spec: doc.manipulativeSpec },
     };
@@ -728,6 +742,23 @@ function revealForClient(
     case "onCorrect":
       return correct ? displayAnswer : undefined;
   }
+}
+
+/**
+ * The one-number question a manipulative item asks, if its kind derives one
+ * (`derivedQuestion`: a distribute board asks for the product, an exact
+ * distributor for the quotient). Null for every other item. The teaching
+ * moment uses it to reveal a real answer + answer type for these items, where
+ * a plain manipulative has no answer string at all.
+ */
+export function manipulativeQuestionOf(
+  item: ServableItem,
+): { question: string; value: number } | null {
+  if (item.kind !== "manipulative") return null;
+  const spec = parseManipulativeSpec(item.verifier.spec);
+  if (!spec) return null;
+  const q = manipulativeDerivedQuestion(spec);
+  return q ? { question: q.question, value: q.value } : null;
 }
 
 /**

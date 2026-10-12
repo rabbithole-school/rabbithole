@@ -39,8 +39,9 @@ export type CompletionCase = {
    */
   script?: string[];
   /**
-   * Optional case-insensitive regexes that must all match one scholar turn for
-   * deterministic goal evidence when the sim forgets to append [[DONE]].
+   * Optional case-insensitive regexes for deterministic goal evidence when the
+   * sim forgets to append [[DONE]]. Each must match at least one scholar turn
+   * so far; they need not all appear in the same turn.
    */
   goalEvidencePatterns?: string[];
   /** Optional prose describing the failure mode this case guards. */

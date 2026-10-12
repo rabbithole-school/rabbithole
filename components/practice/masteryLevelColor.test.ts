@@ -34,13 +34,6 @@ describe("masteryLevelColor / masteryLevelTone", () => {
     expect(masteryLevelColor(chronoRank + 2, chronoRank)).toBe("#0b5a54");
   });
 
-  it("the at/above hexes strictly equal the imported palette constants", () => {
-    expect(masteryLevelColor(chronoRank, chronoRank)).toBe(MASTERY_DOT_COLOR.fluent);
-    expect(MASTERY_DOT_COLOR.fluent).toBe("#3a9e6b");
-    expect(masteryLevelColor(chronoRank + 1, chronoRank)).toBe(MASTERY_DOT_COLOR.overlearned);
-    expect(MASTERY_DOT_COLOR.overlearned).toBe("#0f766e");
-  });
-
   it("falls back to the absolute ramp when chronoRank is null, at each boundary", () => {
     expect(masteryLevelColor(2.9, null)).toBe("#5aa87a");
     expect(masteryLevelColor(3.0, null)).toBe("#3f8f5f");

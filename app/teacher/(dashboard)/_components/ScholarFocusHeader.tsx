@@ -6,6 +6,7 @@ import { useQuery } from "convex/react";
 import { Avatar } from "@/components/Avatar";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { gradeLabel } from "@/shared/gradeRange";
 
 // ── Scholar Focus Header ──────────────────────────────────────────────────
 // The ONE way a teacher surface says "here is the scholar you are looking at":
@@ -72,15 +73,6 @@ export function ageInYears(
   }
   const years = Math.floor((now.getTime() - dob.getTime()) / MS_PER_YEAR);
   return years >= 0 && years < 130 ? years : null;
-}
-
-/** "Kindergarten" / "Grade 4" — the house grade label. */
-export function gradeLabel(grade: string | null | undefined): string | null {
-  if (!grade) return null;
-  const trimmed = grade.trim();
-  if (!trimmed) return null;
-  if (trimmed.toUpperCase() === "K") return "Kindergarten";
-  return `Grade ${trimmed}`;
 }
 
 export function ScholarFocusHeader({

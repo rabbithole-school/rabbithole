@@ -17,9 +17,14 @@
 import { mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runTutor, type TutorCase, type TutorRun } from "./lib/runTutor";
+import {
+  runTutor,
+  tutorModel,
+  type TutorCase,
+  type TutorRun,
+} from "./lib/runTutor";
 import { judge, type Verdict } from "./lib/judge";
-import { MODELS, JUDGE_MODEL } from "../../convex/lib/models";
+import { JUDGE_MODEL } from "../../convex/lib/models";
 import { mean, parseEvalArgs, runPool, writeRunArtifacts } from "../lib/harness";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -168,7 +173,7 @@ function f(n: number, d = 1) {
 function buildReport(judged: Judged[]): { report: string; gate: { pass: boolean; summary: string } } {
   const L: string[] = [];
   L.push(`# Physical-Task Appropriateness Eval\n`);
-  L.push(`_Tutor model: ${MODELS.SONNET} (live tutor) + the real suggest_physical_task tool. Judge: ${JUDGE_MODEL}._\n`);
+  L.push(`_Tutor model: ${tutorModel} (live tutor) + the real suggest_physical_task tool. Judge: ${JUDGE_MODEL}._\n`);
   L.push(
     `Does the tutor invite an embodied task when (and only when) it fits, keep the invitation open, never leak the result, and never invent gear? Over-triggering + result-leaks are the guarded failure modes.\n`,
   );

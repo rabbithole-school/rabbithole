@@ -285,7 +285,7 @@ export async function makeGoogleDocsTools(
     emit({
       toolComplete: {
         name: args.toolName,
-        result: `Created "${result.title}"`,
+        result: `Created "${result.title}" — ${result.url}`,
       },
     });
     return JSON.stringify(result);

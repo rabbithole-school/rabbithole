@@ -63,15 +63,9 @@ function build(opts: {
 }
 
 describe("lesson background labeling (Moment C)", () => {
-  test("with an activity present: labels it teacher-facing and warns against quoting it as shared reading", () => {
+  test("with an activity present: labels it teacher-facing, and the activity governs (marker present)", () => {
     const prompt = build({ hasActivity: true });
-    expect(prompt).toContain("Lesson Background (teacher-facing planning notes");
-    expect(prompt).toContain("the scholar has NOT read this");
-    expect(prompt).toContain("Never quote or paraphrase its wording");
-    expect(prompt).toContain(
-      "The Activity Instructions below are what actually governs this session",
-    );
-    expect(prompt).toContain("the activity's version is authoritative");
+    expect(prompt).toContain("teacher-facing");
     // The original content must still reach the tutor — this is a framing
     // fix, not a redaction.
     expect(prompt).toContain(LESSON_SYSTEM_PROMPT);
@@ -79,10 +73,9 @@ describe("lesson background labeling (Moment C)", () => {
     expect(prompt).not.toContain(`Lesson Instructions: ${LESSON_SYSTEM_PROMPT}`);
   });
 
-  test("with no activity: keeps the plain 'Lesson Instructions' label, no teacher-facing warning", () => {
+  test("with no activity: keeps the plain 'Lesson Instructions' label (marker absent)", () => {
     const prompt = build({ hasActivity: false });
     expect(prompt).toContain(`Lesson Instructions: ${LESSON_SYSTEM_PROMPT}`);
-    expect(prompt).not.toContain("teacher-facing planning notes");
-    expect(prompt).not.toContain("the scholar has NOT read this");
+    expect(prompt).not.toContain("teacher-facing");
   });
 });

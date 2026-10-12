@@ -26,14 +26,21 @@ import { isTeacherRole, type Role } from "./roles";
 import {
   deliverableSchemaFragment,
   advanceRubricSchemaFragment,
+  tutorModelSchemaFragment,
   parseDeliverableArg,
   parseAdvanceRubricArg,
   refusedRecoveryMessage,
+  buildContractSchemaFragment,
+  allowSilenceSchemaFragment,
+  assessesWritingMechanicsSchemaFragment,
+  scholarEditSchemaFragment,
+  scholarEditToEditAccess,
   WEB_SEARCH_TOOL,
   WEB_FETCH_TOOL,
   type RawBotDeliverable,
   type RawBotAdvanceRubric,
 } from "./botTools";
+import { normalizeBuildContract, parseBuildContractArg } from "./buildContract";
 import {
   makeScholarReadTools,
   makeListScholarGroupsTool,
@@ -61,6 +68,7 @@ import {
   presentationState,
   upsertRabbitSlides,
 } from "./activityPresentationResources";
+import { deckAssetIds, rejectForeignAssets } from "./slideAssetUrls";
 import {
   GoogleSlidesEditor,
   parseGoogleSlidesEditorInput,
@@ -327,26 +335,15 @@ export const applyActivitySlideOps = internalMutation({
     if (!Array.isArray(ops)) {
       return { ok: false, error: "ops must be an array." };
     }
-    for (const op of ops as SlideOp[]) {
-      const raw =
-        op?.op === "addElement"
-          ? (op.element as Record<string, unknown> | undefined)
-          : undefined;
-      const assetId =
-        raw?.type === "image" || raw?.type === "video"
-          ? String(raw.assetId ?? "")
-          : "";
-      if (!assetId) continue;
-      const asset = await ctx.db
-        .query("slideAssets")
-        .withIndex("by_storage", (q) =>
-          q.eq("storageId", assetId as Id<"_storage">),
-        )
-        .first();
-      if (!asset || asset.uploaderId !== args.ownerId) {
-        return { ok: false, error: "That media isn't available to this deck." };
-      }
-    }
+
+    // Ownership is checked on the RESULTING deck, not the ops — an addSlide
+    // restore payload can carry image/video elements too, same as
+    // addElement, and a per-op check on "addElement" alone missed that path
+    // (TRA-395). Assets already in the deck before this edit are exempt: they
+    // may legitimately have been uploaded by another staffer in an earlier
+    // version, and re-checking them on every unrelated edit would make an
+    // already-saved deck permanently uneditable.
+    const preExistingAssetIds = deckAssetIds(deck);
 
     const applied = applySlideOps(
       deck,
@@ -362,6 +359,15 @@ export const applyActivitySlideOps = internalMutation({
         error: `Edited deck failed validation: ${validated.errors.join("; ")}`,
       };
     }
+
+    const foreign = await rejectForeignAssets(
+      ctx,
+      validated.deck,
+      args.ownerId,
+      preExistingAssetIds,
+    );
+    if (foreign) return { ok: false, error: foreign };
+
     const encoded = JSON.stringify(validated.deck);
     await ctx.db.patch(args.activityId, { slidesDeck: encoded });
     await upsertRabbitSlides(ctx, {
@@ -379,6 +385,64 @@ export const applyActivitySlideOps = internalMutation({
     };
   },
 });
+
+/**
+ * Fold a title for matching: lowercase, strip diacritics, drop the ʻokina and
+ * every apostrophe/quote glyph, read "&" as "and", and collapse punctuation
+ * runs to single spaces. Hawaiian titles ("Kalo & ʻĀina") are common here and
+ * the model routinely re-types them with a plain apostrophe or none at all.
+ */
+export function foldTitle(raw: string): string {
+  return raw
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u02bb\u2018\u2019\u201c\u201d'"`]/g, "")
+    .replace(/&amp;/g, " and ")
+    .replace(/&/g, " and ")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/**
+ * Pick the best title match from a list. Prefer exact (folded) → startsWith →
+ * includes → the query CONTAINS a stored title (longest wins). Without the
+ * tiering, two activities like "Mini-lecture" and "Mini-lecture: ABO genetics"
+ * would silently route to whichever appeared first in the list. The last tier
+ * exists because the model often re-addresses an activity by a longer phrase
+ * than its stored title ("Food Detective: research it and map it"); before it
+ * existed that lookup failed and the bot narrated "the long title didn't match"
+ * to the teacher (prod, 2026-09-03).
+ */
+export function pickByTitle<T extends { title: string }>(
+  items: readonly T[],
+  query: string,
+): T | undefined {
+  const q = foldTitle(query);
+  if (!q) return undefined;
+  const folded = items.map((x) => ({ x, t: foldTitle(x.title) }));
+  const exact = folded.find((f) => f.t === q);
+  if (exact) return exact.x;
+  const starts = folded.find((f) => f.t.startsWith(q));
+  if (starts) return starts.x;
+  const includes = folded.find((f) => f.t.includes(q));
+  if (includes) return includes.x;
+  let best: { x: T; t: string } | undefined;
+  for (const f of folded) {
+    if (f.t && q.includes(f.t) && (!best || f.t.length > best.t.length)) best = f;
+  }
+  return best?.x;
+}
+
+/** " Existing X: "a", "b"." — the one-shot recovery hint after a failed lookup. */
+function listTitles(label: string, items: readonly { title: string }[]): string {
+  if (items.length === 0) return "";
+  return ` ${label}: ${items.map((x) => JSON.stringify(x.title)).join(", ")}.`;
+}
+
+function noLessonMatch(query: string, lessons: readonly { title: string }[]): string {
+  return `No lesson found matching "${query}".` + listTitles("Existing lesson titles", lessons);
+}
 
 /**
  * Build the unit-designer (Curriculum Bot) toolset: scholar-read tools
@@ -683,11 +747,8 @@ export async function assembleUnitDesignerTools(
         { teacherId, unitId },
       );
       if (!freshCtx) return "Unit not found.";
-      const lower = input.lessonTitle.toLowerCase();
-      const lesson = freshCtx.lessons.find(
-        (l) => l.title.toLowerCase().includes(lower)
-      );
-      if (!lesson) return `No lesson found matching "${input.lessonTitle}".`;
+      const lesson = pickByTitle(freshCtx.lessons, input.lessonTitle);
+      if (!lesson) return noLessonMatch(input.lessonTitle, freshCtx.lessons);
 
       const updates: Record<string, unknown> = {};
       if (input.title) updates.title = input.title;
@@ -722,11 +783,8 @@ export async function assembleUnitDesignerTools(
         { teacherId, unitId },
       );
       if (!freshCtx) return "Unit not found.";
-      const lower = input.lessonTitle.toLowerCase();
-      const lesson = freshCtx.lessons.find(
-        (l) => l.title.toLowerCase().includes(lower)
-      );
-      if (!lesson) return `No lesson found matching "${input.lessonTitle}".`;
+      const lesson = pickByTitle(freshCtx.lessons, input.lessonTitle);
+      if (!lesson) return noLessonMatch(input.lessonTitle, freshCtx.lessons);
 
       try {
         await ctx.runMutation(internal.curriculumAssistant.deleteLessonInternal, {
@@ -759,11 +817,8 @@ export async function assembleUnitDesignerTools(
         { teacherId, unitId },
       );
       if (!freshCtx) return "Unit not found.";
-      const lower = input.lessonTitle.toLowerCase();
-      const lesson = freshCtx.lessons.find(
-        (l) => l.title.toLowerCase().includes(lower)
-      );
-      if (!lesson) return `No lesson found matching "${input.lessonTitle}".`;
+      const lesson = pickByTitle(freshCtx.lessons, input.lessonTitle);
+      if (!lesson) return noLessonMatch(input.lessonTitle, freshCtx.lessons);
 
       await ctx.runMutation(internal.curriculumAssistant.updateLessonInternal, {
         lessonId: lesson._id,
@@ -809,22 +864,6 @@ export async function assembleUnitDesignerTools(
     | { ok: true; lesson: FreshLesson; activity: FreshActivity }
     | { ok: false; error: string };
 
-  // Pick the best title match from a list. Prefer exact (case-insensitive)
-  // → startsWith → includes. Without this, two activities like "Mini-lecture"
-  // and "Mini-lecture: ABO genetics" would silently route to whichever
-  // appeared first in the list.
-  const pickByTitle = <T extends { title: string }>(
-    items: T[],
-    query: string,
-  ): T | undefined => {
-    const lower = query.toLowerCase();
-    return (
-      items.find((x) => x.title.toLowerCase() === lower) ??
-      items.find((x) => x.title.toLowerCase().startsWith(lower)) ??
-      items.find((x) => x.title.toLowerCase().includes(lower))
-    );
-  };
-
   const findLesson = async (titleQuery: string): Promise<LessonResult> => {
     const freshCtx = await ctx.runQuery(
       internal.curriculumAssistant.getUnitDesignerContext,
@@ -832,7 +871,7 @@ export async function assembleUnitDesignerTools(
     );
     if (!freshCtx) return { ok: false, error: "Unit not found." };
     const lesson = pickByTitle(freshCtx.lessons, titleQuery);
-    if (!lesson) return { ok: false, error: `No lesson found matching "${titleQuery}".` };
+    if (!lesson) return { ok: false, error: noLessonMatch(titleQuery, freshCtx.lessons) };
     return { ok: true, lesson };
   };
 
@@ -846,7 +885,9 @@ export async function assembleUnitDesignerTools(
     if (!act)
       return {
         ok: false,
-        error: `No activity matching "${activityTitle}" found on lesson "${f.lesson.title}".`,
+        error:
+          `No activity matching "${activityTitle}" found on lesson "${f.lesson.title}".` +
+          listTitles("Existing activity titles", f.lesson.activities ?? []),
       };
     return { ok: true, lesson: f.lesson, activity: act };
   };
@@ -858,8 +899,9 @@ export async function assembleUnitDesignerTools(
       "Online activities (kind='online') drive a Rabbithole AI tutor session. They REQUIRE EITHER a deliverable OR an advanceRubric (never both):\n" +
       "  • deliverable { kind, prompt, criteria } — when the scholar produces an ARTIFACT/product, including a map that is itself the work. Its criteria are a private quality map for the tutor, NOT a scholar checklist or a completion gate (criteria in systemPrompt are decorative). The AI verdicts each 'not'/'half'/'full'; a full criterion permanently awards it as scholar-visible flair, with its label and description shown together, while half/not-full remain private. Distill the teacher's quality bar into 3-6 concrete dimensional criteria.\n" +
       "  • advanceRubric { criteria } — when the learning happens IN CONVERSATION with NO produced artifact: a Socratic discussion or an interactive map/geography discovery activity. The tutor grades the scholar's talk + map interactions against the criteria and a full pass completes the activity. For a geography/map activity, use advanceRubric when the learning is the discovery sequence; use deliverable kind 'map' only when the saved map itself is the product scholars should check or send.\n\n" +
-      "Make criteria DIMENSIONAL (specificity, length, structure, mechanics; or 'located the places', 'explained the why', 'transferred the pattern') — not procedural (drafted, revised, published). Give each a short label and put the concrete quality bar in its description. Vague criteria produce vague verdicts.\n\n" +
+      "Make criteria DIMENSIONAL (specificity, length, structure, evidence; or 'located the places', 'explained the why', 'transferred the pattern') — not procedural (drafted, revised, published). Never write a criterion about spelling, punctuation, capitalization, handwriting or typing unless the activity is explicitly about spelling or typing (scholars may dictate, and dictated work earns full credit). Give each a short label and put the concrete quality bar in its description. Vague criteria produce vague verdicts.\n\n" +
       "Offline activities (kind='offline') are teacher-planned classroom moments — lab demos, discussions, worksheets. No tutor session or evaluation shape.\n\n" +
+      "Vibecode activities (kind='vibecode'): the systemPrompt is the BUILD BRIEF, and you ALWAYS also write a buildContract (2–3 testable invariants, the scholar's freedoms, one gate) with allowSilence: true — see the buildContract property. Never ask the teacher how off-topic scholar ideas should be handled. Set scholarEdit too: `build` when scholars make/remix the app (the default when omitted), `play` when they only use it — ask the teacher one short question first if it's genuinely unclear.\n\n" +
       "TWO AUDIENCES — keep them separate: `description` is teacher-facing (design intent, facilitation notes; the tutor also reads it) and is NEVER shown to scholars; `scholarDescription` is the scholar-facing card blurb, written TO the scholar in the 2nd person and free of any pedagogy/assessment framing. Author both when you know them.\n\n" +
       "CONVERSATION RECIPE (recipe='baseline' | 'exitTicket'): mark an activity as the unit's pre/post understanding assessment of its essential questions / enduring understandings. 'baseline' opens the unit (surface current thinking, no teaching); 'exitTicket' closes it (revisit the EQs, show growth). Works for BOTH kinds: an ONLINE recipe runs through the tutor; an OFFLINE recipe assesses the scholar's uploaded written work (typed or scanned). Both feed the teacher's Understanding grid. Only set a recipe when the teacher wants a stealth assessment activity — most activities have no recipe. Requires the unit to have essential questions / enduring understandings set.",
     inputSchema: {
@@ -871,11 +913,16 @@ export async function assembleUnitDesignerTools(
         scholarDescription: { type: "string" as const, description: "SCHOLAR-FACING blurb shown on the scholar's home card and activity nav. Write TO the scholar, 2nd person, invitational and concrete (e.g. \"You'll design a terrarium, then predict what happens when a species disappears\"). Do NOT reveal pedagogy or assessment framing — never mention 'stealth pre-assessment', 'baseline', 'exit ticket', rubrics, or 'we're measuring'. Optional; if omitted the scholar sees a title-only card (there is no fallback to the teacher description)." },
         kind: { type: "string" as const, enum: ["online", "offline", "vibecode", "simulator"] as const, description: "online = AI tutor session; offline = classroom task; vibecode = full-screen app-builder workshop (systemPrompt is the BUILD BRIEF) — scholars BUILD an app themselves; world = a Simulator activity (fixed-physics terrarium: ecosystem grid or prisoner's dilemma) the scholar TUNES. A 'simulation/game/model' ask is ambiguous between vibecode and a Simulator — ask which before assuming. To author a Simulator, DON'T use this tool — use create_simulator_activity (it sets the required simulatorSpec). A Simulator made here would be an empty Draft. A Simulator is NOT a map or a build-your-own place/civilization — see list_simulator_templates." },
         systemPrompt: { type: "string" as const, description: "For online = the AI tutor system prompt. For vibecode = the BUILD BRIEF (what the scholar should build + the learning goal). Ignored for offline/Simulator. Quality criteria DON'T belong here; they belong in deliverable.criteria." },
+        tutorModel: tutorModelSchemaFragment(),
         processId: { type: "string" as const, description: "Process ID (only for online activities)" },
         durationMinutes: { type: "number" as const, description: "Expected duration in minutes" },
         deliverable: deliverableSchemaFragment(),
         advanceRubric: advanceRubricSchemaFragment(),
         recipe: { type: "string" as const, enum: ["baseline", "exitTicket"] as const, description: "Optional. Marks this as the unit's baseline (opening) or exit-ticket (closing) EQ/EU assessment. Online → tutor-run; offline → assesses uploaded written work. Omit for a normal activity." },
+        buildContract: buildContractSchemaFragment(),
+        allowSilence: allowSilenceSchemaFragment(),
+        assessesWritingMechanics: assessesWritingMechanicsSchemaFragment(),
+        scholarEdit: scholarEditSchemaFragment(),
       },
       required: ["lessonTitle", "title", "kind"] as const,
     },
@@ -889,6 +936,7 @@ export async function assembleUnitDesignerTools(
         input.advanceRubric as RawBotAdvanceRubric | undefined,
       );
       try {
+        const rawContract = parseBuildContractArg(input.buildContract);
         await ctx.runMutation(internal.activities.upsertInternal, {
           parent: { kind: "lesson", lessonId: f.lesson._id },
           match: { byTitle: input.title },
@@ -900,6 +948,10 @@ export async function assembleUnitDesignerTools(
             input.kind === "online" || input.kind === "vibecode"
               ? input.systemPrompt
               : undefined,
+          tutorModel: input.tutorModel as
+            | "sonnet"
+            | "fable"
+            | undefined,
           processId: input.processId
             ? (input.processId as Id<"processes">)
             : undefined,
@@ -907,6 +959,13 @@ export async function assembleUnitDesignerTools(
           deliverable,
           advanceRubric,
           recipe: input.recipe as "baseline" | "exitTicket" | undefined,
+          buildContract: rawContract
+            ? normalizeBuildContract(rawContract)
+            : undefined,
+          allowSilence: input.allowSilence === true ? true : undefined,
+          assessesWritingMechanics:
+            input.assessesWritingMechanics === true ? true : undefined,
+          editAccess: scholarEditToEditAccess(input.scholarEdit),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1005,6 +1064,10 @@ export async function assembleUnitDesignerTools(
         processId: { type: "string" as const, description: "New process ID (empty string clears)" },
         durationMinutes: { type: "number" as const, description: "New duration in minutes" },
         deliverable: deliverableSchemaFragment(),
+        buildContract: buildContractSchemaFragment(),
+        allowSilence: allowSilenceSchemaFragment(),
+        assessesWritingMechanics: assessesWritingMechanicsSchemaFragment(),
+        scholarEdit: scholarEditSchemaFragment(),
         recipe: { type: "string" as const, enum: ["baseline", "exitTicket", "none"] as const, description: "Conversation recipe: 'baseline' (opens unit) / 'exitTicket' (closes unit) marks this as an EQ/EU assessment; 'none' clears it. Works for online (tutor-run) and offline (assesses uploaded work)." },
       },
       required: ["lessonTitle", "activityTitle"] as const,
@@ -1030,7 +1093,28 @@ export async function assembleUnitDesignerTools(
       if (deliverable !== undefined) patch.deliverable = deliverable;
       if (input.recipe !== undefined)
         patch.recipe = input.recipe === "none" ? null : input.recipe;
-      await ctx.runMutation(internal.activities.updateInternal, patch as Parameters<typeof ctx.runMutation>[1]);
+      if (input.allowSilence !== undefined) patch.allowSilence = input.allowSilence;
+      if (input.assessesWritingMechanics !== undefined)
+        patch.assessesWritingMechanics = input.assessesWritingMechanics === true;
+      try {
+        // Model contract (vibecode only): supplied = replace. The mutation
+        // rejects it on any other kind.
+        const rawContract = parseBuildContractArg(input.buildContract);
+        if (rawContract) patch.buildContract = normalizeBuildContract(rawContract);
+        // Scholar edit policy (vibecode only; the mutation rejects others).
+        const editAccess = scholarEditToEditAccess(input.scholarEdit);
+        if (editAccess !== undefined) patch.editAccess = editAccess;
+        await ctx.runMutation(internal.activities.updateInternal, patch as Parameters<typeof ctx.runMutation>[1]);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        emit({
+          toolComplete: {
+            name: "update_activity",
+            result: `Refused: ${msg.slice(0, 200)}`,
+          },
+        });
+        return `Not updated: ${msg}`;
+      }
       emit({
         toolComplete: {
           name: "update_activity",

@@ -2,9 +2,6 @@ import { describe, expect, test } from "vitest";
 import type { Deck } from "../../shared/slidesScene";
 import { TEXT_PADDING } from "../../shared/slidesRenderContract";
 import {
-  PDF_HEIGHT_PT,
-  PDF_WIDTH_PT,
-  PPTX_HEIGHT_IN,
   PPTX_WIDTH_IN,
   convertColor,
   pdfLinePoints,
@@ -62,8 +59,6 @@ const deck: Deck = {
 
 describe("slide export unit conversion", () => {
   test("maps the logical canvas to PowerPoint inches", () => {
-    expect(PPTX_WIDTH_IN).toBeCloseTo(13.333333, 5);
-    expect(PPTX_HEIGHT_IN).toBe(7.5);
     expect(scaleFrame(
       { x: 128, y: 72, w: 640, h: 360, rotation: 30 },
       "pptx",
@@ -77,8 +72,6 @@ describe("slide export unit conversion", () => {
   });
 
   test("maps the logical canvas to PDF points", () => {
-    expect(PDF_WIDTH_PT).toBe(960);
-    expect(PDF_HEIGHT_PT).toBe(540);
     expect(scaleFrame(
       { x: 128, y: 72, w: 640, h: 360, rotation: 30 },
       "pdf",

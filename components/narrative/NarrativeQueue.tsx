@@ -469,6 +469,8 @@ export function CreatePeriodDialog({
   onCreated: (periodId: Id<"reportingPeriods">) => void;
 }) {
   const create = useMutation(api.reportingPeriods.create);
+  // The period belongs to the school the page is scoped to.
+  const { scopeParam } = useActiveInstitution();
 
   const [label, setLabel] = useState(defaultPeriodLabel());
   const [startsAt, setStartsAt] = useState(() => toDateInput(Date.now()));
@@ -501,6 +503,7 @@ export function CreatePeriodDialog({
         startsAt: startMs,
         endsAt: endMs,
         status,
+        scope: scopeParam,
       });
       toaster.success({ title: "Reporting period created" });
       if (period?._id) onCreated(period._id);

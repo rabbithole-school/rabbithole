@@ -207,12 +207,17 @@ export function scoreRubricVerdicts(
     criterionId: string;
     level: "not" | "half" | "full";
     note?: string;
+    /** The judge set this `full` aside because the activity does not assess
+     * the criterion (conventions on an unflagged activity). Kept at `full` so
+     * `overall` and completion still pass, but it earns no flair or star. */
+    waived?: boolean;
   }>,
 ): {
   verdicts: Array<{
     criterionId: string;
     level: "not" | "half" | "full";
     note?: string;
+    waived?: true;
   }>;
   overall: "not" | "half" | "full";
   passed: boolean;
@@ -228,7 +233,7 @@ export function scoreRubricVerdicts(
   // criterion's own description is grader-facing rubric text).
   const byId = new Map<
     string,
-    { level: "not" | "half" | "full"; note?: string }
+    { level: "not" | "half" | "full"; note?: string; waived?: boolean }
   >();
   for (const v of rawVerdicts) {
     if (!validIds.has(v.criterionId)) continue;
@@ -236,12 +241,15 @@ export function scoreRubricVerdicts(
     byId.set(v.criterionId, {
       level: v.level,
       ...(v.note?.trim() ? { note: v.note.trim() } : {}),
+      // Only a `full` can be waived; a waived half/not is just a miss.
+      ...(v.waived === true && v.level === "full" ? { waived: true } : {}),
     });
   }
   const verdicts = criteria.map((c) => ({
     criterionId: c.id,
     level: byId.get(c.id)?.level ?? ("not" as const),
     ...(byId.get(c.id)?.note ? { note: byId.get(c.id)!.note } : {}),
+    ...(byId.get(c.id)?.waived ? { waived: true as const } : {}),
   }));
   let anyNot = false;
   let anyHalf = false;
@@ -254,7 +262,11 @@ export function scoreRubricVerdicts(
     : anyHalf
       ? "half"
       : "full";
-  const earned = rubricStarsEarned(verdicts.map((verdict) => verdict.level));
+  // A waived criterion passes the rubric but was never demonstrated, so it
+  // earns no star either (mintFlair skips it for the same reason).
+  const earned = rubricStarsEarned(
+    verdicts.map((verdict) => (verdict.waived ? "not" : verdict.level)),
+  );
   return { verdicts, overall, passed: overall === "full", earned, total: criteria.length };
 }
 

@@ -29,6 +29,7 @@ const CLAIMED_CATALOG_KINDS = [
   "clock",
   "liquid",
   "money",
+  "molecule",
 ] as const;
 
 describe("native manipulative kind routing", () => {

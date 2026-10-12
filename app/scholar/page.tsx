@@ -6,6 +6,8 @@ import Link from "next/link";
 import { useEffect } from "react";
 import { useQuery, useMutation } from "convex/react";
 import { useCachedQuery } from "@/hooks/useCachedQuery";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
+import { useContainedQuery } from "@/hooks/useContainedQuery";
 import { useSignOut } from "@/hooks/useSignOut";
 import { RemoteLink } from "@/components/RemoteLink";
 import { api } from "@/convex/_generated/api";
@@ -53,7 +55,13 @@ import {
   prioritizeFocusedUnit,
   type PlateFocusLock,
 } from "@/lib/focusLock";
-import { PlaylistCard, type PlaylistData, type ChoiceCard } from "@/components/practice/PlaylistCard";
+import {
+  PlaylistCard,
+  PlaylistUnavailableCard,
+  type PlaylistData,
+  type ChoiceCard,
+} from "@/components/practice/PlaylistCard";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { CheckInHomeCard } from "@/components/practice/CheckInHomeCard";
 import { MapCompletionCard } from "@/components/practice/MapCompletionCard";
 import { ScholarCalculatorLicenseCard } from "@/components/practice/ScholarCalculatorLicenseCard";
@@ -74,8 +82,8 @@ import {
   PrepActivityCards,
   PrepEntryCard,
 } from "@/components/ScholarPrepCards";
-import { TakeHomePlanCard } from "@/components/TakeHomePlanCard";
-import { takeHomePlanOwnsNow as takeHomePlanOwnsHomeworkInNow } from "@/components/takeHomePlanPlacement";
+import { ScholarPrepSections } from "@/components/ScholarPrepSections";
+import { afterPrepEvening } from "@/components/takeHomePlanPlacement";
 import { ScholarHomeSkeleton } from "@/components/skeletons/PanelSkeletons";
 import { ScholarHomeSectionHeader } from "@/components/ui/ScholarHomeSectionHeader";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -94,6 +102,7 @@ import {
   deriveHomeTabs,
   filterHomeworkForNow,
   filterRowsForTab,
+  focusSectionLabel,
   groupHomeRowsByUnit,
   isWithinScheduleWindow,
   pickCurrentBlock,
@@ -154,6 +163,20 @@ function ScholarHome() {
     isRemoteMode ||
     !!(user && isTeacherRole(user.role) && !hasLearnerContext);
 
+  // The minute-rounded value re-arms focus/plate subscriptions across
+  // institution-local midnight. Convex still derives the authoritative day.
+  // Every query it feeds MUST go through useSmoothedQuery: a plain useQuery
+  // drops to `undefined` for one round-trip each time the bucket changes, and
+  // the skeleton gate below would then unmount the whole Home once a minute —
+  // closing the quest dialog and wiping its text (scholar bug reports,
+  // 2026-09-22).
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+  const minuteNow = Math.floor(nowMs / 60_000) * 60_000;
+
   // Room Layer — a teacher's live cue for THIS scholar's own screens. Scoped
   // to a genuine scholar session: never subscribed for a teacher remote-view
   // or self-preview (isTestMode covers both — see convex/roomCues.ts).
@@ -186,9 +209,9 @@ function ScholarHome() {
   // Legacy listMyScholarScoped query removed — one-off IS tasks are
   // now first-class IS Units (units.authorScholarId). MyIndependentStudies
   // renders them.
-  const currentFocus = useQuery(
+  const currentFocus = useSmoothedQuery(
     api.assignments.currentClassFocusForMe,
-    user ? { asLearner: !isTestMode } : "skip",
+    user ? { asLearner: !isTestMode, now: minuteNow } : "skip",
   );
   // currentFocus is now an array of per-activity classFocus pushes. Take the
   // first SOLO-STARTABLE one as the headline focus: a focus the scholar can't
@@ -228,15 +251,18 @@ function ScholarHome() {
     ? {
         userId: remoteUserId as Id<"users">,
         includeWebActivities: true,
+        now: minuteNow,
       }
-    : {};
-  const plateResult = useQuery(
+    : { now: minuteNow };
+  const plateResult = useSmoothedQuery(
     api.scholarPlate.activeForMe,
     user ? plateScope : "skip",
   );
-  const archivedSessions = useQuery(
+  // `now` lets a reopened session fall back into Finished when its reopen day
+  // ends (sessions.finishedForScholar → isReopenLive).
+  const archivedSessions = useSmoothedQuery(
     api.sessions.finishedForScholar,
-    user && !isRemoteMode ? { asLearner: !isTestMode } : "skip",
+    user && !isRemoteMode ? { asLearner: !isTestMode, now: minuteNow } : "skip",
   );
 
   // ── Above-the-fold practice queries, lifted to the page so the home renders
@@ -250,11 +276,17 @@ function ScholarHome() {
     user ? (remoteScholarId ? { scholarId: remoteScholarId } : {}) : "skip",
   );
   const institutionDay = useInstitutionDay(serverDay);
-  const standing = useQuery(
+  // Contained like the practice reads below (see `practiceError`). A failed
+  // standing read resolves to "no pin" so the render gate still opens; a
+  // failed plan read stays unresolved, which skips the playlist query. Either
+  // way the Math tab shows the unavailable card instead of the whole Home
+  // going down.
+  const { data: standingData, error: standingError } = useContainedQuery(
     api.standingPractice.myActiveStanding,
     user ? (remoteScholarId ? { scholarId: remoteScholarId } : {}) : "skip",
   );
-  const mathPlan = useQuery(
+  const standing = standingError ? null : standingData;
+  const { data: mathPlan, error: mathPlanError } = useContainedQuery(
     api.mathPlans.myPlan,
     user ? (remoteScholarId ? { scholarId: remoteScholarId } : {}) : "skip",
   );
@@ -272,7 +304,7 @@ function ScholarHome() {
   // permanently stuck on a domain they never touched. Not in the render gate:
   // the home shouldn't block on it, and the affordance can appear a beat later
   // without any layout jump.
-  const domainsInfo = useQuery(
+  const { data: domainsInfo, error: domainsInfoError } = useContainedQuery(
     api.practiceSkills.domainsForScholar,
     user ? { scholarId: remoteScholarId ?? user._id } : "skip",
   );
@@ -293,7 +325,7 @@ function ScholarHome() {
   // governing. Same args as CheckInHomeCard's own query, so convex/react shares
   // ONE subscription. Autoblend-only: a teacher pin has no cross-domain
   // check-in concept.
-  const mapProgress = useQuery(
+  const { data: mapProgress, error: mapProgressError } = useContainedQuery(
     api.practiceSkills.mapProgressForScholar,
     user && autoBlend ? { scholarId: remoteScholarId ?? user._id } : "skip",
   );
@@ -316,7 +348,7 @@ function ScholarHome() {
   // construction. `null` = the scholar's primary (server default). Only ever set
   // in focus-mode serving (the chip is a plain label otherwise).
   const [selectedDomain, setSelectedDomain] = useState<string | null>(null);
-  const playlist = useQuery(
+  const { data: playlist, error: playlistError } = useContainedQuery(
     api.practiceSkills.playlistForScholar,
     // Wait for the authoritative plan so a legacy pin cannot briefly drive the
     // preview before an explicit plan suppresses it.
@@ -341,16 +373,20 @@ function ScholarHome() {
         }
       : "skip",
   );
-  const launcherApps = useQuery(
+  const launcherApps = useSmoothedQuery(
     api.scholarApps.listForLauncher,
-    user ? (remoteScholarId ? { scholarId: remoteScholarId } : {}) : "skip",
+    user
+      ? remoteScholarId
+        ? { scholarId: remoteScholarId, now: minuteNow }
+        : { now: minuteNow }
+      : "skip",
   );
   // Up to 3 bounded frontier "You pick" cards — feeds PlaylistCard's optional
   // choice moment. `choiceSetForSelf` always reads the AUTHENTICATED scholar
   // (no scholarId arg), so it's skipped entirely in teacher remote-view mode —
   // there the query would resolve to the viewing teacher, not the scholar being
   // viewed. Not in the render gate: purely additive, can pop in a beat later.
-  const choiceSet = useQuery(
+  const { data: choiceSet, error: choiceSetError } = useContainedQuery(
     api.practiceSkills.choiceSetForSelf,
     user && !remoteScholarId
       ? { ...(selectedDomain ? { domains: [selectedDomain] } : {}) }
@@ -361,7 +397,7 @@ function ScholarHome() {
   // NOT-yet-started domain not already represented in `choiceSet`, tagged
   // `isNew` so the tile row can mark it with a subtle accent. Same
   // authenticated-scholar-only scoping as `choiceSet`.
-  const newTerritoryCards = useQuery(
+  const { data: newTerritoryCards, error: newTerritoryCardsError } = useContainedQuery(
     api.practiceSkills.newTerritoryCards,
     user && !remoteScholarId
       ? {
@@ -444,7 +480,7 @@ function ScholarHome() {
   // scheduling logic) and is a byte-faithful stand-in for what Start will
   // actually serve. Skipped entirely when nothing is selected (the blend
   // already IS `playlist` above, no second query needed).
-  const choicePreview = useQuery(
+  const { data: choicePreview, error: choicePreviewError } = useContainedQuery(
     api.practiceSkills.playlistForScholar,
     user && institutionDay && selectedChoice
       ? {
@@ -487,7 +523,7 @@ function ScholarHome() {
   const effectiveDomainForStretch =
     playlist?.domain ??
     (effectiveStanding?.domain || planDomains[0]);
-  const stretchPreview = useQuery(
+  const { data: stretchPreview, error: stretchPreviewError } = useContainedQuery(
     api.practiceSkills.playlistForScholar,
     user && institutionDay && stretchSelected && effectiveDomainForStretch
       ? {
@@ -498,6 +534,24 @@ function ScholarHome() {
         }
       : "skip",
   );
+  // Any failed practice read makes the playlist unavailable. The reads above
+  // go through useContainedQuery rather than useQuery because they live in
+  // the page: a rethrow here would take the WHOLE Home to the app-wide error
+  // block over one card's data (2026-09-22). The Math tab shows a card-sized
+  // notice in the playlist's place instead; every other tab is untouched.
+  const practiceError =
+    standingError ??
+    mathPlanError ??
+    domainsInfoError ??
+    mapProgressError ??
+    playlistError ??
+    choiceSetError ??
+    newTerritoryCardsError ??
+    choicePreviewError ??
+    stretchPreviewError;
+  useEffect(() => {
+    if (practiceError) console.error("[home] Math practice read failed — showing the unavailable card", practiceError);
+  }, [practiceError]);
 
   // Daily map-movement receipt — the institution's calendar owns "today"; the
   // day key refreshes the subscription at school-local midnight.
@@ -521,14 +575,6 @@ function ScholarHome() {
   const [activeTab, setActiveTab] = useState(() =>
     searchParams.get("tab") === "prep" ? "prep" : "now",
   );
-  // 30s tick — powers the context strip's current-block line and the Now
-  // digest's isQuiet determination.
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 30_000);
-    return () => clearInterval(id);
-  }, []);
-
   // Bell-schedule context: TODAY's blocks for this scholar's groups, used to
   // derive the "Right now: <block>" context strip above the tab row.
   // Scholar-only (invariant 3: no teacher/remote view). dayKey is the
@@ -658,7 +704,13 @@ function ScholarHome() {
       !isLearnerContextLoading &&
       !hasLearnerContext
     ) {
-      router.replace(teacherHomePath(user.role));
+      router.replace(
+        teacherHomePath(
+          user.role,
+          user.hasSchoolOperationsAccess,
+          user.hasCurriculumAccess,
+        ),
+      );
       return;
     }
   }, [
@@ -762,6 +814,7 @@ function ScholarHome() {
       <Box flex={1} overflowY="auto" pb={16} display="flex" flexDir="column">
         <Box maxW="680px" mx="auto" px={{ base: 4, md: 6 }} pt={6} flexShrink={0}>
           <ScholarSections
+            minuteNow={minuteNow}
             plateRows={plateResult?.rows ?? []}
             activeSessions={sessions}
             onboardingPin={plateResult?.onboarding ?? null}
@@ -769,6 +822,7 @@ function ScholarHome() {
             currentFocus={currentFocus}
             focusLock={focusLock}
             playlist={playlist}
+            practiceUnavailable={!!practiceError}
             mathPlan={mathPlan}
             standing={standing}
             startedDomains={startedDomains}
@@ -1012,6 +1066,9 @@ type ScholarClosure = NonNullable<
 >["closure"];
 
 function ScholarSections({
+  // Shared with this component's AppLauncher so parent and child resolve to
+  // ONE `listForLauncher` subscription instead of two drifting clocks.
+  minuteNow,
   plateRows,
   activeSessions,
   onboardingPin,
@@ -1019,6 +1076,7 @@ function ScholarSections({
   currentFocus,
   focusLock,
   playlist,
+  practiceUnavailable,
   mathPlan,
   standing,
   startedDomains,
@@ -1058,6 +1116,7 @@ function ScholarSections({
   nowMs,
   nowDataLoaded,
 }: {
+  minuteNow: number;
   plateRows: PlateRow[];
   activeSessions: ActiveSession[];
   /** The Welcome unit's next-beat pin (H1 fix: hoisted here so it can render
@@ -1072,6 +1131,9 @@ function ScholarSections({
   currentFocus: FocusState[] | undefined;
   focusLock: PlateFocusLock;
   playlist: PlaylistData | null | undefined;
+  /** A practice read failed (see `practiceError` in ScholarHome): render the
+   *  unavailable card where the playlist would be. */
+  practiceUnavailable: boolean;
   mathPlan: {
     practiceScope: import("@/shared/mathPlanScope").PracticeScope;
     scopeSource: "math_plan" | "legacy_standing" | "open_default";
@@ -1197,26 +1259,22 @@ function ScholarSections({
     isWithinSchoolHours,
     isPrepTime,
   });
-  // Once Prep is over, the take-home card owns the current plan's work
-  // on the Now tab — it renders the SAME homework (same shared deadline
-  // policy, server-side) plus whatever the scholar chose during Prep. The
-  // digest therefore stands down for the evening rather than rendering those
-  // rows a second time. Inside the Prep window the card lives on the Prep tab,
-  // so Now keeps its own homework groups.
-  const takeHomePlanOwnsNow = takeHomePlanOwnsHomeworkInNow({
+  // After Prep, the Now tab is the evening Home: the digest renders the
+  // homework itself (the retired "To do tonight" card used to own it here),
+  // and the dated "Coming up" forecast follows it.
+  const isAfterPrepEvening = afterPrepEvening({
     isRemoteMode,
     showHomeworkInNow,
     isPrepTime,
   });
-  const homeworkVisibleInNow =
-    showHomeworkInNow && !takeHomePlanOwnsNow ? homeworkForNow : [];
+  const homeworkVisibleInNow = showHomeworkInNow ? homeworkForNow : [];
   // Mirror EXACTLY what <ScholarPlate tabKey="now"> would put on screen: the
   // same "now" tab predicate, then the same homework suppression. When this is
   // empty the plate renders literally nothing, so the page must not print a
   // header promising a list (the orphaned-band bug) — it owns the empty state
   // itself instead. Both read the same api.scholarPlate.activeForMe query, so
   // the two stay in step without a second round trip.
-  const hideHomeworkInNow = !showHomeworkInNow || takeHomePlanOwnsNow;
+  const hideHomeworkInNow = !showHomeworkInNow;
   const hasOpenWorkInNow = filterRowsForTab(plateRows, "now").some(
     (row) => !(hideHomeworkInNow && row.origin === "homework"),
   );
@@ -1401,68 +1459,60 @@ function ScholarSections({
               filters schedule mirrors to prevent. Inside the tab content on
               purpose — as fixed chrome above the tab bar it read as a
               second, competing header for the same moment. */}
-          {!isStaffPreview && <FocusStrip />}
+          {!isStaffPreview && !isAfterPrepEvening && <FocusStrip />}
           {isPrepTime && (
             <PrepEntryCard onOpen={() => onTabChange("prep")} />
           )}
-          {/* After Prep, tonight's list leads Home — the same card the scholar
-              built during Prep, with the same homework rows the digest would
-              otherwise render (see takeHomePlanOwnsNow). Renders nothing when
-              the list is empty. */}
-          {takeHomePlanOwnsNow && (
-            <TakeHomePlanCard
-              mode="home"
-              hideWhenEmpty={isQuiet && !hasOpenWorkInNow}
-            />
+          {nowFocusGroups.length > 0 && (
+            <Stack gap={isWithinSchoolHours ? 6 : 3}>
+              {!isWithinSchoolHours && (
+                <ScholarHomeSectionHeader>
+                  {focusSectionLabel(isWithinSchoolHours)}
+                </ScholarHomeSectionHeader>
+              )}
+              {nowFocusGroups.map((group) => {
+                const plateRows = group.rows.flatMap((item) =>
+                  item.row ? [item.row] : [],
+                );
+                const fallbackItems = group.rows.filter((item) => !item.row);
+                if (plateRows.length === group.rows.length) {
+                  return (
+                    <ScholarPlateActivityGroup
+                      key={group.key}
+                      rows={plateRows}
+                      activeSessions={activeSessions}
+                      focusLock={focusLock}
+                      onOpenUnitProgress={onOpenUnitProgress}
+                    />
+                  );
+                }
+                if (fallbackItems.length === 1 && group.rows.length === 1) {
+                  return (
+                    <ClassFocusActivityCard
+                      key={group.key}
+                      focus={fallbackItems[0].focus}
+                      setDialogOpen={setDialogOpen}
+                    />
+                  );
+                }
+                return (
+                  <ClassFocusUnitGroupCard
+                    key={group.key}
+                    items={group.rows}
+                    activeSessions={activeSessions}
+                    focusLock={focusLock}
+                    onOpenUnitProgress={onOpenUnitProgress}
+                    setDialogOpen={setDialogOpen}
+                  />
+                );
+              })}
+            </Stack>
           )}
-          {/* Coming up — the read-only lookahead sits directly below tonight's
-              list on the evening Home, dating the work tonight deliberately
-              withholds. On a fully clear day the page's own empty state speaks
-              for the whole tab, so the card stands down rather than stacking a
-              second nothing-message under it. */}
-          {takeHomePlanOwnsNow && (
+          {!isStaffPreview && isAfterPrepEvening && <FocusStrip />}
+          {/* Coming up follows the work carried over from today. */}
+          {isAfterPrepEvening && (
             <ComingUpCard hideWhenEmpty={isQuiet && !hasOpenWorkInNow} />
           )}
-          {/* Live class focus — all currently-active (started, not ended) focus
-              items from buildNowDigest. The All tab keeps pendingClassFocus so
-              started items aren't doubled beside the plate row; the Now tab has
-              no ScholarPlate, so it renders every live focus. */}
-          {nowFocusGroups.map((group) => {
-            const plateRows = group.rows.flatMap((item) =>
-              item.row ? [item.row] : [],
-            );
-            const fallbackItems = group.rows.filter((item) => !item.row);
-            if (plateRows.length === group.rows.length) {
-              return (
-                <ScholarPlateActivityGroup
-                  key={group.key}
-                  rows={plateRows}
-                  activeSessions={activeSessions}
-                  focusLock={focusLock}
-                  onOpenUnitProgress={onOpenUnitProgress}
-                />
-              );
-            }
-            if (fallbackItems.length === 1 && group.rows.length === 1) {
-              return (
-                <ClassFocusActivityCard
-                  key={group.key}
-                  focus={fallbackItems[0].focus}
-                  setDialogOpen={setDialogOpen}
-                />
-              );
-            }
-            return (
-              <ClassFocusUnitGroupCard
-                key={group.key}
-                items={group.rows}
-                activeSessions={activeSessions}
-                focusLock={focusLock}
-                onOpenUnitProgress={onOpenUnitProgress}
-                setDialogOpen={setDialogOpen}
-              />
-            );
-          })}
 
           {/* Planned "up next today" rail — only upcoming entries (startsAt ≥
               nowMs, filtered by buildNowDigest). Ghost/dashed cards, no CTA
@@ -1612,29 +1662,35 @@ function ScholarSections({
                 Today
               </ScholarHomeSectionHeader>
               <Stack gap={4}>
-                <CheckInHomeCard
-                  scholarId={checkInScholarId}
-                  href={stamp("/scholar/practice?checkin=all")}
-                />
-                {playlist && (
-                  <PlaylistCard
-                    playlist={playlist}
-                    mathPlan={mathPlan}
-                    standing={standing}
-                    startedDomains={startedDomains}
-                    choiceSet={choiceSet}
-                    forceChooser={forceChooser}
-                    checkInStarted={checkInStarted}
-                    selectedChoice={selectedChoice}
-                    onSelectChoice={onSelectChoice}
-                    preview={choicePreview}
-                    stretchSelected={stretchSelected}
-                    onSelectStretch={onSelectStretch}
-                    stretchPreview={stretchPreview}
-                    onSelectDomain={onSelectDomain}
-                    selectedDomain={selectedDomain}
-                    secondary={welcomeActive}
+                <ErrorBoundary fallback={null}>
+                  <CheckInHomeCard
+                    scholarId={checkInScholarId}
+                    href={stamp("/scholar/practice?checkin=all")}
                   />
+                </ErrorBoundary>
+                {practiceUnavailable ? (
+                  <PlaylistUnavailableCard />
+                ) : playlist && (
+                  <ErrorBoundary fallback={<PlaylistUnavailableCard />}>
+                    <PlaylistCard
+                      playlist={playlist}
+                      mathPlan={mathPlan}
+                      standing={standing}
+                      startedDomains={startedDomains}
+                      choiceSet={choiceSet}
+                      forceChooser={forceChooser}
+                      checkInStarted={checkInStarted}
+                      selectedChoice={selectedChoice}
+                      onSelectChoice={onSelectChoice}
+                      preview={choicePreview}
+                      stretchSelected={stretchSelected}
+                      onSelectStretch={onSelectStretch}
+                      stretchPreview={stretchPreview}
+                      onSelectDomain={onSelectDomain}
+                      selectedDomain={selectedDomain}
+                      secondary={welcomeActive}
+                    />
+                  </ErrorBoundary>
                 )}
                 <DailyRecapCard recap={recap} mapHref={stamp("/scholar/map?view=tree")} />
               </Stack>
@@ -1684,11 +1740,19 @@ function ScholarSections({
             // LOUDEST rung, rendered above everything else on the days it
             // fires (fires once per state; see components/practice/
             // MapCompletionCard.tsx). Renders nothing otherwise.
+            //
+            // Each card that reads Convex itself sits in its own quiet
+            // boundary: a thrown query hides that one card instead of taking
+            // Home down with it. The page-owned practice reads can't throw
+            // here (useContainedQuery), so the playlist swaps to its
+            // unavailable card on `practiceUnavailable` as well.
             const completionCard = (
-              <MapCompletionCard
-                mapHref={stamp("/scholar/map?view=tree")}
-                checkInHref={stamp("/scholar/practice?checkin=all")}
-              />
+              <ErrorBoundary fallback={null}>
+                <MapCompletionCard
+                  mapHref={stamp("/scholar/map?view=tree")}
+                  checkInHref={stamp("/scholar/practice?checkin=all")}
+                />
+              </ErrorBoundary>
             );
             // Surface 1: the optional check-in accelerator — sits directly
             // above the playlist card it accelerates past (brief: "the ≤2
@@ -1696,38 +1760,46 @@ function ScholarSections({
             // engine — just make sure the CTA sits above the existing
             // playlist card").
             const checkInCard = (
-              <CheckInHomeCard
-                scholarId={checkInScholarId}
-                href={stamp("/scholar/practice?checkin=all")}
-              />
+              <ErrorBoundary fallback={null}>
+                <CheckInHomeCard
+                  scholarId={checkInScholarId}
+                  href={stamp("/scholar/practice?checkin=all")}
+                />
+              </ErrorBoundary>
             );
-            const playlistCard = playlist && (
-              <PlaylistCard
-                playlist={playlist}
-                mathPlan={mathPlan}
-                standing={standing}
-                startedDomains={startedDomains}
-                choiceSet={choiceSet}
-                forceChooser={forceChooser}
-                checkInStarted={checkInStarted}
-                selectedChoice={selectedChoice}
-                onSelectChoice={onSelectChoice}
-                preview={choicePreview}
-                stretchSelected={stretchSelected}
-                onSelectStretch={onSelectStretch}
-                stretchPreview={stretchPreview}
-                onSelectDomain={onSelectDomain}
-                selectedDomain={selectedDomain}
-                secondary={welcomeActive}
-              />
+            const playlistCard = practiceUnavailable ? (
+              <PlaylistUnavailableCard />
+            ) : playlist && (
+              <ErrorBoundary fallback={<PlaylistUnavailableCard />}>
+                <PlaylistCard
+                  playlist={playlist}
+                  mathPlan={mathPlan}
+                  standing={standing}
+                  startedDomains={startedDomains}
+                  choiceSet={choiceSet}
+                  forceChooser={forceChooser}
+                  checkInStarted={checkInStarted}
+                  selectedChoice={selectedChoice}
+                  onSelectChoice={onSelectChoice}
+                  preview={choicePreview}
+                  stretchSelected={stretchSelected}
+                  onSelectStretch={onSelectStretch}
+                  stretchPreview={stretchPreview}
+                  onSelectDomain={onSelectDomain}
+                  selectedDomain={selectedDomain}
+                  secondary={welcomeActive}
+                />
+              </ErrorBoundary>
             );
             // The ONE Fast math + Calculator license card. Its action routes to
             // the dedicated Quick-facts run (`?quickFacts=1`), not the ordinary
             // playlist entry — the playlist's Start is a different offer.
             const calculatorLicenseCard = (
-              <ScholarCalculatorLicenseCard
-                practiceHref={stamp("/scholar/practice?quickFacts=1")}
-              />
+              <ErrorBoundary fallback={null}>
+                <ScholarCalculatorLicenseCard
+                  practiceHref={stamp("/scholar/practice?quickFacts=1")}
+                />
+              </ErrorBoundary>
             );
             // Demote the Tree hero below the playlist whenever the playlist
             // actually has work queued — the SAME `caughtUp` verdict the
@@ -1768,16 +1840,20 @@ function ScholarSections({
       {/* ── SCHOLAR'S PREP tab ───────────────────────────────────────── */}
       {isPrepTab && !isRemoteMode && (
         <Stack gap={3}>
-          {/* Tonight's list leads the Prep tab; Coming up dates what follows;
-              Prep activities close it. */}
-          <TakeHomePlanCard onAddQuest={() => onTabChange("quests")} />
+          {/* The three plain questions — Due · Done today? · Keep going —
+              then Coming up dates what follows and Prep activities close it.
+              The old "To do tonight" plan list is retired. */}
+          <ScholarPrepSections
+            onStartTeacherQuest={handleExploreSeed}
+            startingSeedId={exploringSeedId}
+          />
           <ComingUpCard />
           <PrepActivityCards />
         </Stack>
       )}
 
       {/* ── APPS tab ─────────────────────────────────────────────────── */}
-      {isAppsTab && !isRemoteMode && <AppLauncher />}
+      {isAppsTab && !isRemoteMode && <AppLauncher minuteNow={minuteNow} />}
 
       {/* ── QUESTS tab ──────────────────────────────────────────────── */}
       {isQuestTab && !isRemoteMode && (

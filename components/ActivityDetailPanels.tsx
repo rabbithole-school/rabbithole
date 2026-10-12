@@ -20,7 +20,7 @@
 import Link from "next/link";
 import { useQuery } from "convex/react";
 import { Box, HStack, IconButton, Stack, Text } from "@chakra-ui/react";
-import { Download, Sparkle } from "@phosphor-icons/react";
+import { Download } from "@phosphor-icons/react";
 import { ScholarAngleIcon } from "@/lib/scholarAngle";
 import { TutorTranscriptionChip } from "@/components/TutorTranscriptionChip";
 import { api } from "@/convex/_generated/api";
@@ -235,21 +235,6 @@ export function DeliverableCollationPanel({
                     }
                   >
                     <Download size={13} />
-                  </IconButton>
-                )}
-                {r.contentKind === "portfolio" && r.magicUrl && (
-                  <IconButton
-                    aria-label={`View the magic version of ${r.scholarName}'s work`}
-                    title="✨ View magic version (the original is downloaded below)"
-                    size="xs"
-                    variant="ghost"
-                    color="violet.500"
-                    _hover={{ color: "violet.600", bg: "violet.50" }}
-                    asChild
-                  >
-                    <a href={r.magicUrl} target="_blank" rel="noopener noreferrer">
-                      <Sparkle size={13} weight="fill" />
-                    </a>
                   </IconButton>
                 )}
                 {(r.contentKind === "file" || r.contentKind === "portfolio") && r.fileUrl && (

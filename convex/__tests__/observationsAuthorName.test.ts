@@ -1,9 +1,8 @@
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
-import { grantInstitutionMembership, seedTestInstitution } from "./institutionTestHelpers";
 import { api } from "../_generated/api";
-import type { Doc, Id } from "../_generated/dataModel";
+import { makeWorld } from "./factories/world";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -16,48 +15,30 @@ const modules = (
 // to null so the UI falls back to "A teacher" instead of rendering a blank
 // author prefix (" noted — …").
 
-async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
-  const sessionId = await t.run(async (ctx) => {
-    const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
-      userId,
-      expirationTime: Date.now() + 1000 * 60 * 60,
-    };
-    return await ctx.db.insert("authSessions", session);
-  });
-  return t.withIdentity({
-    subject: `${userId}|${sessionId}`,
-    issuer: "https://convex.dev",
-  });
-}
-
 describe("observations author name normalization", () => {
   test("whitespace-only author name resolves to null", async () => {
     const t = convexTest(schema, modules);
-    const institutionId = await seedTestInstitution(t);
-
-    const teacher = await t.run((ctx) =>
-      ctx.db.insert("users", { name: "   ", username: "teach", role: "teacher" }),
-    );
-    await t.run((ctx) => ctx.db.patch(teacher, { institutionId }));
-    await grantInstitutionMembership(t, teacher, institutionId, "teacher");
-
-    const scholar = await t.run((ctx) =>
-      ctx.db.insert("users", { name: "Kai", username: "kai", role: "scholar" }),
-    );
-    await t.run((ctx) => ctx.db.patch(scholar, { institutionId }));
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const school = world.schools[0];
+    await t.run((ctx) => ctx.db.patch(school.teacher.id, { name: "   " }));
 
     await t.run((ctx) =>
       ctx.db.insert("observations", {
-        teacherId: teacher,
-        scholarId: scholar,
+        teacherId: school.teacher.id,
+        scholarId: school.scholars[0].id,
         note: "Concern about focus.",
         type: "concern",
       }),
     );
 
-    const asTeacher = await withUser(t, teacher);
+    const asTeacher = await world.as.staffOf(school);
     const rows = await asTeacher.query(api.observations.listByScholar, {
-      scholarId: scholar,
+      scholarId: school.scholars[0].id,
     });
 
     expect(rows).toHaveLength(1);
@@ -66,31 +47,29 @@ describe("observations author name normalization", () => {
 
   test("real author name is preserved", async () => {
     const t = convexTest(schema, modules);
-    const institutionId = await seedTestInstitution(t);
-
-    const teacher = await t.run((ctx) =>
-      ctx.db.insert("users", { name: "Ms. Kawena", username: "teach", role: "teacher" }),
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const school = world.schools[0];
+    await t.run((ctx) =>
+      ctx.db.patch(school.teacher.id, { name: "Ms. Kawena" }),
     );
-    await t.run((ctx) => ctx.db.patch(teacher, { institutionId }));
-    await grantInstitutionMembership(t, teacher, institutionId, "teacher");
-
-    const scholar = await t.run((ctx) =>
-      ctx.db.insert("users", { name: "Kai", username: "kai", role: "scholar" }),
-    );
-    await t.run((ctx) => ctx.db.patch(scholar, { institutionId }));
 
     await t.run((ctx) =>
       ctx.db.insert("observations", {
-        teacherId: teacher,
-        scholarId: scholar,
+        teacherId: school.teacher.id,
+        scholarId: school.scholars[0].id,
         note: "Great progress.",
         type: "praise",
       }),
     );
 
-    const asTeacher = await withUser(t, teacher);
+    const asTeacher = await world.as.staffOf(school);
     const rows = await asTeacher.query(api.observations.listByScholar, {
-      scholarId: scholar,
+      scholarId: school.scholars[0].id,
     });
 
     expect(rows).toHaveLength(1);

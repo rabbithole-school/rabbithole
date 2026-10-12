@@ -317,11 +317,12 @@ const cases: GoalCase[] = [
     mismatched: partitionState,
   },
   {
-    name: "distribute splitAt requires the exact split column",
+    name: "distribute splitAt accepts the goal parts on either side",
     kind: "distribute",
     goalVariant: "splitAt",
     spec: distributeSpec,
     solved: { column: 4 },
+    alsoSolved: [{ column: 5 }, { column: 1, value: 27 }],
     nearMiss: { column: 3 },
     mismatched: partitionState,
   },

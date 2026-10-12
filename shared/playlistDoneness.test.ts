@@ -4,6 +4,7 @@ import {
   hasActionablePlaylist,
   playlistCompleteEyebrow,
   playlistMastheadDateline,
+  storyCardGateOpen,
   type PlaylistDonenessInput,
 } from "./playlistDoneness";
 
@@ -174,5 +175,42 @@ describe("hasActionablePlaylist", () => {
         blocked: true,
       }),
     ).toBe(false);
+  });
+});
+
+describe("storyCardGateOpen — the done-screen story/seed card gate", () => {
+  const verdict = (input: PlaylistDonenessInput) => derivePlaylistDoneness(input);
+
+  it("opens on a finished plain round even though the set is NOT caught up", () => {
+    // The prod shape (probed 2026-09-11): a rolling 5-row window, 4 done, a
+    // nextUp still queued after 10-19 skills in the sitting. `caughtUp` is
+    // false here and would starve the card forever.
+    const v = verdict({
+      set: [row(true), row(true), row(true), row(true), row(false)],
+      nextUp: nextUpStub,
+      firstPostPlacementBlock: false,
+    });
+    expect(v.caughtUp).toBe(false);
+    expect(storyCardGateOpen(true, v)).toBe(true);
+  });
+
+  it("opens on a caught-up round too (the old gate is a subset)", () => {
+    const v = verdict({ set: [row(true)], nextUp: null, firstPostPlacementBlock: false });
+    expect(v.caughtUp).toBe(true);
+    expect(storyCardGateOpen(true, v)).toBe(true);
+  });
+
+  it("stays closed while the doneness query is still loading", () => {
+    expect(storyCardGateOpen(true, null)).toBe(false);
+  });
+
+  it("stays closed on a scope-blocked wrap — a boundary is not a finished round", () => {
+    const v = verdict({ set: [], nextUp: null, firstPostPlacementBlock: false, blocked: true });
+    expect(storyCardGateOpen(true, v)).toBe(false);
+  });
+
+  it("stays closed off the plain playlist wrap (tune-up / challenge / mapping / stretch / scoped)", () => {
+    const v = verdict({ set: [row(true)], nextUp: null, firstPostPlacementBlock: false });
+    expect(storyCardGateOpen(false, v)).toBe(false);
   });
 });

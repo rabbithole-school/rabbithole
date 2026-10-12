@@ -51,7 +51,9 @@ export function ChoosePathDialog({
   return (
     <Dialog.Root
       open={open}
-      onOpenChange={(d) => !d.open && !submitting && onClose()}
+      // Exits stay live while a start is pending: closing abandons it
+      // (useExploreSeed) rather than trapping the scholar behind a spinner.
+      onOpenChange={(d) => !d.open && onClose()}
       placement="center"
       motionPreset="slide-in-bottom"
     >
@@ -88,7 +90,6 @@ export function ChoosePathDialog({
                   variant="ghost"
                   color="charcoal.400"
                   _hover={{ bg: "gray.100" }}
-                  disabled={submitting}
                 >
                   <X />
                 </IconButton>

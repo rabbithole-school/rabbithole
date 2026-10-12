@@ -2,6 +2,7 @@ import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { includesProgramGuests } from "../../shared/scholarGroupRouting";
 import { isStaffRole } from "./roles";
+import { isEnrolledScholar } from "./enrollmentStanding";
 
 export const STAFF_CAPABILITIES = [
   "curriculum:edit",
@@ -9,9 +10,45 @@ export const STAFF_CAPABILITIES = [
   "health:manage",
   "program:publish",
   "captures:review",
+  // Mentor threads with ENROLLED scholars (scholarMessages.ts) — the whole
+  // institution when unscoped, else one group. Deliberately NOT a lens-granting
+  // capability: see staffCapabilityInstitutionIds.
+  "scholars:mentor",
+  // Admissions CRM tiers (institution-wide only; a user holds at most one).
+  // Like the mentor grant, neither confers an institution lens: see
+  // staffCapabilityInstitutionIds.
+  "admissions:full",
+  "admissions:scheduling",
 ] as const;
 
 export type StaffCapability = (typeof STAFF_CAPABILITIES)[number];
+
+export const ADMISSIONS_CAPABILITIES = [
+  "admissions:full",
+  "admissions:scheduling",
+] as const satisfies readonly StaffCapability[];
+
+/** An admissions tier as staff editors see it. `"none"` holds no grant. */
+export type AdmissionsTierSetting = "none" | "scheduling" | "full";
+
+export function admissionsCapabilityForTier(
+  tier: AdmissionsTierSetting,
+): StaffCapability | null {
+  switch (tier) {
+    case "full":
+      return "admissions:full";
+    case "scheduling":
+      return "admissions:scheduling";
+    case "none":
+      return null;
+    default:
+      return assertNever(tier);
+  }
+}
+
+export function assertNever(value: never): never {
+  throw new Error(`Unexpected value: ${String(value)}`);
+}
 
 type CapabilityCtx = QueryCtx | MutationCtx;
 
@@ -26,10 +63,14 @@ function hasValidScope(
   return (
     ((capability === "curriculum:edit" ||
       capability === "school:operations" ||
-      capability === "health:manage") &&
+      capability === "health:manage" ||
+      capability === "admissions:full" ||
+      capability === "admissions:scheduling") &&
       scholarGroupId === undefined) ||
     ((capability === "program:publish" || capability === "captures:review") &&
-      scholarGroupId !== undefined)
+      scholarGroupId !== undefined) ||
+    // Institution-wide (a mentor for every enrolled scholar) or one group.
+    capability === "scholars:mentor"
   );
 }
 
@@ -95,7 +136,9 @@ export async function hasActiveInstitutionCapability(
   if (
     capability !== "curriculum:edit" &&
     capability !== "school:operations" &&
-    capability !== "health:manage"
+    capability !== "health:manage" &&
+    capability !== "admissions:full" &&
+    capability !== "admissions:scheduling"
   ) {
     return false;
   }
@@ -190,7 +233,9 @@ export async function authorizedInstitutionIds(
   if (
     capability !== "curriculum:edit" &&
     capability !== "school:operations" &&
-    capability !== "health:manage"
+    capability !== "health:manage" &&
+    capability !== "admissions:full" &&
+    capability !== "admissions:scheduling"
   ) {
     return new Set();
   }
@@ -261,6 +306,49 @@ export async function schoolOperationsInstitutionIds(
     }
   }
   return ids;
+}
+
+/**
+ * The school-operations institutions a caller may act on — the set form, with
+ * SUSPENDED schools already removed and **no `"all"` branch for a caller to
+ * forget**. `null` means the caller has no school-operations standing at all,
+ * which callers distinguish from an empty set (403 vs. an empty result).
+ *
+ * WHY THIS EXISTS — the two gates above are not interchangeable, and the
+ * difference is invisible at the call site:
+ *
+ *   - `hasSchoolOperationsAccessAtInstitution` loads the institution and fails
+ *     closed on `disabledAt`.
+ *   - `schoolOperationsInstitutionIds` short-circuits to `"all"` for a
+ *     platform admin BEFORE any institution is loaded. A caller written as
+ *     `ids === "all" || ids.has(x)` therefore never applies the liveness
+ *     check, and a suspended school stays reachable through that gate while
+ *     the boolean gate refuses the very same action.
+ *
+ * That asymmetry shipped a real defect twice (the agent device transports,
+ * PR #3919; the pairing-code lookup, TRA-359). Prefer THIS helper for any new
+ * school-operations gate. A caller that legitimately wants the raw `"all"` —
+ * because it then intersects with `resolveInstitutionLens`, which does its own
+ * `disabledAt` filtering — can keep using `schoolOperationsInstitutionIds`,
+ * but should say so in a comment.
+ */
+export async function liveSchoolOperationsInstitutionIds(
+  ctx: CapabilityCtx,
+  user: Pick<Doc<"users">, "_id" | "role">,
+): Promise<Set<Id<"institutions">> | null> {
+  const granted = await schoolOperationsInstitutionIds(ctx, user);
+  if (granted !== "all" && granted.size === 0) return null;
+  const liveIds = new Set(
+    (await ctx.db.query("institutions").collect())
+      .filter((institution) => institution.disabledAt === undefined)
+      .map((institution) => institution._id),
+  );
+  // The grant path already rejects a disabled institution
+  // (hasActiveStaffMembershipAtInstitution -> hasActiveInstitution); the
+  // intersection is what makes that true of the admin path too.
+  return granted === "all"
+    ? liveIds
+    : new Set([...granted].filter((id) => liveIds.has(id)));
 }
 
 export async function hasSchoolOperationsAccessAtInstitution(
@@ -350,6 +438,16 @@ export async function staffCapabilityInstitutionIds(
 ): Promise<Set<Id<"institutions">>> {
   const ids = new Set<Id<"institutions">>();
   for (const capability of STAFF_CAPABILITIES) {
+    // A mentor grant opens mentor threads and nothing else. Counting it here
+    // would hand a mentor-only staffer an institution lens, and with it every
+    // staff surface that scopes by lens (rosters, dossiers) — the redaction
+    // boundary the grant exists to keep.
+    if (capability === "scholars:mentor") continue;
+    // Same for the admissions tiers: an admissions-only staffer must not get
+    // a roster lens (scholars, dossiers, parents) from an admissions grant.
+    if (capability === "admissions:full" || capability === "admissions:scheduling") {
+      continue;
+    }
     for (const grant of await activeGrantsFor(ctx, userId, capability)) {
       if (
         await hasActiveStaffMembershipAtInstitution(
@@ -395,7 +493,9 @@ export async function ensureActiveStaffCapabilityGrant(
     const group = await ctx.db.get(args.scholarGroupId);
     if (
       group?.institutionId !== args.institutionId ||
-      !includesProgramGuests(group)
+      // A mentor may be scoped to any group of enrolled scholars; the program
+      // capabilities only ever apply to program groups.
+      (args.capability !== "scholars:mentor" && !includesProgramGuests(group))
     ) {
       throw new Error(
         "Capability group must be a program group in this institution",
@@ -431,4 +531,111 @@ export async function ensureActiveStaffCapabilityGrant(
     ...args,
     grantedAt: Date.now(),
   });
+}
+
+/**
+ * Does this staffer's `scholars:mentor` grant cover this scholar RIGHT NOW?
+ * Checked on every mentor read and write, so revoking the grant (or the
+ * staffer's membership, or suspending the school) ends access immediately.
+ *
+ *   - the scholar is ENROLLED (a program guest is never covered) and belongs
+ *     to a live institution;
+ *   - the staffer holds active staff membership there;
+ *   - an active grant at that institution is either institution-wide or
+ *     scoped to a group (of that institution) the scholar is in.
+ */
+export async function mentorCoversScholar(
+  ctx: CapabilityCtx,
+  user: Pick<Doc<"users">, "_id">,
+  scholar: Doc<"users"> | null,
+): Promise<boolean> {
+  if (!scholar || scholar.role !== "scholar" || !scholar.institutionId) {
+    return false;
+  }
+  if (!isEnrolledScholar(scholar)) return false;
+  const institutionId = scholar.institutionId;
+  if (
+    !(await hasActiveStaffMembershipAtInstitution(ctx, user._id, institutionId))
+  ) {
+    return false;
+  }
+  for (const grant of await activeGrantsFor(ctx, user._id, "scholars:mentor")) {
+    if (grant.institutionId !== institutionId) continue;
+    if (grant.scholarGroupId === undefined) return true;
+    const group = await ctx.db.get(grant.scholarGroupId);
+    if (
+      group?.institutionId === institutionId &&
+      group.scholarIds.includes(scholar._id)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Live institutions where this staffer holds any active mentor grant (the
+ * candidate set for listing mentor threads; per-scholar coverage still goes
+ * through `mentorCoversScholar`).
+ */
+export async function mentorInstitutionIds(
+  ctx: CapabilityCtx,
+  userId: Id<"users">,
+): Promise<Set<Id<"institutions">>> {
+  const ids = new Set<Id<"institutions">>();
+  for (const grant of await activeGrantsFor(ctx, userId, "scholars:mentor")) {
+    if (
+      await hasActiveStaffMembershipAtInstitution(
+        ctx,
+        userId,
+        grant.institutionId,
+      )
+    ) {
+      ids.add(grant.institutionId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * The admissions tier this user holds at one LIVE institution, re-checked on
+ * every call so a revoked grant, a removed membership or a suspended school
+ * ends access immediately:
+ *
+ *   platform_admin (users.role)                 → full (no grant needed)
+ *   active staff membership + admissions:full   → full
+ *   active staff membership + admissions:sched. → scheduling
+ *   anything else (school_admin included)       → none
+ *
+ * Institution-neutral. Which institution admissions runs at is the caller's
+ * business (the first-party CRM pins it to the primary school).
+ */
+export async function admissionsTierAtInstitution(
+  ctx: CapabilityCtx,
+  user: Pick<Doc<"users">, "_id" | "role">,
+  institutionId: Id<"institutions">,
+): Promise<AdmissionsTierSetting> {
+  if (!(await hasActiveInstitution(ctx, institutionId))) return "none";
+  if (user.role === "platform_admin") return "full";
+  if (
+    await hasActiveInstitutionCapability(
+      ctx,
+      user._id,
+      institutionId,
+      "admissions:full",
+    )
+  ) {
+    return "full";
+  }
+  if (
+    await hasActiveInstitutionCapability(
+      ctx,
+      user._id,
+      institutionId,
+      "admissions:scheduling",
+    )
+  ) {
+    return "scheduling";
+  }
+  return "none";
 }

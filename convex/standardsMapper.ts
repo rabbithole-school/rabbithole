@@ -6,6 +6,7 @@ import { internal } from "./_generated/api";
 import { Id } from "./_generated/dataModel";
 import { MODELS } from "./lib/models";
 import { recordAnthropicUsage } from "./usage";
+import { cachedSystem } from "./lib/aideStream";
 
 // ─── System Prompt ──────────────────────────────────────────────────
 
@@ -84,10 +85,39 @@ interface StandardForMapping {
   subject: string;
 }
 
-function buildUserMessage(
-  observations: ObservationForMapping[],
-  standards: StandardForMapping[]
-): string {
+/**
+ * The grade-range standards list, grouped by subject. Rendered ONCE per
+ * action into the prompt-cached system block (see mapToStandards): for a
+ * K–5 range it is several hundred leaf standards (~20k tokens), dwarfing
+ * both the instructions and any 15-observation batch, and it is identical
+ * across every batch of one run and across runs for scholars in the same
+ * grade range. Must be deterministic for the cache to hit — standards come
+ * back in index order and are grouped in insertion order, so it is.
+ */
+function buildStandardsSection(standards: StandardForMapping[]): string {
+  const parts: string[] = [];
+
+  // Group standards by subject for readability
+  const bySubject: Record<string, StandardForMapping[]> = {};
+  for (const s of standards) {
+    if (!bySubject[s.subject]) bySubject[s.subject] = [];
+    bySubject[s.subject].push(s);
+  }
+
+  parts.push("## Available Standards\n");
+  for (const [subject, stds] of Object.entries(bySubject)) {
+    parts.push(`### ${subject}`);
+    for (const s of stds) {
+      parts.push(`${s.notation} | ${s.description}`);
+    }
+    parts.push("");
+  }
+
+  return parts.join("\n");
+}
+
+/** The per-batch, uncached half: the observations to map. */
+function buildUserMessage(observations: ObservationForMapping[]): string {
   const parts: string[] = [];
 
   parts.push("## Mastery Observations\n");
@@ -97,24 +127,8 @@ function buildUserMessage(
     );
   }
 
-  // Group standards by subject for readability
-  const bySubject: Record<string, StandardForMapping[]> = {};
-  for (const s of standards) {
-    if (!bySubject[s.subject]) bySubject[s.subject] = [];
-    bySubject[s.subject].push(s);
-  }
-
-  parts.push("\n## Available Standards\n");
-  for (const [subject, stds] of Object.entries(bySubject)) {
-    parts.push(`### ${subject}`);
-    for (const s of stds) {
-      parts.push(`${s.notation} | ${s.description}`);
-    }
-    parts.push("");
-  }
-
   parts.push(
-    "Map each observation to the standards it demonstrates. Use the exact notation codes from the list above."
+    "\nMap each observation to the standards it demonstrates. Use the exact notation codes from the Available Standards list above."
   );
 
   return parts.join("\n");
@@ -200,6 +214,17 @@ export const mapToStandards = internalAction({
     const { default: Anthropic } = await import("@anthropic-ai/sdk");
     const anthropic = new Anthropic();
 
+    // Prompt-cached prefix: instructions + the whole standards list. The
+    // list is the bulk of every call and identical across the batches
+    // below (and across concurrent observer runs for same-grade scholars,
+    // within the 5m TTL), so batch 2+ reads it at ~1/10th rate. Haiku's
+    // minimum cacheable prefix is 4096 tokens — the standards list clears
+    // it; the instructions + tool alone (~700 tokens) would not, which is
+    // why the list lives here and not in the per-batch user message.
+    const system = cachedSystem(
+      `${MAPPER_SYSTEM_PROMPT}\n\n${buildStandardsSection(standards)}`,
+    );
+
     // 5. Process in batches of 15 observations per Haiku call
     const BATCH_SIZE = 15;
     let totalPatched = 0;
@@ -209,7 +234,7 @@ export const mapToStandards = internalAction({
       const batchNum = Math.floor(batchStart / BATCH_SIZE) + 1;
       const totalBatches = Math.ceil(observations.length / BATCH_SIZE);
 
-      const userMessage = buildUserMessage(batch, standards);
+      const userMessage = buildUserMessage(batch);
       console.log(
         `[StandardsMapper] Batch ${batchNum}/${totalBatches}: ${batch.length} observations, ${userMessage.length} chars`
       );
@@ -219,7 +244,7 @@ export const mapToStandards = internalAction({
         const response = await anthropic.messages.create({
           model: MODELS.HAIKU,
           max_tokens: 2048,
-          system: MAPPER_SYSTEM_PROMPT,
+          system,
           tools: [MAPPER_TOOL],
           tool_choice: { type: "tool", name: "record_standard_mappings" },
           messages: [{ role: "user", content: userMessage }],

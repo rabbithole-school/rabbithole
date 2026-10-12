@@ -7,20 +7,31 @@
  */
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, createElement } from "react";
+import { act, createElement, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ChakraProvider } from "@chakra-ui/react";
 
 const convex = vi.hoisted(() => ({
+  answers: new Map<string, unknown>(),
   calls: [] as Record<string, unknown>[],
   reject: null as string | null,
 }));
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: () => {}, push: () => {} }),
+  useSearchParams: () => new URLSearchParams(),
+}));
+
 vi.mock("convex/react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("convex/react")>();
+  const { getFunctionName } = await import("convex/server");
   return {
     ...actual,
-    useQuery: () => undefined,
+    useConvexAuth: () => ({ isLoading: false, isAuthenticated: true }),
+    useQuery: (reference: unknown, args: unknown) =>
+      args === "skip"
+        ? undefined
+        : convex.answers.get(getFunctionName(reference as never)),
     useMutation: () => async (args: Record<string, unknown>) => {
       convex.calls.push(args);
       if (convex.reject) throw new Error(convex.reject);
@@ -29,8 +40,18 @@ vi.mock("convex/react", async (importOriginal) => {
   };
 });
 
+vi.mock("@/hooks/useCurrentUser", () => ({
+  useCurrentUser: () => ({
+    user: { _id: "teacher-1", name: "Teacher", role: "teacher" },
+    isLoading: false,
+    isAuthenticated: true,
+  }),
+}));
+
 import { system } from "@/lib/theme";
 import { CheckpointBandControl } from "../CheckpointBandControl";
+import { MASTERY_FILTER_ORDER } from "../mathSkillsMasteryFilters";
+import { MathSkillsMasteryView } from "../MathSkillsMasteryView";
 import type { MathPlanRow, PracticeScope } from "../mathPlanProjection";
 
 const OPEN: PracticeScope = { kind: "open" };
@@ -98,8 +119,23 @@ async function press(el: Element) {
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
     true;
+  convex.answers.clear();
   convex.calls = [];
   convex.reject = null;
+  vi.stubGlobal(
+    "matchMedia",
+    (query: string) =>
+      ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+      }) as unknown as MediaQueryList,
+  );
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -111,6 +147,7 @@ afterEach(() => {
   root = null;
   container = null;
   document.body.innerHTML = "";
+  vi.unstubAllGlobals();
 });
 
 describe("the checkpoint control's states", () => {
@@ -275,6 +312,187 @@ describe("the checkpoint control's states", () => {
     expect(convex.calls[0]!.practiceScope).toEqual({
       kind: "limited",
       domains: [{ domain: "probability", strands: ["chance", "compound"] }],
+    });
+  });
+
+  const CELL_SCHOLAR_ID = "scholar-1";
+  const CELL_DOMAIN = "probability";
+  const CELL_NODES = [
+    { nodeKey: "chance-a", label: "Likelihood", strand: "chance", grade: "7" },
+    { nodeKey: "chance-b", label: "Sample space", strand: "chance", grade: "7" },
+    { nodeKey: "chance-c", label: "Certain or impossible", strand: "chance", grade: "6" },
+    { nodeKey: "compound-a", label: "Two events", strand: "compound", grade: "7" },
+  ];
+  const cellScholar = {
+    id: CELL_SCHOLAR_ID,
+    name: "Scholar H",
+    username: "scholar_h",
+    image: null,
+    readingLevel: null,
+    gradeLevel: "6",
+    dateOfBirth: null,
+    lastMessageAt: null,
+    groupIds: [],
+    isMine: true,
+    enrollmentStanding: "enrolled" as const,
+  };
+
+  function seedCellFixtures(planOverrides: Record<string, unknown>) {
+    convex.answers.clear();
+    convex.calls = [];
+    convex.answers.set("cohortPractice:masteryForScholars", {
+      scholars: [
+        {
+          scholarId: CELL_SCHOLAR_ID,
+          name: cellScholar.name,
+          image: null,
+          readings: CELL_NODES.map((node) => ({
+            nodeKey: node.nodeKey,
+            mastery: "frontier",
+            automaticity: 0.5,
+            depth: 1,
+            frontier: true,
+            flagged: false,
+          })),
+        },
+      ],
+    });
+    convex.answers.set("cohortPractice:mapStatusForScholars", { scholars: [] });
+    convex.answers.set("cohortPractice:fastMathForScholars", { scholars: [] });
+    convex.answers.set("practiceItemPool:poolSummary", {
+      domain: CELL_DOMAIN,
+      nodes: [],
+    });
+    convex.answers.set("mathPlans:forScholars", [
+      {
+        scholarId: CELL_SCHOLAR_ID,
+        practiceScope: { kind: "open" },
+        scopeSource: "open_default",
+        migrationIssue: null,
+        checkpoint: null,
+        conflict: false,
+        mode: "toward",
+        bandSolid: 0,
+        bandTotal: 0,
+        ...planOverrides,
+      },
+    ]);
+  }
+
+  function CellHarness() {
+    const [selected, setSelected] = useState<string | null>(null);
+    return createElement(MathSkillsMasteryView, {
+      domain: CELL_DOMAIN,
+      domainLabel: "Probability",
+      nodes: CELL_NODES,
+      domains: [{ domain: CELL_DOMAIN, label: "Probability" }],
+      selectedNode: selected,
+      onSelectNode: (nodeKey: string | null) => setSelected(nodeKey),
+      treeView: false,
+      onToggleTreeView: () => {},
+      search: "",
+      onSearchChange: () => {},
+      statuses: new Set(MASTERY_FILTER_ORDER),
+      onStatusesChange: () => {},
+      scopedScholars: [cellScholar],
+      effectiveScholarId: "",
+      rosterLoading: false,
+      reportScholarId: "",
+      onOpenReport: () => {},
+      onOpenContentForNode: () => {},
+      onOpenStoriesForNode: () => {},
+    });
+  }
+
+  async function renderCellHarness() {
+    await act(async () => {
+      root!.render(
+        // eslint-disable-next-line react/no-children-prop -- Chakra's createElement type requires children in the props object
+        createElement(ChakraProvider, {
+          value: system,
+          children: createElement(CellHarness),
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+  }
+
+  async function clickCellElement(element: Element) {
+    await act(async () => {
+      element.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+  }
+
+  function masteryCell(nodeKey: string) {
+    return document.querySelector(
+      `[data-testid="mastery-cell-${nodeKey}-${CELL_SCHOLAR_ID}"]`,
+    );
+  }
+
+  function mountedControl() {
+    return document.querySelector('[data-testid="checkpoint-band-control"]');
+  }
+
+  describe("setting the checkpoint from the cell you are looking at", () => {
+    it("offers the clicked cell's own band, counts its siblings, and writes it atomically", async () => {
+      seedCellFixtures({});
+      await renderCellHarness();
+
+      expect(mountedControl()).toBeNull();
+
+      await clickCellElement(masteryCell("chance-a")!);
+      const row = mountedControl();
+      expect(row, "a clicked cell opens the panel that carries the control").toBeTruthy();
+      expect(row!.textContent).toContain("Chance · grade 7");
+      expect(row!.textContent).toContain("2 skills in this band");
+      expect(action()!.textContent).toContain("Set checkpoint here");
+
+      await clickCellElement(action()!);
+      expect(convex.calls).toEqual([
+        {
+          scholarId: CELL_SCHOLAR_ID,
+          practiceScope: { kind: "open" },
+          checkpoint: {
+            domain: CELL_DOMAIN,
+            strand: "chance",
+            grade: "7",
+          },
+        },
+      ]);
+    });
+
+    it("re-reads the band when the teacher drills a different skill", async () => {
+      seedCellFixtures({});
+      await renderCellHarness();
+
+      await clickCellElement(masteryCell("chance-c")!);
+      expect(mountedControl()!.textContent).toContain("Chance · grade 6");
+      expect(mountedControl()!.textContent).toContain("1 skill in this band");
+
+      await clickCellElement(masteryCell("compound-a")!);
+      expect(mountedControl()!.textContent).toContain("Compound · grade 7");
+    });
+
+    it("names the band being left when this scholar's checkpoint is elsewhere", async () => {
+      seedCellFixtures({
+        checkpoint: {
+          domain: CELL_DOMAIN,
+          strand: "compound",
+          grade: "7",
+          source: "teacher",
+        },
+        mode: "toward",
+      });
+      await renderCellHarness();
+
+      await clickCellElement(masteryCell("chance-a")!);
+      expect(action()!.textContent).toContain("Move checkpoint here");
+      expect(mountedControl()!.textContent).toContain(
+        "moves it off Compound · grade 7",
+      );
     });
   });
 

@@ -8,10 +8,11 @@ import {
   type QueryCtx,
 } from "./_generated/server";
 import { finalizeAndSplit } from "./sessionHelpers";
-import { requireUnitEditAccess } from "./lib/auth";
+import { requireUnitEditAccess, requireUnitEditAccessForUser } from "./lib/auth";
 import { requireActiveScholarAccess } from "./lib/access";
 import { authedMutation, authedQuery } from "./lib/customFunctions";
 import { classifyAideUpload } from "./lib/aideUploadMimes";
+import { resolveDeckAssetUrls, storedDeck } from "./lib/slideAssetUrls";
 import { activityResourceDisplayRows } from "./lib/activityResourceDisplay";
 import {
   isMaterialActivityResource,
@@ -140,8 +141,14 @@ async function editorRows(
     .sort((a, b) => a.order - b.order);
 }
 
-async function requireResourceEditAccess(
-  ctx: (QueryCtx | MutationCtx) & { user: Doc<"users"> },
+// The resource edit gate, resolved against an explicitly-supplied user rather
+// than `ctx.auth`. The aide/Slack/MCP path runs in an internal mutation with a
+// verified callerUserId but no `ctx.user`, so it can't go through the
+// auth-reading `requireResourceEditAccess`; it shares THIS so the tenancy and
+// ownership checks are exactly the ones the teacher UI gets (TRA-245).
+async function requireResourceEditAccessForUser(
+  ctx: QueryCtx | MutationCtx,
+  user: Doc<"users">,
   args: {
     activityId: Id<"activities">;
     assignmentId?: Id<"assignments">;
@@ -150,16 +157,31 @@ async function requireResourceEditAccess(
   if (args.assignmentId) {
     return {
       kind: "programHandout" as const,
-      ...(await requireProgramHandoutAccess(ctx, {
-        activityId: args.activityId,
-        assignmentId: args.assignmentId,
-      })),
+      ...(await requireProgramHandoutAccess(
+        { ...ctx, user },
+        {
+          activityId: args.activityId,
+          assignmentId: args.assignmentId,
+        },
+      )),
     };
   }
   return {
     kind: "unit" as const,
-    ...(await requireUnitEditAccess(ctx, { activityId: args.activityId })),
+    ...(await requireUnitEditAccessForUser(ctx, user, {
+      activityId: args.activityId,
+    })),
   };
+}
+
+async function requireResourceEditAccess(
+  ctx: (QueryCtx | MutationCtx) & { user: Doc<"users"> },
+  args: {
+    activityId: Id<"activities">;
+    assignmentId?: Id<"assignments">;
+  },
+) {
+  return await requireResourceEditAccessForUser(ctx, ctx.user, args);
 }
 
 async function pruneResourceReferencesInUnit(
@@ -215,6 +237,7 @@ export const listForActivity = authedQuery({
         order: row.order,
         extractionStatus: row.extractionStatus ?? null,
         extractionError: row.extractionError ?? null,
+        familyVisibility: row.familyVisibility ?? ("staff_only" as const),
         url:
           row.source.kind === "file"
             ? await ctx.storage.getUrl(row.source.fileStorageId)
@@ -357,6 +380,30 @@ export const presentationsForActivity = authedQuery({
   },
 });
 
+/**
+ * Serving URLs for the activity's Rabbit Slides media, behind the same edit
+ * gate as `presentationsForActivity`. Only ids in the stored deck, or slide
+ * media the caller uploaded, resolve (TRA-389).
+ */
+export const presentationAssetUrls = authedQuery({
+  args: {
+    activityId: v.id("activities"),
+    assignmentId: v.optional(v.id("assignments")),
+    storageIds: v.array(v.id("_storage")),
+  },
+  handler: async (ctx, args) => {
+    await requireResourceEditAccess(ctx, args);
+    const activity = await ctx.db.get(args.activityId);
+    if (!activity) return [];
+    const presentations = await presentationState(ctx, activity);
+    return await resolveDeckAssetUrls(ctx, {
+      storageIds: args.storageIds,
+      deck: storedDeck(presentations.rabbit?.deck),
+      callerId: ctx.user._id,
+    });
+  },
+});
+
 export const listForSession = authedQuery({
   args: { sessionId: v.id("sessions") },
   handler: async (ctx, args) => {
@@ -447,8 +494,13 @@ export const registerFile = authedMutation({
   },
 });
 
-async function addUrlResource(
-  ctx: MutationCtx & { user: Doc<"users"> },
+// Insert a link/video resource on an activity. Shared by the teacher-UI
+// addLink/addVideo mutations, the aide's aideAddUrlResource, and the YouTube
+// dispatch rewrite in convex/assignments.ts — so a video resource is created
+// exactly one way. Callers own the access check before calling this.
+export async function addUrlResource(
+  ctx: MutationCtx,
+  user: Doc<"users">,
   args: {
     activityId: Id<"activities">;
     title: string;
@@ -465,7 +517,7 @@ async function addUrlResource(
     ),
     source: { kind: args.kind, url },
     order: await nextOrder(ctx, args.activityId),
-    uploadedBy: ctx.user._id,
+    uploadedBy: user._id,
   });
 }
 
@@ -478,7 +530,7 @@ export const addLink = authedMutation({
   },
   handler: async (ctx, args) => {
     await requireResourceEditAccess(ctx, args);
-    return await addUrlResource(ctx, { ...args, kind: "link" });
+    return await addUrlResource(ctx, ctx.user, { ...args, kind: "link" });
   },
 });
 
@@ -491,7 +543,47 @@ export const addVideo = authedMutation({
   },
   handler: async (ctx, args) => {
     await requireResourceEditAccess(ctx, args);
-    return await addUrlResource(ctx, { ...args, kind: "video" });
+    return await addUrlResource(ctx, ctx.user, { ...args, kind: "video" });
+  },
+});
+
+// Aide/Slack/MCP entry: add a link/video resource to an activity on behalf of a
+// verified teacher (there is no `ctx.user` here). Reuses the SAME access gate
+// and insert helper the teacher UI's addLink/addVideo use, so the tenancy and
+// ownership checks can't drift from the UI (TRA-245). Returns the stored title
+// so the tool can name it back to the teacher.
+export const aideAddUrlResource = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    activityId: v.id("activities"),
+    assignmentId: v.optional(v.id("assignments")),
+    title: v.string(),
+    url: v.string(),
+    kind: v.union(v.literal("link"), v.literal("video")),
+  },
+  handler: async (
+    ctx,
+    { callerUserId, activityId, assignmentId, title, url, kind },
+  ) => {
+    const user = await ctx.db.get(callerUserId);
+    if (!user) throw new Error("Caller not found.");
+    if (!isTeacherRole(user.role)) {
+      throw new Error("Adding an activity resource is teacher/admin only.");
+    }
+    await requireResourceEditAccessForUser(ctx, user, {
+      activityId,
+      assignmentId,
+    });
+    const resourceId = await addUrlResource(ctx, user, {
+      activityId,
+      title,
+      url,
+      kind,
+    });
+    return {
+      resourceId,
+      title: normalizedTitle(title, kind === "video" ? "Video" : "Website"),
+    };
   },
 });
 
@@ -513,6 +605,38 @@ export const rename = authedMutation({
     const title = args.title.trim();
     if (!title) throw new Error("Resource title is required");
     await ctx.db.patch(args.resourceId, { title });
+  },
+});
+
+/**
+ * Teacher opt-in that lets a family see one material resource in the parent
+ * portal's course view. Same edit gate as every other resource write, so a
+ * program-handout author can share their own handout's materials without
+ * curriculum access. Presentation decks are teacher instruments and have no
+ * family rendering — they are rejected rather than silently ignored.
+ */
+export const setFamilyVisibility = authedMutation({
+  args: {
+    resourceId: v.id("activityResources"),
+    assignmentId: v.optional(v.id("assignments")),
+    familyVisibility: v.union(
+      v.literal("staff_only"),
+      v.literal("families"),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const row = await ctx.db.get(args.resourceId);
+    if (!row) throw new Error("Resource not found");
+    await requireResourceEditAccess(ctx, {
+      activityId: row.activityId,
+      assignmentId: args.assignmentId,
+    });
+    if (!isMaterialActivityResource(row)) {
+      throw new Error("Presentations cannot be shared with families");
+    }
+    await ctx.db.patch(args.resourceId, {
+      familyVisibility: args.familyVisibility,
+    });
   },
 });
 

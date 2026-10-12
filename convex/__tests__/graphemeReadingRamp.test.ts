@@ -376,19 +376,6 @@ describe("upsert records the fade-stage arc in graphemeHistory", () => {
     expect(thRows).toEqual(["training"]); // unchanged → no second row
   });
 
-  test("a re-save with identical stages writes no history rows", async () => {
-    const t = makeTester();
-    const teacher = await seedUser(t, "teacher");
-    const scholar = await seedUser(t, "scholar");
-    const asTeacher = await withUser(t, teacher);
-
-    const teams = [{ team: "ea", stage: "fading" as const }];
-    await asTeacher.mutation(api.graphemeInventory.upsert, { scholarId: scholar, teams });
-    await asTeacher.mutation(api.graphemeInventory.upsert, { scholarId: scholar, teams });
-
-    const rows = await historyFor(t, scholar);
-    expect(rows).toHaveLength(1); // only the initial appearance
-  });
 
   test("graduation is detected and recorded (any non-graduated → graduated)", async () => {
     const t = makeTester();

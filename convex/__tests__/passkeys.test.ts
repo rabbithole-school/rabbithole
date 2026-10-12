@@ -207,6 +207,105 @@ describe("enrollment tokens", () => {
     );
     expect(remaining.length).toBe(0);
   });
+
+  // Regression for the finishEnrollmentWithToken race: a single-use
+  // enrollment token must not be redeemable twice. Before this fix, the
+  // token was consumed by a SEPARATE mutation call after the credential
+  // insert, so two concurrent finishes (or a stale token reused after the
+  // first insert) could each pass validation and each insert a passkey.
+  // insertCredential now validates + marks the token used atomically with
+  // the insert, so a second redemption must fail AND must not insert a
+  // second credential.
+  test("a consumed enrollment token cannot be redeemed a second time via insertCredential", async () => {
+    const t = convexTest(schema, modules);
+    const adminId = await seedUser(t, "platform_admin", { username: "admin-race" });
+    const teacherId = await seedUser(t, "teacher", { username: "teach-race" });
+    const asAdmin = await withUser(t, adminId);
+
+    const { token } = await asAdmin.mutation(api.enrollment.issueToken, {
+      userId: teacherId,
+    });
+
+    // First redemption: succeeds, consumes the token in the same transaction.
+    const first = await t.run(async (ctx) =>
+      ctx.runMutation(internal.passkeys.insertCredential, {
+        userId: teacherId,
+        credentialId: "cred-race-1",
+        publicKey: "pk",
+        counter: 0,
+        enrollmentToken: token,
+      }),
+    );
+    expect(first).toBeTruthy();
+
+    // Second redemption of the SAME token — simulating a concurrent finish,
+    // or a delayed retry after the first already landed — must be rejected
+    // and must NOT insert a second credential.
+    await expect(
+      t.run(async (ctx) =>
+        ctx.runMutation(internal.passkeys.insertCredential, {
+          userId: teacherId,
+          credentialId: "cred-race-2",
+          publicKey: "pk",
+          counter: 0,
+          enrollmentToken: token,
+        }),
+      ),
+    ).rejects.toThrow(/invalid, expired, or already used/i);
+
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query("passkeys")
+        .withIndex("by_user", (q) => q.eq("userId", teacherId))
+        .collect(),
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].credentialId).toBe("cred-race-1");
+
+    // The token row itself is marked used, not deleted (matches consumeToken).
+    const tokenRow = await t.run(async (ctx) =>
+      ctx.db
+        .query("enrollmentTokens")
+        .withIndex("by_user", (q) => q.eq("userId", teacherId))
+        .unique(),
+    );
+    expect(tokenRow?.usedAt).toBeTruthy();
+  });
+
+  test("insertCredential rejects a token that does not belong to the target user", async () => {
+    const t = convexTest(schema, modules);
+    const adminId = await seedUser(t, "platform_admin", { username: "admin-mismatch" });
+    const teacherId = await seedUser(t, "teacher", { username: "teach-mismatch" });
+    const otherId = await seedUser(t, "teacher", { username: "teach-mismatch-2" });
+    const asAdmin = await withUser(t, adminId);
+
+    const { token } = await asAdmin.mutation(api.enrollment.issueToken, {
+      userId: teacherId,
+    });
+
+    // A token minted for `teacherId` must not enroll a credential onto a
+    // different user's account, even if the caller supplies a mismatched
+    // userId (e.g. a reissued/deleted-and-recreated token scenario).
+    await expect(
+      t.run(async (ctx) =>
+        ctx.runMutation(internal.passkeys.insertCredential, {
+          userId: otherId,
+          credentialId: "cred-mismatch",
+          publicKey: "pk",
+          counter: 0,
+          enrollmentToken: token,
+        }),
+      ),
+    ).rejects.toThrow(/invalid, expired, or already used/i);
+
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query("passkeys")
+        .withIndex("by_user", (q) => q.eq("userId", otherId))
+        .collect(),
+    );
+    expect(rows.length).toBe(0);
+  });
 });
 
 // ── Challenge handling ──────────────────────────────────────────────────
@@ -457,5 +556,65 @@ describe("devEnsureEnrollmentBypass (dev-login sentinel)", () => {
     const rows = await passkeys(t, admin);
     expect(rows).toHaveLength(1);
     expect(rows[0].credentialId).toBe("real-cred");
+  });
+
+  test("concurrent redemptions of one token insert exactly one credential", async () => {
+    const t = convexTest(schema, modules);
+    const adminId = await seedUser(t, "platform_admin", { username: "admin-concurrent" });
+    const teacherId = await seedUser(t, "teacher", { username: "teach-concurrent" });
+    const asAdmin = await withUser(t, adminId);
+    const { token } = await asAdmin.mutation(api.enrollment.issueToken, {
+      userId: teacherId,
+    });
+
+    const results = await Promise.allSettled(
+      [1, 2, 3].map((n) =>
+        t.mutation(internal.passkeys.insertCredential, {
+          userId: teacherId,
+          credentialId: `cred-concurrent-${n}`,
+          publicKey: "pk",
+          counter: 0,
+          enrollmentToken: token,
+        }),
+      ),
+    );
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query("passkeys")
+        .withIndex("by_user", (q) => q.eq("userId", teacherId))
+        .collect(),
+    );
+    expect(rows).toHaveLength(1);
+  });
+
+  test("insertCredential refuses a token whose user can no longer hold a passkey", async () => {
+    const t = convexTest(schema, modules);
+    const adminId = await seedUser(t, "platform_admin", { username: "admin-demoted" });
+    const teacherId = await seedUser(t, "teacher", { username: "teach-demoted" });
+    const asAdmin = await withUser(t, adminId);
+    const { token } = await asAdmin.mutation(api.enrollment.issueToken, {
+      userId: teacherId,
+    });
+    // Between the action's lookup and the insert, the account became a
+    // scholar (a role that signs in with a PIN, never a passkey).
+    await t.run((ctx) => ctx.db.patch(teacherId, { role: "scholar" }));
+
+    await expect(
+      t.mutation(internal.passkeys.insertCredential, {
+        userId: teacherId,
+        credentialId: "cred-demoted",
+        publicKey: "pk",
+        counter: 0,
+        enrollmentToken: token,
+      }),
+    ).rejects.toThrow(/invalid, expired, or already used/i);
+    const tokenRow = await t.run(async (ctx) =>
+      ctx.db
+        .query("enrollmentTokens")
+        .withIndex("by_user", (q) => q.eq("userId", teacherId))
+        .unique(),
+    );
+    expect(tokenRow?.usedAt).toBeUndefined();
   });
 });

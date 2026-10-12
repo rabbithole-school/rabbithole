@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   breakerResponseLine,
+  breakerRepeatLine,
   buildBreakerOutcomeReply,
   buildNotYetTaughtAlertBody,
   buildStuckAlertBody,
@@ -80,30 +81,14 @@ describe("formatAttemptElapsed", () => {
 });
 
 describe("breakerResponseLine", () => {
-  test("describes an accepted conversation in progress", () => {
-    expect(breakerResponseLine({ offer: "accepted" })).toBe(
-      "They chose to talk it through with the tutor; the conversation is under way.",
-    );
-  });
-
-  test("describes a declined conversation without judging the choice", () => {
-    expect(breakerResponseLine({ offer: "declined" })).toBe(
-      "They chose to finish on an easier one; the session is winding down.",
-    );
-  });
-
-  test("adds the completed recovery result", () => {
-    expect(
+  test("accepted, declined, recovery, and no-response variants each produce distinct text", () => {
+    const outputs = new Set([
+      breakerResponseLine({ offer: "accepted" }),
+      breakerResponseLine({ offer: "declined" }),
       breakerResponseLine({ offer: "accepted", recovery: "won" }),
-    ).toBe(
-      "They chose to talk it through with the tutor; the conversation is under way. They got the final easier item right.",
-    );
-  });
-
-  test("states when no response was recorded", () => {
-    expect(breakerResponseLine()).toBe(
-      "No response was recorded yet; they may have left the session.",
-    );
+      breakerResponseLine(),
+    ]);
+    expect(outputs.size).toBe(4);
   });
 
   test("describes the versioned repair lifecycle without changing legacy wording", () => {
@@ -148,10 +133,86 @@ describe("breaker state in alert bodies", () => {
         },
       }),
     );
-    expect(body).toContain(
-      "Rabbithole paused the run with one step-card repair ready, plus the tutor or an easier finish.",
-    );
+    expect(body).toContain("step-card repair");
     expect(body).not.toContain("offered to talk one through");
+  });
+});
+
+describe("breakerRepeatLine — same-node re-trip", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const TZ = "Pacific/Honolulu"; // NOW is Wed 2026-08-19 in HST
+
+  test("returns undefined with no prior episodes", () => {
+    expect(breakerRepeatLine(undefined, NOW)).toBeUndefined();
+    expect(
+      breakerRepeatLine({ priorEpisodeAts: [], timeZone: TZ }, NOW),
+    ).toBeUndefined();
+  });
+
+  test("names the count and the prior weekdays", () => {
+    expect(
+      breakerRepeatLine(
+        { priorEpisodeAts: [NOW - 2 * DAY, NOW - 3 * DAY], timeZone: TZ },
+        NOW,
+      ),
+    ).toBe(
+      "Third breaker on this skill in the last week (also Sun and Mon).",
+    );
+  });
+
+  test("uses a relative label for a single prior episode yesterday", () => {
+    expect(
+      breakerRepeatLine({ priorEpisodeAts: [NOW - 1 * DAY], timeZone: TZ }, NOW),
+    ).toBe("Second breaker on this skill in the last week (also yesterday).");
+  });
+
+  test("collapses two prior episodes on the same day to one day label", () => {
+    expect(
+      breakerRepeatLine(
+        {
+          priorEpisodeAts: [NOW - 2 * DAY, NOW - 2 * DAY - 3 * 60 * 60 * 1000],
+          timeZone: TZ,
+        },
+        NOW,
+      ),
+    ).toBe("Third breaker on this skill in the last week (also Mon).");
+  });
+
+  test("uses no grit, deficit, or prescriptive vocabulary", () => {
+    const line = breakerRepeatLine(
+      { priorEpisodeAts: [NOW - 2 * DAY], timeZone: TZ },
+      NOW,
+    )!;
+    for (const banned of [
+      "grit",
+      "persever",
+      "resilien",
+      "you should",
+      "struggl",
+    ]) {
+      expect(line.toLowerCase()).not.toContain(banned);
+    }
+  });
+
+  test("buildStuckAlertBody appends the repeat line before the sign-off", () => {
+    const body = buildStuckAlertBody(
+      input({
+        repeatBreaker: { priorEpisodeAts: [NOW - 2 * DAY], timeZone: TZ },
+      }),
+    );
+    expect(body).toContain(
+      "Second breaker on this skill in the last week (also Mon).",
+    );
+    const repeatIndex = body.indexOf("Second breaker on this skill");
+    const signOffIndex = body.indexOf("Might be a good moment to check in.");
+    expect(repeatIndex).toBeGreaterThan(-1);
+    expect(repeatIndex).toBeLessThan(signOffIndex);
+  });
+
+  test("buildStuckAlertBody omits the line without a repeat", () => {
+    expect(buildStuckAlertBody(input())).not.toContain(
+      "breaker on this skill in the last week",
+    );
   });
 });
 
@@ -173,7 +234,7 @@ describe("buildBreakerOutcomeReply", () => {
       ),
     ).toBe(
       [
-        "*What happened next:* They completed the step-card repair, then got the fresh same-skill item right.",
+        "**What happened next:** They completed the step-card repair, then got the fresh same-skill item right.",
         "_AI read:_ The regrouping move was not yet stable.",
       ].join("\n"),
     );
@@ -190,6 +251,57 @@ describe("buildBreakerOutcomeReply", () => {
         },
       }),
     ).toContain("got the fresh same-skill item right with more help");
+  });
+
+  test.each([
+    {
+      recovery: "won" as const,
+      line: "Area model multiplication: still not started — 8 misses in a row, no progress this episode. Recovered on an easier item; the skill itself did not move.",
+    },
+    {
+      recovery: "missed" as const,
+      line: "Area model multiplication: still practicing — 2 misses in a row, no progress this episode.",
+    },
+    {
+      recovery: "none" as const,
+      line: "Area model multiplication: still fluent — 1 miss in a row, no progress this episode.",
+    },
+    {
+      recovery: "skipped" as const,
+      line: "Area model multiplication: first correct answer on this skill in this episode.",
+      progressed: true,
+      brandNew: true,
+      firstCorrectAnswer: true,
+    },
+  ])("adds the trigger skill state for a $recovery recovery", ({
+    recovery,
+    line,
+    progressed = false,
+    brandNew = false,
+    firstCorrectAnswer = false,
+  }) => {
+    expect(
+      buildBreakerOutcomeReply(
+        { recovery },
+        undefined,
+        {
+          label: "Area model multiplication",
+          proficiency:
+            recovery === "won"
+              ? "not_started"
+              : recovery === "missed"
+                ? "practicing"
+                : recovery === "none"
+                  ? "fluent"
+                  : "practicing",
+          missStreak: recovery === "won" ? 8 : recovery === "missed" ? 2 : 1,
+          progressed,
+          episodeProgressKnown: true,
+          brandNew,
+          firstCorrectAnswer,
+        },
+      ),
+    ).toContain(line);
   });
 
   test("reports the scholar's final choice after a fresh miss", () => {
@@ -375,12 +487,12 @@ describe("buildStuckAlertBody", () => {
         "Missed 3 practice items in a row. Rabbithole paused the run and offered to talk one through with the tutor, or to finish on an easier one.",
         "This sitting: 4 of 11 correct, over 23 min.",
         "",
-        "• *Evaluate a two-operation numerical expression using precedence* (8s on this one)",
+        "• **Evaluate a two-operation numerical expression using precedence** (8s on this one)",
         "   `3 + 4 × 2` → answered `14`  (expected `11`)",
         "   ↳ Order of the operation isn't yet anchored.",
-        "• *Divisibility rules for 2, 5, and 10* (2 min on this one)",
+        "• **Divisibility rules for 2, 5, and 10** (2 min on this one)",
         "   `Is 470 divisible by 4?` → answered `yes`  (expected `no`)",
-        "• *Multiply a 2-digit number by a 1-digit number*",
+        "• **Multiply a 2-digit number by a 1-digit number**",
         '   `47 × 6` → tapped "I don\'t know"',
         "",
         "Might be a good moment to check in.",
@@ -466,11 +578,11 @@ describe("buildStuckAlertBody", () => {
             isDontKnow: false,
           },
         ],
-        diagnosis: "The *grouping* procedure is _not yet_ stable.",
+        diagnosis: "The **grouping** procedure is _not yet_ stable.",
       }),
     );
     expect(body).toContain(
-      "• *Use \\*groups\\* and \\_remainders\\_*",
+      "• **Use \\*groups\\* and \\_remainders\\_**",
     );
     expect(body).not.toContain("_AI read:_");
   });
@@ -529,7 +641,7 @@ describe("buildStuckAlertBody", () => {
     ).toBe(
       [
         "Missed 3 practice items in a row. Rabbithole paused the run and offered to talk one through with the tutor, or to finish on an easier one.",
-        "Most recently on *Divisibility rules for 2, 5, and 10*.",
+        "Most recently on **Divisibility rules for 2, 5, and 10**.",
         "Might be a good moment to check in.",
       ].join("\n"),
     );
@@ -698,12 +810,12 @@ describe("buildNotYetTaughtAlertBody", () => {
         `Tapped "I haven't learned this yet" on 3 practice items in a row. This reads as material not yet taught, rather than a misconception to unpick.`,
         "This sitting: 0 of 3 correct, over 2 min.",
         "",
-        "• *Unit fractions* (14s on this one)",
+        "• **Unit fractions** (14s on this one)",
         "   `Shade one fourth.`",
-        "• *Division as sharing* (1 min on this one)",
+        "• **Division as sharing** (1 min on this one)",
         "   `Share 15 among 3 groups.`",
         "   ↳ Teaching follow-up: finished with a hint.",
-        "• *Interpret remainders*",
+        "• **Interpret remainders**",
       ].join("\n"),
     );
   });

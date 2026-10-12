@@ -25,8 +25,8 @@
  * above-band items.
  */
 
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -54,6 +54,17 @@ import { REGISTERED_PRACTICE_DOMAINS } from "../knowledgeNodes";
 const modules = (
   import.meta as ImportMeta & { glob: (p: string) => Record<string, () => Promise<unknown>> }
 ).glob("../**/*.ts");
+
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
 
 // ── Fix 3: grade-tag shape normalization ("Grade N" ≡ "N") ──────────────────
 
@@ -358,8 +369,7 @@ async function asUser(t: Tester, userId: Id<"users">) {
 
 describe("F3 — mixed check-in: strong domain 1, IDK later domains", () => {
   test("later domains place at the floor; the first block has NO above-band items", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedGradeTwoScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -461,8 +471,7 @@ describe("F3 — mixed check-in: strong domain 1, IDK later domains", () => {
   });
 
   test("normalization end-to-end: a 'Grade 2' scholar is served the SAME first probe as a '2' scholar", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const longForm = await t.run(async (ctx) =>
       ctx.db.insert("users", { name: "Long", username: "f3-long", role: "scholar", gradeLevel: "Grade 2" }),
     );

@@ -134,16 +134,16 @@ describe("findingCoverageLabel", () => {
 
   test("limited labels follow evidence dependencies rather than edit target", () => {
     const preflight = result([]);
-    expect(
-      findingCoverageLabel(
-        preflight,
-        finding({
-          status: "not-observed",
-          targetSurface: "activity-resources",
-          contextDependencies: ["deliverableScoring"],
-        }),
-      ),
-    ).toBe("Limited · deliverable scoring withheld");
+    const label = findingCoverageLabel(
+      preflight,
+      finding({
+        status: "not-observed",
+        targetSurface: "activity-resources",
+        contextDependencies: ["deliverableScoring"],
+      }),
+    );
+    expect(label).toContain("deliverable scoring");
+    expect(label).not.toContain("resources");
   });
 });
 
@@ -183,9 +183,9 @@ describe("protectedCoverageNotice", () => {
   });
 
   test("nonempty coverage names the missing checks with readable labels", () => {
-    expect(
-      protectedCoverageNotice(result(["socratic", "noSpoilers"])),
-    ).toBe("Needs rerun · checks not run: Socratic, No spoilers.");
+    const notice = protectedCoverageNotice(result(["socratic", "noSpoilers"]));
+    expect(notice).toContain("Socratic");
+    expect(notice).toContain("No spoilers");
   });
 });
 

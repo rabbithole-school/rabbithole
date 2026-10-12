@@ -31,9 +31,18 @@ import { authedMutation, authedQuery } from "./lib/customFunctions";
 import { requireTeacherOrSelf } from "./lib/auth";
 import { requireActiveScholarAccess } from "./lib/access";
 import { plantStorySeed } from "./lib/seeds";
+import { seedCardCopy } from "./lib/practice/crossDomainSeeds";
+import { storyCardQuestion } from "./lib/practice/storyCardQuestions";
+import { seedCardQuestion } from "./lib/practice/seedCardQuestions";
 import {
+  isCorrectChoice,
+  isValidCardQuestion,
+} from "../shared/questionCard";
+import {
+  isEligibleCrossDomainSeedMoment,
   isEligibleStoryTransition,
   isStoryEdgeReserved,
+  isTerminalStoryMomentOutcome,
   shouldAdvanceStoryMomentOutcome,
   storyOfferCooldownCutoff,
   storyReofferReserveCutoff,
@@ -41,10 +50,32 @@ import {
 import { eligibleStoryApplication } from "./lib/practice/applicationEligibility";
 import {
   STORY_KIND_LABELS,
-  STANDING_STORY_INVITATION_CAP,
-  standingStoryInvitationsForScholar,
   storyArtUrlForNode,
 } from "./lib/scholarReads";
+
+// Upper bound on active seeds scanned for a cross-domain seed moment. Seed
+// cards have no age window, so the cap is what stops the creation-desc read
+// from scaling with lifetime seed volume (newest-first, so fresh seeds win).
+const RECENT_ACTIVE_SEED_SCAN_CAP = 100;
+
+/**
+ * Every SEED ledger event for a scholar, at any age. Seed events carry no
+ * edge, so they are exactly the `by_scholar_edge` rows with both keys unset —
+ * bounded by how many seed cards the scholar was ever shown (≤1 per 20h).
+ * Needed because seed cards have no age window: a seed settled before the
+ * 45-day reserve read must still be seen as settled.
+ */
+async function seedLedgerForScholar(
+  ctx: QueryCtx | MutationCtx,
+  scholarId: Id<"users">,
+): Promise<Doc<"momentEvents">[]> {
+  return await ctx.db
+    .query("momentEvents")
+    .withIndex("by_scholar_edge", (q) =>
+      q.eq("scholarId", scholarId).eq("fromKey", undefined).eq("toKey", undefined),
+    )
+    .collect();
+}
 
 async function edgeIsReserved(
   ctx: QueryCtx | MutationCtx,
@@ -100,14 +131,131 @@ async function hasRecentOffer(
   scholarId: Id<"users">,
   cutoff: number,
 ): Promise<boolean> {
-  return (
-    (await ctx.db
+  // A question answered from the Quests list (trigger "quests_list") is the
+  // scholar working their backlog, not a done-screen moment — it never spends
+  // the done-screen's one-a-day rarity budget.
+  const recent = ctx.db
+    .query("momentEvents")
+    .withIndex("by_scholar", (q) =>
+      q.eq("scholarId", scholarId).gte("offeredAt", cutoff),
+    );
+  for await (const event of recent) {
+    if (event.trigger !== "quests_list") return true;
+  }
+  return false;
+}
+
+/**
+ * The Quests-list / Scholar's Prep branch of `recordMomentOffered`: the
+ * scholar is answering an open question (`questionQueue.forSelf`) that has no
+ * ledger row yet. Same ledger, same ownership + question checks, but none of
+ * the done-screen's rarity rules — the scholar picked this item off their own
+ * backlog. Idempotent per item: a non-terminal row for the same seed/edge is
+ * returned rather than duplicated; a settled (terminal) item is refused.
+ */
+async function offerFromQuestsList(
+  ctx: MutationCtx,
+  args: {
+    scholarId: Id<"users">;
+    kind?: "story" | "seed";
+    fromKey?: string;
+    toKey?: string;
+    seedId?: Id<"seeds">;
+  },
+  clientEventId: string,
+  now: number,
+): Promise<{ eventId: Id<"momentEvents">; seedId: Id<"seeds"> | null }> {
+  const newest = (events: Doc<"momentEvents">[]) =>
+    events.sort(
+      (a, b) => b.offeredAt - a.offeredAt || b._creationTime - a._creationTime,
+    )[0];
+
+  if ((args.kind ?? "story") === "seed") {
+    if (
+      args.seedId === undefined ||
+      args.fromKey !== undefined ||
+      args.toKey !== undefined
+    ) {
+      throw new Error("Seed moments require only seedId");
+    }
+    const seed = await ctx.db.get(args.seedId);
+    if (
+      !seed ||
+      seed.scholarId !== args.scholarId ||
+      seed.status !== "active" ||
+      seed.suggestionType !== "cross_domain" ||
+      !isValidCardQuestion(seedCardQuestion(seed.topic))
+    ) {
+      throw new Error("This seed has no open question");
+    }
+    const latest = newest(
+      (await seedLedgerForScholar(ctx, args.scholarId)).filter(
+        (event) => event.seedId === seed._id,
+      ),
+    );
+    if (latest) {
+      if (isTerminalStoryMomentOutcome(latest.outcome)) {
+        throw new Error("This question is already settled");
+      }
+      return { eventId: latest._id, seedId: seed._id };
+    }
+    const eventId = await ctx.db.insert("momentEvents", {
+      scholarId: args.scholarId,
+      kind: "seed",
+      seedId: seed._id,
+      trigger: "quests_list",
+      offeredAt: now,
+      outcome: "offered",
+      clientEventId,
+    });
+    return { eventId, seedId: seed._id };
+  }
+
+  const { fromKey, toKey } = args;
+  if (args.seedId !== undefined || fromKey === undefined || toKey === undefined) {
+    throw new Error("Story moments require fromKey and toKey");
+  }
+  // The Quests list only ever lists a story the scholar ALREADY holds as an
+  // active story seed (`questionQueueForScholar`), so this path never plants
+  // one: an edge the scholar never unlocked has no row to mint.
+  const storySeed = await ctx.db
+    .query("seeds")
+    .withIndex("by_scholar_story_edge", (q) =>
+      q.eq("scholarId", args.scholarId).eq("storyFromKey", fromKey).eq("storyToKey", toKey),
+    )
+    .first();
+  if (
+    !storySeed ||
+    storySeed.origin !== "story" ||
+    storySeed.status !== "active" ||
+    !isValidCardQuestion(storyCardQuestion(fromKey, toKey))
+  ) {
+    throw new Error("This story has no open question");
+  }
+  const latest = newest(
+    await ctx.db
       .query("momentEvents")
-      .withIndex("by_scholar", (q) =>
-        q.eq("scholarId", scholarId).gte("offeredAt", cutoff),
+      .withIndex("by_scholar_edge", (q) =>
+        q.eq("scholarId", args.scholarId).eq("fromKey", fromKey).eq("toKey", toKey),
       )
-      .first()) !== null
+      .collect(),
   );
+  if (latest && isTerminalStoryMomentOutcome(latest.outcome)) {
+    throw new Error("This question is already settled");
+  }
+  const seedId = storySeed._id;
+  if (latest) return { eventId: latest._id, seedId };
+  const eventId = await ctx.db.insert("momentEvents", {
+    scholarId: args.scholarId,
+    kind: "story",
+    fromKey,
+    toKey,
+    trigger: "quests_list",
+    offeredAt: now,
+    outcome: "offered",
+    clientEventId,
+  });
+  return { eventId, seedId };
 }
 
 /**
@@ -203,6 +351,10 @@ export const storyMomentForScholar = authedQuery({
 
       for await (const edge of outgoing) {
         if (edge.story === undefined) continue;
+        // The card is a question: a story edge with no authored question is
+        // never offered (keep looking), so the card never renders questionless.
+        const question = storyCardQuestion(edge.fromKey, edge.toKey);
+        if (!isValidCardQuestion(question)) continue;
         if (
           await edgeIsReserved(
             ctx,
@@ -232,6 +384,7 @@ export const storyMomentForScholar = authedQuery({
         const artUrl = await storyArtUrlForNode(ctx, edge.toKey);
 
         return {
+          kind: "story" as const,
           fromKey: edge.fromKey,
           toKey: edge.toKey,
           skillLabel: skill.label,
@@ -249,8 +402,55 @@ export const storyMomentForScholar = authedQuery({
             : { probe: edge.story.probe }),
           kindLabel: STORY_KIND_LABELS[edge.story.kind],
           hasApplication: application !== null,
+          question,
         };
       }
+    }
+
+    const events = await ctx.db
+      .query("momentEvents")
+      .withIndex("by_scholar", (q) =>
+        q
+          .eq("scholarId", args.scholarId)
+          .gte("offeredAt", storyReofferReserveCutoff(now)),
+      )
+      .collect();
+    // Cross-domain seeds stay card-eligible at any age until settled or
+    // reserved (isEligibleCrossDomainSeedMoment). Scan active seeds
+    // newest-first so the newest eligible preview wins, while the cap
+    // prevents lifetime-volume reads.
+    const seedEvents = [
+      ...events,
+      ...(await seedLedgerForScholar(ctx, args.scholarId)),
+    ];
+    const seed = (
+      await ctx.db
+        .query("seeds")
+        .withIndex("by_scholar_status", (q) =>
+          q.eq("scholarId", args.scholarId).eq("status", "active"),
+        )
+        .order("desc")
+        .take(RECENT_ACTIVE_SEED_SCAN_CAP)
+    ).find(
+      (candidate) =>
+        isValidCardQuestion(seedCardQuestion(candidate.topic)) &&
+        isEligibleCrossDomainSeedMoment(candidate, seedEvents, now),
+    );
+    if (seed) {
+      // Card copy resolves from the registry by topic at READ time, so seeds
+      // minted before a copy rewrite still show the current card.
+      const card = seedCardCopy(seed);
+      return {
+        kind: "seed" as const,
+        seedId: seed._id,
+        hook: card.title,
+        teaser: card.teaser,
+        ...(card.visualEmoji === undefined
+          ? {}
+          : { visualEmoji: card.visualEmoji }),
+        hasApplication: false,
+        question: seedCardQuestion(seed.topic)!,
+      };
     }
 
     return null;
@@ -274,9 +474,14 @@ export const storyMomentForScholar = authedQuery({
 export const recordMomentOffered = authedMutation({
   args: {
     scholarId: v.id("users"),
-    fromKey: v.string(),
-    toKey: v.string(),
+    kind: v.optional(v.union(v.literal("story"), v.literal("seed"))),
+    fromKey: v.optional(v.string()),
+    toKey: v.optional(v.string()),
+    seedId: v.optional(v.id("seeds")),
     clientEventId: v.string(),
+    // "quests": the scholar is answering an open question from the Quests
+    // list / Scholar's Prep (see offerFromQuestsList). Omitted = done screen.
+    surface: v.optional(v.literal("quests")),
   },
   handler: async (ctx, args) => {
     const isTeacher = requireTeacherOrSelf(ctx.user, args.scholarId);
@@ -298,18 +503,84 @@ export const recordMomentOffered = authedMutation({
     if (existing)
       return {
         eventId: existing._id,
-        seedId: await storySeedIdForEdge(
-          ctx,
-          args.scholarId,
-          existing.fromKey,
-          existing.toKey,
-        ),
+        seedId:
+          existing.kind === "seed"
+            ? (existing.seedId ?? null)
+            : existing.fromKey && existing.toKey
+              ? await storySeedIdForEdge(
+                  ctx,
+                  args.scholarId,
+                  existing.fromKey,
+                  existing.toKey,
+                )
+              : null,
       };
 
+    const now = Date.now();
+
+    if (args.surface === "quests") {
+      return await offerFromQuestsList(ctx, args, clientEventId, now);
+    }
+
+    // No eviction: the old two-card "New quests" section capped standing
+    // invitations by marking the oldest `dismissed` on every new offer. That
+    // section is retired — every open moment now lives in the Quests list
+    // (questionQueue), which has no cap — so evicting would silently close a
+    // question the scholar never let go of.
+
+    const kind = args.kind ?? "story";
+    if (kind === "seed") {
+      if (
+        args.seedId === undefined ||
+        args.fromKey !== undefined ||
+        args.toKey !== undefined
+      ) {
+        throw new Error("Seed moments require only seedId");
+      }
+      const seed = await ctx.db.get(args.seedId);
+      if (!seed || seed.scholarId !== args.scholarId) {
+        throw new Error("Seed not found");
+      }
+      const events = await ctx.db
+        .query("momentEvents")
+        .withIndex("by_scholar", (q) =>
+          q
+            .eq("scholarId", args.scholarId)
+            .gte("offeredAt", storyReofferReserveCutoff(now)),
+        )
+        .collect();
+      events.push(...(await seedLedgerForScholar(ctx, args.scholarId)));
+      if (
+        !isValidCardQuestion(seedCardQuestion(seed.topic)) ||
+        !isEligibleCrossDomainSeedMoment(seed, events, now)
+      ) {
+        throw new Error("This seed moment is not eligible to be offered");
+      }
+      const eventId = await ctx.db.insert("momentEvents", {
+        scholarId: args.scholarId,
+        kind: "seed",
+        seedId: seed._id,
+        trigger: "fluency_transition",
+        offeredAt: now,
+        outcome: "offered",
+        clientEventId,
+      });
+      return { eventId, seedId: seed._id };
+    }
+
+    if (
+      args.seedId !== undefined ||
+      args.fromKey === undefined ||
+      args.toKey === undefined
+    ) {
+      throw new Error("Story moments require fromKey and toKey");
+    }
     const context = await storyEdgeContext(ctx, args.fromKey, args.toKey);
     if (!context) throw new Error("Story edge not found");
+    if (!isValidCardQuestion(storyCardQuestion(args.fromKey, args.toKey))) {
+      throw new Error("This story moment is not eligible to be offered");
+    }
 
-    const now = Date.now();
     if (
       await hasRecentOffer(
         ctx,
@@ -329,19 +600,6 @@ export const recordMomentOffered = authedMutation({
       )
     ) {
       throw new Error("This story moment is not eligible to be offered");
-    }
-
-    const standingInvitations = await standingStoryInvitationsForScholar(
-      ctx,
-      args.scholarId,
-      Number.POSITIVE_INFINITY,
-    );
-    if (standingInvitations.length >= STANDING_STORY_INVITATION_CAP) {
-      const oldest = standingInvitations.at(-1)!;
-      await ctx.db.patch(oldest.eventId, {
-        outcome: "dismissed",
-        outcomeAt: now,
-      });
     }
 
     // Auto-keep. Deliberately does NOT advance the outcome past "offered" —
@@ -418,6 +676,57 @@ export const recordMomentOutcome = authedMutation({
 
     await applyMomentOutcome(ctx, event, args.outcome);
     return event._id;
+  },
+});
+
+/**
+ * Record the scholar's answer to the card's question. FEEDBACK-ONLY: it never
+ * touches mastery or spaced repetition. Correctness is computed here from the
+ * same lookup the selector used (never trusted from the client). First answer
+ * wins: a repeat call returns the stored result unchanged. Advances the
+ * outcome to "probed" through the shared precedence rules (a later or terminal
+ * outcome is never regressed).
+ */
+export const recordMomentAnswer = authedMutation({
+  args: { eventId: v.id("momentEvents"), choiceIndex: v.number() },
+  handler: async (ctx, args) => {
+    const event = await ctx.db.get("momentEvents", args.eventId);
+    if (!event) throw new Error("Moment event not found");
+    // Self-only: the scholar who owns the row.
+    if (event.scholarId !== ctx.user._id) {
+      throw new Error("Not your moment");
+    }
+
+    if (event.answerIndex !== undefined && event.answerCorrect !== undefined) {
+      return { correct: event.answerCorrect, answerIndex: event.answerIndex };
+    }
+
+    let question;
+    if (event.kind === "seed") {
+      const seed = event.seedId ? await ctx.db.get(event.seedId) : null;
+      question = seed ? seedCardQuestion(seed.topic) : undefined;
+    } else if (event.fromKey && event.toKey) {
+      question = storyCardQuestion(event.fromKey, event.toKey);
+    }
+    if (!isValidCardQuestion(question)) {
+      throw new Error("This moment has no question");
+    }
+    if (
+      !Number.isInteger(args.choiceIndex) ||
+      args.choiceIndex < 0 ||
+      args.choiceIndex >= question.choices.length
+    ) {
+      throw new Error("Choice out of range");
+    }
+
+    const correct = isCorrectChoice(question, args.choiceIndex);
+    await ctx.db.patch(event._id, {
+      answerIndex: args.choiceIndex,
+      answerCorrect: correct,
+      answeredAt: Date.now(),
+    });
+    await applyMomentOutcome(ctx, event, "probed");
+    return { correct, answerIndex: args.choiceIndex };
   },
 });
 

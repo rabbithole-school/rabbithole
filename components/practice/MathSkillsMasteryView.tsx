@@ -33,7 +33,6 @@ import {
   HStack,
   IconButton,
   Input,
-  Menu,
   Popover,
   Portal,
   Spinner,
@@ -42,7 +41,7 @@ import {
   useBreakpointValue,
   VisuallyHidden,
 } from "@chakra-ui/react";
-import { ArrowsOutSimple, CaretLeft, CaretRight, Check, Funnel, ListBullets, MapTrifold, SidebarSimple, X } from "@phosphor-icons/react";
+import { ArrowsOutSimple, CaretLeft, CaretRight, Check, ListBullets, MapTrifold, SidebarSimple, X } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Avatar } from "@/components/Avatar";
@@ -53,6 +52,7 @@ import { StudioControlBar } from "@/components/practice/StudioControlBar";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { MasteryDot } from "@/components/MasteryDot";
+import { StatusFilterMenu } from "@/components/ui/StatusFilterMenu";
 import { MASTERY_DOT_COLOR } from "@/shared/masteryDialPalette";
 import { STRUGGLING_TITLE_LABEL } from "@/shared/masteryLexicon";
 import type { RosterScholar } from "@/hooks/useScholarRoster";
@@ -1119,90 +1119,13 @@ function MasteryStatusMark({
   return <MasteryDot state={status} size={size} />;
 }
 
-function MasteryStatusFilter({
-  selected,
-  onChange,
-}: {
-  selected: ReadonlySet<MasteryFilterKey>;
-  onChange: (next: Set<MasteryFilterKey>) => void;
-}) {
-  const toggle = (status: MasteryFilterKey) => {
-    const next = new Set(selected);
-    if (next.has(status)) next.delete(status);
-    else next.add(status);
-    onChange(next);
-  };
-  // "Filter" is now a compact control — access ("All | Served") is the primary
-  // way to narrow the class, so this stays a quiet secondary. A small count
-  // rides the funnel only when some mastery bands are hidden.
-  const hiddenCount = MASTERY_FILTER_ORDER.length - selected.size;
-
-  return (
-    <Menu.Root closeOnSelect={false} positioning={{ placement: "bottom-end" }}>
-      <Menu.Trigger asChild>
-        <Button
-          size="sm"
-          variant="ghost"
-          h="auto"
-          minH="32px"
-          px={2.5}
-          py={1.5}
-          gap={1.5}
-          flexShrink={0}
-          color={hiddenCount > 0 ? "violet.700" : "charcoal.500"}
-          _hover={{ bg: "gray.50" }}
-          aria-label="Filter skills by mastery"
-        >
-          <Funnel size={14} weight={hiddenCount > 0 ? "fill" : "regular"} />
-          <Text fontFamily="heading" fontSize="sm" fontWeight="600">
-            Filter
-          </Text>
-          {hiddenCount > 0 && (
-            <Box
-              as="span"
-              minW="16px"
-              h="16px"
-              px={1}
-              borderRadius="full"
-              bg="violet.500"
-              color="white"
-              fontFamily="heading"
-              fontSize="2xs"
-              fontWeight="700"
-              lineHeight="16px"
-              textAlign="center"
-            >
-              {hiddenCount}
-            </Box>
-          )}
-        </Button>
-      </Menu.Trigger>
-      <Portal>
-        <Menu.Positioner>
-          <Menu.Content minW="200px">
-            {MASTERY_FILTER_ORDER.map((status) => (
-              <Menu.CheckboxItem
-                key={status}
-                value={status}
-                checked={selected.has(status)}
-                cursor="pointer"
-                onClick={() => toggle(status)}
-              >
-                <HStack gap={2.5} justify="space-between" w="full">
-                  <HStack gap={2}>
-                    <MasteryStatusMark status={status} />
-                    <Text>{MASTERY_FILTER_LABEL[status]}</Text>
-                  </HStack>
-                  <Menu.ItemIndicator color="violet.600" />
-                </HStack>
-              </Menu.CheckboxItem>
-            ))}
-          </Menu.Content>
-        </Menu.Positioner>
-      </Portal>
-    </Menu.Root>
-  );
-}
+// The mastery bands in filter order, each with its dial-colour swatch, for the
+// shared "Filter" menu (which doubles as the dial-colour legend).
+const MASTERY_FILTER_ITEMS = MASTERY_FILTER_ORDER.map((status) => ({
+  key: status,
+  label: MASTERY_FILTER_LABEL[status],
+  icon: <MasteryStatusMark status={status} />,
+}));
 
 export function MathSkillsMasteryView({
   domain,
@@ -3145,7 +3068,12 @@ export function MathSkillsMasteryView({
           />
           {/* Mastery-band filter — a compact "Filter" button whose dropdown
               doubles as the dial-colour legend. Shared across List and Map. */}
-          <MasteryStatusFilter selected={statuses} onChange={onStatusesChange} />
+          <StatusFilterMenu
+            items={MASTERY_FILTER_ITEMS}
+            selected={statuses}
+            onChange={onStatusesChange}
+            ariaLabel="Filter skills by mastery"
+          />
           <ViewToggle
             items={[
               {

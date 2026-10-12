@@ -102,10 +102,31 @@ export type BreakerOperation =
 // ─── Commands ────────────────────────────────────────────────────────────
 
 /**
- * An ordering domain. The host runs at most one command per domain at a time,
- * in emission order, using the same keyed mutex the outbox uses. Ephemeral
- * commands declare no domain: they are independent, deduplicated by id, and
- * executed immediately.
+ * An ordering domain. `domain` only governs ordering ACROSS host calls to a
+ * command's `run` — the keyed mutex (`practiceCoordinator.ts`'s `executeAll`,
+ * shared by web and native) serializes same-domain commands from different
+ * mounts/StrictMode double-invocations so, e.g., breaker fresh issuance can
+ * never overtake the lifecycle write that authorizes it.
+ *
+ * It is NOT what keeps one screen's commands in order — that is a stronger,
+ * host-side guarantee `practiceReduce` leans on but does not itself enforce:
+ * both hosts (`hooks/usePracticeMachine.ts`, `native/src/hooks/
+ * usePracticeMachine.ts`) drain one emitted batch through `executeAll`, which
+ * `await`s each command's `run` before starting the next, REGARDLESS of
+ * domain. So at most one command is ever in flight per practice screen, in
+ * emission order — domain-tagged and ephemeral alike. Ephemeral commands
+ * (no `domain`) are independent and deduplicated by id, but on the shipped
+ * hosts they still execute in that same one-at-a-time sequence, never
+ * concurrently with another command.
+ *
+ * The lane gate at the top of `practiceReduce` (search "A suspended lane
+ * owns the screen") depends on this: it assumes a lane-opening command
+ * (e.g. `launchCoach`) cannot overtake an in-flight `submitAnswer` whose
+ * result is still due, which only holds because of the host-side
+ * sequencing above, not because of anything the reducer or this domain
+ * mechanism enforces on its own. See `shared/practiceMachine.explore.test.ts`
+ * ("busyHasALiveResolver" / trace (a)) for the counterexample that
+ * ordering rules out.
  */
 export type CommandDomain = string;
 
@@ -204,7 +225,24 @@ export type PracticeCommand =
   | { kind: "openHandoff"; id: CommandId; entryMode: "ladder" | "spiral" }
   /** Rehearse only: a staff member drives the drill with an injected grader and
    *  the machine emits NO durable command at all. */
-  | { kind: "gradeLocally"; id: CommandId; entry: OutboxAnswer };
+  | { kind: "gradeLocally"; id: CommandId; entry: OutboxAnswer }
+  /** Ephemeral. Install a client-side PROVISIONAL verdict for a bare fact
+   *  (convex/lib/practice/factVerdict.ts) so a Fast math answer is marked the
+   *  instant it is submitted. The host answers with `local:provisionalGraded`,
+   *  and only THAT emits the durable `submitAnswer` — the server still grades,
+   *  records, and wins any disagreement. */
+  | { kind: "gradeProvisionally"; id: CommandId; entry: OutboxAnswer; correct: boolean }
+  /** Ephemeral. Run the Next / Try again the scholar tapped while a
+   *  provisional verdict was still confirming (`ui:hold`). The host runs its
+   *  ordinary handler, which sends the ordinary `ui:advance` / `ui:retry`. */
+  | { kind: "releaseHeld"; id: CommandId; action: HeldAction }
+  /** Ephemeral. A provisional verdict's answer was lost (neither submitted nor
+   *  queued) and the mark was unwound: the host drops what it rendered and
+   *  logged for that receipt. */
+  | { kind: "retractProvisional"; id: CommandId; clientEventId: string };
+
+/** What a scholar can tap on a provisional verdict before it is confirmed. */
+export type HeldAction = "advance" | "retry";
 
 export type ResumeClearReason =
   | "fresh-serve"
@@ -295,6 +333,20 @@ export type ItemState = {
   /** Per-item dedup for pulling the coach off an exhausted hint ladder. State,
    *  not a ref: it is a fact about the item, not an imperative handle. */
   ladderCoachPulled: boolean;
+  /** A provisional verdict on screen whose `submitAnswer` has not come back.
+   *  The item shows feedback, but it may not advance, retry, or open a hint
+   *  until the server confirms — so a reconciliation always lands on the item
+   *  it belongs to. `counted`/`wasRecorded` are what the provisional grade
+   *  changed, kept so a lost submit can be undone exactly. */
+  confirming: {
+    commandId: CommandId;
+    correct: boolean;
+    counted: boolean;
+    wasRecorded: boolean;
+    /** A Next / Try again tapped before the server answered (last tap wins),
+     *  released as a `releaseHeld` command once it does. */
+    held: HeldAction | null;
+  } | null;
 };
 
 export type HintState = {
@@ -347,6 +399,11 @@ export type BreakerState = {
    *  exception: their pending entry re-emits the SAME semantic id after an
    *  explicit retry. */
   emitted: readonly CommandId[];
+  /** The run input key this episode belongs to. A cold mount hydrates a
+   *  breaker before any run has loaded, so `run.inputKey` is still null there
+   *  and cannot say which run the episode owns; the host passes the key it is
+   *  serving. Only a settled breaker reads it (see `run:inputsChanged`). */
+  runKey?: string | null;
 };
 
 export type RunState = {
@@ -432,6 +489,7 @@ export function newPracticeState(args: {
       clientEventKey: null,
       clientEventReplay: null,
       ladderCoachPulled: false,
+      confirming: null,
     },
     hint: freshHint(),
     breaker: null,
@@ -471,8 +529,14 @@ export type PracticeEvent =
        *  reuse the receipt. */
       clientEventKey?: string;
       entry: OutboxAnswer;
+      /** The client's own verdict for a bare fact (`localFactVerdict`), when it
+       *  has one. Honored only where no server-side consequence can hinge on
+       *  the grade arriving first — see `canGradeProvisionally`. */
+      provisionalCorrect?: boolean;
     }
   | { type: "ui:advance"; nextItemId?: string | null }
+  /** Next / Try again tapped while a provisional verdict is confirming. */
+  | { type: "ui:hold"; action: HeldAction }
   | { type: "ui:retry" }
   | { type: "ui:hintPressed" }
   | { type: "ui:hintLadderPulled" }
@@ -530,7 +594,19 @@ export type PracticeEvent =
         easyItemId: string | null;
         confirmedLifecycle?: readonly BreakerLifecycleOperation[];
       };
+      /** The run input key the host is serving this episode on. */
+      inputKey?: string;
     }
+  /** The counterpart of `hydrate:breaker`: the server reports no breaker
+   *  episode that belongs to the run this screen is about to serve — either
+   *  there is none at all (terminal, or its window closed), or the live one
+   *  belongs to a different domain (`breakerEpisodeAppliesToRun`). Clearing
+   *  local breaker state is the HOST's call because only it knows which run
+   *  it is about to ask for; the reducer just obeys, and no-ops when there is
+   *  nothing hydrated. Without this, breaker state outlived the episode on a
+   *  mounted screen and `run:inputsChanged` refused every load for as long as
+   *  the component stayed mounted — which is longer than the episode itself. */
+  | { type: "hydrate:noBreakerForRun" }
   | { type: "hydrate:resume"; idx: number; hasRecorded: boolean; itemId: string | null }
   | { type: "run:inputsChanged"; inputKey: string }
   | { type: "run:reloadRequested" }
@@ -558,6 +634,13 @@ export type PracticeEvent =
   // ── rehearsal's local grade, fed back through the SAME reducer path as a
   //    server grade so rehearse never grows split canonical state ──
   | { type: "local:graded"; id: CommandId; correct: boolean }
+  /** The host installed a provisional fact verdict; now submit it for real. */
+  | {
+      type: "local:provisionalGraded";
+      id: CommandId;
+      correct: boolean;
+      entry: OutboxAnswer;
+    }
   // ── lanes returning control (the typed bridge) ──
   | { type: "lane:entered"; lane: Lane }
   | { type: "lane:mappingAnswered"; recorded: boolean; correct: boolean }
@@ -594,6 +677,7 @@ export function isAwaiting(state: PracticeState, id: CommandId): boolean {
   if (state.item.phase.kind === "submitting" && state.item.phase.commandId === id) {
     return true;
   }
+  if (state.item.confirming?.commandId === id) return true;
   if (state.hint.pendingCommandId === id) return true;
   if (state.run.pendingLoad?.id === id) return true;
   const breaker = state.breaker;
@@ -621,6 +705,47 @@ export function isAwaiting(state: PracticeState, id: CommandId): boolean {
  *  the sixteen scattered early-returns the web component grew. */
 function allowDurable(state: PracticeState): boolean {
   return state.mode === "live";
+}
+
+/** A provisional verdict is safe only where the server's grade cannot open or
+ *  advance anything the screen must react to before moving on: a live run with
+ *  the spiral breaker suppressed (the Fast math round) and no lane or breaker
+ *  episode in progress. Everywhere else the answer waits for the server. */
+function canGradeProvisionally(state: PracticeState): boolean {
+  return (
+    allowDurable(state) &&
+    state.run.suppressBreaker &&
+    state.breaker === null &&
+    state.lane === null
+  );
+}
+
+export const provisionalCommandId = (clientEventId: string): CommandId =>
+  `provisional:${clientEventId}`;
+
+/** Release a tap held during confirmation only if it still applies to what
+ *  the scholar now sees: a held Next only when the server agreed with the
+ *  provisional verdict (an overturned one deserves to be read), a held Try
+ *  again only when the confirmed verdict is still a miss. */
+function releaseHeld(
+  state: PracticeState,
+  held: HeldAction | null,
+  provisionalCorrect: boolean,
+): Transition {
+  const phase = state.item.phase;
+  if (
+    !held ||
+    phase.kind !== "feedback" ||
+    (held === "advance" && phase.correct !== provisionalCorrect) ||
+    (held === "retry" && phase.correct)
+  ) {
+    return none(state);
+  }
+  const { id, seq } = ephemeral(state);
+  return {
+    state: { ...state, seq },
+    commands: [{ kind: "releaseHeld", id, action: held }],
+  };
 }
 
 function ephemeral(state: PracticeState): { id: CommandId; seq: number } {
@@ -916,6 +1041,19 @@ function withBreakerCommands(state: PracticeState, commands: PracticeCommand[]):
   };
 }
 
+/** The episode reached its result on THIS mount: a correct fresh answer, or
+ *  a graded or unavailable easy finish. The server treats every one of these
+ *  as terminal and stops reporting the episode, but the close card has not
+ *  necessarily been shown yet. */
+function breakerSettledHere(flow: BreakerState["flow"]): boolean {
+  return (
+    flow.fresh?.correct === true ||
+    flow.easy === "correct" ||
+    flow.easy === "missed" ||
+    flow.easy === "unavailable"
+  );
+}
+
 function advanceFlow(
   state: PracticeState,
   event: Parameters<typeof advanceBreakerFlow>[1],
@@ -965,6 +1103,7 @@ function freshItem(itemId: string | null): ItemState {
     clientEventKey: null,
     clientEventReplay: null,
     ladderCoachPulled: false,
+    confirming: null,
   };
 }
 
@@ -1043,6 +1182,26 @@ function breakerProgress(flow: BreakerFlow): number {
  * same reason: a double tap or a late async resolution must never strand a
  * struggling kid.
  */
+/**
+ * True when `itemId` is the breaker's pinned fresh item AND it is already the
+ * item on screen — a re-issued `serveBreakerFresh` (an in-place `?domain=`
+ * round trip re-hydrates with an empty `emitted`) returning the item the
+ * scholar may be mid-answer on (TRA-376). The reducer keeps its item state in
+ * that case, and the command executors skip the host's reinstall, which would
+ * otherwise wipe the typed answer, hint ladder and result on screen. One
+ * predicate for both so they cannot disagree.
+ */
+export function breakerFreshItemOnScreen(
+  state: PracticeState,
+  itemId: string,
+): boolean {
+  return (
+    state.breaker !== null &&
+    state.breaker.freshItemId === itemId &&
+    state.item.itemId === itemId
+  );
+}
+
 export function practiceReduce(
   state: PracticeState,
   event: PracticeEvent,
@@ -1050,8 +1209,18 @@ export function practiceReduce(
   // A suspended lane owns the screen. The machine still owns items/idx/log and
   // the continuation; it just refuses to act on item events until the lane
   // returns through its typed event. Persistence and hydration still flow.
+  // Depends on the host command-ordering contract documented on
+  // `CommandDomain` above: a lane-opening command cannot overtake an
+  // in-flight `server:submit*`/`server:hint*` result on the shipped hosts.
+  // The one exception: the server's verdict on a provisional answer always
+  // lands, so a lane opened during confirmation can never strand `confirming`.
+  const confirmsProvisional =
+    "id" in event &&
+    state.item.confirming !== null &&
+    event.id === state.item.confirming.commandId;
   if (
     state.lane &&
+    !confirmsProvisional &&
     !isLaneEvent(event) &&
     !isPersistenceEvent(event) &&
     !event.type.startsWith("ui:breaker") &&
@@ -1093,6 +1262,33 @@ export function practiceReduce(
         };
       }
 
+      if (
+        event.provisionalCorrect !== undefined &&
+        canGradeProvisionally(state)
+      ) {
+        const id = provisionalCommandId(event.clientEventId);
+        return {
+          state: {
+            ...state,
+            item: {
+              ...state.item,
+              phase: { kind: "submitting", commandId: id },
+              clientEventId: event.clientEventId,
+              clientEventKey: event.clientEventKey ?? null,
+              clientEventReplay: event.entry.submissionReplay ?? null,
+            },
+          },
+          commands: [
+            {
+              kind: "gradeProvisionally",
+              id,
+              entry: event.entry,
+              correct: event.provisionalCorrect,
+            },
+          ],
+        };
+      }
+
       const id = submitCommandId(event.clientEventId);
       return {
         state: {
@@ -1119,6 +1315,49 @@ export function practiceReduce(
     case "server:submitSucceeded": {
       if (!isAwaiting(state, event.id)) return none(state);
       const { result } = event;
+      const confirming = state.item.confirming;
+      if (confirming?.commandId === event.id) {
+        // The server's verdict on an answer already marked provisionally. It
+        // wins: a disagreement re-marks the item and corrects the tallies. The
+        // breaker never opens here — provisional grading only runs with it
+        // suppressed (`canGradeProvisionally`).
+        const flipped = result.correct !== confirming.correct;
+        const countNow = result.correct && !confirming.wasRecorded;
+        const next: PracticeState = {
+          ...state,
+          run: {
+            ...state.run,
+            correctCount:
+              state.run.correctCount -
+              (confirming.counted ? 1 : 0) +
+              (countNow ? 1 : 0),
+          },
+          item: {
+            ...state.item,
+            phase:
+              state.item.phase.kind === "feedback"
+                ? { kind: "feedback", correct: result.correct }
+                : state.item.phase,
+            missCount: flipped
+              ? state.item.missCount + (result.correct ? -1 : 1)
+              : state.item.missCount,
+            confirming: null,
+            clientEventId: null,
+            clientEventKey: null,
+            clientEventReplay: null,
+          },
+        };
+        const saved = saveResume(next);
+        const released = releaseHeld(
+          saved.state,
+          confirming.held,
+          confirming.correct,
+        );
+        return {
+          state: released.state,
+          commands: [saved.command, ...released.commands],
+        };
+      }
       const missCount = result.correct ? state.item.missCount : state.item.missCount + 1;
       let next: PracticeState = {
         ...state,
@@ -1173,6 +1412,7 @@ export function practiceReduce(
             lifecycle: { confirmed: [], pending: [] },
             easyRequested: false,
             emitted: [],
+            runKey: state.run.inputKey,
           },
         };
         commands.push(clearResume(next, "breaker-started"));
@@ -1210,6 +1450,30 @@ export function practiceReduce(
 
     case "server:submitQueued": {
       if (!isAwaiting(state, event.id)) return none(state);
+      if (state.item.confirming?.commandId === event.id) {
+        // Durably queued behind the outbox. The provisional verdict stays on
+        // screen — it is the fact's own arithmetic, not a claim the server
+        // made — and the server grades the attempt when the queue drains.
+        const saved = saveResume({
+          ...state,
+          item: {
+            ...state.item,
+            confirming: null,
+            clientEventId: null,
+            clientEventKey: null,
+            clientEventReplay: null,
+          },
+        });
+        const released = releaseHeld(
+          saved.state,
+          state.item.confirming.held,
+          state.item.confirming.correct,
+        );
+        return {
+          state: released.state,
+          commands: [saved.command, ...released.commands],
+        };
+      }
       // Durably queued and NOT graded. The scholar may move on — an outage must
       // not trap them — but nothing here claims a verdict, and `hasRecorded`
       // still becomes true so the resume position skips the answered item.
@@ -1234,6 +1498,45 @@ export function practiceReduce(
 
     case "server:submitFailed": {
       if (!isAwaiting(state, event.id)) return none(state);
+      const lost = state.item.confirming;
+      if (lost?.commandId === event.id) {
+        // The answer was neither submitted nor queued, so the provisional mark
+        // is unwound exactly and the scholar answers again with the SAME
+        // receipt — the same contract as a non-provisional failed submit.
+        const { id: retractId, seq: retractSeq } = ephemeral(state);
+        const unwound: PracticeState = {
+          ...state,
+          run: {
+            ...state.run,
+            correctCount: state.run.correctCount - (lost.counted ? 1 : 0),
+            answeredCount:
+              state.run.answeredCount - (lost.wasRecorded ? 0 : 1),
+          },
+          item: {
+            ...state.item,
+            phase: { kind: "answering" },
+            hasRecorded: lost.wasRecorded,
+            missCount: lost.correct
+              ? state.item.missCount
+              : state.item.missCount - 1,
+            confirming: null,
+            clientEventReplay: event.submissionReplay,
+          },
+          seq: retractSeq,
+        };
+        return {
+          state: unwound,
+          commands: state.item.clientEventId
+            ? [
+                {
+                  kind: "retractProvisional",
+                  id: retractId,
+                  clientEventId: state.item.clientEventId,
+                },
+              ]
+            : [],
+        };
+      }
       // Neither submitted nor durably queued: the scholar must not advance past
       // an answer that was lost. Back to answering, receipt retained so the
       // retry carries the SAME id.
@@ -1246,6 +1549,50 @@ export function practiceReduce(
           clientEventReplay: event.submissionReplay,
         },
       });
+    }
+
+    case "local:provisionalGraded": {
+      // The provisional fact verdict is on screen: show it as feedback NOW and
+      // send the answer for real. The receipt is retained until the server
+      // answers, so a failed submit retries under the same id.
+      if (!isAwaiting(state, event.id)) return none(state);
+      if (!state.item.clientEventId) return none(state);
+      const submitId = submitCommandId(state.item.clientEventId);
+      const counted = event.correct && !state.item.hasRecorded;
+      const next: PracticeState = {
+        ...state,
+        run: {
+          ...state.run,
+          correctCount: state.run.correctCount + (counted ? 1 : 0),
+          answeredCount: state.run.answeredCount + (state.item.hasRecorded ? 0 : 1),
+        },
+        item: {
+          ...state.item,
+          phase: { kind: "feedback", correct: event.correct },
+          hasRecorded: true,
+          missCount: event.correct ? state.item.missCount : state.item.missCount + 1,
+          confirming: {
+            commandId: submitId,
+            correct: event.correct,
+            counted,
+            wasRecorded: state.item.hasRecorded,
+            held: null,
+          },
+        },
+      };
+      const seq = next.seq + 1;
+      return {
+        state: { ...next, seq },
+        commands: [
+          { kind: "haptic", id: `ui:${seq}`, style: event.correct ? "success" : "warning" },
+          {
+            kind: "submitAnswer",
+            id: submitId,
+            domain: outboxDomain(state.scholarId),
+            entry: event.entry,
+          },
+        ],
+      };
     }
 
     case "local:graded": {
@@ -1285,8 +1632,22 @@ export function practiceReduce(
     }
 
     // ── moving through the run ───────────────────────────────────────────
+    case "ui:hold": {
+      // A failed submit drops the hold with the mark: the scholar is back to
+      // answering, so neither Next nor Try again applies any more.
+      if (!state.item.confirming) return none(state);
+      return none({
+        ...state,
+        item: {
+          ...state.item,
+          confirming: { ...state.item.confirming, held: event.action },
+        },
+      });
+    }
+
     case "ui:retry": {
       if (state.item.phase.kind !== "feedback") return none(state);
+      if (state.item.confirming) return none(state);
       return none({
         ...state,
         item: { ...state.item, phase: { kind: "retry", missCount: state.item.missCount } },
@@ -1295,8 +1656,10 @@ export function practiceReduce(
 
     case "ui:advance": {
       if (state.terminal) return none(state);
-      // A queued answer may advance; a submitting one may not.
+      // A queued answer may advance; a submitting one may not, and neither may
+      // a provisional verdict the server has not confirmed yet.
       if (state.item.phase.kind === "submitting") return none(state);
+      if (state.item.confirming) return none(state);
       const nextIdx = state.run.idx + 1;
       if (nextIdx >= state.run.itemCount) return terminate(state, "run-complete");
       return none({
@@ -1313,7 +1676,8 @@ export function practiceReduce(
         !allowDurable(state) ||
         state.terminal ||
         !state.item.itemId ||
-        state.item.phase.kind === "submitting"
+        state.item.phase.kind === "submitting" ||
+        state.item.confirming !== null
       ) {
         return none(state);
       }
@@ -1487,7 +1851,10 @@ export function practiceReduce(
     }
 
     case "lane:coachEnded": {
-      if (!state.breaker) return none({ ...state, lane: null });
+      // Without a breaker this is a stale reply: dropping the breaker also
+      // closes its coach chat (`hydrate:noBreakerForRun`), so whatever lane is
+      // open now belongs to something else and must not be closed by it.
+      if (!state.breaker) return none(state);
       if (
         hasEmitted(
           state.breaker,
@@ -1516,6 +1883,16 @@ export function practiceReduce(
       }
       if (!isAwaiting(state, event.id)) return none(state);
       if (state.breaker.flow.fresh) return none(state);
+      // The pinned item is ALREADY on screen: a re-hydrate (an in-place
+      // `?domain=` round trip) rebuilt the breaker with an empty `emitted` and
+      // re-issued it. Resetting the item here would discard an answer already
+      // in flight — its grade dropped as stale, the one fresh item answered
+      // twice, the server keeping the first verdict (TRA-376). Keep the item;
+      // only the flow advance is idempotent enough to apply. A cold mount has
+      // no copy of the item on screen, so it still takes the full path below.
+      if (breakerFreshItemOnScreen(state, event.itemId)) {
+        return none(advanceFlow(state, { type: "freshServed" }));
+      }
       const next: PracticeState = {
         ...advanceFlow(state, { type: "freshServed" }),
         run: { ...state.run, idx: 0, itemCount: 1 },
@@ -1775,6 +2152,15 @@ export function practiceReduce(
       if (state.item.phase.kind === "submitting") {
         return none({ ...state, item: { ...state.item, phase: { kind: "answering" } } });
       }
+      if (state.item.confirming?.commandId === event.id) {
+        // A provisional answer whose submit threw: unwind it like a lost one,
+        // or the item would wait on a confirmation that can never arrive.
+        return practiceReduce(state, {
+          type: "server:submitFailed",
+          id: event.id,
+          submissionReplay: state.item.clientEventReplay ?? false,
+        });
+      }
       return none(state);
     }
 
@@ -1790,9 +2176,19 @@ export function practiceReduce(
               episode.confirmedLifecycle ?? [],
             )
           : state.breaker;
+      // The same episode re-projected while the host serves it under a new
+      // input key (the pin or started-state changed, the episode still
+      // applies): it now belongs to that run.
+      const rekeyedBreaker =
+        sameTrigger &&
+        reconciledBreaker &&
+        event.inputKey !== undefined &&
+        reconciledBreaker.runKey !== event.inputKey
+          ? { ...reconciledBreaker, runKey: event.inputKey }
+          : reconciledBreaker;
       const projectedState =
-        reconciledBreaker !== state.breaker
-          ? { ...state, breaker: reconciledBreaker }
+        rekeyedBreaker !== state.breaker
+          ? { ...state, breaker: rekeyedBreaker }
           : state;
       const projectedBreaker = projectedState.breaker;
       if (
@@ -1836,6 +2232,7 @@ export function practiceReduce(
           },
           easyRequested: false,
           emitted: [],
+          runKey: event.inputKey ?? state.run.inputKey,
         },
       };
       const commands: PracticeCommand[] = [];
@@ -1878,7 +2275,54 @@ export function practiceReduce(
       });
     }
 
+    case "hydrate:noBreakerForRun": {
+      if (!state.breaker) return none(state);
+      // An episode this mount just FINISHED stops being reported the moment
+      // the server records the result (a correct fresh answer or a graded /
+      // unavailable easy finish makes it terminal), so the host sends this
+      // event right then. Dropping it there yanked the close card — the
+      // recovery the scholar just earned — and the outcome row it records.
+      // Keep a settled breaker until the scholar closes it or the run changes
+      // (see `run:inputsChanged`); it can never be hydrated from the server,
+      // so it cannot refuse a cold mount's load.
+      if (breakerSettledHere(state.breaker.flow)) return none(state);
+      // Only the breaker's own state is dropped — and that includes its coach
+      // chat, which is the breaker's screen rather than the run's. Left open
+      // with no episode behind it, the chat's one escape ("Easy one, then
+      // stop") is a no-op, so a scholar whose episode expired mid-coach sat in
+      // a dead conversation over their own run. A chat still open when the
+      // episode expires has sat idle: an active one would have hit
+      // HANDOFF_MAX_ASSISTANT_TURNS and ended long before, but an abandoned
+      // one never ends by itself. The run underneath is left exactly as it
+      // was, so the host's
+      // `run:inputsChanged` (or the existing payload, if the inputs did not
+      // actually change) decides what happens next — this event never serves
+      // anything itself.
+      const coachOpen =
+        state.lane === "handoff" && state.breaker.flow.stage === "coach";
+      return none({
+        ...state,
+        breaker: null,
+        ...(coachOpen ? { lane: null } : {}),
+      });
+    }
+
     case "run:inputsChanged": {
+      // A hydrated breaker owns the screen and refuses to start a run
+      // underneath itself — that is what keeps a relaunch mid-repair from
+      // re-serving the interrupted playlist. Moving to a run the episode does
+      // NOT belong to is not an exception to that rule: the host clears the
+      // breaker first with `hydrate:noBreakerForRun`, so by the time this
+      // event lands there is nothing left to own the screen.
+      if (
+        state.breaker &&
+        breakerSettledHere(state.breaker.flow) &&
+        (state.breaker.runKey ?? state.run.inputKey) !== event.inputKey
+      ) {
+        // Moving to another run past a settled close card: nothing is left
+        // for the finished episode to own.
+        state = { ...state, breaker: null };
+      }
       if (state.breaker) return none(state);
       if (state.run.inputKey === event.inputKey) return none(state);
       if (state.run.allMapping && state.run.inputKey !== null) {
@@ -1900,7 +2344,10 @@ export function practiceReduce(
     }
 
     case "run:reloadRequested": {
-      if (state.breaker) return none(state);
+      if (state.breaker && !breakerSettledHere(state.breaker.flow)) {
+        return none(state);
+      }
+      if (state.breaker) state = { ...state, breaker: null };
       const inputKey =
         state.run.pendingLoad?.inputKey ??
         state.run.failedInputKey ??

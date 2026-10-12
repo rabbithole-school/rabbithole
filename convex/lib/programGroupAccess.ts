@@ -1,6 +1,7 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { includesProgramGuests } from "../../shared/scholarGroupRouting";
+import { hasCurriculumAccessForInstitution } from "./curriculumAccess";
 import { resolveInstitutionLens } from "./institutionLens";
 import { isPlatformAdminRole } from "./roles";
 import {
@@ -189,6 +190,66 @@ export async function requireProgramPublishAccess(
     throw new Error("Forbidden: this program group is not assigned to you.");
   }
   return group;
+}
+
+/**
+ * The units a program group can schedule existing work from: active catalog
+ * (not Independent Study) units stamped to the group's OWN school, editable by
+ * the caller. This is the set
+ * `ensureProgramAssignment` accepts (same-school stamp + unit edit access), so
+ * the program picker's unit column and its search agree with the server guard
+ * instead of offering units that fail on submit. Pass an already-authorized
+ * group (`requireProgramPublishAccess`).
+ */
+export async function programSchedulableUnits(
+  ctx: ProgramAccessCtx,
+  user: Doc<"users">,
+  group: Doc<"scholarGroups">,
+): Promise<Doc<"units">[]> {
+  const institutionId = group.institutionId;
+  if (
+    !institutionId ||
+    !(await hasCurriculumAccessForInstitution(ctx, user, institutionId))
+  ) {
+    return [];
+  }
+  const units = await ctx.db
+    .query("units")
+    .withIndex("by_institution", (q) => q.eq("institutionId", institutionId))
+    .collect();
+  // Independent Study units are a scholar's own work, not program curriculum
+  // — and are stamped to the school too, so the index alone would surface them.
+  return units.filter((unit) => unit.isActive && !unit.authorScholarId);
+}
+
+export type ProgramCurriculumAccessStatus =
+  | { hasCurriculumAccess: true }
+  | { hasCurriculumAccess: false; institutionName: string };
+
+/**
+ * Distinguishes "no curriculum access at this group's school" from "no
+ * matches" — `programSchedulableUnits` collapses both into `[]`, which the
+ * Add work dialog's unit column and curriculum search used to render as an
+ * unexplained empty result (TRA-327). Callers that need to tell the two
+ * apart (so they can name the reason) check this first.
+ */
+export async function programCurriculumAccessStatus(
+  ctx: ProgramAccessCtx,
+  user: Doc<"users">,
+  group: Doc<"scholarGroups">,
+): Promise<ProgramCurriculumAccessStatus> {
+  const institutionId = group.institutionId;
+  if (
+    institutionId &&
+    (await hasCurriculumAccessForInstitution(ctx, user, institutionId))
+  ) {
+    return { hasCurriculumAccess: true };
+  }
+  const institution = institutionId ? await ctx.db.get(institutionId) : null;
+  return {
+    hasCurriculumAccess: false,
+    institutionName: institution?.name ?? "this school",
+  };
 }
 
 export async function requireProgramCaptureReviewAccess(

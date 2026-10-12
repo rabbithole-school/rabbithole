@@ -220,6 +220,35 @@ export const isGroupInScope = (
   return roster.length > 0 && roster.every((id) => isScholarInScope(scope, id));
 };
 
+/**
+ * A group's name if the caller may see it, else null (callers then say
+ * `HIDDEN_GROUP`). `scholarAppAccess` finds group grants by scanning EVERY
+ * school's groups for the scholar (the tile's own rule, so the answer stays
+ * true), so a group it reports can belong to another school. Such a group
+ * still counts toward "can open"; only its name is withheld. Both the staff
+ * aide's access answer (`appAudiences`) and the teacher app panel's "via
+ * <group>" chips (`scholarApps.listForScholar`, TRA-447) label through here.
+ *
+ * The test is `isGroupInScope`, the one the app-wide `groups` list filters by.
+ * It also hides a legacy UNSTAMPED group whose roster reaches beyond the
+ * caller's scholars, even one the push writer treats as the primary school's.
+ * So the stand-in says what is true for every case — the caller cannot see
+ * this group — rather than claiming where the group belongs. (The app-wide
+ * `pushes` list names a push's group by the push's school instead, so the two
+ * can differ for such a legacy group.)
+ */
+export async function groupLabelInScope(
+  ctx: QueryCtx,
+  scope: ExternalAppScope,
+  groupId: Id<"scholarGroups">,
+): Promise<string | null> {
+  const group = await ctx.db.get(groupId);
+  if (!group || !isGroupInScope(scope, group)) return null;
+  return group.name;
+}
+
+export const HIDDEN_GROUP = "a group not visible to you";
+
 const inScholarScope = isScholarInScope;
 
 const norm = (s: string) => s.trim().toLowerCase();

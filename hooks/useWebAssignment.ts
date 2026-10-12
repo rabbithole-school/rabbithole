@@ -91,10 +91,42 @@ export function useWebAssignment() {
         });
         if (result.completed) {
           haptic("success");
-          toaster.success({ title: "Marked complete" });
+          const completionId = result.completionId;
+          toaster.success({
+            title: "Marked complete",
+            // Undo only a mark this tap created — the scholar's own. A row a
+            // teacher or scan already wrote isn't theirs to take back.
+            ...(result.undoAvailable && completionId
+              ? {
+                  duration: 8000,
+                  action: {
+                    label: "Undo",
+                    onClick: () => {
+                      void convex
+                        .mutation(api.activityCompletions.undoHomeworkDoneForSelf, {
+                          completionId,
+                        })
+                        .then((undo) => {
+                          if (!undo.ok) toaster.error({ title: undo.message });
+                        })
+                        .catch(() =>
+                          toaster.error({ title: "Couldn't undo that. Try again." }),
+                        );
+                    },
+                  },
+                }
+              : {}),
+          });
+        } else if (markDone && result.refusal) {
+          // A Done tap that can't record must say so — it used to close
+          // silently, so a scholar tapped Done on the same video 59 times.
+          toaster.error({ title: result.refusal.message });
         }
       } catch (err) {
         console.error("Web assignment finalize failed:", err);
+        if (markDone) {
+          toaster.error({ title: "Couldn't mark it done. Try again." });
+        }
       }
     },
     [convex, donePrompt],

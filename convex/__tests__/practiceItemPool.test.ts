@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -7,9 +7,27 @@ import { hasTemplate } from "../lib/practice/templates";
 
 const modules = (import.meta as ImportMeta & { glob: (p: string) => Record<string, () => Promise<unknown>> }).glob("../**/*.ts");
 
+let sharedT: TestConvex<typeof schema> | null = null;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  if (!sharedT) throw new Error("Shared convexTest not initialized");
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
+
 async function seedUser(
-  t: ReturnType<typeof convexTest>,
-  role: string,
+  t: TestConvex<typeof schema>,
+  role: Doc<"users">["role"],
   username: string,
 ) {
   return await t.run(async (ctx) =>
@@ -17,7 +35,7 @@ async function seedUser(
   );
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -93,8 +111,7 @@ describe("practiceItemPool — reads", () => {
   });
 
   test("poolForNode: null for unknown node; template previews + stored items for a real one", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const teacher = await seedUser(t, "teacher", "pool-teacher");
     const asTeacher = await asUser(t, teacher);
 
@@ -143,8 +160,7 @@ describe("practiceItemPool — reads", () => {
   });
 
   test("poolSummary: reports per-node and per-strand content coverage", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const teacher = await seedUser(t, "teacher", "pool-teacher2");
     const asTeacher = await asUser(t, teacher);
 
@@ -255,8 +271,7 @@ describe("practiceItemPool — reads", () => {
   });
 
   test("poolForNode: targeted rehearsal excludes stretch-only items", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const teacher = await seedUser(t, "teacher", "stretch-only-pool-teacher");
     const asTeacher = await asUser(t, teacher);
 
@@ -327,8 +342,7 @@ describe("practiceItemPool — reads", () => {
   });
 
   test("gates: a scholar cannot read the pool (answers included) or write items", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedUser(t, "scholar", "pool-scholar");
     const asScholar = await asUser(t, scholar);
 
@@ -357,8 +371,7 @@ describe("practiceItemPool — reads", () => {
   });
 
   test("curriculum_designer passes the gate (design-side surface)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const designer = await seedUser(t, "curriculum_designer", "pool-designer");
     const asDesigner = await asUser(t, designer);
     const pool = await asDesigner.query(api.practiceItemPool.poolForNode, { nodeKey: "count_to_10" });
@@ -373,8 +386,7 @@ describe("practiceItemPool — reads", () => {
 
 describe("practiceItemPool — authoring", () => {
   test("createItem validates + normalizes the answer; bad answers are refused", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const teacher = await seedUser(t, "teacher", "author-teacher");
     const asTeacher = await asUser(t, teacher);
 
@@ -430,8 +442,7 @@ describe("practiceItemPool — authoring", () => {
   });
 
   test("an authored answerUnit is enforced by the real scholar-facing grader", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const teacher = await seedUser(t, "teacher", "unit-teacher");
     const scholar = await seedUser(t, "scholar", "unit-scholar");
     const asTeacher = await asUser(t, teacher);
@@ -546,8 +557,7 @@ describe("practiceItemPool — authoring", () => {
   });
 
   test("updateItem edits are live in grading (submitAnswer grades against the NEW answer)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const teacher = await seedUser(t, "teacher", "edit-teacher");
     const scholar = await seedUser(t, "scholar", "edit-scholar");
     const asTeacher = await asUser(t, teacher);
@@ -585,8 +595,7 @@ describe("practiceItemPool — authoring", () => {
   });
 
   test("manipulative items: answer edits refused, ungradable spec refused, gradable spec saved", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const teacher = await seedUser(t, "teacher", "manip-teacher");
     const asTeacher = await asUser(t, teacher);
 
@@ -618,8 +627,7 @@ describe("practiceItemPool — authoring", () => {
   });
 
   test("a structurally-invalid manipulative spec (gradable goal, missing renderer fields) is refused", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const teacher = await seedUser(t, "teacher", "smoke-teacher");
     const asTeacher = await asUser(t, teacher);
 
@@ -650,8 +658,7 @@ describe("practiceItemPool — authoring", () => {
   });
 
   test("storeGeneratedItems replace clears word items but PRESERVES manipulatives", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     await t.run(async (ctx) => {
       await ctx.db.insert("practiceItems", {
         skillKey: "partition_shapes",
@@ -702,8 +709,7 @@ describe("practiceItemPool — authoring", () => {
   });
 
   test("deleteItem removes the row", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const teacher = await seedUser(t, "teacher", "del-teacher");
     const asTeacher = await asUser(t, teacher);
 
@@ -720,8 +726,7 @@ describe("practiceItemPool — authoring", () => {
   });
 
   test("createItem: a valid manipulative spec is accepted through the public mutation; an invalid one is rejected", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const teacher = await seedUser(t, "teacher", "manip-create-teacher");
     const asTeacher = await asUser(t, teacher);
 
@@ -760,8 +765,7 @@ describe("practiceItemPool — authoring", () => {
 
 describe("practiceItemPool — manipulativeCoverage", () => {
   test("counts stored word items + manipulatives per skill, across a domain and across all registered domains", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const teacher = await seedUser(t, "teacher", "coverage-teacher");
     const asTeacher = await asUser(t, teacher);
     const baseline = await asTeacher.query(api.practiceItemPool.manipulativeCoverage, {
@@ -870,8 +874,7 @@ describe("practiceItemPool — manipulativeCoverage", () => {
   });
 
   test("gates: a scholar cannot read manipulative coverage", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedUser(t, "scholar", "coverage-scholar");
     const asScholar = await asUser(t, scholar);
 
@@ -882,8 +885,7 @@ describe("practiceItemPool — manipulativeCoverage", () => {
   });
 
   test("curriculum_designer passes the gate", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const designer = await seedUser(t, "curriculum_designer", "coverage-designer");
     const asDesigner = await asUser(t, designer);
     const rows = await asDesigner.query(api.practiceItemPool.manipulativeCoverage, {

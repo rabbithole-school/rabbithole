@@ -3,6 +3,7 @@ import { internalMutation } from "./_generated/server";
 import { authedQuery, authedMutation } from "./lib/customFunctions";
 import { requireTeacherOrSelf } from "./lib/auth";
 import { requireActiveScholarAccess } from "./lib/access";
+import { assertFreshUpload } from "./lib/freshUpload";
 import type { Id } from "./_generated/dataModel";
 
 /**
@@ -87,6 +88,9 @@ export const getForCard = authedQuery({
       status: task.status,
       completedAt: task.completedAt ?? null,
       photoStorageId: task.photoStorageId ?? null,
+      photoUrl: task.photoStorageId
+        ? await ctx.storage.getUrl(task.photoStorageId)
+        : null,
     };
   },
 });
@@ -177,7 +181,7 @@ export const markDone = authedMutation({
  *      carrying the same storage id in `imageId`.
  *
  * That last step is the whole trick: `imageId` on a `role:"user"` message IS the
- * existing vision path — `convex/http.ts` (`/project-stream`) fetches it and
+ * existing vision path — `convex/http.ts` (`/session-stream`) fetches it and
  * feeds it to the model as base64 vision input. So the tutor reasons from the
  * actual artifact on its NEXT turn with zero streaming changes. We intentionally
  * do NOT create an assistant placeholder / kick a stream here (markDone-style: a
@@ -197,6 +201,8 @@ export const attachPhoto = authedMutation({
     // Owner or teacher/admin only (same gate as markDone).
     const isTeacher = requireTeacherOrSelf(ctx.user, task.scholarId);
     if (isTeacher) await requireActiveScholarAccess(ctx, ctx.user, task.scholarId);
+    // `photoUrl` and the tutor's vision path serve this blob back (TRA-394).
+    await assertFreshUpload(ctx, args.photoStorageId);
 
     // 1 + 2: stamp the evidence + completed state onto the task row.
     await ctx.db.patch(args.id, {

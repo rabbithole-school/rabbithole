@@ -16,11 +16,6 @@ describe("buildHandoffPrompt", () => {
     expect(p).toContain('"3400"');
   });
 
-  it("states the tutor was NOT given the correct answer, and is an all-in partner (not a leak gate)", () => {
-    expect(p).toContain("weren't given the correct answer");
-    expect(p).toContain("NOT graded");
-    expect(p).toContain("great thinking partner");
-  });
 });
 
 describe("deriveHandoffItem + turn cap", () => {

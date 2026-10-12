@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -16,13 +16,24 @@ const modules = (
   import.meta as ImportMeta & { glob: (p: string) => Record<string, () => Promise<unknown>> }
 ).glob("../**/*.ts");
 
-async function seedUser(t: ReturnType<typeof convexTest>, username: string) {
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function seedUser(t: TestConvex<typeof schema>, username: string) {
   return await t.run(async (ctx) =>
     ctx.db.insert("users", { name: `scholar ${username}`, username, role: "scholar" }),
   );
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -35,8 +46,7 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 
 describe("placement warmth floor — serve path", () => {
   test("a graded MISS returns a warm, non-empty reveal line", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedUser(t, "floor_miss");
     const asScholar = await asUser(t, scholar);
     const base = { scholarId: scholar, seed: 7 };
@@ -54,8 +64,7 @@ describe("placement warmth floor — serve path", () => {
   });
 
   test("an honest 'I haven't learned this yet' returns a warm reveal line", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedUser(t, "floor_idk");
     const asScholar = await asUser(t, scholar);
     const base = { scholarId: scholar, seed: 11 };
@@ -77,8 +86,7 @@ describe("placement warmth floor — serve path", () => {
   });
 
   test("a CORRECT answer carries no reveal line (affirmation only)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedUser(t, "floor_correct");
     const asScholar = await asUser(t, scholar);
     const base = { scholarId: scholar, seed: 3 };

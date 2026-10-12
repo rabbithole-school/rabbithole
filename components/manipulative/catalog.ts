@@ -50,11 +50,14 @@ export const MANIPULATIVE_KIND_LABELS: Record<ManipulativeKind, string> = {
   clock: "Clock",
   liquid: "Measuring jars",
   money: "Money",
+  molecule: "Molecule",
 };
 
-export const MANIPULATIVE_KINDS = Object.keys(
-  MANIPULATIVE_KIND_LABELS,
-) as ManipulativeKind[];
+// Molecule is intentionally tutor-tool-only in v1: it has no grading goal, so
+// offering it in the practice-item picker would create an unwinnable item.
+export const MANIPULATIVE_KINDS = (
+  Object.keys(MANIPULATIVE_KIND_LABELS) as ManipulativeKind[]
+).filter((kind) => kind !== "molecule");
 
 /** One representative, gradable example spec per kind — sourced from the same
  *  library the scholar-facing gallery uses, so a teacher starts from a spec
@@ -107,6 +110,7 @@ export type ManipulativeGroup =
   | "Fractions"
   | "Multiplication"
   | "Geometry"
+  | "Chemistry"
   | "Measurement and money"
   | "Chance and data";
 
@@ -117,6 +121,7 @@ export const MANIPULATIVE_GROUP_ORDER: readonly ManipulativeGroup[] = [
   "Fractions",
   "Multiplication",
   "Geometry",
+  "Chemistry",
   "Measurement and money",
   "Chance and data",
 ];
@@ -325,6 +330,14 @@ export const MANIPULATIVE_CATALOG: Record<
     whatYouCanChange:
       "You choose which denominations the bank offers and the target amount; the goal is to make it any way, to make it with an exact number of pieces, or to make it with as few pieces as possible.",
     group: "Measurement and money",
+    production: true,
+  },
+  molecule: {
+    blurb:
+      "Inspect a real PubChem 2D structure, tap atoms to identify them, and trace named substructures.",
+    whatYouCanChange:
+      "The tutor supplies a compound name or PubChem CID and may highlight oxygen atoms or a bridging oxygen; the server resolves every atom, bond, and stereochemical mark.",
+    group: "Chemistry",
     production: true,
   },
 };

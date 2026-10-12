@@ -37,6 +37,7 @@ import {
   verifyInstructionContent,
   type VerifyAtom,
 } from "./lib/practice/instructionVerify";
+import { assertWritableAction } from "./lib/auth";
 
 /** One model-emitted candidate, plus the placement warmth-floor reveal line
  *  (Tier 1c) and the measurement unit the answer must carry. Both are verified
@@ -600,6 +601,7 @@ export const generateAnotherWorkedExample = action({
     avoidPrompts: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args): Promise<WorkedExampleAtom | null> => {
+    await assertWritableAction(ctx);
     const genCtx = await ctx.runQuery(api.instruction.exampleGenContext, {
       scholarId: args.scholarId,
       skillKey: args.skillKey,

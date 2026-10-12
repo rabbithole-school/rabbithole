@@ -12,7 +12,7 @@ firehose?**
 
 ## What this exercises
 
-- The real prompt: `buildMetaSystemPrompt({ …, codeExplorerEnabled: true })`
+- The real prompt: `buildMetaSystemPrompt({ … })` (the Code Explorer section is always on)
   from [`convex/metaPrompts.ts`](../../convex/metaPrompts.ts) — the same builder
   `/meta-stream` uses.
 - The real tools: `list_rabbithole_files` + `read_rabbithole_file` +

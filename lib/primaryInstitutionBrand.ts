@@ -1,3 +1,4 @@
+// Deployment configuration — see DEPLOYMENT.md (Institution brand).
 /**
  * Foundation's neutral printable-form identity. Adopters can replace this
  * generated configuration with their own school branding and contact details.

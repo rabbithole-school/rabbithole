@@ -22,6 +22,8 @@ import {
   STRETCH_EVIDENCE_TYPE,
 } from "../practiceSkills";
 import { STRETCH_SEED_ITEMS } from "../seed/stretchItems";
+import { ALGEBRA_1_SKILLS } from "../seed/algebra1Graph";
+import { DISCRETE_MATH_SKILLS } from "../seed/discreteMathGraph";
 import { parseAnswer, rawAnswersEqual, type AnswerType } from "../lib/practice/answers";
 
 const modules = (
@@ -159,9 +161,8 @@ describe("STRETCH_SEED_ITEMS registry — every authored item is well-formed and
   const typedItems = STRETCH_SEED_ITEMS.filter((it) => it.answerType !== "dialogue");
   const dialogueItems = STRETCH_SEED_ITEMS.filter((it) => it.answerType === "dialogue");
 
-  test.each(typedItems.map((it) => [`${it.skillKey} :: ${it.stem.slice(0, 48)}`, it] as const))(
-    "%s — canonical answer parses as its answerType and self-verifies through the grader",
-    (_label, item) => {
+  test("every authored item parses and self-verifies through the grader", () => {
+    for (const item of typedItems) {
       const type = item.answerType as AnswerType;
       // A non-empty answer the grader can turn into a truth value.
       expect(item.answer.trim().length).toBeGreaterThan(0);
@@ -171,8 +172,8 @@ describe("STRETCH_SEED_ITEMS registry — every authored item is well-formed and
       expect(rawAnswersEqual(item.answer, item.answer, type)).toBe(true);
       // Every stretch item must name an insight technique (the anti-drill gate).
       expect(item.technique.trim().length).toBeGreaterThan(0);
-    },
-  );
+    }
+  });
 
   test("every dialogue item has an empty typed answer and 2–3 server-only rubric criteria", () => {
     for (const item of dialogueItems) {
@@ -270,6 +271,14 @@ describe("STRETCH_SEED_ITEMS registry — every authored item is well-formed and
       expect(seen.has(key)).toBe(false);
       seen.add(key);
     }
+  });
+
+  test("the folded prime node keeps both distinct stretch items", () => {
+    const items = STRETCH_SEED_ITEMS.filter(
+      (item) => item.skillKey === "prime_or_composite",
+    );
+    expect(items).toHaveLength(2);
+    expect(new Set(items.map((item) => item.stem)).size).toBe(2);
   });
 });
 
@@ -539,15 +548,19 @@ describe("STRETCH_SEED_ITEMS — wave-3 fraction-arithmetic strand coverage", ()
 });
 
 describe("STRETCH_SEED_ITEMS — wave-4 algebra-1 application lane coverage", () => {
-  const items = STRETCH_SEED_ITEMS;
-  const nodeKeys = new Set(items.map((it) => it.skillKey));
+  // Only the APPLICATION lane (seed-only `lane: "application"` tag). Wave 5
+  // ships INSIGHT items on many of the same nodes — a different bar — so this
+  // block must not count them.
+  const applications = STRETCH_SEED_ITEMS.filter((it) => it.lane === "application");
+  const applicationNodes = new Set(applications.map((it) => it.skillKey));
 
   // The algebra-1 application lane authored exactly one APPLICATION per accepted
   // node in the `linear-equations` and `linear-functions` strands. Coverage is
   // deliberately partial: 8 of the 20 scoped nodes returned REJECT-ALL because
   // no honest, non-headless application exists (a skipped node beats a costume).
-  // The rejected nodes are asserted ABSENT so a future well-meaning "fill the
-  // gap" pass has to reckon with the bar rather than ship pseudocontext.
+  // The rejected nodes are asserted to carry NO application so a future
+  // well-meaning "fill the gap" pass has to reckon with the bar rather than
+  // ship pseudocontext. (An insight-lane item on those nodes is fine.)
   const acceptedNodes: readonly string[] = [
     "lin_ineq_multi_step",
     "lin_ineq_compound",
@@ -573,23 +586,92 @@ describe("STRETCH_SEED_ITEMS — wave-4 algebra-1 application lane coverage", ()
     "lin_fn_parallel_perpendicular",
   ];
 
-  test("every accepted algebra-1 application node has exactly one authored item", () => {
+  test("every accepted algebra-1 application node has exactly one application item", () => {
     for (const key of acceptedNodes) {
-      const matches = items.filter((it) => it.skillKey === key);
+      const matches = applications.filter((it) => it.skillKey === key);
       expect(matches).toHaveLength(1);
     }
+    expect(applications).toHaveLength(acceptedNodes.length);
   });
 
-  test("deliberately-rejected nodes ship NO item (REJECT-ALL, not costume math)", () => {
-    const present = rejectedNodes.filter((k) => nodeKeys.has(k));
+  test("deliberately-rejected nodes ship NO application (REJECT-ALL, not costume math)", () => {
+    const present = rejectedNodes.filter((k) => applicationNodes.has(k));
     expect(present).toEqual([]);
   });
 
   test("every application item is graded (numeric answerType, never dialogue)", () => {
-    for (const key of acceptedNodes) {
-      const item = items.find((it) => it.skillKey === key);
-      expect(item).toBeDefined();
-      expect(["integer", "decimal", "fraction"]).toContain(item!.answerType);
+    for (const item of applications) {
+      expect(["integer", "decimal", "fraction"]).toContain(item.answerType);
+    }
+  });
+});
+
+describe("STRETCH_SEED_ITEMS — wave-5 algebra-1 + discrete-math insight lane coverage (TRA-96)", () => {
+  const insightItems = STRETCH_SEED_ITEMS.filter((it) => it.lane !== "application");
+  const nodeKeys = new Set(insightItems.map((it) => it.skillKey));
+
+  // Every node in both domains except the one deliberate skip
+  // (gt_path_vs_circuit: no honest single-number insight form).
+  const algebra1Nodes: readonly string[] = [
+    "lin_eq_combine_terms", "lin_eq_distribute", "lin_eq_clear_fractions",
+    "lin_eq_justify_steps", "lin_eq_literal", "lin_eq_abs_value",
+    "lin_ineq_multi_step", "lin_ineq_compound", "lin_eq_model_context",
+    "sys_solution_meaning", "sys_solve_graphing", "sys_substitution",
+    "sys_elimination", "sys_special_cases", "sys_model_context",
+    "sys_linear_inequalities",
+    "fn_identify_function", "fn_notation_evaluate", "slope_two_points",
+    "slope_from_graph", "slope_intercept_form", "lin_fn_from_two_points",
+    "lin_fn_point_slope", "lin_fn_standard_form", "lin_fn_interpret_context",
+    "lin_fn_parallel_perpendicular", "fn_compare_representations",
+    "exp_product_quotient", "exp_power_rule", "exp_zero_negative",
+    "roots_square_cube", "roots_simplify_radicals", "sci_notation_convert",
+    "sci_notation_operations", "exp_fn_evaluate", "exp_growth_decay", "lin_vs_exp",
+    "poly_classify", "poly_add_subtract", "poly_multiply_monomial",
+    "poly_multiply_binomials", "poly_special_products", "factor_gcf",
+    "factor_trinomial_simple", "factor_trinomial_general", "factor_special_forms",
+    "quad_graph_features", "quad_solve_sqrt", "quad_zero_product",
+    "quad_solve_factoring", "quad_complete_square", "quad_formula",
+    "quad_discriminant", "quad_vertex_form", "quad_model_context",
+  ];
+  const discreteMathNodes: readonly string[] = [
+    "count_list_outcomes", "count_organized_count", "addition_principle",
+    "multiplication_principle", "factorial_arrangements", "permutations_r_from_n",
+    "combinations_r_from_n", "permutation_vs_combination", "count_with_restriction",
+    "count_complementary", "pigeonhole_basic", "pigeonhole_generalized",
+    "gt_vertices_edges", "gt_vertex_degree", "gt_degree_sequence",
+    "gt_handshake_sum", "gt_connected", "gt_euler_path", "gt_complete_edges",
+    "gt_tree_definition", "gt_tree_edges", "gt_bipartite", "gt_coloring",
+    "nt_parity_classify", "nt_parity_argument", "nt_parity_proof",
+    "nt_modular_clock", "nt_mod_cycle", "nt_modular_arithmetic", "nt_last_digit",
+    "nt_divisibility_proof", "nt_prime_test_deeper", "nt_twin_primes",
+    "nt_prime_gaps", "nt_gcd_euclid", "nt_linear_congruence",
+    "lg_truth_value", "lg_and", "lg_or", "lg_not", "lg_compound_truth",
+    "lg_negate", "lg_if_then", "lg_converse", "lg_counterexample",
+    "lg_knights_knaves", "lg_deduce_clues",
+  ];
+
+  test("the node lists above ARE the two domain graphs (drift guard)", () => {
+    expect([...algebra1Nodes].sort()).toEqual(ALGEBRA_1_SKILLS.map((s) => s.skillKey).sort());
+    expect([...discreteMathNodes, "gt_path_vs_circuit"].sort()).toEqual(
+      DISCRETE_MATH_SKILLS.map((s) => s.skillKey).sort(),
+    );
+  });
+
+  test("algebra-1: every node carries at least one insight item", () => {
+    expect(algebra1Nodes.filter((k) => !nodeKeys.has(k))).toEqual([]);
+  });
+
+  test("discrete-math: every node except the deliberate skip carries an insight item", () => {
+    expect(discreteMathNodes.filter((k) => !nodeKeys.has(k))).toEqual([]);
+    expect(nodeKeys.has("gt_path_vs_circuit")).toBe(false);
+  });
+
+  test("wave-5 items are graded and never duplicate a stem", () => {
+    const stems = new Set<string>();
+    for (const it of insightItems) {
+      expect(["integer", "decimal", "fraction", "dialogue"]).toContain(it.answerType);
+      expect(stems.has(`${it.skillKey}::${it.stem}`)).toBe(false);
+      stems.add(`${it.skillKey}::${it.stem}`);
     }
   });
 });

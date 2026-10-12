@@ -18,17 +18,24 @@ import * as Clipboard from "expo-clipboard";
 
 import { Markdown } from "@/components/Markdown";
 import { SpeakableBubble } from "@/components/SpeakableBubble";
+import { AppSnapshotBubble } from "@/components/AppSnapshotBubble";
 import { chatBubbleStyles } from "@/lib/chatBubbles";
-import { useColors } from "@/theme";
+import { fonts, useColors } from "@/theme";
 
 export function ChatBubble({
   role,
   content,
   ttsEnabled,
+  stopRequestedAt,
+  appSnapshotUrl,
 }: {
   role: string;
   content: string;
   ttsEnabled: boolean;
+  // Set on the assistant row the user cut short — renders the muted "Stopped"
+  // caption beneath the finished bubble.
+  stopRequestedAt?: number | null;
+  appSnapshotUrl?: string | null;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -39,6 +46,9 @@ export function ChatBubble({
       <View style={[styles.row, styles.rowMine]}>
         <View style={styles.colMine}>
           <View style={[styles.bubble, styles.mine]}>
+            {appSnapshotUrl ? (
+              <AppSnapshotBubble url={appSnapshotUrl} />
+            ) : null}
             <Text style={[styles.bubbleText, styles.textMine]}>{content}</Text>
           </View>
         </View>
@@ -64,6 +74,9 @@ export function ChatBubble({
             <Markdown content={content} color={colors.charcoal} />
           </View>
         </SpeakableBubble>
+        {stopRequestedAt != null ? (
+          <Text style={styles.stopped}>Stopped</Text>
+        ) : null}
       </View>
     </View>
   );
@@ -80,5 +93,13 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     rowTutor: { justifyContent: "flex-start" },
     colMine: { maxWidth: "80%", alignItems: "flex-end" },
     colTutor: { maxWidth: "80%", alignItems: "flex-start" },
+    // The user cut this reply short — a quiet, sentence-case caption under the
+    // bubble (matches the web transcript's "Stopped").
+    stopped: {
+      marginTop: 3,
+      fontFamily: fonts.regular,
+      fontSize: 12,
+      color: c.charcoalSubtle,
+    },
   });
 }

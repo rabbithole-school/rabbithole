@@ -8,8 +8,12 @@ const config = [
       ".claude/**",
       "convex/_generated/**",
       "convex/lib/pdfiumWasm.generated.ts",
+      "marshal-ui/dist/**",
       "native/.expo/**",
       "native/vendor/convex_generated/**",
+      "native/src/lib/appKitAssets.generated.ts",
+      "public/app-kit/**",
+      "shared/appKitSources.generated.ts",
       "scripts/**",
       "vendor/**",
     ],
@@ -238,6 +242,37 @@ const config = [
       ],
     },
   },
+  // ── The tenancy boundary ───────────────────────────────────────────────────
+  //
+  // Rabbithole hosts more than one school on ONE production Convex deployment,
+  // and the auth wrappers in `convex/lib/customFunctions.ts` check ROLE ONLY —
+  // never tenant. A `teacherQuery` that takes a client-supplied `scholarId` and
+  // reads it straight out of the db passes typecheck, tests and review, and is
+  // a cross-tenant leak. This rule is the mechanical reminder; the helpers that
+  // actually enforce the boundary live in `convex/lib/access.ts` and
+  // `convex/lib/institutionLens.ts`.
+  //
+  // `files` is load-bearing for the same reason it is in the `react` block near
+  // the top: a flat config registers plugins PER CONFIG OBJECT, so an
+  // `eslint-disable-next-line local/require-tenant-check` comment in a file
+  // this glob does not cover would abort the ENTIRE run with "could not find
+  // plugin local". The rule only ever fires under `convex/`, so the opt-out
+  // only ever appears there — keep the two in sync if that changes.
+  //
+  // The extension list is load-bearing too: it is every extension Convex's
+  // bundler takes as a function entry point (`ENTRY_POINT_EXTENSIONS` in
+  // `node_modules/convex/dist/cjs/bundler/index.js`), so a handler deployed
+  // from a `.tsx`, `.mts` or `.js` file is held to the same boundary as one in
+  // a `.ts` file (TRA-439). `convex/_generated/` is skipped by the bundler and
+  // ignored at the top of this file. The `lint:tenant` / `lint:message-access`
+  // / `lint:query-clock` checkers lint the `convex` directory with this config,
+  // so they follow this glob rather than keeping a list of their own.
+  //
+  // Inherited violations are held in `scripts/tenant-check-baseline.json` and
+  // suppressed by the rule itself, so this lands green and `pnpm lint:ratchet`
+  // holds the rule at zero NEW findings. `pnpm lint:tenant` closes the other
+  // half: it fails on a stale baseline entry (a handler that was fixed but left
+  // listed) and on an opt-out that carries no ` -- reason`.
 ];
 
 export default config;

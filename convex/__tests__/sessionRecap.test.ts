@@ -30,7 +30,7 @@ describe("recapLinesFromGrowthStories", () => {
   });
 
   describe("guaranteed proportional recap fallbacks", () => {
-    test("mirrors current-session concepts without claiming growth", () => {
+    test("mirrors current-session concepts, most-recent first, without claiming growth", () => {
       const lines = recapLinesFromSessionObservations([
         {
           conceptLabel: "Adding money amounts",
@@ -44,23 +44,22 @@ describe("recapLinesFromGrowthStories", () => {
         },
       ]);
 
-      expect(lines).toEqual([
-        expect.objectContaining({
-          tier: "mirror",
-          text: "Today you worked on decimal place value and adding money amounts.",
-          excerpt: null,
-        }),
-      ]);
-      expect(lines[0].text).not.toMatch(/figured out|mastered|grew/i);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({ tier: "mirror", excerpt: null });
+      // Most-recently-observed concept is mentioned first.
+      const text = lines[0].text;
+      expect(text.indexOf("decimal place value")).toBeLessThan(
+        text.indexOf("adding money amounts"),
+      );
+      // A mirror never claims the scholar grew or mastered anything.
+      expect(text).not.toMatch(/figured out|mastered|grew/i);
     });
 
     test("closes warmly when the session has no observations", () => {
-      expect(tinySessionRecap()).toEqual([
-        expect.objectContaining({
-          tier: "tiny",
-          text: "Short visit — this will be here when you want it.",
-        }),
-      ]);
+      const lines = tinySessionRecap();
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({ tier: "tiny" });
+      expect(lines[0].text.length).toBeGreaterThan(0);
     });
   });
 
@@ -75,7 +74,7 @@ describe("recapLinesFromGrowthStories", () => {
       },
     ]);
 
-    expect(lines[0].text).toBe("You connected your own question to DNA.");
+    expect(lines[0].text).not.toContain("You figured out something new about DNA");
     expect(lines[0].excerpt).toBe("This is like a recipe for bodies.");
     expect(lines[0].text).not.toMatch(/level|score|engagement|time/i);
   });

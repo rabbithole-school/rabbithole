@@ -36,3 +36,20 @@ export function pageCountForRange(
   }
   return pageRange.end - pageRange.start + 1;
 }
+
+/**
+ * A capture-station video's length, for the duration pill on its card:
+ * "0:42", "12:05", "1:01:01". Returns null for a missing or nonsensical
+ * duration so the pill simply doesn't render.
+ */
+export function formatVideoDuration(ms: number | null | undefined): string | null {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return null;
+  const totalSeconds = Math.round(ms / 1000);
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${pad(minutes)}:${pad(seconds)}`
+    : `${minutes}:${pad(seconds)}`;
+}

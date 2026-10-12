@@ -13,11 +13,21 @@ const PROB = "probability";
  *  the entries so ordering is deterministic. */
 function q(
   domain: string,
-  entries: { key: string; reason: "review" | "new"; retention?: number }[],
+  entries: {
+    key: string;
+    reason: "review" | "new";
+    isConfirmation?: boolean;
+    retention?: number;
+  }[],
 ): MergeableDomainQueue {
   return {
     domain,
-    entries: entries.map((e) => ({ key: e.key, reason: e.reason, retention: e.retention ?? 1 })),
+    entries: entries.map((e) => ({
+      key: e.key,
+      reason: e.reason,
+      isConfirmation: e.isConfirmation ?? false,
+      retention: e.retention ?? 1,
+    })),
   };
 }
 
@@ -142,6 +152,31 @@ describe("mergeDomainQueues", () => {
       Array.from({ length: 10 }, (_, i) => ({ key: `frac_${i}`, reason: "new" as const })),
     );
     expect(mergeDomainQueues([wna, frac], 8).length).toBe(8);
+  });
+
+  it("caps confirmation items once across a three-domain mixed run", () => {
+    const wna = q(WNA, [
+      { key: "wna_confirmation", reason: "review", isConfirmation: true, retention: 0.1 },
+      { key: "wna_frontier", reason: "new" },
+    ]);
+    const frac = q(FRAC, [
+      { key: "frac_confirmation", reason: "review", isConfirmation: true, retention: 0.2 },
+      { key: "frac_frontier", reason: "new" },
+    ]);
+    const prob = q(PROB, [
+      { key: "prob_confirmation", reason: "review", isConfirmation: true, retention: 0.3 },
+      { key: "prob_frontier", reason: "new" },
+    ]);
+
+    const merged = mergeDomainQueues([wna, frac, prob], 6);
+    const confirmationKeys = new Set([
+      "wna_confirmation",
+      "frac_confirmation",
+      "prob_confirmation",
+    ]);
+
+    expect(merged.filter((entry) => confirmationKeys.has(entry.key))).toHaveLength(2);
+    expect(merged).toHaveLength(5);
   });
 
   it("dedups by domain+key so the same skill is never served twice", () => {

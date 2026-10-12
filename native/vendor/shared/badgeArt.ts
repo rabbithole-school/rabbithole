@@ -3,21 +3,22 @@
 //
 // A badge is the artifact of finishing a STRUCTURED quest (a unit with
 // activities + a deliverable). When a unit's `badgeOnCompletion` fires, we
-// auto-generate topic-true artwork via the Gemini image model — the same SOP
-// the tutor's `generate_image` tool uses. The kid can then remix it a tightly
-// capped number of times (preset style + color only, never a free-text
-// prompt) so customization can't become a distraction.
+// auto-generate topic-true artwork via the charm layer's image model
+// (convex/lib/openaiImage.ts). The kid can then remix it a tightly capped
+// number of times (preset style + color only, never a free-text prompt) so
+// customization can't become a distraction.
 
 /** Default house style — the NASA-style embroidered mission patch. */
 export const DEFAULT_BADGE_STYLE = "patch" as const;
 
-// The image model can't emit a true alpha channel (gemini-3-pro-image-preview /
-// "Nano Banana Pro" returns a solid or a *painted* checkerboard — see
-// convex/lib/badgeChroma.ts). So we render every badge on a FLAT chroma-key
-// green screen and strip it server-side. This is the target key color; the
-// remover samples the actual corner pixels too, so slight model variance is OK.
-export const CHROMA_KEY_RGB: readonly [number, number, number] = [0, 177, 64]; // #00B140
-const CHROMA_BG = `a solid, perfectly flat, uniform chroma-key green screen background (pure green, RGB ${CHROMA_KEY_RGB.join(", ")} / hex #00B140), with absolutely no gradient, no glow, no vignette, and NO drop shadow beneath the badge — every pixel surrounding the badge must be that one identical green so the background can be removed cleanly`;
+// A badge is composited over app chrome, so it needs REAL alpha. GPT-Image-2.5
+// returns it directly (`background: "transparent"`), which is why badges are no
+// longer rendered on a chroma-key green screen and keyed out server-side: the
+// key could never cut a merrowed stitched border or a medallion's specular
+// falloff without fringing the very edges that make the art read as an object.
+// The prompt still has to forbid a painted backdrop, because the model will
+// otherwise fill the alpha with a scene.
+const TRANSPARENT_BG = `a fully TRANSPARENT background — no backdrop color, no painted checkerboard, no scene, no ground plane, no drop shadow beneath the badge, and no glow or vignette around it; every pixel that is not part of the badge itself must be empty`;
 
 /** Default colorway — let the model pick a palette that suits the subject. */
 export const DEFAULT_BADGE_COLORWAY = "auto" as const;
@@ -125,7 +126,7 @@ export function buildBadgePrompt(args: {
       `Embossed in the center, filling the disc: ${scene}, rendered as sleek minimal metallic relief.`,
       `${palette[0].toUpperCase()}${palette.slice(1)} anodized metallic finish, shiny, premium, award-trophy feel.`,
       noText,
-      framing(CHROMA_BG),
+      framing(TRANSPARENT_BG),
     ].join(" ");
   }
 
@@ -136,6 +137,6 @@ export function buildBadgePrompt(args: {
     `Central design, filling the patch: ${scene}, set against a deep navy starfield with a thin orbital arc and a few small stars.`,
     `Retro 1970s space-program aesthetic with ${palette}, clean flat embroidery and soft realistic stitch shading.`,
     noText,
-    framing(CHROMA_BG),
+    framing(TRANSPARENT_BG),
   ].join(" ");
 }

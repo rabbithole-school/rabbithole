@@ -90,6 +90,9 @@ export function DistributeNative({
     snapAxis: "x",
     onChange: report,
     onSettled: report,
+    // The divider is the board's ONLY affordance and nothing about a thin
+    // orange line says "drag me" — so it breathes while the card sits idle.
+    idlePulse: true,
   });
 
   const onLayout = (e: LayoutChangeEvent) => setBoxW(e.nativeEvent.layout.width);

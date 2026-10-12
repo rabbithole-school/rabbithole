@@ -4,7 +4,7 @@ import {
   customAction,
 } from "convex-helpers/server/customFunctions";
 import { query, mutation, action } from "../_generated/server";
-import { requireUser, requireTeacher, requirePlatformAdmin, requireSchoolAdmin, requireCurriculumAccess, requireCurriculumAccessSelf, requireStaffSelf, requireScholarAdmin, requireStaff, assertNotImpersonating } from "./auth";
+import { requireUser, requireTeacher, requirePlatformAdmin, requireSchoolAdmin, requireCurriculumAccess, requireCurriculumAccessSelf, requireStaffSelf, requireScholarAdmin, requireStaff, requireStaffAction, assertCanWrite, assertWritableAction } from "./auth";
 import { Doc } from "../_generated/dataModel";
 
 // ── Authenticated queries/mutations (any logged-in user) ──────────────
@@ -21,7 +21,7 @@ export const authedMutation = customMutation(mutation, {
   args: {},
   input: async (ctx) => {
     const user = await requireUser(ctx);
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
     return { ctx: { ...ctx, user }, args: {} };
   },
 });
@@ -30,6 +30,7 @@ export const authedAction = customAction(action, {
   args: {},
   input: async (ctx) => {
     // Actions don't have db access directly, but we can pass user info
+    await assertWritableAction(ctx);
     return { ctx, args: {} };
   },
 });
@@ -48,7 +49,7 @@ export const teacherMutation = customMutation(mutation, {
   args: {},
   input: async (ctx) => {
     const user = await requireTeacher(ctx);
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
     return { ctx: { ...ctx, user }, args: {} };
   },
 });
@@ -68,7 +69,7 @@ export const scholarAdminMutation = customMutation(mutation, {
   args: {},
   input: async (ctx) => {
     const user = await requireScholarAdmin(ctx);
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
     return { ctx: { ...ctx, user }, args: {} };
   },
 });
@@ -89,8 +90,16 @@ export const staffMutation = customMutation(mutation, {
   args: {},
   input: async (ctx) => {
     const user = await requireStaff(ctx);
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
     return { ctx: { ...ctx, user }, args: {} };
+  },
+});
+
+export const staffAction = customAction(action, {
+  args: {},
+  input: async (ctx) => {
+    await requireStaffAction(ctx);
+    return { ctx, args: {} };
   },
 });
 
@@ -108,7 +117,7 @@ export const curriculumMutation = customMutation(mutation, {
   args: {},
   input: async (ctx) => {
     const user = await requireCurriculumAccess(ctx);
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
     return { ctx: { ...ctx, user }, args: {} };
   },
 });
@@ -158,6 +167,7 @@ export const platformAdminMutation = customMutation(mutation, {
   args: {},
   input: async (ctx) => {
     const user = await requirePlatformAdmin(ctx);
+    await assertCanWrite(ctx);
     return { ctx: { ...ctx, user }, args: {} };
   },
 });
@@ -180,7 +190,7 @@ export const schoolAdminMutation = customMutation(mutation, {
   args: {},
   input: async (ctx) => {
     const user = await requireSchoolAdmin(ctx);
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
     return { ctx: { ...ctx, user }, args: {} };
   },
 });

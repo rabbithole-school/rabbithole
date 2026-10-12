@@ -10,6 +10,8 @@
 // `assignments.activitySchedule`.
 
 import type { Doc, Id } from "../_generated/dataModel";
+import { isFocusShowing } from "../../shared/focusShowing";
+import { dayStartForDayKey, shiftDayKey } from "../../shared/institutionDay";
 
 /** The default window a focus stays open. Teachers may override. */
 export const DEFAULT_FOCUS_MS = 60 * 60 * 1000;
@@ -21,6 +23,11 @@ export type PushDoc = Doc<"pushes">;
 export type PushTarget = PushDoc["target"];
 export type PushAudience = PushDoc["audience"];
 export type PushTiming = PushDoc["timing"];
+export type FocusClock = {
+  nowMs: number;
+  todayDayKey: string;
+  timeZone: string;
+};
 
 /**
  * The scholar-side facts needed to decide whether a push covers someone.
@@ -48,9 +55,10 @@ export type ScholarAudienceContext = {
 /**
  * When a push stops being live on its own.
  *
- * A focus closes at `endsAt`. Nothing else expires on a clock:
- *   - `untilCleared` is the focus lane without a window — it ends when the
- *     scholar completes the work or a teacher wraps it up.
+ * A focus closes its blocking window at `endsAt`. Nothing else expires on a
+ * timestamp:
+ *   - `untilCleared` is the focus lane without a window — it stops showing
+ *     after its institution day unless a teacher wraps it sooner.
  *   - homework is a deadline to meet, not a window that shuts, so an
  *     overdue assignment stays on the plate (that is the point of overdue).
  */
@@ -61,8 +69,8 @@ export function pushExpiresAt(timing: PushTiming): number | null {
 /**
  * Focus ⇒ the "finish this first" lane. Homework ⇒ the due list.
  *
- * `untilCleared` is a focus that never closes, so it shares the focus lane.
- * Only the CLOCK differs between them, never the placement.
+ * `untilCleared` is a focus without an explicit future lifetime, so it shares
+ * the focus lane and remains visible only on the institution day it was set.
  */
 export function pushLane(timing: PushTiming): "classFocus" | "homework" {
   return timing.kind === "homework" ? "homework" : "classFocus";
@@ -73,25 +81,27 @@ export function pushLane(timing: PushTiming): "classFocus" | "homework" {
 /**
  * Is this push still on the scholar's screen?
  *
- * Two gates:
+ * Three gates:
  *   1. `setAt` stamped     — a planned push is agenda-only, never shown
  *   2. `clearedAt` absent  — not wrapped up by a teacher or by the clear job
+ *   3. focus timing         — set today, or explicitly extended into the future
  *
- * Deliberately NOT gated on `endsAt`. A focus whose window has closed but
- * that nobody has wrapped is still the thing the class is on — that is
- * exactly what the teacher's own surface means by "running long", and it
- * offers Extend / Wrap rather than pretending the focus vanished. When the
- * scholar's surfaces disagreed with that, one half of the screen said the
- * day was empty while the other half was still printing "Class focus".
- *
- * The safety this used to buy now lives in `isPushBlocking`: an overrun
- * focus keeps its LABEL but loses its WALL, so a slipped clear job leaves a
- * stale line on a screen instead of a scholar locked out of their own app.
+ * Homework never expires here. An `untilCleared` focus has no future clock, so
+ * it is a same-day instruction unless a teacher clears it sooner.
  */
-export function isPushShowing(push: PushDoc): boolean {
+export function isPushShowing(push: PushDoc, clock: FocusClock): boolean {
   if (push.setAt === undefined) return false;
   if (push.clearedAt !== undefined) return false;
-  return true;
+  if (push.timing.kind === "homework") return true;
+  return isFocusShowing(
+    {
+      setAt: push.setAt,
+      endsAt: push.timing.kind === "focus" ? push.timing.endsAt : undefined,
+    },
+    clock.nowMs,
+    clock.todayDayKey,
+    clock.timeZone,
+  );
 }
 
 /**
@@ -105,15 +115,14 @@ export function isPushShowing(push: PushDoc): boolean {
  * code relied on that and left focuses walling scholars in past their window
  * whenever the job slipped.
  *
- * An `untilCleared` push has no window by construction, so it blocks until a
- * human ends it. That is a teacher deliberately holding the room, not a job
- * failing to fire.
+ * An `untilCleared` push has no window by construction, so it blocks while its
+ * same-day focus is showing.
  */
-export function isPushBlocking(push: PushDoc, now: number): boolean {
-  if (!isPushShowing(push)) return false;
+export function isPushBlocking(push: PushDoc, clock: FocusClock): boolean {
+  if (!isPushShowing(push, clock)) return false;
   if (push.blocking !== true) return false;
   const expiresAt = pushExpiresAt(push.timing);
-  if (expiresAt !== null && expiresAt <= now) return false;
+  if (expiresAt !== null && expiresAt <= clock.nowMs) return false;
   return true;
 }
 
@@ -127,6 +136,32 @@ export function isPushDueForClear(push: PushDoc, now: number): boolean {
   if (push.setAt === undefined) return false;
   const expiresAt = pushExpiresAt(push.timing);
   return expiresAt !== null && expiresAt <= now;
+}
+
+/**
+ * When a push that `isPushShowing` shows at `clock` is EXPECTED to stop
+ * showing. An expectation, not a guarantee:
+ *
+ *   - Inside its window: the window's end, because that is when the clear
+ *     scheduled for it (`pushes.autoClearPush`) stamps `clearedAt`. If that
+ *     clear is late, a push set today keeps showing past its window, as an
+ *     overrun, until the institution-local midnight.
+ *   - Past its window with nothing cleared (an overrun, which a clear normally
+ *     ends within minutes): the midnight after today, the latest
+ *     `isPushShowing` shows it on its own, clear or no clear.
+ *   - A homework push never expires on its own: null.
+ *
+ * A schedule placement's `endsAt` is already the block's end plus
+ * `APP_PLACEMENT_GRACE_MS` (masterSchedule.ts), so the grace needs no term
+ * here. Only meaningful for a push that is showing now. Two readers share it:
+ * the staff "who can use this app" read (`appAudiences.aideGetAppAccess`) and
+ * the per-scholar `until` of `lib/deviceAppProjection.scholarAppAccess`.
+ */
+export function liveUntil(push: PushDoc, clock: FocusClock): number | null {
+  if (push.timing.kind === "homework") return null;
+  const endsAt = pushExpiresAt(push.timing);
+  if (endsAt !== null && endsAt > clock.nowMs) return endsAt;
+  return dayStartForDayKey(shiftDayKey(clock.todayDayKey, 1), clock.timeZone);
 }
 
 // ───────────────────────────── audience ─────────────────────────────
@@ -162,9 +197,10 @@ export function pushCoversScholar(
 export function livePushesForScholar(
   pushes: ReadonlyArray<PushDoc>,
   scholar: ScholarAudienceContext,
+  clock: FocusClock,
 ): PushDoc[] {
   return pushes
-    .filter((p) => isPushShowing(p) && pushCoversScholar(p, scholar))
+    .filter((p) => isPushShowing(p, clock) && pushCoversScholar(p, scholar))
     .sort(comparePushesForPlate);
 }
 
@@ -210,7 +246,7 @@ export function comparePushesForPlate(a: PushDoc, b: PushDoc): number {
 
 // ───────────────────── activitySchedule mirror (migration) ─────────────────
 //
-// Scaffolding for TODO.html#pushes-migrate-activity-schedule. Deleted along
+// Scaffolding for Linear TRA-13. Deleted along
 // with `assignments.activitySchedule` once reads have switched.
 
 export type ScheduleEntry = NonNullable<

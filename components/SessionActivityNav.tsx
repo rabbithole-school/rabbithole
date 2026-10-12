@@ -191,6 +191,7 @@ export function useSessionActivityNav(
   const existingSessionForActivity = (activityId: Id<"activities">) =>
     activeSessions?.find(
       (s) =>
+        !s.freePlay &&
         s.activityId &&
         String(s.activityId) === String(activityId) &&
         (session?.assignmentId

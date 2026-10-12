@@ -202,7 +202,11 @@ describe("messageFlags.toggle — scholar feedback raises a non-urgent alert", (
     expect(alerts[0].severity).toBe("info");
     expect(alerts[0].scholarId).toBe(scholarId);
     expect(alerts[0].body).toContain("Yes, 2 + 2 = 5.");
-    expect(alerts[0].body).toContain("My session");
+    // The session title is BOLD, not italic: this body reaches Slack through
+    // raiseAlert → postMessage({markdown: true}), whose markdown_text field is
+    // CommonMark. Asserting the bare title let a single-asterisk span sit here
+    // rendering italic (TRA-346).
+    expect(alerts[0].body).toContain("On **My session**:");
     expect(alerts[0].body).toContain("2 + 2 is 4, not 5");
   });
 

@@ -25,8 +25,13 @@
  * `native/src/lib/practiceShell.ts`.
  */
 
-import { Box, HStack, Text, VStack } from "@chakra-ui/react";
-import { Check } from "@phosphor-icons/react";
+import { Box, VStack } from "@chakra-ui/react";
+import {
+  VERDICT_MOTION_CSS,
+  VerdictStamp,
+  verdictRing,
+  type VerdictTone,
+} from "@/components/practice/VerdictStamp";
 import { StemText } from "@/components/practice/StemText";
 import { PromptVisual } from "@/components/practice/PromptVisual";
 import { SpeakableLabel } from "@/components/SpeakableLabel";
@@ -35,7 +40,10 @@ import { superscriptExponents } from "@/shared/mathNotation";
 import type { PracticePromptVisual } from "@/shared/practicePromptVisual";
 import { STEM_FONT_LG, STEM_FONT_SM } from "@/shared/practicePromptVisual";
 
-export type VerdictTone = "correct" | "miss" | null;
+// The stamp, ring and motion live in VerdictStamp.tsx (shared with the
+// done-screen QuestionCard); re-exported here for existing importers.
+export { VERDICT_MOTION_CSS };
+export type { VerdictTone };
 
 export function VerdictStemCard({
   stem,
@@ -72,10 +80,8 @@ export function VerdictStemCard({
    *  FastMath feel), not a wordy word-problem card. Default off ⇒ STEM_FONT_SM. */
   big?: boolean;
 }) {
-  const isCorrect = tone === "correct";
   const isMiss = tone === "miss";
-  const visibleLabel = label ?? (isCorrect ? "Correct" : "Not quite");
-  const a11yLabel = announcement ?? visibleLabel;
+  const ring = verdictRing(tone);
   const stemFontSize = big ? STEM_FONT_LG : STEM_FONT_SM;
 
   return (
@@ -86,20 +92,14 @@ export function VerdictStemCard({
         bg="#fffdfa"
         borderWidth="1px"
         borderStyle="solid"
-        borderColor={isCorrect ? "#8fe3bf" : isMiss ? "#f2c98a" : "#ded8cb"}
+        borderColor={ring.borderColor}
         borderRadius="16px"
         p={6}
         minH="120px"
         display="flex"
         alignItems="center"
         justifyContent="center"
-        boxShadow={
-          isCorrect
-            ? "0 0 0 3px rgba(0,181,116,0.18), 0 2px 6px rgba(23,32,27,0.06)"
-            : isMiss
-              ? "0 0 0 3px rgba(255,166,57,0.22)"
-              : "0 1px 2px rgba(23,32,27,0.05)"
-        }
+        boxShadow={ring.boxShadow}
         className={isMiss ? "rh-shake" : undefined}
         transition="border-color 0.3s, box-shadow 0.3s"
       >
@@ -119,54 +119,12 @@ export function VerdictStemCard({
           {promptVisual ? <PromptVisual spec={promptVisual} /> : null}
         </VStack>
       </Box>
-      {(isCorrect || isMiss) && (
-        <HStack
-          key={stampKey ?? tone ?? "none"}
-          className="rh-stamp"
-          position="absolute"
-          top="-11px"
-          right="-6px"
-          gap={1}
-          px={2.5}
-          py={1}
-          borderRadius="full"
-          fontSize="12px"
-          fontWeight="800"
-          bg={isCorrect ? "#00b574" : "#FFA639"}
-          color={isCorrect ? "#fff" : "#3a2a08"}
-          boxShadow={isCorrect ? "0 5px 14px rgba(0,181,116,0.42)" : "0 5px 14px rgba(255,166,57,0.42)"}
-          pointerEvents="none"
-          whiteSpace="nowrap"
-          aria-live="polite"
-          aria-label={a11yLabel}
-        >
-          {isCorrect ? <Check weight="bold" aria-hidden="true" /> : null}
-          <Text as="span" aria-hidden="true">{visibleLabel}</Text>
-        </HStack>
-      )}
+      <VerdictStamp
+        key={stampKey ?? tone ?? "none"}
+        tone={tone}
+        label={label}
+        announcement={announcement}
+      />
     </Box>
   );
 }
-
-/**
- * Stamp-pop / card-shake / note-fade keyframes as global CSS classes
- * (`rh-stamp`, `rh-shake`, `rh-note`) — self-injected here so any consumer
- * (Placement.tsx) needs no separate wiring. PracticeSession.tsx keeps its OWN
- * transcript-scroll keyframes (rh-rise/rh-float-up — a different concern,
- * choreographing which problem is on screen) and also happens to already
- * declare `rh-note`/`rh-stamp`/`rh-shake` locally for its pre-extraction
- * paint; that duplication is harmless (identical rules, browsers just apply
- * them twice) and deliberately left alone to keep this extraction surgical.
- */
-export const VERDICT_MOTION_CSS = `
-@keyframes rhStampPop { from { opacity: 0; transform: scale(0.55); } to { opacity: 1; transform: scale(1); } }
-@keyframes rhShakeX { 0%,100%{transform:translateX(0)} 18%{transform:translateX(-7px)} 38%{transform:translateX(6px)} 58%{transform:translateX(-4px)} 78%{transform:translateX(3px)} }
-@keyframes rhFade { from { opacity: 0; } to { opacity: 1; } }
-.rh-stamp { animation: rhStampPop 0.34s cubic-bezier(0.2,1.35,0.4,1) both; }
-.rh-shake { animation: rhShakeX 0.42s; }
-.rh-note { animation: rhFade 0.3s ease both; }
-@media (prefers-reduced-motion: reduce) {
-  .rh-stamp { animation: none !important; opacity: 1 !important; transform: none !important; }
-  .rh-shake { animation: none !important; }
-}
-`;

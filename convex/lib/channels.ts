@@ -112,9 +112,14 @@ export function scholarSlug(
   return username ?? String(id);
 }
 
-/** The Scholars tab, focused on one scholar by their username slug. */
-export function scholarPath(username: string): string {
-  return username ? `/teacher/scholars/${username}` : `/teacher/scholars`;
+/** The Scholars tab, focused on one scholar by their username slug, and
+ *  optionally on one of their sub-tabs ("documents"), which the scholars route
+ *  reads as the next path segment. */
+export function scholarPath(username: string, subTab?: string): string {
+  if (!username) return `/teacher/scholars`;
+  return subTab
+    ? `/teacher/scholars/${username}/${subTab}`
+    : `/teacher/scholars/${username}`;
 }
 
 /** A scholar's project/session. `remote` opens it as that scholar for staff. */
@@ -138,6 +143,21 @@ export function unitPath(
   // straight to the column-view — never the old /teacher/unit/<id> redirect.
   const paneSeg = opts?.lessonId || opts?.activityId ? "/edit" : "";
   return `/teacher/curriculum/${unitId}${paneSeg}${q ? `?${q}` : ""}`;
+}
+
+/** The activity Preflight pane, auto-launching a manual rehearsal. */
+export function activityRehearsalPath(
+  unitId: string,
+  lessonId: string,
+  activityId: string,
+): string {
+  const query = new URLSearchParams({
+    lesson: lessonId,
+    activity: activityId,
+    surface: "columns",
+    rehearse: "manual",
+  });
+  return `/teacher/curriculum/${encodeURIComponent(unitId)}/preflight?${query.toString()}`;
 }
 
 /** The assignment Run page (Schedule tab, that assignment selected). */

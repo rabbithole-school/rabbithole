@@ -743,6 +743,22 @@ describe("registerWithCode — always requires a valid invite", () => {
       t.mutation(api.users.registerWithCode, { username: "sneaky", code: "bogus" }),
     ).rejects.toThrow(/invalid invite code/i);
   });
+
+  test("empty username is rejected when a valid invite is given", async () => {
+    const t = convexTest(schema, modules);
+    const admin = await seedUser(t, "platform_admin", "avery");
+    const { code } = await (await withUser(t, admin)).mutation(
+      api.institutionInvites.mintCreateInstitutionInvite,
+      {},
+    );
+    await expect(
+      t.mutation(api.users.registerWithCode, {
+        username: "   ",
+        code,
+        institutionName: "A",
+      }),
+    ).rejects.toThrow(/username is required/i);
+  });
 });
 
 // ── bootstrapFirstPlatformAdmin — the admin-key-gated bootstrap ──────────

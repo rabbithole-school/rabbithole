@@ -5,6 +5,8 @@
  * scholar enters a genuinely new strand — the deliberate answer to "the playlist
  * feels too fully Socratic". It sits on the playlist alongside practice but is
  * pure CONTENT: it never grades, never moves mastery, never scores the scholar.
+ * In the run it is now the "Can you already do this?" frame on a real item,
+ * and its move must be about that item — see "The MOVE" below.
  *
  * This module is the PURE core (no `ctx`, no DB) so the selection + fire-once
  * lifecycle rules are unit-testable in isolation. The Convex query/mutations
@@ -28,6 +30,42 @@ export const INSTRUCTION_REOFFER_CAP = 3;
 /** Equal-weight fork copy — preference, not remediation (both grant full credit). */
 export const TRY_FIRST_LABEL = "Try it myself";
 export const SHOW_ME_LABEL = "Show me the move";
+
+// ── "Can you already do this?" — the question framing (2026-10) ─────────────
+// The run's `launchpad` entry is no longer a card in front of the item: the
+// first served item in never-attempted territory wears a small pill, the kid
+// answers the REAL item (an ordinary graded attempt), and the move is shown
+// only if they say "not yet" or miss. Ask, don't tell. Copy lives here so web
+// and native (which vendors this module) render the same words.
+/** The pill above the stem card on the framed item. */
+export const QUESTION_FRAME_PILL = "Can you already do this?";
+/** The quiet link under the answer — the honest don't-know for this item. */
+export const QUESTION_FRAME_NOT_YET = "Not yet — show me";
+/** The primary button under the shown move; returns to answering. */
+export const QUESTION_FRAME_TRY_ONE = "Got it, let me try one";
+
+/** Telemetry plan for the framed item, in call order — the same ledger
+ *  (`instructionEvents`) the doorway card wrote, so the next read has a
+ *  denominator: shown → (show | try) → viewed → completed. Empty in preview or
+ *  without a scholar subject, exactly like `instructionWritesFor`. */
+export function questionFrameWritesFor(
+  event: "frameShown" | "notYet" | "answered" | "moveShown" | "answeredAfterMove",
+  opts: { preview?: boolean; scholarId?: string | null },
+): InstructionWrite[] {
+  if (!shouldRecordInstruction(opts)) return [];
+  switch (event) {
+    case "frameShown":
+      return [{ type: "claimShown" }];
+    case "notYet":
+      return [{ type: "recordChoice", choice: "show" }];
+    case "answered":
+      return [{ type: "recordChoice", choice: "try" }];
+    case "moveShown":
+      return [{ type: "recordViewed" }];
+    case "answeredAfterMove":
+      return [{ type: "recordCompleted" }];
+  }
+}
 
 /** Stable content key for a strand-level Launchpad. Domain-scoped so identically
  *  named strands in different domains never collide. */
@@ -243,14 +281,14 @@ export type InstructionEntry = {
   id: string;
   offerId: string;
   kind: "launchpad";
-  // Node doorway (§4.1): the SAME positioned-sibling mechanics as the strand
-  // doorway, just keyed to a node when a NEW-lane item's specific node is
-  // zero-mastery and has PASSED `node:<nodeKey>` content — even inside an
-  // otherwise partly-known strand (see `selectRunLaunchpad`). Strand takes
-  // precedence whenever both are eligible for the same item (the bigger
-  // moment wins); `level` tells the client/teacher-preview which grain fired,
-  // though today's card renders both identically (title/atoms only).
+  // The run's frame is always NODE grain now (`selectRunLaunchpad`): the move
+  // must be about the framed item, and strand content cannot be shown to be.
+  // "strand" stays in the union for resume snapshots minted before the change.
   level: "strand" | "node";
+  /** Where the move comes from (`FrameMoveSource`). `item_steps` carries no
+   *  atoms — the client renders the item's own TeachingStep. Absent on an
+   *  entry minted before 2026-10-10 (a resumed run), which always had atoms. */
+  move?: FrameMoveSource;
   key: string;
   target: {
     domain: string;
@@ -303,155 +341,220 @@ export function isInstructionSuppressed(
 // below is now the ONE selector; a second one left alive here would be an
 // invitation to re-introduce the same divergence.
 
-/** One served item, reduced to what Launchpad selection needs. */
+// ── The MOVE: what "Not yet — show me" (or a miss) actually shows ──────────
+//
+// The framed item's move must be about THAT ITEM. A kid who says "I don't know
+// how to do this" and gets a lesson about something else has been handed a
+// wall, not a move. (Seen live, 2026-10: "Make 45¢ out of nickels and dimes"
+// — a skip-count node filed under the mult-divide strand — showed the
+// STRAND's "Multiplying counts equal groups… 4 × 3" lesson plus a full eggs
+// manipulative.) So the selector frames an item ONLY when an on-topic move
+// exists, in this precedence:
+//
+//   1. "item_steps"   — the item's OWN faded worked step: the existing
+//                       teach-as-action moment (`practiceSkills.teachingStep`,
+//                       `TeachingStep` on both clients), reused verbatim.
+//   2. "node_content" — PASSED instruction content keyed to the item's own
+//                       node (`node:<nodeKey>`), compacted to its text +
+//                       worked-example atoms (`compactMoveAtoms`).
+//   3. Strand content — NEVER. A `strand:` entry is authored for the strand's
+//                       core move on its own numbers (convex/seed/
+//                       instructionSeed.ts); nothing ties it to any one node,
+//                       so it cannot be shown to be about the framed item.
+//                       It stays where it belongs: the "See an example" shelf.
+//
+// An item with neither is simply not framed.
+
+/** Where the framed item's move comes from (see the precedence above). */
+export type FrameMoveSource = "item_steps" | "node_content";
+
+/** True when an item's worked steps support the teach-as-action faded step —
+ *  the SAME predicate `practiceSkills.teachingStep` uses to decide between the
+ *  interactive step and reveal-only (a single-blank fade needs ≥2 steps). One
+ *  definition, so "frameable by its own step" can never disagree with "the
+ *  teaching moment actually has a step to show". */
+export function hasTeachingStep(workedSteps: readonly unknown[] | null | undefined): boolean {
+  return (workedSteps?.length ?? 0) >= 2;
+}
+
+/** The atom kinds a move may carry inline: words and a worked example. Kids
+ *  skip text, so the move is short — explorers, manipulatives, videos and
+ *  story hooks stay on the "See an example" shelf, never inline. */
+const MOVE_ATOM_KINDS: ReadonlySet<InstructionAtom["kind"]> = new Set<InstructionAtom["kind"]>([
+  "micro_explain",
+  "worked_example",
+]);
+
+/** Compact node content to the inline move: text + worked-example atoms only.
+ *  Empty when the content has neither — which makes it no move at all, so the
+ *  selector will not frame on it. */
+export function compactMoveAtoms(atoms: readonly InstructionAtom[]): InstructionAtom[] {
+  return atoms.filter((a) => MOVE_ATOM_KINDS.has(a.kind));
+}
+
+/** One served item, reduced to what framing selection needs. */
 export type RunItemLike = {
   skillKey: string;
   /** The item's practice domain. Single-domain runs stamp the session domain. */
   domain: string;
-  /** The item's strand, if its domain is stranded. Unstranded → no Launchpad. */
+  /** The item's strand, if its domain is stranded. Unstranded → never framed. */
   strand?: string;
-  /** Serving lane; only genuinely NEW frontier work can open a Launchpad. */
+  /** Serving lane; only genuinely new ground can be framed. */
   lane?: string;
+  /** True when THIS item carries its own teach-as-action step
+   *  (`hasTeachingStep` over the resolved item's worked steps). */
+  hasTeachingStep?: boolean;
 };
 
 /**
- * Pick the Launchpad for a RUN — the strand OR node to introduce, AND the
- * exact item index to introduce it before.
- *
- * THIS IS THE FIX FOR THE POSITION DEFECT. The previous selector
- * (`selectInstructionKey`, still used by the legacy daily query) chose a strand
- * by walking the whole domain graph in node order and never looked at the
- * playlist, while the queue picked its own frontier independently and the client
- * mounted the result at `idx === 0`. The two routinely disagreed, so a scholar
- * could be handed a doorway into a strand the run never served (reproduced
- * 18/18 configurations).
- *
- * Selecting FROM the served items makes that class of bug unrepresentable rather
- * than merely fixed: the returned strand/node is, by construction, drawn from
- * `items[at]`, so it cannot name work the run does not contain, and `at` is the
- * position of the work it introduces rather than a hardcoded zero.
- *
- * Precedence, evaluated PER ITEM in serve order (§4.1 node doorway):
- *  1. STRAND doorway — the bigger moment, so it wins whenever eligible at this
- *     item: NEW-lane, stranded, no mastery ANYWHERE in the strand (expertise-
- *     reversal guard), PASSED `strand:` content, not suppressed.
- *  2. Else NODE doorway — the SAME item's specific node, when the scholar has
- *     zero mastery on THAT NODE (narrower than the strand check — this is what
- *     lets a hard node re-open instruction even inside an otherwise
- *     partly-known, or dismissed, strand) and PASSED `node:` content exists,
- *     not suppressed. Optional: a caller that omits `hasMasteryOnNode`/
- *     `hasNodeContent` gets strand-only behavior, byte-identical to pre-§4.1.
- *  3. Neither eligible at this item → try the next item.
- *
- * The ≤1/day governor is EXTENDED, not duplicated (§4.1 decision b): it reads
- * the SAME `eventByKey` map regardless of which key kind (`strand:`/`node:`)
- * was actually shown, so "any Launchpad already shown today" and the re-offer
- * cap are shared across BOTH grains for free — a strand shown today blocks a
- * node offer and vice versa, and a node's own `offerCount` caps its re-offers
- * exactly like a strand's.
- *
- * Advisory, exactly like `selectInstructionKey` — a Convex query cannot write,
- * so the claim mutation re-checks the daily cap authoritatively.
- */
-/**
- * A Launchpad positioned ON a served run: the entry to show, and the index of
- * the first item of the strand/node it introduces.
- *
- * Deliberately a SIBLING of `items`, never a member of it. `items` is the graded
- * array; keeping an ungraded beat out of it is what makes `masteryEffect:
- * "none"` a structural guarantee rather than a flag some future code path could
- * forget to honour.
+ * A frame positioned ON a served run: the entry, and the index of the item it
+ * frames. Deliberately a SIBLING of `items`, never a member: `items` is the
+ * graded array, and keeping an ungraded beat out of it is what makes
+ * `masteryEffect: "none"` structural rather than a flag.
  */
 export type RunLaunchpad = { at: number; entry: InstructionEntry };
 
-/** The selector's raw pick, before the caller (`resolveRunLaunchpad`) resolves
- *  it against loaded content to build the wire `InstructionEntry`. */
+/** The selector's raw pick, before `resolveRunLaunchpad` builds the wire
+ *  `InstructionEntry` from it. */
 export type RunLaunchpadCandidate = {
   at: number;
-  level: "strand" | "node";
+  level: "node";
   domain: string;
   strand: string;
-  /** Set only when `level === "node"`. */
-  nodeKey?: string;
+  nodeKey: string;
   key: string;
+  move: FrameMoveSource;
 };
 
-/** The ≤1/day governor: true when some OTHER key (either grain) was already
- *  shown today. Shared across strand/node keys by construction — it just reads
- *  `eventByKey`, which stores both grains under one scholar-keyed table. */
+/** The ≤1/day governor: true when some OTHER key was already shown today. */
 function dailyCapBlocks(
   eventByKey: Map<string, InstructionEventLike>,
   dayBucket: string,
   key: string,
 ): boolean {
   // Scoped to OTHER keys, and not a softening of the rule. This selector runs
-  // inside the reactive `practiceSession` query, and the card claims its own
+  // inside the reactive `practiceSession` query, and the client claims its own
   // impression on mount -- which writes `shownAt` for exactly this key. A
-  // blanket "anything shown today" test would therefore flip to true the
-  // instant the card appeared and retract the very offer being rendered,
-  // yanking the card off-screen before the scholar could choose a path. (That
-  // is the precise failure the old client-side `launchpadLatchRef` existed to
-  // hide; scoping the check removes the cause instead of the symptom.)
-  //
-  // Excluding this key is also the behaviour we want on its own merits: an
-  // unengaged doorway survives a reload, while `isInstructionSuppressed`
-  // above still retracts it the moment the scholar views/completes/dismisses
-  // it. Instruction for a DIFFERENT key (strand OR node) is still capped at
-  // one per day.
+  // blanket "anything shown today" test would flip to true the instant the
+  // frame appeared and retract the very offer being rendered.
   return [...eventByKey.entries()].some(
     ([k, e]) => k !== key && e.shownAt != null && e.lastShownDayBucket === dayBucket,
   );
 }
 
+/** Serving lanes that can carry the framed item. `new` is frontier work;
+ *  `review` is admitted because a placement-CREDITED skill the scholar never
+ *  actually attempted is served there (the confirmation lane) and is, for the
+ *  kid, still new ground. The never-attempted check keeps a genuine review (a
+ *  skill really drilled) out. Mapping (a placement probe), challenge, and
+ *  stretch (hit-only) are never framed. */
+const FRAMEABLE_LANES: ReadonlySet<string> = new Set(["new", "review"]);
+export function isFrameableLane(lane: string | undefined): boolean {
+  return !!lane && FRAMEABLE_LANES.has(lane);
+}
+
+/** Which on-topic move an item has, by precedence — or null (not frameable). */
+export function frameMoveFor(
+  item: Pick<RunItemLike, "skillKey" | "hasTeachingStep">,
+  hasNodeContent: (skillKey: string) => boolean,
+): FrameMoveSource | null {
+  if (item.hasTeachingStep) return "item_steps";
+  if (hasNodeContent(item.skillKey)) return "node_content";
+  return null;
+}
+
+/**
+ * Pick the framed item for a RUN — the "Can you already do this?" pill — and
+ * the move it will show.
+ *
+ * Selection reads FROM the served items, so the frame can only ever sit on
+ * work the run contains (the 2026-07 position defect stays unrepresentable),
+ * and `at` is that item's index.
+ *
+ * TRIGGER: the first item, in serve order, that is
+ *  - on a frameable lane (`new`, or `review` of inferred credit),
+ *  - stranded,
+ *  - on a node the scholar has never ATTEMPTED (`lastAttemptAt` or a
+ *    demonstrated source — placement credit alone is still new ground),
+ *  - and HAS an on-topic move: its own teaching step, else passed node
+ *    content (precedence above). Strand content never qualifies.
+ * The key is always `node:<nodeKey>`, so the fire-once ledger is per node:
+ * once a scholar has seen this node's move (viewed/completed/dismissed, or
+ * skipped past the re-offer cap) the node is not framed again.
+ *
+ * The ≤1/day governor (`dailyCap`, default ON) reads the same `eventByKey`
+ * regardless of key kind. Both run clients pass `false` — a pill on a real
+ * graded item has nothing to ration. Advisory: a query cannot write, so the
+ * claim mutation re-checks authoritatively.
+ */
 export function selectRunLaunchpad(params: {
   items: RunItemLike[];
-  /** True when the scholar has ANY mastery row in the strand → not new. */
-  hasMasteryInStrand: (domain: string, strand: string) => boolean;
-  /** True when PASSED, non-empty instructional content exists for the strand. */
-  hasContent: (domain: string, strand: string) => boolean;
-  /** Node doorway (§4.1): true when the scholar has ANY mastery row on THIS
-   *  specific node — finer than `hasMasteryInStrand`, which is exactly what
-   *  lets a hard node qualify even inside a strand that already has mastery
-   *  elsewhere. Optional; omitting it (with `hasNodeContent`) disables the
-   *  node doorway entirely for strand-only callers. */
-  hasMasteryOnNode?: (skillKey: string) => boolean;
-  /** Node doorway: true when PASSED, non-empty `node:<nodeKey>` content exists
-   *  for this item's skillKey. Optional, same reason as `hasMasteryOnNode`. */
-  hasNodeContent?: (skillKey: string) => boolean;
+  /** True when the scholar has actually attempted THIS node. */
+  hasAttemptOnNode: (skillKey: string) => boolean;
+  /** True when PASSED `node:<nodeKey>` content with a non-empty compact move
+   *  (`compactMoveAtoms`) exists for this skillKey on this platform. */
+  hasNodeContent: (skillKey: string) => boolean;
   eventByKey: Map<string, InstructionEventLike>;
   dayBucket: string;
   reofferCap?: number;
+  /** The cross-key ≤1/day governor — default ON; the question framing passes
+   *  `false`. At most one frame per RUN stays structural (one `launchpad`). */
+  dailyCap?: boolean;
 }): RunLaunchpadCandidate | null {
   const cap = params.reofferCap ?? INSTRUCTION_REOFFER_CAP;
-  const nodeDoorwayEnabled = !!params.hasMasteryOnNode && !!params.hasNodeContent;
+  const dailyCap = params.dailyCap ?? true;
   for (let at = 0; at < params.items.length; at++) {
     const item = params.items[at];
-    if (item.lane !== "new") continue;
+    if (!isFrameableLane(item.lane)) continue;
     const strand = item.strand;
     if (!strand) continue;
-
-    // 1. STRAND doorway — the bigger moment; wins whenever eligible here.
-    if (!params.hasMasteryInStrand(item.domain, strand) && params.hasContent(item.domain, strand)) {
-      const key = strandInstructionKey(item.domain, strand);
-      if (!isInstructionSuppressed(params.eventByKey.get(key), cap)) {
-        if (dailyCapBlocks(params.eventByKey, params.dayBucket, key)) return null;
-        return { at, level: "strand", domain: item.domain, strand, key };
-      }
-      // Suppressed at this item — fall through to a node check on the SAME
-      // item rather than skipping to the next one; a dismissed strand doorway
-      // shouldn't block a still-eligible node doorway on the very item it
-      // would have introduced.
-    }
-
-    // 2. NODE doorway (§4.1) — the SAME item's own node, zero-mastery on that
-    // node specifically (not the whole strand).
-    if (nodeDoorwayEnabled && !params.hasMasteryOnNode!(item.skillKey) && params.hasNodeContent!(item.skillKey)) {
-      const key = nodeInstructionKey(item.skillKey);
-      if (!isInstructionSuppressed(params.eventByKey.get(key), cap)) {
-        if (dailyCapBlocks(params.eventByKey, params.dayBucket, key)) return null;
-        return { at, level: "node", domain: item.domain, strand, nodeKey: item.skillKey, key };
-      }
-    }
+    if (params.hasAttemptOnNode(item.skillKey)) continue;
+    const move = frameMoveFor(item, params.hasNodeContent);
+    if (!move) continue;
+    const key = nodeInstructionKey(item.skillKey);
+    if (isInstructionSuppressed(params.eventByKey.get(key), cap)) continue;
+    if (dailyCap && dailyCapBlocks(params.eventByKey, params.dayBucket, key)) return null;
+    return { at, level: "node", domain: item.domain, strand, nodeKey: item.skillKey, key, move };
   }
+  return null;
+}
+
+// ── The frame's stage machine (shared by web and native) ───────────────────
+
+/** ask → (nailed | move) → after → done. See PracticeSession's comment. */
+export type QuestionFrameStage = "ask" | "move" | "after" | "nailed" | "done";
+export type QuestionFrameEvent = Parameters<typeof questionFrameWritesFor>[0];
+
+/**
+ * Advance the framed item's stage when the answer machine moves, and name the
+ * telemetry events to write. Returns null when nothing changes. Pure, so both
+ * clients advance identically.
+ *
+ *  - right first time → "nailed" (the move is never shown);
+ *  - "Not yet" → "move": the item's own teaching step (item_steps) or the
+ *    compact node move (node_content);
+ *  - a MISS → with node_content, the move + "Got it, let me try one"; with
+ *    item_steps, "done" — the teaching step is earned by the honest don't-know
+ *    (`teachingStep` is gated on it, #900), so a miss takes the ordinary miss
+ *    lane (Socratic retry, then the stuck lane) rather than a second mechanism;
+ *  - back to answering after a node_content move → "after"; the next verdict →
+ *    "done" (completed).
+ */
+export function advanceQuestionFrame(
+  stage: QuestionFrameStage,
+  phase: string,
+  verdict: { correct: boolean; dontKnow?: boolean } | null | undefined,
+  move: FrameMoveSource,
+): { stage: QuestionFrameStage; events: QuestionFrameEvent[] } | null {
+  if (stage === "move" && phase === "answering") return { stage: "after", events: [] };
+  if (phase !== "feedback" || !verdict) return null;
+  if (stage === "ask") {
+    if (verdict.correct) return { stage: "nailed", events: ["answered"] };
+    // "Not yet" already recorded its choice ("show") on tap.
+    if (verdict.dontKnow) return { stage: "move", events: ["moveShown"] };
+    if (move === "item_steps") return { stage: "done", events: ["answered"] };
+    return { stage: "move", events: ["answered", "moveShown"] };
+  }
+  if (stage === "after") return { stage: "done", events: ["answeredAfterMove"] };
   return null;
 }

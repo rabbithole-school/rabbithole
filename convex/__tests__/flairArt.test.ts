@@ -5,7 +5,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
-import { flairArtKey } from "../flairArt";
+import { ensureFlairArtForActivity, flairArtKey } from "../flairArt";
 import { buildFlairArtPrompt } from "../lib/themeIconArt";
 
 const modules = (
@@ -77,11 +77,12 @@ async function seedCurriculum(t: ReturnType<typeof convexTest>) {
 
 async function drainScheduled(t: ReturnType<typeof convexTest>) {
   // runAfter(0) otherwise fires after this test and can consume the next
-  // test's Gemini fetch mock.
+  // test's image-model fetch mock.
   await new Promise((resolve) => setTimeout(resolve, 0));
   await t.finishInProgressScheduledFunctions();
 }
 
+/** What the image model now returns: an opaque icon on real transparency. */
 function generatedFlairPngBase64(): string {
   const png = new PNG({ width: 32, height: 32 });
   for (let y = 0; y < png.height; y += 1) {
@@ -90,11 +91,76 @@ function generatedFlairPngBase64(): string {
       const isIcon = x >= 10 && x < 22 && y >= 10 && y < 22;
       png.data[offset] = 255;
       png.data[offset + 1] = isIcon ? 198 : 0;
-      png.data[offset + 2] = isIcon ? 77 : 255;
-      png.data[offset + 3] = 255;
+      png.data[offset + 2] = isIcon ? 77 : 0;
+      png.data[offset + 3] = isIcon ? 255 : 0;
     }
   }
   return PNG.sync.write(png).toString("base64");
+}
+
+/** A non-retryable client error — the way to make ONE row fail fast. */
+function imagesApiBadRequest() {
+  return {
+    ok: false,
+    status: 400,
+    text: async () => JSON.stringify({ error: { message: "invalid prompt" } }),
+  };
+}
+
+/** One successful Images-API response carrying `png`. */
+function imagesApiOk(png: string) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ data: [{ b64_json: png }] }),
+    text: async () => "",
+  };
+}
+
+/** A transient `server_error`, the shape the Images API returned during the
+ *  2026-09-15 outage — every request failed for minutes, then recovered. */
+function imagesApiServerError() {
+  return {
+    ok: false,
+    status: 500,
+    text: async () =>
+      JSON.stringify({ error: { type: "server_error", message: "The server had an error." } }),
+  };
+}
+
+/**
+ * Run an action whose provider call backs off, WITHOUT sleeping for real.
+ *
+ * The retry delays are seconds long on purpose (a 429 names a ~12s cooldown).
+ * Burning that wall clock in a unit test is not just slow — the merge gate runs
+ * four vitest shards on a shared, load-starved host, where a test that takes
+ * seconds of real time is exactly the kind that trips the 5s timeout and
+ * durably excludes a candidate. Fake timers make the backoff instant and
+ * deterministic instead.
+ */
+async function withoutWaiting<T>(start: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  try {
+    const pending = start();
+    await vi.advanceTimersByTimeAsync(120_000);
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+/** A 429 that names its own cooldown, the way the Images API does. */
+function imagesApiRateLimited(retryAfter = "10ms") {
+  return {
+    ok: false,
+    status: 429,
+    text: async () =>
+      JSON.stringify({
+        error: {
+          message: `Rate limit reached for gpt-image-2.5-flare on input-images per min: Limit 5, Used 5, Requested 1. Please try again in ${retryAfter}.`,
+        },
+      }),
+  };
 }
 
 describe("flair art key and prompt", () => {
@@ -118,18 +184,18 @@ describe("flair art key and prompt", () => {
     expect(first.length).toBeLessThan(40);
   });
 
-  test("locks the Bold lineal-color family and magenta screen", () => {
+  test("carries the chip size and the caller's label", () => {
     const prompt = buildFlairArtPrompt(
       "Record observations",
       "Capture evidence from the experiment",
     );
-    expect(prompt).toContain("#17171C");
-    expect(prompt).toContain("#FFC64D");
-    expect(prompt).toContain("#FF6B57");
-    expect(prompt).toContain("#FF00FF");
+    // The render size is load-bearing: it is what makes the model draw a
+    // silhouette legible in the 36px chip rather than a detailed illustration.
     expect(prompt).toContain("exactly 36 × 36 pixels");
-    expect(prompt).toContain("exactly ONE icon");
+    // Dynamic interpolation: the caller's label actually reaches the prompt.
     expect(prompt).toContain("Record observations");
+    // The art is composited over a chip, so it must never carry a backdrop.
+    expect(prompt).toContain("transparent");
   });
 });
 
@@ -617,7 +683,7 @@ describe("flair art scheduling and reads", () => {
         id,
         imageStorageId: firstImageStorageId,
         prompt: "first prompt",
-        generationModel: "gemini-first",
+        generationModel: "first-model",
       }),
     ).resolves.toBe(true);
     await expect(
@@ -628,7 +694,7 @@ describe("flair art scheduling and reads", () => {
         id,
         imageStorageId: secondImageStorageId,
         prompt: "late prompt",
-        generationModel: "gemini-late",
+        generationModel: "late-model",
       }),
     ).resolves.toBe(false);
 
@@ -637,11 +703,11 @@ describe("flair art scheduling and reads", () => {
       status: "ready",
       imageStorageId: firstImageStorageId,
       prompt: "first prompt",
-      generationModel: "gemini-first",
+      generationModel: "first-model",
     });
   });
 
-  test("failed chroma processing never publishes the raw magenta image", async () => {
+  test("an undecodable image never publishes", async () => {
     const t = convexTest(schema, modules);
     const { institutionId } = await seedCurriculum(t);
     const id = await t.run((ctx) =>
@@ -655,31 +721,10 @@ describe("flair art scheduling and reads", () => {
         createdAt: Date.now(),
       }),
     );
-    vi.stubEnv("GEMINI_API_KEY", "test-key");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          candidates: [
-            {
-              content: {
-                parts: [
-                  {
-                    inlineData: {
-                      mimeType: "image/png",
-                      data: "iVBORw0KGgo=",
-                    },
-                  },
-                ],
-              },
-            },
-          ],
-        }),
-        text: async () => "",
-      }),
-    );
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    // A truncated PNG: the downscale throws, and the row must stay unpublished
+    // rather than storing bytes no surface can render.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(imagesApiOk("iVBORw0KGgo=")));
 
     await expect(
       t.action(internal.flairArtActions.generateFlairArt, { id }),
@@ -689,7 +734,7 @@ describe("flair art scheduling and reads", () => {
     expect(row?.imageStorageId).toBeUndefined();
   });
 
-  test("falls back on primary quota exhaustion and records the actual model", async () => {
+  test("waits out a rate limit and publishes on the retry", async () => {
     const t = convexTest(schema, modules);
     const { institutionId } = await seedCurriculum(t);
     const id = await t.run((ctx) =>
@@ -703,64 +748,151 @@ describe("flair art scheduling and reads", () => {
         createdAt: Date.now(),
       }),
     );
-    vi.stubEnv("GEMINI_API_KEY", "test-key");
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
     vi.stubGlobal(
       "fetch",
       vi
         .fn()
-        .mockResolvedValueOnce({
-          ok: false,
-          status: 429,
-          text: async () =>
-            JSON.stringify({
-              error: {
-                code: 429,
-                status: "RESOURCE_EXHAUSTED",
-                message: "GenerateRequestsPerDayPerProjectPerModel",
-              },
-            }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({
-            candidates: [
-              {
-                content: {
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: "image/png",
-                        data: generatedFlairPngBase64(),
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          }),
-          text: async () => "",
-        }),
+        .mockResolvedValueOnce(imagesApiRateLimited())
+        .mockResolvedValueOnce(imagesApiOk(generatedFlairPngBase64())),
     );
 
+    // The org's images-per-minute allowance is small, so a 429 is an ordinary
+    // event on a backfill, not a failure: the call waits out the cooldown the
+    // response names rather than leaving the chip on its fallback glyph.
     await expect(
-      t.action(internal.flairArtActions.generateFlairArt, { id }),
+      withoutWaiting(() =>
+        t.action(internal.flairArtActions.generateFlairArt, { id }),
+      ),
     ).resolves.toEqual({
       status: "ready",
-      model: "gemini-3.1-flash-image-preview",
+      model: "gpt-image-2.5-flare",
     });
     const row = await t.run((ctx) => ctx.db.get(id));
-    expect(row?.generationModel).toBe("gemini-3.1-flash-image-preview");
+    expect(row?.generationModel).toBe("gpt-image-2.5-flare");
     expect(fetch).toHaveBeenCalledTimes(2);
-    expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain(
-      "gemini-3-pro-image-preview",
-    );
-    expect(String(vi.mocked(fetch).mock.calls[1]?.[0])).toContain(
-      "gemini-3.1-flash-image-preview",
-    );
   });
 
-  test("model-pinned recovery continues after one row fails", async () => {
+  test("rides out a transient provider outage rather than failing the row", async () => {
+    const t = convexTest(schema, modules);
+    const { institutionId } = await seedCurriculum(t);
+    const id = await t.run((ctx) =>
+      ctx.db.insert("flairArt", {
+        institutionId,
+        artKey: "bold-v1:outage",
+        sourceLabel: "Record observations",
+        status: "pending",
+        attemptCount: 1,
+        lastAttemptAt: Date.now(),
+        createdAt: Date.now(),
+      }),
+    );
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(imagesApiServerError())
+        .mockResolvedValueOnce(imagesApiOk(generatedFlairPngBase64())),
+    );
+
+    // A 5xx says nothing about the request, so treating it as a permanent
+    // failure would strand the chip on its fallback glyph for no reason.
+    await expect(
+      withoutWaiting(() =>
+        t.action(internal.flairArtActions.generateFlairArt, { id }),
+      ),
+    ).resolves.toEqual({ status: "ready", model: "gpt-image-2.5-flare" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  test("re-drives a row left pending by a killed generation", async () => {
+    const t = convexTest(schema, modules);
+    const { institutionId, lessonId } = await seedCurriculum(t);
+    const activityId = await t.run((ctx) =>
+      ctx.db.insert("activities", {
+        lessonId,
+        title: "Map the creek",
+        kind: "online",
+        systemPrompt: "...",
+        order: 0,
+      }),
+    );
+    const criterion = { label: "Careful observer" };
+    const first = await t.run((ctx) =>
+      ensureFlairArtForActivity(ctx, activityId, [criterion], undefined, {
+        scheduleGeneration: false,
+      }),
+    );
+    expect(first.created).toBe(1);
+
+    // Its action never reached ready or markFailed. Inside the retry delay it
+    // may still be running, so it is left alone…
+    const inFlight = await t.run((ctx) =>
+      ensureFlairArtForActivity(ctx, activityId, [criterion], undefined, {
+        scheduleGeneration: false,
+      }),
+    );
+    expect(inFlight).toEqual({ created: 0, existing: 1, retried: 0 });
+
+    // …but past it, the run can only have been killed.
+    await t.run(async (ctx) => {
+      const row = (await ctx.db
+        .query("flairArt")
+        .withIndex("by_institution_key", (q) => q.eq("institutionId", institutionId))
+        .unique())!;
+      await ctx.db.patch(row._id, { lastAttemptAt: Date.now() - 16 * 60 * 1000 });
+    });
+    const stale = await t.run((ctx) =>
+      ensureFlairArtForActivity(ctx, activityId, [criterion], undefined, {
+        scheduleGeneration: false,
+      }),
+    );
+    expect(stale).toEqual({ created: 0, existing: 0, retried: 1 });
+    const row = await t.run(async (ctx) =>
+      ctx.db
+        .query("flairArt")
+        .withIndex("by_institution_key", (q) => q.eq("institutionId", institutionId))
+        .unique(),
+    );
+    expect(row?.status).toBe("pending");
+    expect(row?.attemptCount).toBe(2);
+  });
+
+  test("the scheduled watchdog re-drives a stalled row and leaves a finished one", async () => {
+    const t = convexTest(schema, modules);
+    const { institutionId } = await seedCurriculum(t);
+    const stalledAt = Date.now() - 16 * 60 * 1000;
+    const [stalled, fresh, ready] = await t.run(async (ctx) =>
+      Promise.all(
+        [
+          { status: "pending" as const, lastAttemptAt: stalledAt },
+          { status: "pending" as const, lastAttemptAt: Date.now() },
+          { status: "ready" as const, lastAttemptAt: stalledAt },
+        ].map((row, index) =>
+          ctx.db.insert("flairArt", {
+            institutionId,
+            artKey: `bold-v1:watchdog-${index}`,
+            sourceLabel: `Criterion ${index}`,
+            attemptCount: 1,
+            createdAt: stalledAt,
+            ...row,
+          }),
+        ),
+      ),
+    );
+    const retry = (id: Id<"flairArt">) =>
+      t.mutation(internal.flairArtInternal.retryIfStalled, { id });
+    expect(await retry(stalled)).toBe(true);
+    expect(await retry(fresh)).toBe(false);
+    expect(await retry(ready)).toBe(false);
+    const row = await t.run((ctx) => ctx.db.get(stalled));
+    expect(row?.attemptCount).toBe(2);
+    expect(row?.status).toBe("pending");
+    await drainScheduled(t);
+  });
+
+  test("recovery continues after one row fails", async () => {
     const t = convexTest(schema, modules);
     const { institutionId } = await seedCurriculum(t);
     const ids = await t.run(async (ctx) =>
@@ -779,50 +911,22 @@ describe("flair art scheduling and reads", () => {
         ),
       ),
     );
-    vi.stubEnv("GEMINI_API_KEY", "test-key");
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
     vi.stubGlobal(
       "fetch",
       vi
         .fn()
-        .mockRejectedValueOnce(new Error("provider unavailable"))
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({
-            candidates: [
-              {
-                content: {
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: "image/png",
-                        data: generatedFlairPngBase64(),
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          }),
-          text: async () => "",
-        }),
+        .mockResolvedValueOnce(imagesApiBadRequest())
+        .mockResolvedValueOnce(imagesApiOk(generatedFlairPngBase64())),
     );
 
-    const result = await t.action(
-      internal.flairArtActions.generateIdsWithModel,
-      {
-        ids,
-        model: "gemini-3.1-flash-image-preview",
-      },
-    );
+    const result = await t.action(internal.flairArtActions.regenerateIds, {
+      ids,
+    });
 
     expect(result).toEqual([
       { id: ids[0], status: "failed" },
-      {
-        id: ids[1],
-        status: "ready",
-        model: "gemini-3.1-flash-image-preview",
-      },
+      { id: ids[1], status: "ready", model: "gpt-image-2.5-flare" },
     ]);
     const rows = await t.run((ctx) =>
       Promise.all(ids.map((id) => ctx.db.get(id))),
@@ -832,7 +936,7 @@ describe("flair art scheduling and reads", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(
       vi.mocked(fetch).mock.calls.every(([url]) =>
-        String(url).includes("gemini-3.1-flash-image-preview"),
+        String(url).includes("api.openai.com/v1/images/generations"),
       ),
     ).toBe(true);
   });

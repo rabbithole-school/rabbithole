@@ -283,4 +283,111 @@ describe("mcpOauth — remembered consent (skip the click on reconnect)", () => 
       false,
     );
   });
+
+  test("revoking a connection burns any outstanding authorization code for that user+client (can't be exchanged after revoke)", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "teach");
+    const asTeacher = await withUser(t, teacher);
+    const { clientId } = await registerTestClient(t);
+
+    // A code minted just before the revoke (e.g. a second consent tab, or a
+    // client that hasn't exchanged it yet) — NOT the session being revoked.
+    const { code } = await asTeacher.mutation(
+      api.mcpOauth.approve,
+      approveArgs(clientId),
+    );
+
+    // An unrelated live connection for the same client, which is what
+    // revokeMySession actually targets.
+    await asTeacher.mutation(api.mcpOauth.recordMySession, { clientId });
+    const list = await asTeacher.query(api.mcpOauth.listMySessions, {});
+    expect(list).toHaveLength(1);
+
+    await asTeacher.mutation(api.mcpOauth.revokeMySession, { id: list[0]._id });
+
+    // The outstanding code must be gone — it must NOT still be exchangeable
+    // for a brand-new session within its remaining 10-minute TTL.
+    const remaining = await t.run(async (ctx) =>
+      ctx.db.query("mcpOauthCodes").collect(),
+    );
+    expect(remaining).toHaveLength(0);
+
+    const grant = await t.run(async (ctx) =>
+      ctx.runMutation(internal.mcpOauth.takeCode, {
+        codeHash: await sha256Hex(code),
+      }),
+    );
+    expect(grant).toBeNull();
+  });
+
+  test("revoke burns the revoked client's code even behind a pile of other clients' codes", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "teach");
+    const asTeacher = await withUser(t, teacher);
+    const { clientId } = await registerTestClient(t);
+    // More outstanding codes for OTHER clients than a revoke reads in one go,
+    // all older than the revoked client's code.
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 300; i++) {
+        await ctx.db.insert("mcpOauthCodes", {
+          codeHash: `other-${i}`,
+          clientId: "some-other-client",
+          userId: teacher,
+          redirectUri: "https://example.com/callback",
+          codeChallenge: CHALLENGE,
+          expiresAt: Date.now() + 10 * 60_000,
+        });
+      }
+    });
+    const { code } = await asTeacher.mutation(
+      api.mcpOauth.approve,
+      approveArgs(clientId),
+    );
+    await asTeacher.mutation(api.mcpOauth.recordMySession, { clientId });
+    const list = await asTeacher.query(api.mcpOauth.listMySessions, {});
+    await asTeacher.mutation(api.mcpOauth.revokeMySession, { id: list[0]._id });
+
+    const grant = await t.run(async (ctx) =>
+      ctx.runMutation(internal.mcpOauth.takeCode, {
+        codeHash: await sha256Hex(code),
+      }),
+    );
+    expect(grant).toBeNull();
+  });
+
+  test("revoking a connection does not touch another client's outstanding code for the same user", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "teach");
+    const asTeacher = await withUser(t, teacher);
+    const { clientId: revokedClientId } = await registerTestClient(t, [
+      "https://claude.ai/api/mcp/auth_callback",
+    ]);
+    const { clientId: otherClientId } = await registerTestClient(t, [
+      "https://example.com/callback",
+    ]);
+
+    const { code: otherCode } = await asTeacher.mutation(
+      api.mcpOauth.approve,
+      {
+        clientId: otherClientId,
+        redirectUri: "https://example.com/callback",
+        codeChallenge: CHALLENGE,
+        codeChallengeMethod: "S256",
+      },
+    );
+
+    await asTeacher.mutation(api.mcpOauth.recordMySession, {
+      clientId: revokedClientId,
+    });
+    const list = await asTeacher.query(api.mcpOauth.listMySessions, {});
+    await asTeacher.mutation(api.mcpOauth.revokeMySession, { id: list[0]._id });
+
+    // A different client's outstanding code survives the revoke.
+    const grant = await t.run(async (ctx) =>
+      ctx.runMutation(internal.mcpOauth.takeCode, {
+        codeHash: await sha256Hex(otherCode),
+      }),
+    );
+    expect(grant?.clientId).toBe(otherClientId);
+  });
 });

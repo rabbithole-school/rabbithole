@@ -8,6 +8,12 @@
 // - `disconnect`: teacher-initiated unlink. Best-effort revoke at Google.
 // - `upsertInternal` / `getForUserInternal` / `updateTokensInternal`:
 //   used by the OAuth callback (in `http.ts`) and the export actions.
+// - `admissionsConnectStatus`: whether the signed-in user's link can serve
+//   the Admissions workspace (calendar.readonly + gmail.readonly +
+//   gmail.compose).
+//
+// Tokens are encrypted at rest. Writers seal through `sealGoogleToken`;
+// readers open through `openGoogleAccountTokens` (lib/googleTokenCrypto.ts).
 
 import { v } from "convex/values";
 import { staffSelfQuery } from "./lib/customFunctions";
@@ -16,7 +22,18 @@ import {
   internalQuery,
 } from "./_generated/server";
 import { normalizeEmail } from "./lib/email";
-import { getGoogleScopeCapability, GOOGLE_OAUTH_SCOPES } from "./lib/google";
+import {
+  ADMISSIONS_GOOGLE_SCOPES,
+  getGoogleScopeCapability,
+  GOOGLE_OAUTH_SCOPES,
+  missingAdmissionsScopes,
+} from "./lib/google";
+import {
+  isProdDeployment,
+  openGoogleAccountTokens,
+  sealGoogleToken,
+} from "./lib/googleTokenCrypto";
+import { isPlatformAdminRole } from "./lib/roles";
 
 export const status = staffSelfQuery({
   args: {},
@@ -40,6 +57,55 @@ export const status = staffSelfQuery({
 });
 
 /**
+ * Admissions needs calendar.readonly + gmail.readonly + gmail.compose on the
+ * caller's OWN link, and no leftover gmail.metadata (which would block full
+ * reads); `missingScopes` lists what a new consent must grant. `needsReconnect` means the link exists but its grant is dead (a
+ * refresh came back `invalid_grant`, the stored token is unreadable, or there
+ * is no refresh token to keep the access token alive), so asking for more
+ * scopes is not enough: the user must run the consent flow again.
+ *
+ * `bypass` lets a platform admin into the workspace without a Google link,
+ * on a dev deployment only (local, or hosted with ADMISSIONS_DEV_MODE=1), so a
+ * prototype is not blocked on OAuth. On
+ * production it is always false and the gate applies to everyone.
+ */
+export const admissionsConnectStatus = staffSelfQuery({
+  args: {},
+  handler: async (
+    ctx,
+  ): Promise<{
+    connected: boolean;
+    missingScopes: string[];
+    needsReconnect: boolean;
+    bypass: boolean;
+  }> => {
+    const bypass = !isProdDeployment() && isPlatformAdminRole(ctx.user.role);
+    const acct = await ctx.db
+      .query("googleAccounts")
+      .withIndex("by_user", (q) => q.eq("userId", ctx.user._id))
+      .unique();
+    if (!acct) {
+      return {
+        connected: false,
+        missingScopes: [...ADMISSIONS_GOOGLE_SCOPES],
+        needsReconnect: false,
+        bypass,
+      };
+    }
+    // No refresh token means the link dies within the hour and Admissions
+    // can't sync in the background, so treat it as needing a reconnect.
+    // (Checking `expiresAt` here would read the clock in a cached query.)
+    return {
+      connected: true,
+      missingScopes: missingAdmissionsScopes(acct.scopes),
+      needsReconnect:
+        acct.reconnectRequiredAt !== undefined || !acct.refreshToken,
+      bypass,
+    };
+  },
+});
+
+/**
  * Delete the row + return the access/refresh token so the caller can
  * fire-and-forget the revoke at Google. Mutations can't make HTTP calls,
  * hence the two-step shape: this mutation hands the token back to
@@ -56,7 +122,14 @@ export const disconnectInternal = internalMutation({
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .unique();
     if (!acct) return { token: null as string | null };
-    const token = acct.refreshToken ?? acct.accessToken;
+    let token: string | null = null;
+    try {
+      const opened = await openGoogleAccountTokens(acct);
+      token = opened.refreshToken ?? opened.accessToken;
+    } catch {
+      // Unreadable token (missing/rotated key): still unlink locally; the
+      // user can revoke from their Google account settings.
+    }
     await ctx.db.delete(acct._id);
     return { token };
   },
@@ -105,18 +178,32 @@ export const upsertInternal = internalMutation({
       .query("googleAccounts")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .unique();
+    const accessToken = await sealGoogleToken(args.accessToken);
+    const refreshToken =
+      args.refreshToken === undefined
+        ? undefined
+        : await sealGoogleToken(args.refreshToken);
     if (existing) {
       // Preserve refresh token if the new exchange didn't return one
       // (Google sometimes omits it on re-auth without prompt=consent).
+      // A preserved legacy plaintext refresh token is upgraded in place.
+      const keptRefreshToken =
+        refreshToken ??
+        (existing.refreshToken === undefined
+          ? undefined
+          : await sealGoogleToken(existing.refreshToken));
       await ctx.db.patch(existing._id, {
         googleSub: args.googleSub,
         email,
         googleDisplayName:
           googleDisplayName ?? existing.googleDisplayName,
-        accessToken: args.accessToken,
-        refreshToken: args.refreshToken ?? existing.refreshToken,
+        accessToken,
+        refreshToken: keptRefreshToken,
         expiresAt: args.expiresAt,
         scopes: args.scopes,
+        // A fresh consent revives the grant.
+        reconnectRequiredAt: undefined,
+        reconnectReason: undefined,
       });
       return existing._id;
     }
@@ -125,8 +212,8 @@ export const upsertInternal = internalMutation({
       googleSub: args.googleSub,
       email,
       googleDisplayName,
-      accessToken: args.accessToken,
-      refreshToken: args.refreshToken,
+      accessToken,
+      refreshToken,
       expiresAt: args.expiresAt,
       scopes: args.scopes,
       connectedAt: Date.now(),
@@ -153,6 +240,14 @@ export const updateDisplayNameInternal = internalMutation({
   },
 });
 
+/**
+ * Store a refreshed access token. A refresh does NOT clear a reconnect flag:
+ * every flag today (`refresh_revoked`, including Gmail refusing the grant,
+ * and `token_unreadable`) means the grant itself must be renewed, and a
+ * refresh that happens to succeed (another API still accepts the token)
+ * would otherwise clear it and let the Gmail sync fail and re-flag on the
+ * next run. Only a fresh consent (`upsertInternal`) clears it.
+ */
 export const updateTokensInternal = internalMutation({
   args: {
     userId: v.id("users"),
@@ -167,9 +262,95 @@ export const updateTokensInternal = internalMutation({
       .unique();
     if (!acct) throw new Error("No Google account linked");
     await ctx.db.patch(acct._id, {
-      accessToken: args.accessToken,
+      accessToken: await sealGoogleToken(args.accessToken),
       expiresAt: args.expiresAt,
-      ...(args.refreshToken ? { refreshToken: args.refreshToken } : {}),
+      ...(args.refreshToken
+        ? { refreshToken: await sealGoogleToken(args.refreshToken) }
+        : acct.refreshToken !== undefined
+          ? // Upgrade a legacy plaintext refresh token on the way past.
+            { refreshToken: await sealGoogleToken(acct.refreshToken) }
+          : {}),
     });
+  },
+});
+
+/**
+ * Record that this user's stored grant is dead so the UI asks for a
+ * reconnect. Called by `getValidAccessToken` when Google rejects the refresh
+ * token (`invalid_grant`) or the stored token can't be decrypted.
+ */
+export const markReconnectRequiredInternal = internalMutation({
+  args: {
+    userId: v.id("users"),
+    reason: v.union(v.literal("refresh_revoked"), v.literal("token_unreadable")),
+  },
+  handler: async (ctx, args) => {
+    const acct = await ctx.db
+      .query("googleAccounts")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .unique();
+    if (!acct) return;
+    await ctx.db.patch(acct._id, {
+      reconnectRequiredAt: Date.now(),
+      reconnectReason: args.reason,
+    });
+  },
+});
+
+// ── Single-use OAuth state nonces (personal link) ───────────────────────
+
+/** Expired nonce rows swept per new OAuth start. */
+const NONCE_SWEEP = 50;
+
+/**
+ * Record the nonce signed into a personal OAuth `state` (beginOAuth). The
+ * callback must consume it, so the state works once and only for this user.
+ * Sweeps a few expired rows on the way past.
+ */
+export const createOAuthNonceInternal = internalMutation({
+  args: {
+    nonce: v.string(),
+    userId: v.id("users"),
+    purpose: v.string(),
+    expiresAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const stale = await ctx.db
+      .query("googleOAuthNonces")
+      .withIndex("by_expiresAt", (q) => q.lt("expiresAt", now))
+      .take(NONCE_SWEEP);
+    for (const row of stale) await ctx.db.delete(row._id);
+    await ctx.db.insert("googleOAuthNonces", args);
+  },
+});
+
+/**
+ * Consume a personal OAuth nonce. Valid only if it exists, has not expired,
+ * and was minted for this user and purpose. The row is deleted on any match
+ * by nonce, so a second use (or a tampered attempt) finds nothing. Returns
+ * the Rabbithole user's email for the callback's account check.
+ */
+export const consumeOAuthNonceInternal = internalMutation({
+  args: { nonce: v.string(), userId: v.id("users"), purpose: v.string() },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ ok: true; userEmail: string | null } | { ok: false }> => {
+    const row = await ctx.db
+      .query("googleOAuthNonces")
+      .withIndex("by_nonce", (q) => q.eq("nonce", args.nonce))
+      .first();
+    if (!row) return { ok: false };
+    await ctx.db.delete(row._id);
+    if (
+      row.userId !== args.userId ||
+      row.purpose !== args.purpose ||
+      row.expiresAt <= Date.now()
+    ) {
+      return { ok: false };
+    }
+    const user = await ctx.db.get(args.userId);
+    return { ok: true, userEmail: user?.email ? normalizeEmail(user.email) : null };
   },
 });

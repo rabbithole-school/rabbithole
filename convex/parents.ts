@@ -18,15 +18,21 @@
 import { v } from "convex/values";
 import { authedQuery, authedMutation, scholarAdminQuery, scholarAdminMutation } from "./lib/customFunctions";
 import {
+  canReadScholarAsTeacher,
   requireActiveScholarAccess,
   requireScholarsAccessible,
 } from "./lib/access";
 import { internalQuery, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { requireGuardianOf, hasGuardianships } from "./lib/auth";
+import {
+  requireGuardianOf,
+  requireGuardianOrStaffPreview,
+  hasGuardianships,
+} from "./lib/auth";
 import { resolveValidatedProfileImageUrl } from "./lib/profileImage";
+import { isApplicantOnlyParent } from "./lib/applicantParent";
 import { ensureDefaultMembershipForUser, ensureMembership } from "./memberships";
-import { ROLES, isStaffRole, isPlatformAdminRole } from "./lib/roles";
+import { ROLES, isStaffRole, isTeacherRole, isPlatformAdminRole } from "./lib/roles";
 import { normalizeEmail, isValidEmail } from "./lib/email";
 import { sendClaimInviteEmail } from "./lib/claimInviteEmail";
 import {
@@ -34,19 +40,19 @@ import {
   readScholarSeeds,
 } from "./lib/scholarReads";
 import { gatherMathPortrait } from "./mathPortrait";
-import { resolveInstitutionLens, scholarIdsInLens } from "./lib/institutionLens";
+import { parentInLens, resolveInstitutionLens, scholarIdsInLens } from "./lib/institutionLens";
 import { isProgramGuest } from "./lib/enrollmentStanding";
 import { EXTENDED_EDUCATION_LABEL } from "../shared/scholarGroupRouting";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 
 // ── Scholar-admin: manage parent accounts + guardianship links ──────────
 
-function cleanOptional(value: string | undefined) {
+export function cleanOptional(value: string | undefined) {
   return value?.trim() || undefined;
 }
 
-function formatStructuredAddress(parts: {
+export function formatStructuredAddress(parts: {
   streetAddress?: string;
   city?: string;
   state?: string;
@@ -57,6 +63,74 @@ function formatStructuredAddress(parts: {
     [parts.state, parts.zip].filter(Boolean).join(" "),
   ].filter(Boolean).join(", ");
   return [parts.streetAddress, cityStateZip].filter(Boolean).join(", ") || undefined;
+}
+
+export type ParentAccountLookup =
+  | { kind: "parent"; user: Doc<"users">; duplicate: boolean }
+  | { kind: "non_parent"; user: Doc<"users">; duplicate: boolean }
+  | { kind: "none"; duplicate: false };
+
+/**
+ * The account an email already belongs to, if any (`users.by_email`). Shared
+ * by `createParent` and the admissions account/link paths so the collision
+ * rules cannot drift. `email` must already be normalized.
+ *
+ * `by_email` is not enforced unique, so this takes the first row and reports
+ * `duplicate` when a second one exists; callers flag it instead of throwing.
+ */
+export async function findParentAccountByEmail(
+  ctx: QueryCtx,
+  email: string,
+): Promise<ParentAccountLookup> {
+  const rows = await ctx.db
+    .query("users")
+    .withIndex("by_email", (q) => q.eq("email", email))
+    .take(2);
+  const existing = rows[0];
+  if (!existing) return { kind: "none", duplicate: false };
+  const duplicate = rows.length > 1;
+  return existing.role === ROLES.PARENT
+    ? { kind: "parent", user: existing, duplicate }
+    : { kind: "non_parent", user: existing, duplicate };
+}
+
+export type ParentContactFields = {
+  name?: string;
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
+  address?: string;
+  streetAddress?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+};
+
+/**
+ * Fill only the contact fields an existing account is MISSING; never
+ * overwrite. `stampVerified` also stamps `emailVerificationTime` when absent
+ * (createParent's "a trusted operator typed it"; a public intake never does).
+ */
+export async function backfillParentContact(
+  ctx: MutationCtx,
+  user: Doc<"users">,
+  fields: ParentContactFields,
+  opts: { stampVerified?: boolean } = {},
+): Promise<void> {
+  const patch: Record<string, unknown> = {};
+  if (!user.name && fields.name) patch.name = fields.name;
+  if (!user.firstName && fields.firstName) patch.firstName = fields.firstName;
+  if (!user.lastName && fields.lastName) patch.lastName = fields.lastName;
+  if (opts.stampVerified && !user.emailVerificationTime) {
+    patch.emailVerificationTime = Date.now();
+  }
+  if (!user.phone && fields.phone) patch.phone = fields.phone;
+  if (!user.address && fields.address) patch.address = fields.address;
+  if (!user.streetAddress && fields.streetAddress) patch.streetAddress = fields.streetAddress;
+  if (!user.city && fields.city) patch.city = fields.city;
+  if (!user.state && fields.state) patch.state = fields.state;
+  if (!user.zip && fields.zip) patch.zip = fields.zip;
+  if (Object.keys(patch).length) await ctx.db.patch(user._id, patch);
 }
 
 /**
@@ -105,13 +179,11 @@ export const createParent = scholarAdminMutation({
     // their own child) — never a scholar, which would be scholar-to-scholar
     // access. We never change their primary role; we add a guardianship + a
     // `parent` membership below.
-    const existing = await ctx.db
-      .query("users")
-      .withIndex("by_email", (q) => q.eq("email", email))
-      .unique();
-    if (existing && existing.role !== ROLES.PARENT) {
+    const lookup = await findParentAccountByEmail(ctx, email);
+    const existing = lookup.kind === "none" ? null : lookup.user;
+    if (lookup.kind === "non_parent") {
       const adminLinkingStaff =
-        isPlatformAdminRole(ctx.user.role) && isStaffRole(existing.role);
+        isPlatformAdminRole(ctx.user.role) && isStaffRole(lookup.user.role);
       if (!adminLinkingStaff) {
         throw new Error("That email already belongs to a non-parent account");
       }
@@ -136,18 +208,12 @@ export const createParent = scholarAdminMutation({
 
     // Backfill name/verified/contact on an existing parent if missing.
     if (existing) {
-      const patch: Record<string, unknown> = {};
-      if (!existing.name) patch.name = name;
-      if (!existing.firstName && firstName) patch.firstName = firstName;
-      if (!existing.lastName && lastName) patch.lastName = lastName;
-      if (!existing.emailVerificationTime) patch.emailVerificationTime = Date.now();
-      if (!existing.phone && phone) patch.phone = phone;
-      if (!existing.address && address) patch.address = address;
-      if (!existing.streetAddress && streetAddress) patch.streetAddress = streetAddress;
-      if (!existing.city && city) patch.city = city;
-      if (!existing.state && state) patch.state = state;
-      if (!existing.zip && zip) patch.zip = zip;
-      if (Object.keys(patch).length) await ctx.db.patch(existing._id, patch);
+      await backfillParentContact(
+        ctx,
+        existing,
+        { name, firstName, lastName, phone, address, streetAddress, city, state, zip },
+        { stampVerified: true },
+      );
     }
 
     for (const scholarId of args.scholarIds) {
@@ -254,6 +320,13 @@ export const sendClaimInvite = scholarAdminMutation({
   handler: async (ctx, args) => {
     const parent = await ctx.db.get(args.parentId);
     if (!parent || parent.role !== ROLES.PARENT) {
+      throw new Error("Parent not found");
+    }
+    // Tenancy: a role wrapper alone is a cross-tenant leak. Same gate as
+    // enrollment.issueParentEnrollLink — the parent must sit inside the
+    // caller's institution lens (platform admins stay global).
+    const lens = await resolveInstitutionLens(ctx, ctx.user);
+    if (!(await parentInLens(ctx, lens, args.parentId))) {
       throw new Error("Parent not found");
     }
     const email = parent.email ? normalizeEmail(parent.email) : "";
@@ -477,7 +550,10 @@ async function requireEnrolledGuardianChild(
   ctx: QueryCtx & { user: { _id: Id<"users"> } },
   scholarId: Id<"users">,
 ) {
-  await requireGuardianOf(ctx, scholarId);
+  // Guardian, or staff previewing the family view ("View as parent"). The
+  // reads behind this gate are exactly the non-sensitive ones a teacher can
+  // already see on their dashboard; writes (setChildPhoto) stay guardian-only.
+  await requireGuardianOrStaffPreview(ctx, scholarId);
   const scholar = await ctx.db.get(scholarId);
   if (!scholar || scholar.role !== ROLES.SCHOLAR) {
     throw new Error("Scholar not found");
@@ -521,6 +597,36 @@ export const listMyChildren = authedQuery({
 });
 
 /**
+ * "View as parent": the child row a TEACHER previews the parent portal for —
+ * the same shape `listMyChildren` returns, so `/parent?remote=<id>` renders
+ * the ordinary portal with this one child. Same boundary as
+ * `requireGuardianOrStaffPreview` (teacher-role membership access, never
+ * guardianship, never operations-only staff). Takes the raw URL param and
+ * returns null for anything that isn't a reachable scholar — a malformed id,
+ * a non-scholar, another school — so the page fails legibly instead of
+ * tripping argument validation.
+ */
+export const previewChildForStaff = authedQuery({
+  args: { scholarId: v.string() },
+  handler: async (ctx, args) => {
+    if (!isTeacherRole(ctx.user.role)) return null;
+    const scholarId = ctx.db.normalizeId("users", args.scholarId);
+    if (!scholarId) return null;
+    if (!(await canReadScholarAsTeacher(ctx, ctx.user, scholarId))) {
+      return null;
+    }
+    const scholar = await ctx.db.get(scholarId);
+    if (!scholar || scholar.role !== ROLES.SCHOLAR) return null;
+    return {
+      _id: scholar._id,
+      name: scholar.name ?? "Scholar",
+      image: scholar.image ?? null,
+      enrollmentStanding: scholar.enrollmentStanding ?? "enrolled",
+    };
+  },
+});
+
+/**
  * A guardian sets one of their linked children's profile photo. Guardian-gated
  * (by the `guardianships` graph, not role) so a parent — or a staff/admin who
  * is also a guardian — can update their own child's avatar. The upload is
@@ -560,6 +666,35 @@ export const hasParentContext = authedQuery({
       ctx.user.role === ROLES.PARENT ||
       (await hasGuardianships(ctx, ctx.user._id))
     );
+  },
+});
+
+/**
+ * The parent portal's mode for the signed-in user. `applicantOnly` is true for
+ * a parent whose family has applied to the primary institution but has no
+ * linked child yet (see lib/applicantParent.ts). The portal then shows only
+ * its Admissions tab and none of the enrolled-family surfaces.
+ */
+export const applicantContext = authedQuery({
+  args: {},
+  handler: async (ctx) => {
+    return {
+      applicantOnly: await isApplicantOnlyParent(ctx, ctx.user._id),
+    };
+  },
+});
+
+/**
+ * May the signed-in user open the guardian-only pages (/parent/health-form,
+ * /parent/forms/*)? Requires a real guardianship. `hasParentContext` is true
+ * for any parent-role account, including an applicant with no linked child,
+ * so those pages gate on this instead. The per-scholar reads and writes behind
+ * them still enforce `requireGuardianOf` on their own.
+ */
+export const canOpenGuardianForms = authedQuery({
+  args: {},
+  handler: async (ctx) => {
+    return await hasGuardianships(ctx, ctx.user._id);
   },
 });
 
@@ -742,6 +877,7 @@ export const childMastery = authedQuery({
     > = {};
 
     for (const o of observations) {
+      if (o.evidenceType === "interest_signal") continue;
       const isMisconception = o.evidenceType === "misconception_signal";
       if (isMisconception && o.misconceptionStatus === "addressed") continue;
       const bucket = (byDomain[o.domain] ??= { understands: [], notYet: [] });

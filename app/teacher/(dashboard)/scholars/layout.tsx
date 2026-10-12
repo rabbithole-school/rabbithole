@@ -288,13 +288,52 @@ export default function ScholarsLayout({
     }
     return null;
   }, [rawScholar, scholars]);
-  const selectedScholarId = (rawScholar
+  const resolvedScholarId = (rawScholar
     ? (rosterSlugMatch ?? slugResolution?.id ?? null)
     : null) as Id<"users"> | null;
+  // The username IS the slug, so renaming the open scholar (Account details,
+  // or another staffer) makes the URL they're on stop resolving. Remember which
+  // scholar the slug last resolved to; when it stops, look for them under their
+  // new username and move the URL there (the effect after buildUrl).
+  const [lastResolved, setLastResolved] = useState<{
+    slug: string;
+    id: Id<"users">;
+  } | null>(null);
+  if (
+    rawScholar &&
+    resolvedScholarId &&
+    (lastResolved?.slug !== rawScholar || lastResolved.id !== resolvedScholarId)
+  ) {
+    setLastResolved({ slug: rawScholar, id: resolvedScholarId });
+  }
+  const renamedScholarId =
+    !resolvedScholarId && slugResolution === null && lastResolved?.slug === rawScholar
+      ? lastResolved.id
+      : null;
+  // Hold the pane open only on proof the scholar still exists and is in
+  // reach: a slug that stopped resolving may equally mean they were deleted,
+  // and their profile's queries throw then. The roster updates in the same
+  // transition as the rename, so a roster hit is proof enough (and spares a
+  // round trip); off the roster (a program guest), ask by id.
+  const renamedRosterHit = renamedScholarId
+    ? scholars?.find((s) => s.id === renamedScholarId)
+    : undefined;
+  const renamedLookup = useQuery(
+    api.scholars.resolveSlug,
+    renamedScholarId && !renamedRosterHit ? { slug: renamedScholarId } : "skip",
+  );
+  const renamedTo = renamedRosterHit ?? renamedLookup ?? null;
+  const selectedScholarId =
+    resolvedScholarId ?? (renamedTo ? renamedScholarId : null);
   const resolvingSlug =
-    !!rawScholar && !rosterSlugMatch && slugResolution === undefined; // no sync hit, query in flight
+    (!!rawScholar && !rosterSlugMatch && slugResolution === undefined) || // no sync hit, query in flight
+    (!!renamedScholarId && !renamedTo && renamedLookup === undefined); // renamed-or-gone, lookup in flight
   const unknownSlug =
-    !!rawScholar && !rosterSlugMatch && slugResolution === null; // resolved, no such scholar
+    !!rawScholar &&
+    !rosterSlugMatch &&
+    slugResolution === null &&
+    !renamedTo &&
+    !resolvingSlug; // resolved, no such scholar
 
   // id → username, off the loaded roster, so the URL builders emit the friendly
   // username slug. ALSO seed the currently-selected scholar from slugResolution
@@ -451,7 +490,8 @@ export default function ScholarsLayout({
   const consumeAdd = useCallback(() => setAddAction(null), [setAddAction]);
   const handleAdd = useCallback(
     (action: ScholarAddAction) => {
-      if (action === "report" || action === "file") setScholarSubTab("documents");
+      if (action === "report" || action === "file")
+        setScholarSubTab("documents");
       else if (action === "note") setScholarSubTab("dossier");
       setAddAction(action);
     },
@@ -494,6 +534,26 @@ export default function ScholarsLayout({
       scroll: false,
     });
   }, [router, buildUrl, selectedScholarId, scholarSubTab, scopeKey]);
+
+  // Follow a rename of the open scholar to their new slug (see lastResolved),
+  // keeping everything else the URL says — the Rounds week, an open
+  // observation. The username goes in as the slug directly: buildUrl uses any
+  // value that isn't a roster id verbatim, and a program guest isn't on the
+  // roster.
+  const renamedToSlug = renamedTo ? (renamedTo.username ?? renamedScholarId) : null;
+  useEffect(() => {
+    if (!renamedToSlug) return;
+    router.replace(
+      buildUrl({
+        scholar: renamedToSlug,
+        stab: scholarSubTab,
+        group: scopeKey,
+        rweek: viewedRoundsWeek,
+        obs: rawObs,
+      }),
+      { scroll: false },
+    );
+  }, [router, buildUrl, renamedToSlug, scholarSubTab, scopeKey, viewedRoundsWeek, rawObs]);
 
   // Switching scope drops the selected scholar → land on that scope's overview.
   const setScope = useCallback(
@@ -629,10 +689,16 @@ export default function ScholarsLayout({
   // segment). Latched so it fires at most once per mount, and only when the URL
   // named NO tab (bare Snapshot) — a manual tab click or an explicit deep link
   // always wins. `groupPrepTimeBlock` returns the institution's canonical
-  // bell-schedule window (null when the pod doesn't run the ritual).
+  // bell-schedule window (null when the pod doesn't run the ritual). It is a
+  // teacher-gated query and the ritual is a teacher one, so it must not fire
+  // for an operations-only viewer — a throwing useQuery takes the whole layout
+  // down to the route error boundary (TRA-277), and until the mode is known
+  // the viewer might be one.
   const prepBlock = useQuery(
     api.metaChat.groupPrepTimeBlock,
-    activeGroup ? { groupId: activeGroup.id as Id<"scholarGroups"> } : "skip",
+    activeGroup && isOperationsOnly === false
+      ? { groupId: activeGroup.id as Id<"scholarGroups"> }
+      : "skip",
   );
   const prepNowMs = useNow(60_000);
   const prepAutoAppliedRef = useRef(false);

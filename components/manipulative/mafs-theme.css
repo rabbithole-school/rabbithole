@@ -27,3 +27,22 @@
   outline-offset: 2px;
   border-radius: 4px;
 }
+
+/* Idle invitation: while the card sits untouched (`.manip-idle-pulse` is set by
+   the frame and removed for good on the first interaction), the ONE movable
+   point breathes to show that the easy-to-miss handle is draggable. Delayed so
+   a scholar who is reading isn't nagged; off under reduce-motion. */
+.manip-idle-pulse .mafs-movable-point-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: manip-ring-breathe 1.4s ease-in-out 2.5s infinite;
+}
+@keyframes manip-ring-breathe {
+  0%, 100% { transform: scale(1); fill-opacity: 0.25; }
+  50% { transform: scale(1.6); fill-opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .manip-idle-pulse .mafs-movable-point-ring {
+    animation: none;
+  }
+}

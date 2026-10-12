@@ -42,7 +42,12 @@ export const forRoster = teacherQuery({
       }
     }
 
-    let badgeRows = await ctx.db.query("scholarUnitBadges").collect();
+    // A Calculator License badge's image is the license card — the scholar's
+    // photo, full name, and license number — so it never goes on the big
+    // screen by the door (an ambient display any visitor can read).
+    let badgeRows = (await ctx.db.query("scholarUnitBadges").collect()).filter(
+      (b) => b.kind !== "calculator_license",
+    );
     if (allowedScholarIds) {
       // Active institution lens: the kiosk only celebrates badges for scholars
       // visible in the resolved institution scope.

@@ -91,8 +91,12 @@ describe("applyCheckResult persists per-criterion verdicts", () => {
       }),
     );
 
+    const { submittedAt: assessedSubmittedAt } = (await t.run((ctx) =>
+      ctx.db.get(deliverableId),
+    ))!;
     await t.mutation(internal.deliverables.applyCheckResult, {
       deliverableId,
+      assessedSubmittedAt,
       verdicts: [
         { criterionId: "structure", level: "full", note: "ok" },
         { criterionId: "length", level: "half", note: "borderline" },
@@ -142,8 +146,12 @@ describe("applyCheckResult persists per-criterion verdicts", () => {
       }),
     );
 
+    const { submittedAt: assessedSubmittedAt } = (await t.run((ctx) =>
+      ctx.db.get(deliverableId),
+    ))!;
     await t.mutation(internal.deliverables.applyCheckResult, {
       deliverableId,
+      assessedSubmittedAt,
       verdicts: [
         { criterionId: "structure", level: "full" },
         { criterionId: "length", level: "full" },

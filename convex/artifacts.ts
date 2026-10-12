@@ -8,7 +8,9 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
+import { insertCodeRevision } from "./codeArtifactRevisions";
 import { isTeacherRole, ROLES } from "./lib/roles";
+import { resolveWorkshopPolicy } from "./lib/workshopPolicy";
 import { requireTeacherOrSelf } from "./lib/auth";
 import {
   requireActiveScholarAccess,
@@ -45,6 +47,11 @@ import {
   type SlideOp,
 } from "../shared/slidesScene";
 import { findExactlyOneLiteral } from "./lib/exactTextMatch";
+import {
+  rejectForeignAssets,
+  resolveDeckAssetUrls,
+  storedDeck,
+} from "./lib/slideAssetUrls";
 import { isTextArtifact } from "../shared/textArtifacts";
 
 function artifactState(artifact: {
@@ -125,6 +132,9 @@ export const scholarUpdate = authedMutation({
     content: v.optional(v.string()),
     title: v.optional(v.string()),
     baseRevision: v.optional(v.number()),
+    // Set when this write is a History → Restore of an earlier code revision;
+    // stamped on the recorded row so History labels it as a restore (F13).
+    restoredFromRevision: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const artifact = await ctx.db.get(args.artifactId);
@@ -140,6 +150,20 @@ export const scholarUpdate = authedMutation({
     }
     if (!isTextArtifact(artifact)) {
       throw new Error("Structured artifacts must be edited with their own tool.");
+    }
+    // App designer (TRA-301): a code app's html only changes in Edit. The same
+    // server verdict that clamps a forged stream `mode` gates this direct write
+    // (History → Restore, a manual code edit), so a scholar under `never` or a
+    // still-locked `afterCompletion` cannot produce a version through it. A
+    // teacher-role caller is never gated (see lib/workshopPolicy.ts).
+    if (artifact.type === "code" && session.sessionMode === "vibecode") {
+      const { effectiveEditAccess } = await resolveWorkshopPolicy(ctx, {
+        session,
+        caller: ctx.user,
+      });
+      if (effectiveEditAccess !== "allowed") {
+        throw new Error("Edit is not available in this activity.");
+      }
     }
     const currentRevision = artifact.revision ?? 0;
     const compatibleLegacyWrite =
@@ -188,6 +212,50 @@ export const scholarUpdate = authedMutation({
     if (changed) {
       patch.revision = currentRevision + 1;
       await ctx.db.patch(artifact._id, patch);
+      // A manual edit or a History → Restore of a code app records a revision
+      // row so History captures every version, not just the streamed ones (F3).
+      if (artifact.type === "code" && patch.content !== undefined) {
+        await insertCodeRevision(ctx, {
+          sessionId: artifact.sessionId,
+          artifactId: artifact._id,
+          revision: patch.revision,
+          html: patch.content,
+          ...(args.restoredFromRevision !== undefined
+            ? { restoredFromRevision: args.restoredFromRevision }
+            : {}),
+        });
+        // Autosave replaces the Save button entirely, so a manual code edit or
+        // a Restore on the teacher's OWN test-drive build session must reach
+        // the activity starter — the streamed-turn path is not the only writer
+        // (G3). Same derivation `recordTurnRevision` uses to compute the
+        // autosave target (test-drive session whose activity carries an
+        // appRequest). Play never reaches here (the editor is removed in Play,
+        // G2), but guard on the owner + test-drive shape anyway. Scheduled so
+        // the blob-copying promotion runs after this mutation commits, off the
+        // scholar's write path; the helper stamps success/failure on the
+        // session and never throws.
+        if (
+          session.isTestDrive &&
+          session.freePlay !== true &&
+          session.userId === ctx.user._id &&
+          isTeacher &&
+          session.activityId
+        ) {
+          const buildActivity = await ctx.db.get(session.activityId);
+          if (buildActivity?.appRequest != null) {
+            await ctx.scheduler.runAfter(
+              0,
+              internal.vibecodeStarterActions.autosaveStarterFromArtifact,
+              {
+                sessionId: session._id,
+                callerUserId: session.userId,
+                activityId: session.activityId,
+                artifactId: artifact._id,
+              },
+            );
+          }
+        }
+      }
       return { ok: true as const, revision: patch.revision };
     }
     return { ok: true as const, revision: currentRevision };
@@ -235,6 +303,20 @@ export const deleteArtifact = authedMutation({
     if (!isTeacher && session.userId !== ctx.user._id) return;
     if (isTeacher && session.userId !== ctx.user._id) {
       await requireActiveScholarAccess(ctx, ctx.user, session.userId);
+    }
+    // App designer (TRA-301): deleting a vibecode code app is a destructive
+    // code write — a scholar pinned to Play could otherwise delete the
+    // teacher-authored app and never rebuild it (Play has no code tools). Gate
+    // it behind the same verdict scholarUpdate uses; a teacher-role caller is
+    // never gated (see lib/workshopPolicy.ts).
+    if (artifact.type === "code" && session.sessionMode === "vibecode") {
+      const { effectiveEditAccess } = await resolveWorkshopPolicy(ctx, {
+        session,
+        caller: ctx.user,
+      });
+      if (effectiveEditAccess !== "allowed") {
+        throw new Error("Edit is not available in this activity.");
+      }
     }
 
     await ctx.db.delete(args.artifactId);
@@ -441,83 +523,6 @@ export const aiInsert = internalMutation({
       artifact: artifactState({
         ...artifact,
         content: lines.join("\n"),
-        lastEditedBy: "ai",
-        revision: result.currentRevision + 1,
-      }),
-    };
-  },
-});
-
-/**
- * The tutor writes the scholar's OWN words into their document.
- *
- * Deliberately separate from aiInsert, because the provenance differs and that
- * difference is consequential: the rubric grades this text, so a teacher reading
- * the deliverable later has to be able to tell "she wrote it" from "she said it
- * and the tutor typed it". `lastEditedBy` is a binary scholar|ai union that
- * cannot carry that distinction, so we stamp `hasTutorTranscription` alongside
- * it. Sticky once set: the document goes on containing transcribed words no
- * matter who edits it next, and un-setting it would overstate the scholar's
- * authorship.
- *
- * Appends rather than taking a line number — the tutor is copying down what the
- * scholar just said, not making a structural edit, and a child watching the box
- * should see their own sentence land at the end of it.
- */
-export const aiTranscribe = internalMutation({
-  args: {
-    sessionId: v.id("sessions"),
-    text: v.string(),
-    artifactId: v.optional(v.id("artifacts")),
-    baseRevision: v.optional(v.number()),
-  },
-  handler: async (ctx, args) => {
-    const text = args.text.trim();
-    if (!text) {
-      return {
-        kind: "refused" as const,
-        error: "Error: transcribe requires the scholar's own words in transcribe_text.",
-      };
-    }
-    let artifact;
-    if (args.artifactId) {
-      artifact = await ctx.db.get(args.artifactId);
-      assertArtifactBelongsToSession(artifact, args.sessionId);
-    } else {
-      artifact = await ctx.db
-        .query("artifacts")
-        .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
-        .collect()
-        .then((rows) => rows.find(isTextArtifact) ?? null);
-    }
-    if (!artifact) {
-      return {
-        kind: "refused" as const,
-        error: "Error: No document exists yet. Use create first.",
-      };
-    }
-    const result = editResult(artifact, args.baseRevision);
-    if (result.kind !== "ready") return result;
-    const content = artifact.content.trim()
-      ? `${artifact.content}\n${text}`
-      : text;
-    await ctx.db.patch(artifact._id, {
-      content,
-      lastEditedBy: "ai",
-      hasTutorTranscription: true,
-      // Kept so a later scholar edit can re-verify whether the transcribed
-      // words are still on the page (see scholarUpdate).
-      tutorTranscribedExcerpts: [
-        ...(artifact.tutorTranscribedExcerpts ?? []),
-        text,
-      ],
-      revision: result.currentRevision + 1,
-    });
-    return {
-      kind: "success" as const,
-      artifact: artifactState({
-        ...artifact,
-        content,
         lastEditedBy: "ai",
         revision: result.currentRevision + 1,
       }),
@@ -820,6 +825,34 @@ export const getById = authedQuery({
 });
 
 /**
+ * Serving URLs for a slides artifact's media, behind the same owner/staff gate
+ * as `getById`. Only ids in the stored deck, or slide media the caller uploaded
+ * (a picture just added, before its op lands), resolve (TRA-389).
+ */
+export const slideAssetUrls = authedQuery({
+  args: {
+    artifactId: v.id("artifacts"),
+    storageIds: v.array(v.id("_storage")),
+  },
+  handler: async (ctx, args) => {
+    const artifact = await ctx.db.get(args.artifactId);
+    if (!artifact || artifact.type !== "slides") return [];
+    const session = await ctx.db.get(artifact.sessionId);
+    if (!session) return [];
+    const isTeacher = isTeacherRole(ctx.user.role);
+    if (!isTeacher && session.userId !== ctx.user._id) return [];
+    if (isTeacher && session.userId !== ctx.user._id) {
+      await requireActiveScholarAccess(ctx, ctx.user, session.userId);
+    }
+    return await resolveDeckAssetUrls(ctx, {
+      storageIds: args.storageIds,
+      deck: storedDeck(artifact.content),
+      callerId: ctx.user._id,
+    });
+  },
+});
+
+/**
  * No-spoiler redaction (pure string→string). Given a stored map artifact's
  * JSON `content`, return a re-serialized copy with `spec.task` replaced by
  * `redactTaskForClient(spec.task)`. Valid taskless maps keep their original
@@ -839,9 +872,20 @@ function redactMapTaskContent(content: string): string | null {
  * spec. Used by every scholar-reachable read that returns artifact content
  * (getBySession, getByScholar, getById) so the answer never leaves the server.
  */
-function redactMapRowForScholar<T extends { type?: string; content: string }>(
-  row: T,
-): T {
+function redactMapRowForScholar<
+  T extends {
+    type?: string;
+    content: string;
+    appAi?: { character?: unknown } | null;
+  },
+>(withAppAi: T): Omit<T, "appAi"> & { hasAppCharacter?: true } {
+  // A code app's character persona and judge rubrics are server-only. The
+  // scholar's client learns only THAT a character exists, so its Workshop
+  // opens in Play, where the tutor hears the exchanges.
+  const { appAi, ...rest } = withAppAi;
+  const row: Omit<T, "appAi"> & { hasAppCharacter?: true } = appAi?.character
+    ? { ...rest, hasAppCharacter: true }
+    : rest;
   if (row.type !== "map") return row;
   const redacted = redactMapTaskContent(row.content);
   return redacted === null ? row : { ...row, content: redacted };
@@ -1199,6 +1243,15 @@ export const aiReadDeck = internalQuery({
       artifactId: artifact._id,
       revision: deck.revision,
       summary: summarizeDeckForModel(deck),
+      textStrings: deck.slides.flatMap((slide) =>
+        slide.elementIds.flatMap((elementId) => {
+          const element = slide.elements[elementId];
+          if (element?.type === "text") return [element.text];
+          // Image/video alt is prose too — the boundary lets the tutor move a
+          // picture with its existing alt, never write a new one.
+          return element && "alt" in element && element.alt ? [element.alt] : [];
+        }),
+      ),
     };
   },
 });
@@ -1246,9 +1299,21 @@ export const scholarEnsureSlidesDeck = authedMutation({
 export const registerSlideAsset = authedMutation({
   args: { storageId: v.id("_storage") },
   handler: async (ctx, args) => {
+    // Registration is what lets a deck show a blob, so it must be the caller's
+    // fresh upload, not any unclaimed storage id they learned (TRA-389).
+    const storage = await ctx.db.system.get("_storage", args.storageId);
+    if (
+      !storage ||
+      Date.now() - storage._creationTime > SLIDE_ASSET_REGISTER_WINDOW_MS
+    ) {
+      throw new Error("Upload expired. Add the picture again.");
+    }
     return await registerSlideAssetForUser(ctx, args.storageId, ctx.user._id);
   },
 });
+
+// Clients register immediately after the upload POST returns.
+const SLIDE_ASSET_REGISTER_WINDOW_MS = 10 * 60 * 1000;
 
 async function registerSlideAssetForUser(
   ctx: MutationCtx,
@@ -1624,32 +1689,3 @@ export const scholarGenerateSlideImage = authedAction({
   },
 });
 
-/**
- * Every media asset in the resulting deck must be registered to `ownerId`.
- * Checking the validated deck covers whole-deck creates, addElement, and
- * addSlide restoration without duplicating the slide-operation grammar.
- */
-async function rejectForeignAssets(
-  ctx: MutationCtx,
-  deck: Deck,
-  ownerId: Id<"users">,
-): Promise<string | null> {
-  const assetIds = new Set<string>();
-  for (const slide of deck.slides) {
-    for (const element of Object.values(slide.elements)) {
-      if (element.type === "image" || element.type === "video") {
-        assetIds.add(element.assetId);
-      }
-    }
-  }
-  for (const assetId of assetIds) {
-    const row = await ctx.db
-      .query("slideAssets")
-      .withIndex("by_storage", (q) => q.eq("storageId", assetId as Id<"_storage">))
-      .first();
-    if (!row || row.uploaderId !== ownerId) {
-      return "That media isn't available to this deck.";
-    }
-  }
-  return null;
-}

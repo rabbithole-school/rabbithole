@@ -2,7 +2,7 @@
  * Tutor-quality rubric — the single source of truth for the per-turn scoring
  * dimensions and their descriptions.
  *
- * The dimension `description` strings are copied VERBATIM from the Opus judge's
+ * The dimension `description` strings are copied VERBATIM from the tutor-quality judge's
  * per-turn rubric (`evals/tutor-quality/lib/judge.ts` → `TURN_RUBRIC`). This is
  * deliberate and load-bearing: the golden-set labeling tool (`/teacher/labeling`)
  * exists to CALIBRATE that judge, so humans must score the SAME dimensions with
@@ -44,12 +44,12 @@ export const PER_TURN_DIMENSIONS: RubricDimension[] = [
   {
     key: "socratic",
     label: "Socratic",
-    description: "turns thinking back to the scholar; opens questions. 5 = a real opening\n  question tied to what the scholar said. 1 = full answer, no invitation back.",
+    description: "turns thinking back to the scholar. 5 = the scholar leaves this turn with\n  real thinking to do: an opening question tied to what they said, or, after a real stall, a\n  short worked example followed by their own problem handed back. 1 = full answer to the\n  scholar's own problem, no invitation back. A question with nothing in it for a stuck scholar\n  (re-asking what they just said they don't know, a vocabulary quiz, a step so small it is\n  trivia) is not Socratic: score it 2 at most.",
   },
   {
     key: "cognitiveOffloading",
     label: "Cognitive offloading (absence-of)",
-    description: "did the tutor do the THINKING for the scholar?\n  5 = scaffolded, left the work for the scholar. 1 = handed over reasoning the scholar\n  could have done with a nudge (\"the answer is X because A, B, C\"). Watch for: complete\n  how-tos, full enumerations, finished reasoning chains.",
+    description: "did the tutor do the THINKING for the scholar?\n  5 = the scholar still owns the thinking on their own problem. 1 = handed over reasoning the\n  scholar could have done with a nudge (\"the answer is X because A, B, C\"). Watch for: complete\n  how-tos, full enumerations, finished reasoning chains, the tutor answering its own question.\n  NOT offloading: after a real stall (the scholar tried and is stuck, says \"idk\" again, or is on\n  brand-new ground with nothing to build from), showing the idea on a parallel example and then\n  handing the scholar's actual problem back. Score that 4-5. Offloading is solving THEIR problem\n  for them, not teaching what a nudge could not have reached.",
   },
   {
     key: "overScaffolding",
@@ -69,7 +69,7 @@ export const PER_TURN_DIMENSIONS: RubricDimension[] = [
   {
     key: "didacticDensity",
     label: "Didactic density (absence-of)",
-    description: "how info-dumpy is this turn? 5 = conversational, scoped to\n  what was asked. 1 = long bulleted lecture / Wikipedia paragraph in response to a casual\n  question. Even direct factual questions can be answered briefly and pivoted back.",
+    description: "how info-dumpy is this turn? 5 = conversational, scoped to\n  what the moment needs. 1 = long bulleted lecture / Wikipedia paragraph in response to a casual\n  question. Even direct factual questions can be answered briefly and pivoted back. A short\n  explanation or worked example after a real stall is scoped, not a dump: judge its length\n  against what the scholar needed to get unstuck, not against a one-line reply.",
   },
   {
     key: "followUpQuality",

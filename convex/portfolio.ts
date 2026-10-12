@@ -6,7 +6,7 @@ import {
   type QueryCtx,
 } from "./_generated/server";
 import { authedQuery, authedMutation } from "./lib/customFunctions";
-import { requireGuardianOf } from "./lib/auth";
+import { requireGuardianOrStaffPreview } from "./lib/auth";
 import { ROLES, isScholarAdminRole } from "./lib/roles";
 import {
   requireProgramCaptureReviewAccess,
@@ -24,8 +24,18 @@ import { clearScanAssessment } from "./portfolioAssess";
 import { maybeScheduleArtifactAssessment } from "./granuleAssessment";
 import {
   entryTargetsScholar,
+  isLiveEntry,
   liveActivityAt,
 } from "./assignments";
+import { isProgramHandoutActivity } from "./lib/programHandoutAccess";
+import { resolveScholarHomework } from "./activityCompletions";
+import { isScholarHomeworkMark } from "./lib/activityCompletionCore";
+import {
+  resolveReachableActivityResources,
+  unitIdForActivity,
+} from "./lib/activityResourceReachability";
+import { candidateGroupsForScholar } from "./lib/scholarGroupMembership";
+import { getFormEntry } from "./lib/formRegistry";
 import {
   canUserAccessScholar,
   requireActiveScholarAccess,
@@ -42,6 +52,7 @@ import {
 import {
   portfolioItemContainsIdentifiableMedia,
   portfolioFamilySharingEligibility,
+  familyMediaReleaseStatus,
 } from "./lib/schoolMediaConsent";
 import { activityResourceDisplayRows } from "./lib/activityResourceDisplay";
 import { normalizeDocumentHeading } from "./lib/pdfSegments";
@@ -234,10 +245,6 @@ function publicView(r: Doc<"portfolioItems">) {
     // A stuck-"pending" item degrades to the icon (see thumbStatusFor) so it
     // never spins forever.
     thumbStatus: thumbStatusFor(r),
-    // Magic Annotations: present when a Magic Corners marker was redrawn. The
-    // URL is fetched on demand via getMagicFileUrl (needs ctx.storage).
-    hasMagic: r.magicStorageId != null,
-    magicInstruction: r.magicInstruction ?? null,
   };
 }
 
@@ -789,11 +796,6 @@ export const listForScholar = authedQuery({
       visibleRows.map(async (r) => ({
         ...publicView(r),
         thumbUrl: await previewUrl(ctx, r),
-        // Magic Annotations: thumbnail of the redraw, so the card can preview
-        // the magic version inline (and toggle to the original).
-        magicThumbUrl: r.magicThumbStorageId
-          ? await ctx.storage.getUrl(r.magicThumbStorageId)
-          : null,
       })),
     );
   },
@@ -823,18 +825,6 @@ export const getFileUrl = authedQuery({
   },
 });
 
-/** Signed URL for the Magic-Annotations-redrawn image (before/after viewer). */
-export const getMagicFileUrl = authedQuery({
-  args: { itemId: v.id("portfolioItems") },
-  handler: async (ctx, args) => {
-    requireScholarAdmin(ctx);
-    const item = await ctx.db.get(args.itemId);
-    if (!item || !item.magicStorageId) return null;
-    await requirePortfolioItemAccess(ctx, item);
-    return await ctx.storage.getUrl(item.magicStorageId);
-  },
-});
-
 // ── Parent (guardian) read-only access ──────────────────────────────────
 // Parents see their OWN child's work samples, read-only. Separate from the
 // scholar-admin functions above so the guardian gate is explicit and a
@@ -852,45 +842,98 @@ async function itemFamilySharingEligibility(
   );
 }
 
-/** A guardian's read-only list of their child's portfolio items. */
-export const listForGuardian = authedQuery({
-  args: { scholarId: v.id("users") },
-  handler: async (ctx, args) => {
-    await requireGuardianOf(ctx, args.scholarId);
-    const legacyRows = await ctx.db
-      .query("portfolioItems")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
-      .order("desc")
-      .collect();
-    const attributedRows = await ctx.db
-      .query("portfolioAttributions")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
-      .collect();
-    const rows = new Map(legacyRows.map((row) => [row._id, row]));
-    for (const attribution of attributedRows) {
-      const item = await ctx.db.get(attribution.portfolioItemId);
-      if (item) rows.set(item._id, item);
+/**
+ * The COURSE a piece of family-visible work belongs to: the scholar-group
+ * provenance stamped on the assignment it was filed under. Null for unfiled
+ * work and for assignments that were never published through a program group.
+ */
+async function courseIdForAssignment(
+  ctx: Pick<QueryCtx, "db">,
+  assignmentId: Id<"assignments"> | undefined,
+): Promise<Id<"scholarGroups"> | null> {
+  if (!assignmentId) return null;
+  const assignment = await ctx.db.get(assignmentId);
+  return assignment?.scholarGroupId ?? null;
+}
+
+/**
+ * Every family-visible item for one child, newest first — the single
+ * selection + projection both guardian portfolio surfaces read.
+ *
+ * Deliberately omits `scholarId` / `assignmentId` / `activityId` from `item`:
+ * a family sees their child's work, never the roster or the execution graph
+ * behind it (asserted in portfolio.test.ts).
+ *
+ * `courseId` is stamped ONLY when the child is actually part of that course.
+ * Filing a scan to an assignment the child isn't in is permitted
+ * (`applyPortfolioItemAssignment` keeps the roster intact on purpose), so the
+ * provenance alone would otherwise advertise — and open — a group the family
+ * has no claim on. Work filed to a foreign course reads as unfiled.
+ *
+ * `hydrate: false` skips every `ctx.storage.getUrl` and the capture join: the
+ * tile pipeline needs only `courseId` + `_creationTime`, and signing URLs for
+ * work nobody is about to look at is pure cost.
+ */
+async function guardianWorkEntries(
+  ctx: QueryCtx,
+  scholarId: Id<"users">,
+  options: {
+    hydrate?: boolean;
+    courseGroups?: Doc<"scholarGroups">[];
+  } = {},
+) {
+  const hydrate = options.hydrate ?? true;
+  const courseGroupIds = new Set(
+    (options.courseGroups ?? (await guardianCourseGroups(ctx, scholarId))).map(
+      (group) => String(group._id),
+    ),
+  );
+  const courseIdForItem = async (
+    assignmentId: Id<"assignments"> | undefined,
+  ): Promise<Id<"scholarGroups"> | null> => {
+    const courseId = await courseIdForAssignment(ctx, assignmentId);
+    return courseId && courseGroupIds.has(String(courseId)) ? courseId : null;
+  };
+  const legacyRows = await ctx.db
+    .query("portfolioItems")
+    .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
+    .order("desc")
+    .collect();
+  const attributedRows = await ctx.db
+    .query("portfolioAttributions")
+    .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
+    .collect();
+  const rows = new Map(legacyRows.map((row) => [row._id, row]));
+  for (const attribution of attributedRows) {
+    const item = await ctx.db.get(attribution.portfolioItemId);
+    if (item) rows.set(item._id, item);
+  }
+  const visibleItems = [];
+  for (const item of [...rows.values()].sort(
+    (a, b) => b._creationTime - a._creationTime,
+  )) {
+    if (
+      item.familyVisibility !== "staff_only" &&
+      assignmentResolved(item) &&
+      (await itemFamilySharingEligibility(ctx, item)).allowed
+    ) {
+      visibleItems.push(item);
     }
-    const visibleItems = [];
-    for (const item of [...rows.values()].sort(
-      (a, b) => b._creationTime - a._creationTime,
-    )) {
-      if (
-        item.familyVisibility !== "staff_only" &&
-        assignmentResolved(item) &&
-        (await itemFamilySharingEligibility(ctx, item)).allowed
-      ) {
-        visibleItems.push(item);
-      }
-    }
-    const fileItems = await Promise.all(
-      visibleItems.map(async (item) => {
-        const attributed = await attributedScholarIds(ctx, item);
-        const activity = item.activityId
-          ? await ctx.db.get(item.activityId)
-          : null;
-        return {
+  }
+  const fileEntries = await Promise.all(
+    visibleItems.map(async (item) => {
+      const attributed = await attributedScholarIds(ctx, item);
+      const activity = item.activityId
+        ? await ctx.db.get(item.activityId)
+        : null;
+      // A capture-station video has no image thumbnail (previewUrl returns
+      // null for it) — its poster still and duration live on the capture row.
+      const capture = hydrate ? await captureForPortfolioItem(ctx, item) : null;
+      return {
+        activityId: item.activityId ?? null,
+        item: {
           _id: item._id,
+          courseId: await courseIdForItem(item.assignmentId),
           _creationTime: item._creationTime,
           kind: "file" as const,
           title: item.title,
@@ -899,42 +942,51 @@ export const listForGuardian = authedQuery({
           aiCaption:
             attributed.length <= 1 ? (item.aiCaption ?? undefined) : undefined,
           hasFile: item.fileStorageId != null,
-          fileUrl: item.fileStorageId
-            ? await ctx.storage.getUrl(item.fileStorageId)
-            : null,
+          fileUrl:
+            hydrate && item.fileStorageId
+              ? await ctx.storage.getUrl(item.fileStorageId)
+              : null,
           attributionCount: attributed.length,
           activityTitle: activity?.title ?? null,
-          thumbUrl: await previewUrl(ctx, item),
-        };
-      }),
-    );
-    const sharedDeliverables = [];
-    const digitalRows = await ctx.db
-      .query("deliverables")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
-      .collect();
-    for (const deliverable of digitalRows) {
-      if (
-        deliverable.familyVisibility === "attributed_families" &&
-        deliverable.familySnapshot !== undefined &&
-        deliverable.familyPublishedAt !== undefined &&
-        (
-          await portfolioFamilySharingEligibility(
-            ctx,
-            [deliverable.scholarId],
-            false,
-          )
-        ).allowed
-      ) {
-        sharedDeliverables.push(deliverable);
-      }
+          thumbUrl: hydrate ? await previewUrl(ctx, item) : null,
+          videoThumbUrl: capture?.videoThumbStorageId
+            ? await ctx.storage.getUrl(capture.videoThumbStorageId)
+            : null,
+          videoDurationMs: capture?.videoDurationMs ?? null,
+        },
+      };
+    }),
+  );
+  const sharedDeliverables = [];
+  const digitalRows = await ctx.db
+    .query("deliverables")
+    .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
+    .collect();
+  for (const deliverable of digitalRows) {
+    if (
+      deliverable.familyVisibility === "attributed_families" &&
+      deliverable.familySnapshot !== undefined &&
+      deliverable.familyPublishedAt !== undefined &&
+      (
+        await portfolioFamilySharingEligibility(
+          ctx,
+          [deliverable.scholarId],
+          false,
+        )
+      ).allowed
+    ) {
+      sharedDeliverables.push(deliverable);
     }
-    const digitalItems = await Promise.all(
-      sharedDeliverables.map(async (deliverable) => {
-        const activity = await ctx.db.get(deliverable.activityId);
-        const snapshot = deliverable.familySnapshot!;
-        return {
+  }
+  const digitalEntries = await Promise.all(
+    sharedDeliverables.map(async (deliverable) => {
+      const activity = await ctx.db.get(deliverable.activityId);
+      const snapshot = deliverable.familySnapshot!;
+      return {
+        activityId: deliverable.activityId,
+        item: {
           _id: deliverable._id,
+          courseId: await courseIdForItem(deliverable.assignmentId),
           _creationTime: deliverable.familyPublishedAt!,
           kind: snapshot.kind,
           title: snapshot.title,
@@ -948,12 +1000,347 @@ export const listForGuardian = authedQuery({
           attributionCount: 1,
           activityTitle: activity?.title ?? null,
           thumbUrl: null,
-        };
-      }),
+          videoThumbUrl: null,
+          videoDurationMs: null,
+        },
+      };
+    }),
+  );
+  return [...fileEntries, ...digitalEntries].sort(
+    (a, b) => b.item._creationTime - a.item._creationTime,
+  );
+}
+
+/** A guardian's read-only list of their child's portfolio items. */
+export const listForGuardian = authedQuery({
+  args: { scholarId: v.id("users") },
+  handler: async (ctx, args) => {
+    // Guardian, or staff previewing the family view ("View as parent").
+    await requireGuardianOrStaffPreview(ctx, args.scholarId);
+    return (await guardianWorkEntries(ctx, args.scholarId)).map(
+      (entry) => entry.item,
     );
-    return [...fileItems, ...digitalItems].sort(
-      (a, b) => b._creationTime - a._creationTime,
+  },
+});
+
+// ── Family course view ──────────────────────────────────────────────────
+// A "course" is a scholarGroup that is the provenance (`scholarGroupId`) of
+// assignments a child is part of — e.g. a Robotics program. Everything below
+// hangs off `requireGuardianOrStaffPreview(scholarId)`: the child's own
+// guardianship is the only authority, and the institution is taken from the
+// child rather than assumed primary.
+
+/**
+ * Is this assignment's audience this child? The published roster
+ * (`scholarIds`) is the snapshot that counts. An EMPTY roster is the
+ * program-handout draft shape (`createProgramHandoutDraft` publishes with
+ * `scholarIds: []` and `placeProgramHandout` stamps the roster at placement),
+ * so fall back to the group's own membership rather than showing nobody.
+ */
+function assignmentTargetsScholar(
+  assignment: Doc<"assignments">,
+  group: Doc<"scholarGroups">,
+  scholarId: Id<"users">,
+): boolean {
+  if (assignment.archivedAt) return false;
+  const roster =
+    assignment.scholarIds.length > 0 ? assignment.scholarIds : group.scholarIds;
+  return roster.some((id) => id === scholarId);
+}
+
+/**
+ * The child's LIVE sessions in one course, in schedule order. Planned-only
+ * entries (`setAt` unstamped) never reach a family — same safety property the
+ * scholar surfaces rely on (`isLiveEntry`).
+ */
+async function courseSessionsForScholar(
+  ctx: QueryCtx,
+  group: Doc<"scholarGroups">,
+  scholarId: Id<"users">,
+  now: number,
+) {
+  const assignments = await ctx.db
+    .query("assignments")
+    .withIndex("by_scholar_group", (q) => q.eq("scholarGroupId", group._id))
+    .collect();
+  const sessions = [];
+  for (const assignment of assignments) {
+    if (!assignmentTargetsScholar(assignment, group, scholarId)) continue;
+    const schedule = assignment.activitySchedule ?? [];
+    for (const [index, entry] of schedule.entries()) {
+      if (!isLiveEntry(entry, now)) continue;
+      if (!entryTargetsScholar(entry, scholarId)) continue;
+      const activity = await ctx.db.get(entry.activityId);
+      if (!activity || activity.archivedAt) continue;
+      const isHandout = isProgramHandoutActivity(activity, assignment);
+      // A lesson can be MOVED to another unit after it was scheduled. The
+      // schedule entry keeps pointing at the activity, so without this the
+      // session would carry a different unit's title and — worse — that
+      // unit's referenced resources. A handout has no unit by construction.
+      const unitId = await unitIdForActivity(ctx, activity);
+      if (!isHandout && (!assignment.unitId || unitId !== assignment.unitId)) {
+        continue;
+      }
+      const lesson = activity.lessonId
+        ? await ctx.db.get(activity.lessonId)
+        : null;
+      const unit = unitId ? await ctx.db.get(unitId) : null;
+      sessions.push({
+        // The schedule index keeps the key unique when one activity is
+        // scheduled twice in the same assignment.
+        key: `${assignment._id}:${index}:${activity._id}`,
+        activityId: activity._id,
+        // `startsAt` is when the session RUNS; `setAt` is only when a teacher
+        // activated it (and `isLiveEntry` already requires it), so reading
+        // `setAt` first would sort the schedule by activation order.
+        scheduledAt: entry.startsAt ?? entry.setAt ?? null,
+        kind: isHandout ? ("handout" as const) : ("lesson" as const),
+        unitTitle: unit?.title ?? null,
+        lessonTitle: lesson?.title ?? null,
+        activityTitle: activity.title,
+        lessonOrder: lesson?.order ?? 0,
+        activityOrder: activity.order,
+      });
+    }
+  }
+  sessions.sort((a, b) => {
+    if (a.scheduledAt !== b.scheduledAt) {
+      if (a.scheduledAt == null) return 1;
+      if (b.scheduledAt == null) return -1;
+      return a.scheduledAt - b.scheduledAt;
+    }
+    if (a.lessonOrder !== b.lessonOrder) return a.lessonOrder - b.lessonOrder;
+    if (a.activityOrder !== b.activityOrder) {
+      return a.activityOrder - b.activityOrder;
+    }
+    return a.key.localeCompare(b.key);
+  });
+  return sessions;
+}
+
+/**
+ * The courses a child is PART OF: the groups whose current roster holds them,
+ * plus the groups whose assignments froze them into an audience (so a child
+ * dropped from a roster keeps the course they actually did).
+ *
+ * Membership is never inferred from work provenance. Filing a scan to an
+ * assignment the child isn't in is deliberately allowed
+ * (`applyPortfolioItemAssignment`), so a misfiled scan would otherwise hand a
+ * family an unrelated group's name, sessions and teacher materials.
+ *
+ * Which groups are even scanned — the child's own school, plus unstamped
+ * legacy rows for a primary-school child — is the canonical rule in
+ * `candidateGroupsForScholar`, not a local "no institutionId matches
+ * everyone".
+ */
+async function guardianCourseGroups(
+  ctx: QueryCtx,
+  scholarId: Id<"users">,
+): Promise<Doc<"scholarGroups">[]> {
+  const scholar = await ctx.db.get(scholarId);
+  if (!scholar) return [];
+  const groups: Doc<"scholarGroups">[] = [];
+  for (const group of await candidateGroupsForScholar(ctx, scholar)) {
+    if (group.scholarIds.some((id) => id === scholarId)) {
+      groups.push(group);
+      continue;
+    }
+    const assignments = await ctx.db
+      .query("assignments")
+      .withIndex("by_scholar_group", (q) => q.eq("scholarGroupId", group._id))
+      .collect();
+    if (
+      assignments.some(
+        (assignment) =>
+          !assignment.archivedAt &&
+          assignment.scholarIds.some((id) => id === scholarId),
+      )
+    ) {
+      groups.push(group);
+    }
+  }
+  return groups;
+}
+
+/** The portal opens a child's form at `<path>?scholarId=<id>` (see
+ *  GuardianFormCard), so the link the notice hands out carries the same. */
+function formPathForScholar(
+  formPath: string | undefined,
+  scholarId: Id<"users">,
+): string | null {
+  return formPath ? `${formPath}?scholarId=${scholarId}` : null;
+}
+
+/** The media-release state a family can act on, plus where to act on it. */
+async function guardianMediaRelease(ctx: QueryCtx, scholarId: Id<"users">) {
+  const status = await familyMediaReleaseStatus(ctx, scholarId);
+  return {
+    status,
+    formPath:
+      status === "not_granted" || status === "form_missing"
+        ? formPathForScholar(
+            getFormEntry("extended_education_visiting_student")?.formPath,
+            scholarId,
+          )
+        : null,
+  };
+}
+
+/**
+ * The family portal's Portfolio landing: one tile per course this child is
+ * part of, plus the count of work that belongs to no course.
+ */
+export const coursesForGuardian = authedQuery({
+  args: { scholarId: v.id("users") },
+  handler: async (ctx, args) => {
+    await requireGuardianOrStaffPreview(ctx, args.scholarId);
+    const groups = await guardianCourseGroups(ctx, args.scholarId);
+    // Tiles are counts and timestamps — no signed URLs.
+    const entries = await guardianWorkEntries(ctx, args.scholarId, {
+      hydrate: false,
+      courseGroups: groups,
+    });
+    const now = Date.now();
+    const courses = [];
+    for (const group of groups) {
+      const inCourse = entries.filter(
+        (entry) => entry.item.courseId === group._id,
+      );
+      const sessions = await courseSessionsForScholar(
+        ctx,
+        group,
+        args.scholarId,
+        now,
+      );
+      // A homeroom or routing group the child merely belongs to is not a
+      // course: a tile needs a live session or a piece of work behind it.
+      if (inCourse.length === 0 && sessions.length === 0) continue;
+      courses.push({
+        groupId: group._id,
+        name: group.name,
+        emoji: group.emoji ?? null,
+        latestWorkAt:
+          inCourse.length > 0
+            ? Math.max(...inCourse.map((entry) => entry.item._creationTime))
+            : null,
+        workCount: inCourse.length,
+        sessionCount: sessions.length,
+      });
+    }
+    courses.sort((a, b) => {
+      if (a.latestWorkAt !== b.latestWorkAt) {
+        if (a.latestWorkAt == null) return 1;
+        if (b.latestWorkAt == null) return -1;
+        return b.latestWorkAt - a.latestWorkAt;
+      }
+      return a.name.localeCompare(b.name);
+    });
+    return {
+      courses,
+      otherWorkCount: entries.filter((entry) => entry.item.courseId == null).length,
+      mediaRelease: await guardianMediaRelease(ctx, args.scholarId),
+    };
+  },
+});
+
+/**
+ * One course, for one family: the child's live sessions in schedule order,
+ * each carrying their own shared work and the teacher's family-visible
+ * materials. `course` is null — not an error — when the child is not part of
+ * this course (or the URL carried junk), so the portal can render a plain
+ * "not found" for a stale link.
+ *
+ * `mediaRelease` rides along so the course view never has to re-run the whole
+ * tile pipeline just to know whether to show the consent notice; it is
+ * returned on the null branch too, which is what `/parent/portfolio/other`
+ * reads.
+ *
+ * `groupId` is a plain string: `/parent/portfolio/<junk>` would otherwise be
+ * rejected by the `v.id` validator before the handler and throw at the family.
+ *
+ * Teacher materials are NOT media-consent gated: they are the program's own
+ * handouts, not a picture of a child. The child's work is (through
+ * `guardianWorkEntries`).
+ */
+export const courseForGuardian = authedQuery({
+  args: { scholarId: v.id("users"), groupId: v.string() },
+  handler: async (ctx, args) => {
+    await requireGuardianOrStaffPreview(ctx, args.scholarId);
+    const mediaRelease = await guardianMediaRelease(ctx, args.scholarId);
+    const groupId = ctx.db.normalizeId("scholarGroups", args.groupId);
+    if (!groupId) return { course: null, mediaRelease };
+    const groups = await guardianCourseGroups(ctx, args.scholarId);
+    const group = groups.find((candidate) => candidate._id === groupId);
+    if (!group) return { course: null, mediaRelease };
+    const entries = await guardianWorkEntries(ctx, args.scholarId, {
+      courseGroups: groups,
+    });
+
+    const now = Date.now();
+    const scheduled = await courseSessionsForScholar(
+      ctx,
+      group,
+      args.scholarId,
+      now,
     );
+    const courseWork = entries.filter(
+      (entry) => entry.item.courseId === group._id,
+    );
+    // One item files under the FIRST session that runs its activity, so a
+    // repeated activity can't show the same work twice.
+    const filed = new Set<string>();
+    const sessions = [];
+    for (const session of scheduled) {
+      const work = courseWork.filter(
+        (entry) =>
+          entry.activityId === session.activityId &&
+          !filed.has(String(entry.item._id)),
+      );
+      for (const entry of work) filed.add(String(entry.item._id));
+      const { all } = await resolveReachableActivityResources(
+        ctx,
+        session.activityId,
+      );
+      const resources = await Promise.all(
+        all
+          .filter((resource) => resource.familyVisibility === "families")
+          .map(async (resource) => ({
+            _id: resource._id,
+            title: resource.title,
+            source: resource.source.kind,
+            url:
+              resource.source.kind === "file"
+                ? await ctx.storage.getUrl(resource.source.fileStorageId)
+                : resource.source.url,
+            mimeType:
+              resource.source.kind === "file" ? resource.source.mimeType : null,
+            fileName:
+              resource.source.kind === "file" ? resource.source.fileName : null,
+          })),
+      );
+      sessions.push({
+        key: session.key,
+        scheduledAt: session.scheduledAt,
+        kind: session.kind,
+        unitTitle: session.unitTitle,
+        lessonTitle: session.lessonTitle,
+        activityTitle: session.activityTitle,
+        work: work.map((entry) => entry.item),
+        resources,
+      });
+    }
+    return {
+      course: {
+        groupId: group._id,
+        name: group.name,
+        emoji: group.emoji ?? null,
+        sessions,
+        otherWork: courseWork
+          .filter((entry) => !filed.has(String(entry.item._id)))
+          .map((entry) => entry.item),
+      },
+      mediaRelease,
+    };
   },
 });
 
@@ -1767,11 +2154,6 @@ export const offlineSessionView = authedQuery({
             fileUrl: item?.fileStorageId
               ? await ctx.storage.getUrl(item.fileStorageId)
               : null,
-            // Magic version (Magic Corners redrawn), alongside the original —
-            // the UI decides which to show. null when there was no marker.
-            magicUrl: item?.magicStorageId
-              ? await ctx.storage.getUrl(item.magicStorageId)
-              : null,
             overall: d.overall ?? null,
             rubricPassed: d.rubricPassed ?? null,
             // Scholar-facing "Checked by your teacher" state (Phase 2). A stamp
@@ -1807,6 +2189,44 @@ export const offlineSessionView = authedQuery({
     const resources = activity
       ? await activityResourceDisplayRows(ctx, activity._id)
       : [];
+    // The finish block (TRA-458): the owning scholar can say "I did it" for
+    // live offline homework with no completion yet, and undo their OWN mark
+    // while the homework is live. Staff never see it — teachers mark from the
+    // Run page, and a staff account can't say a scholar did the work.
+    const completion =
+      session.assignmentId && session.activityId
+        ? await ctx.db
+            .query("activityCompletions")
+            .withIndex("by_scholar_assignment", (q) =>
+              q
+                .eq("scholarId", session.userId)
+                .eq("assignmentId", session.assignmentId!),
+            )
+            .filter((q) => q.eq(q.field("activityId"), session.activityId!))
+            .first()
+        : null;
+    // Liveness here only gates OFFERING the button (T11: it can go stale while
+    // the page is open); the mutation re-checks and refuses an ended entry
+    // legibly, so a stale "I did it" never writes.
+    const homework =
+      isOwner && session.assignmentId && session.activityId
+        ? await resolveScholarHomework(
+            ctx,
+            session.userId,
+            session.assignmentId,
+            session.activityId,
+          )
+        : null;
+    const homeworkLive = homework?.ok === true;
+    const selfMark =
+      isOwner && completion && isScholarHomeworkMark(completion)
+        ? {
+            completionId: completion._id,
+            completedAt: completion.completedAt,
+            canUndo: homeworkLive,
+          }
+        : null;
+    const canMarkDone = homeworkLive && !completion;
 
     return {
       title: session.title,
@@ -1827,6 +2247,10 @@ export const offlineSessionView = authedQuery({
       resources,
       items,
       viewerCanGrade,
+      assignmentId: session.assignmentId ?? null,
+      activityId: session.activityId ?? null,
+      canMarkDone,
+      selfMark,
     };
   },
 });
@@ -1967,11 +2391,11 @@ export const replaceFileAfterRotation = internalMutation({
     const item = await ctx.db.get(args.itemId);
     if (!item) {
       await ctx.storage.delete(args.newStorageId);
-      return { replaced: false, regenerateMagic: false };
+      return { replaced: false };
     }
     if (item.fileStorageId !== args.expectedOldStorageId) {
       await ctx.storage.delete(args.newStorageId);
-      return { replaced: false, regenerateMagic: false };
+      return { replaced: false };
     }
     if (item.fileMimeType !== "application/pdf" || !item.fileStorageId) {
       await ctx.storage.delete(args.newStorageId);
@@ -1987,7 +2411,6 @@ export const replaceFileAfterRotation = internalMutation({
       item.magicStorageId,
       item.magicThumbStorageId,
     ].filter((id): id is Id<"_storage"> => id != null);
-    const regenerateMagic = item.magicStorageId != null;
 
     await ctx.db.patch(args.itemId, {
       fileStorageId: args.newStorageId,
@@ -2005,51 +2428,7 @@ export const replaceFileAfterRotation = internalMutation({
     for (const storageId of staleDerivedIds) {
       await ctx.storage.delete(storageId);
     }
-    return { replaced: true, regenerateMagic };
-  },
-});
-
-/** Internal: store the Magic-Annotations redraw (+ its thumbnail + instruction) on an item. */
-export const setMagicResult = internalMutation({
-  args: {
-    itemId: v.id("portfolioItems"),
-    magicStorageId: v.id("_storage"),
-    magicThumbStorageId: v.optional(v.id("_storage")),
-    magicInstruction: v.string(),
-  },
-  handler: async (ctx, args) => {
-    await ctx.db.patch(args.itemId, {
-      magicStorageId: args.magicStorageId,
-      magicThumbStorageId: args.magicThumbStorageId,
-      magicInstruction: args.magicInstruction,
-    });
-  },
-});
-
-/** Internal: set just the magic thumbnail (used by the backfill). */
-export const setMagicThumb = internalMutation({
-  args: {
-    itemId: v.id("portfolioItems"),
-    magicThumbStorageId: v.id("_storage"),
-  },
-  handler: async (ctx, args) => {
-    await ctx.db.patch(args.itemId, { magicThumbStorageId: args.magicThumbStorageId });
-  },
-});
-
-/**
- * Internal: items that HAVE a magic redraw but no magic thumbnail yet —
- * i.e. magic items processed before magic thumbnails existed. Drives the
- * one-time backfill in magicAnnotations.backfillMagicThumbnails.
- */
-export const itemsMissingMagicThumb = internalQuery({
-  args: { limit: v.number() },
-  handler: async (ctx, args) => {
-    const rows = await ctx.db.query("portfolioItems").collect();
-    return rows
-      .filter((r) => r.magicStorageId != null && r.magicThumbStorageId == null)
-      .slice(0, args.limit)
-      .map((r) => ({ itemId: r._id, magicStorageId: r.magicStorageId! }));
+    return { replaced: true };
   },
 });
 

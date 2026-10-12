@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { parseObserverResponse } from "../lib/observerShared";
+import { parseObserverResponse, resolveChatAlerts } from "../lib/observerShared";
 
 /**
  * The observer's chat "going in circles" signal is a pure passthrough on the
@@ -125,5 +125,83 @@ describe("parseObserverResponse — overwhelmAlert", () => {
     });
     expect(result?.stuckAlert?.summary).toBe("Circling.");
     expect(result?.overwhelmAlert?.summary).toBe("Asked to stop.");
+  });
+});
+
+/**
+ * Precedence between the two conversational alerts. The regression this locks:
+ * `overwhelmAlert` used to win outright, so one bad overwhelm silently deleted
+ * an accurate `stuckAlert`. Neither may suppress the other now, and each is
+ * gated only by the verbatim scholar quote its own spec makes mandatory.
+ */
+describe("resolveChatAlerts", () => {
+  const stuck = {
+    severity: "warning" as const,
+    summary: "Circling the same regrouping error with no progress.",
+    excerpt: "i still don't get it",
+  };
+  const overwhelm = {
+    severity: "info" as const,
+    summary: "Asked to stop partway through; carried on after a smaller step.",
+    excerpt: "can we stop please",
+  };
+
+  test("an overwhelm alert can no longer suppress a stuck alert", () => {
+    expect(resolveChatAlerts({ stuckAlert: stuck, overwhelmAlert: overwhelm })).toEqual({
+      raiseStuck: true,
+      raiseOverwhelm: true,
+    });
+  });
+
+  test("an unsubstantiated overwhelm cannot silence a substantiated stuck", () => {
+    // The property the fix exists for, in its sharpest form: the overwhelm is
+    // off-spec (no scholar quote), the stuck alert is not, and the stuck alert
+    // survives regardless of what the overwhelm does.
+    for (const badExcerpt of [undefined, "", "   "]) {
+      expect(
+        resolveChatAlerts({
+          stuckAlert: stuck,
+          overwhelmAlert: { ...overwhelm, excerpt: badExcerpt },
+        }),
+      ).toEqual({ raiseStuck: true, raiseOverwhelm: false });
+    }
+  });
+
+  test("the quote rule is symmetric — an unquoted stuck alert is dropped too", () => {
+    expect(
+      resolveChatAlerts({
+        stuckAlert: { ...stuck, excerpt: undefined },
+        overwhelmAlert: overwhelm,
+      }),
+    ).toEqual({ raiseStuck: false, raiseOverwhelm: true });
+  });
+
+  test("each alert raises alone, and an empty run raises nothing", () => {
+    expect(resolveChatAlerts({ stuckAlert: stuck })).toEqual({
+      raiseStuck: true,
+      raiseOverwhelm: false,
+    });
+    expect(resolveChatAlerts({ overwhelmAlert: overwhelm })).toEqual({
+      raiseStuck: false,
+      raiseOverwhelm: true,
+    });
+    expect(resolveChatAlerts({})).toEqual({
+      raiseStuck: false,
+      raiseOverwhelm: false,
+    });
+  });
+
+  test("the prod shape: same evidence, contradictory labels, both still reach the teacher", () => {
+    // Day 3 flagged the scholar circling; day 8 re-read the same moment and
+    // relabelled it an opt-out on the identical quote. The old tie-break kept
+    // only the second, wrong reading. Nothing in the alert payloads lets code
+    // tell which is right, so both are delivered rather than one guessed at.
+    const sharedQuote = "i finished it already";
+    expect(
+      resolveChatAlerts({
+        stuckAlert: { ...stuck, excerpt: sharedQuote },
+        overwhelmAlert: { ...overwhelm, excerpt: sharedQuote },
+      }),
+    ).toEqual({ raiseStuck: true, raiseOverwhelm: true });
   });
 });

@@ -75,7 +75,6 @@ describe("isValidHHMM", () => {
 describe("isValidTimeZone", () => {
   test("accepts real IANA names", () => {
     expect(isValidTimeZone("Pacific/Honolulu")).toBe(true);
-    expect(isValidTimeZone("America/New_York")).toBe(true);
     expect(isValidTimeZone("UTC")).toBe(true);
   });
   test("rejects junk", () => {

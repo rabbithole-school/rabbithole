@@ -40,9 +40,15 @@ import {
 } from "./roles";
 import { deleteSessionAppStates } from "../appStates";
 import { detachScholarFromPortfolio } from "./portfolioAttributions";
+import { attachmentOwnsBlob } from "./parentMessageAttachmentStorage";
 import { scheduleClaimDecommissionLocksForScholar } from "./deviceAppUnlockScheduling";
 import { recheckUnlocksForRemovedMembers } from "./scholarGroupUnlocks";
 import { settlePlacementAppPush } from "../masterSchedule";
+import { removeManagedDeviceRow } from "../managedDeviceClaims";
+import {
+  deleteDeviceAuthSessionLog,
+  revokeAllDeviceAuthSessions,
+} from "../devicePairing";
 
 // A running tally of deleted rows per table, merged across batched steps.
 export type Counts = Record<string, number>;
@@ -51,6 +57,518 @@ export type Counts = Record<string, number>;
 // deleted only once all sessions are gone, so a heavy user (long chat history)
 // resumes across steps instead of exceeding a single mutation's limits.
 const SESSION_CHUNK = 4;
+
+// Device rows torn down per institution-scoped batch. Each teardown is several
+// writes (binding, auth sessions + refresh tokens, unlock rows), so it is
+// chunked like SESSION_CHUNK rather than charged one unit of the doc budget.
+const DEVICE_CHUNK = 25;
+
+type ScholarOwnedRow = {
+  _id: Id<TableNames>;
+  scholarId: Id<"users">;
+  storageId?: Id<"_storage">;
+  workImageId?: Id<"_storage">;
+  screenshotIds?: Id<"_storage">[];
+  fileStorageId?: Id<"_storage">;
+  photoStorageId?: Id<"_storage">;
+  imageStorageId?: Id<"_storage">;
+  insert?: {
+    kind: string;
+    storageId?: Id<"_storage">;
+  };
+};
+
+export type ScholarOwnedRowSource = {
+  readonly table: TableNames;
+  readonly index: string;
+  readonly blobFields: readonly string[];
+  collectByScholar: (
+    ctx: MutationCtx,
+    scholarId: Id<"users">,
+  ) => Promise<ScholarOwnedRow[]>;
+  collectAll: (ctx: MutationCtx) => Promise<ScholarOwnedRow[]>;
+  blobIds: (row: ScholarOwnedRow) => readonly (Id<"_storage"> | undefined)[];
+};
+
+const noBlobIds = () => [] as const;
+
+/**
+ * Canonical inventory of directly scholar-owned rows.
+ *
+ * Child-owning roots such as metaChats, gameSessions, scholarGoals, and
+ * scholarDocuments remain in the explicit cascades below so their dependent
+ * rows are removed before the root. Every entry here is safe to delete directly
+ * after reclaiming the listed blobs.
+ */
+export const scholarOwnedRowSources = [
+  {
+    table: "practiceMastery",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("practiceMastery").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("practiceMastery").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "factFluency",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("factFluency").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("factFluency").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "calculatorLicenses",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("calculatorLicenses").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("calculatorLicenses").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "scholarCheckpointOverride",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("scholarCheckpointOverride").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("scholarCheckpointOverride").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "scholarMathPlans",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("scholarMathPlans").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("scholarMathPlans").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "scholarMathPlanMigrationIssues",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("scholarMathPlanMigrationIssues").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("scholarMathPlanMigrationIssues").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "nodeReveals",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("nodeReveals").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("nodeReveals").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "momentEvents",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("momentEvents").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("momentEvents").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "instructionEvents",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("instructionEvents").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("instructionEvents").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "practiceOfferEvents",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("practiceOfferEvents").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("practiceOfferEvents").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "practiceGameOffers",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("practiceGameOffers").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("practiceGameOffers").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "mapReveals",
+    index: "by_scholar_map",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("mapReveals").withIndex("by_scholar_map", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("mapReveals").withIndex("by_scholar_map").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "closureLines",
+    index: "by_scholar_kind_hash",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("closureLines").withIndex("by_scholar_kind_hash", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("closureLines").withIndex("by_scholar_kind_hash").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "specialDeliveryLetters",
+    index: "by_scholar_day",
+    blobFields: ["insert.storageId (sketch only)"],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("specialDeliveryLetters").withIndex("by_scholar_day", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("specialDeliveryLetters").withIndex("by_scholar_day").collect(),
+    blobIds: (row) => row.insert?.kind === "sketch" ? [row.insert.storageId] : [],
+  },
+  {
+    table: "practicePlacements",
+    index: "by_scholar_domain",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("practicePlacements").withIndex("by_scholar_domain", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("practicePlacements").withIndex("by_scholar_domain").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "practiceErrorEvents",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("practiceErrorEvents").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("practiceErrorEvents").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "practiceChoiceEvents",
+    index: "by_scholar_createdAt",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("practiceChoiceEvents").withIndex("by_scholar_createdAt", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("practiceChoiceEvents").withIndex("by_scholar_createdAt").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "practiceTuneups",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("practiceTuneups").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("practiceTuneups").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "practicePredictions",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("practicePredictions").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("practicePredictions").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "practiceHintReveals",
+    index: "by_scholar_item_createdAt",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("practiceHintReveals").withIndex("by_scholar_item_createdAt", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("practiceHintReveals").withIndex("by_scholar_item_createdAt").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "teacherMasteryOverrides",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("teacherMasteryOverrides").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("teacherMasteryOverrides").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "teachBacks",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("teachBacks").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("teachBacks").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "sessionSignals",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("sessionSignals").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("sessionSignals").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "crossDomainConnections",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("crossDomainConnections").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("crossDomainConnections").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "activityCompletions",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("activityCompletions").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("activityCompletions").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "scholarActivityAngles",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("scholarActivityAngles").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("scholarActivityAngles").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "messageFlags",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("messageFlags").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("messageFlags").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "scholarDossiers",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("scholarDossiers").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("scholarDossiers").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "graphemeInventories",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("graphemeInventories").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("graphemeInventories").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "graphemeHistory",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("graphemeHistory").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("graphemeHistory").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "teacherDirectives",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("teacherDirectives").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("teacherDirectives").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "scholarSuggestions",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("scholarSuggestions").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("scholarSuggestions").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "readingLevelHistory",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("readingLevelHistory").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("readingLevelHistory").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "courseNarratives",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("courseNarratives").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("courseNarratives").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "wholeChildNarratives",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("wholeChildNarratives").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("wholeChildNarratives").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "interimCheckins",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("interimCheckins").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("interimCheckins").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "selSyntheses",
+    index: "by_scholar_week",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("selSyntheses").withIndex("by_scholar_week", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("selSyntheses").withIndex("by_scholar_week").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "granuleEvidence",
+    index: "by_scholar_unit",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("granuleEvidence").withIndex("by_scholar_unit", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("granuleEvidence").withIndex("by_scholar_unit").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "weeklyGoals",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("weeklyGoals").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("weeklyGoals").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "observations",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("observations").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("observations").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "masteryObservations",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("masteryObservations").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("masteryObservations").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "seeds",
+    index: "by_scholar_status",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("seeds").withIndex("by_scholar_status", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("seeds").withIndex("by_scholar_status").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "scholarApps",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("scholarApps").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("scholarApps").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "practiceWorkImages",
+    index: "by_scholar_item_createdAt",
+    blobFields: ["storageId"],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("practiceWorkImages").withIndex("by_scholar_item_createdAt", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("practiceWorkImages").withIndex("by_scholar_item_createdAt").collect(),
+    blobIds: (row) => [row.storageId],
+  },
+  {
+    table: "practiceAttempts",
+    index: "by_scholar",
+    blobFields: ["workImageId"],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("practiceAttempts").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("practiceAttempts").withIndex("by_scholar").collect(),
+    blobIds: (row) => [row.workImageId],
+  },
+  {
+    table: "webActivitySessions",
+    index: "by_scholar",
+    blobFields: ["screenshotIds[]"],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("webActivitySessions").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("webActivitySessions").withIndex("by_scholar").collect(),
+    blobIds: (row) => row.screenshotIds ?? [],
+  },
+  {
+    table: "physicalTasks",
+    index: "by_scholar",
+    blobFields: ["photoStorageId"],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("physicalTasks").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("physicalTasks").withIndex("by_scholar").collect(),
+    blobIds: (row) => [row.photoStorageId],
+  },
+  {
+    table: "gameSessionDigests",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("gameSessionDigests").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("gameSessionDigests").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "simulatorBenches",
+    index: "by_scholar_activity",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("simulatorBenches").withIndex("by_scholar_activity", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("simulatorBenches").withIndex("by_scholar_activity").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "goalCheckins",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("goalCheckins").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("goalCheckins").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "documentAccessLog",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("documentAccessLog").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("documentAccessLog").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "documentProposals",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("documentProposals").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("documentProposals").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "scholarHealthRecords",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("scholarHealthRecords").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("scholarHealthRecords").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "scholarHealthRecordDrafts",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("scholarHealthRecordDrafts").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("scholarHealthRecordDrafts").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "healthRecordFiles",
+    index: "by_scholar",
+    blobFields: ["storageId"],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("healthRecordFiles").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("healthRecordFiles").withIndex("by_scholar").collect(),
+    blobIds: (row) => [row.storageId],
+  },
+  {
+    table: "medicalClearanceRequests",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("medicalClearanceRequests").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("medicalClearanceRequests").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
+    table: "deliverables",
+    index: "by_scholar",
+    blobFields: ["fileStorageId"],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("deliverables").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("deliverables").withIndex("by_scholar").collect(),
+    blobIds: (row) => [row.fileStorageId],
+  },
+  {
+    table: "scholarUnitBadges",
+    index: "by_scholar",
+    blobFields: ["imageStorageId"],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("scholarUnitBadges").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("scholarUnitBadges").withIndex("by_scholar").collect(),
+    blobIds: (row) => [row.imageStorageId],
+  },
+] as const satisfies readonly ScholarOwnedRowSource[];
+
+export type ScholarOwnedTableName =
+  (typeof scholarOwnedRowSources)[number]["table"];
 
 /**
  * Does this user hold a membership that keeps them alive independent of the
@@ -100,6 +618,31 @@ async function delBlob(
   }
 }
 
+async function isCustomAppThumbnail(
+  ctx: MutationCtx,
+  id: Id<"_storage">,
+): Promise<boolean> {
+  const app = await ctx.db
+    .query("customApps")
+    .withIndex("by_thumbnail", (q) => q.eq("thumbnailStorageId", id))
+    .first();
+  return app !== null;
+}
+
+export async function deleteScholarOwnedRows(
+  ctx: MutationCtx,
+  counts: Counts,
+  source: ScholarOwnedRowSource,
+  rows: ScholarOwnedRow[],
+) {
+  for (const row of rows) {
+    for (const storageId of source.blobIds(row)) {
+      await delBlob(ctx, counts, storageId);
+    }
+  }
+  await del(ctx, counts, source.table, rows);
+}
+
 // ─── Session cascade ──────────────────────────────────────────────────
 //
 // Deletes every row keyed to one session, plus the session row and any blobs
@@ -116,17 +659,32 @@ export async function deleteSessionCascade(
   sessionId: Id<"sessions">,
 ) {
   bump(counts, "appStates", await deleteSessionAppStates(ctx, sessionId));
+  const session = await ctx.db.get(sessionId);
+  for (const storageId of session?.appAssetIds ?? []) {
+    await delBlob(ctx, counts, storageId);
+  }
 
   // messages — delete their image blobs first
   const messages = await ctx.db
     .query("messages")
     .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
     .collect();
-  for (const m of messages) await delBlob(ctx, counts, m.imageId ?? null);
+  for (const m of messages) {
+    await delBlob(ctx, counts, m.imageId ?? null);
+    if (
+      m.appSnapshotStorageId &&
+      !(await isCustomAppThumbnail(ctx, m.appSnapshotStorageId))
+    ) {
+      await delBlob(ctx, counts, m.appSnapshotStorageId);
+    }
+  }
   await del(ctx, counts, "messages", messages);
 
   await del(ctx, counts, "analyses", await ctx.db.query("analyses").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect());
   await del(ctx, counts, "artifacts", await ctx.db.query("artifacts").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect());
+  await del(ctx, counts, "codeArtifactRevisions", await ctx.db.query("codeArtifactRevisions").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect());
+  // In-app AI record: the scholar's typed lines to an app's character/judge.
+  await del(ctx, counts, "appAiTurns", await ctx.db.query("appAiTurns").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect());
   await del(ctx, counts, "processState", await ctx.db.query("processState").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect());
   await del(ctx, counts, "sessionSignals", await ctx.db.query("sessionSignals").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect());
   await del(ctx, counts, "crossDomainConnections", await ctx.db.query("crossDomainConnections").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect());
@@ -380,9 +938,9 @@ export async function purgeUserInner(
   // in this cascade tells an already-unlocked managed device to re-lock —
   // schedule that BEFORE the user row disappears so the durable relock
   // record survives regardless of what happens to the claim row next (the
-  // claim itself is institution-scoped state this cascade intentionally
-  // doesn't touch — see the module header — so it's left dangling, same
-  // posture as devPurge's other audit-field references).
+  // claim itself is institution-scoped state a per-user purge doesn't touch,
+  // so it's left dangling for staff to reassign; an institution deletion
+  // removes it in deleteInstitutionScopedBatch).
   await scheduleClaimDecommissionLocksForScholar(ctx, uid);
 
   // 7. The user row
@@ -391,63 +949,22 @@ export async function purgeUserInner(
   return true;
 }
 
-async function purgeScholarOwned(ctx: MutationCtx, counts: Counts, uid: Id<"users">) {
-  // Simple scholar-owned tables (first index column === scholarId).
-  await del(ctx, counts, "practiceMastery", await ctx.db.query("practiceMastery").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "factFluency", await ctx.db.query("factFluency").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "scholarCheckpointOverride", await ctx.db.query("scholarCheckpointOverride").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "nodeReveals", await ctx.db.query("nodeReveals").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "momentEvents", await ctx.db.query("momentEvents").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "instructionEvents", await ctx.db.query("instructionEvents").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "practiceGameOffers", await ctx.db.query("practiceGameOffers").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "mapReveals", await ctx.db.query("mapReveals").withIndex("by_scholar_map", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "closureLines", await ctx.db.query("closureLines").withIndex("by_scholar_kind_hash", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "practicePlacements", await ctx.db.query("practicePlacements").withIndex("by_scholar_domain", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "practiceErrorEvents", await ctx.db.query("practiceErrorEvents").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "practiceChoiceEvents", await ctx.db.query("practiceChoiceEvents").withIndex("by_scholar_createdAt", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "practiceTuneups", await ctx.db.query("practiceTuneups").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "practicePredictions", await ctx.db.query("practicePredictions").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "practiceHintReveals", await ctx.db.query("practiceHintReveals").withIndex("by_scholar_item_createdAt", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "teacherMasteryOverrides", await ctx.db.query("teacherMasteryOverrides").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "teachBacks", await ctx.db.query("teachBacks").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "sessionSignals", await ctx.db.query("sessionSignals").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "crossDomainConnections", await ctx.db.query("crossDomainConnections").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "activityCompletions", await ctx.db.query("activityCompletions").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "scholarActivityAngles", await ctx.db.query("scholarActivityAngles").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "messageFlags", await ctx.db.query("messageFlags").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "scholarDossiers", await ctx.db.query("scholarDossiers").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "graphemeInventories", await ctx.db.query("graphemeInventories").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "graphemeHistory", await ctx.db.query("graphemeHistory").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "teacherDirectives", await ctx.db.query("teacherDirectives").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "scholarSuggestions", await ctx.db.query("scholarSuggestions").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "readingLevelHistory", await ctx.db.query("readingLevelHistory").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "courseNarratives", await ctx.db.query("courseNarratives").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "wholeChildNarratives", await ctx.db.query("wholeChildNarratives").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "selSyntheses", await ctx.db.query("selSyntheses").withIndex("by_scholar_week", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "granuleEvidence", await ctx.db.query("granuleEvidence").withIndex("by_scholar_unit", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "weeklyGoals", await ctx.db.query("weeklyGoals").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
+export async function purgeScholarOwned(
+  ctx: MutationCtx,
+  counts: Counts,
+  uid: Id<"users">,
+) {
+  for (const source of scholarOwnedRowSources) {
+    await deleteScholarOwnedRows(
+      ctx,
+      counts,
+      source,
+      await source.collectByScholar(ctx, uid),
+    );
+  }
+  // Alerts without a scholarId are institution/staff-owned, so only the
+  // scholar-filtered subset belongs in this per-user cascade.
   await del(ctx, counts, "alerts", await ctx.db.query("alerts").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "observations", await ctx.db.query("observations").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "masteryObservations", await ctx.db.query("masteryObservations").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "seeds", await ctx.db.query("seeds").withIndex("by_scholar_status", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "scholarApps", await ctx.db.query("scholarApps").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-
-  // Blob-bearing scholar tables (reclaim the blob, then the row)
-  const workImages = await ctx.db.query("practiceWorkImages").withIndex("by_scholar_item_createdAt", (q) => q.eq("scholarId", uid)).collect();
-  for (const r of workImages) await delBlob(ctx, counts, r.storageId ?? null);
-  await del(ctx, counts, "practiceWorkImages", workImages);
-
-  const padHints = await ctx.db.query("practicePadHints").withIndex("by_scholar_item_createdAt", (q) => q.eq("scholarId", uid)).collect();
-  for (const r of padHints) await delBlob(ctx, counts, r.imageId ?? null);
-  await del(ctx, counts, "practicePadHints", padHints);
-
-  const attempts = await ctx.db.query("practiceAttempts").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect();
-  for (const r of attempts) await delBlob(ctx, counts, r.workImageId ?? null);
-  await del(ctx, counts, "practiceAttempts", attempts);
-
-  const webSessions = await ctx.db.query("webActivitySessions").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect();
-  for (const r of webSessions) for (const b of r.screenshotIds ?? []) await delBlob(ctx, counts, b);
-  await del(ctx, counts, "webActivitySessions", webSessions);
 
   // metaChats (+ messages + observer runs)
   const metaChats = await ctx.db.query("metaChats").withIndex("by_scholar_day", (q) => q.eq("scholarId", uid)).collect();
@@ -463,22 +980,13 @@ async function purgeScholarOwned(ctx: MutationCtx, counts: Counts, uid: Id<"user
     await del(ctx, counts, "gameEvents", await ctx.db.query("gameEvents").withIndex("by_session_seq", (q) => q.eq("sessionId", g._id)).collect());
   }
   await del(ctx, counts, "gameSessions", games);
-  await del(ctx, counts, "gameSessionDigests", await ctx.db.query("gameSessionDigests").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
 
-  // simulatorRuns not tied to a (now-deleted) session (by_scholar) + chunks; benches
+  // simulatorRuns not tied to a (now-deleted) session (by_scholar) + chunks
   const runs = await ctx.db.query("simulatorRuns").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect();
   for (const r of runs) {
     await del(ctx, counts, "simulatorRunChunks", await ctx.db.query("simulatorRunChunks").withIndex("by_run_startTick", (q) => q.eq("runId", r._id)).collect());
   }
   await del(ctx, counts, "simulatorRuns", runs);
-  await del(ctx, counts, "simulatorBenches", await ctx.db.query("simulatorBenches").withIndex("by_scholar_activity", (q) => q.eq("scholarId", uid)).collect());
-
-  const simulatorRuns = await ctx.db.query("simulatorRuns").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect();
-  for (const run of simulatorRuns) {
-    await del(ctx, counts, "simulatorRunChunks", await ctx.db.query("simulatorRunChunks").withIndex("by_run_startTick", (q) => q.eq("runId", run._id)).collect());
-  }
-  await del(ctx, counts, "simulatorRuns", simulatorRuns);
-  await del(ctx, counts, "simulatorBenches", await ctx.db.query("simulatorBenches").withIndex("by_scholar_activity", (q) => q.eq("scholarId", uid)).collect());
 
   // scholarGoals (+ checkins)
   const goals = await ctx.db.query("scholarGoals").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect();
@@ -486,7 +994,6 @@ async function purgeScholarOwned(ctx: MutationCtx, counts: Counts, uid: Id<"user
     await del(ctx, counts, "goalCheckins", await ctx.db.query("goalCheckins").withIndex("by_goal", (q) => q.eq("goalId", g._id)).collect());
   }
   await del(ctx, counts, "scholarGoals", goals);
-  await del(ctx, counts, "goalCheckins", await ctx.db.query("goalCheckins").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
 
   // scholarDocuments (+ access logs / proposals) + blobs
   const docs = await ctx.db.query("scholarDocuments").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect();
@@ -496,20 +1003,10 @@ async function purgeScholarOwned(ctx: MutationCtx, counts: Counts, uid: Id<"user
     await del(ctx, counts, "documentProposals", await ctx.db.query("documentProposals").withIndex("by_document", (q) => q.eq("documentId", d._id)).collect());
   }
   await del(ctx, counts, "scholarDocuments", docs);
-  await del(ctx, counts, "documentAccessLog", await ctx.db.query("documentAccessLog").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
   // NOTE: documentAccessLog.userId is an AUDIT field ("who accessed") — a
   // deleted staffer's accesses to OTHER (surviving) scholars' documents must
   // NOT be swept, so we deliberately do NOT delete by_user. Those rows keep a
   // dangling accessor id (accepted; the accessed document/scholar owns the row).
-  await del(ctx, counts, "documentProposals", await ctx.db.query("documentProposals").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-
-  // Health record layer (+ file blobs)
-  await del(ctx, counts, "scholarHealthRecords", await ctx.db.query("scholarHealthRecords").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  await del(ctx, counts, "scholarHealthRecordDrafts", await ctx.db.query("scholarHealthRecordDrafts").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
-  const healthFiles = await ctx.db.query("healthRecordFiles").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect();
-  for (const f of healthFiles) await delBlob(ctx, counts, f.storageId ?? null);
-  await del(ctx, counts, "healthRecordFiles", healthFiles);
-  await del(ctx, counts, "medicalClearanceRequests", await ctx.db.query("medicalClearanceRequests").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect());
 
   // Shared portfolio evidence survives while any attributed peer remains.
   const detached = await detachScholarFromPortfolio(ctx, uid);
@@ -535,21 +1032,17 @@ async function purgeScholarOwned(ctx: MutationCtx, counts: Counts, uid: Id<"user
     bump(counts, "portfolioItems", 1);
   }
 
-  // deliverables + blob; scholarUnitBadges + blob (badges also handled per-unit)
-  const deliverables = await ctx.db.query("deliverables").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect();
-  for (const d of deliverables) await delBlob(ctx, counts, d.fileStorageId ?? null);
-  await del(ctx, counts, "deliverables", deliverables);
-
-  const badges = await ctx.db.query("scholarUnitBadges").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect();
-  for (const b of badges) await delBlob(ctx, counts, b.imageStorageId ?? null);
-  await del(ctx, counts, "scholarUnitBadges", badges);
 }
 
 async function delCurriculumMessages(ctx: MutationCtx, counts: Counts, uid: Id<"users">) {
   const teacherMsgs = await ctx.db.query("curriculumMessages").withIndex("by_teacher", (q) => q.eq("teacherId", uid)).collect();
   const scholarMsgs = await ctx.db.query("curriculumMessages").withIndex("by_scholar_and_creation", (q) => q.eq("scholarId", uid)).collect();
   for (const m of [...teacherMsgs, ...scholarMsgs]) {
-    for (const att of m.attachments ?? []) await delBlob(ctx, counts, att.storageId ?? null);
+    for (const att of m.attachments ?? []) {
+      await delBlob(ctx, counts, att.storageId ?? null);
+      // A recorded video also carries a contact-sheet poster blob.
+      await delBlob(ctx, counts, att.posterStorageId ?? null);
+    }
   }
   await del(ctx, counts, "curriculumMessages", teacherMsgs);
   await del(ctx, counts, "curriculumMessages", scholarMsgs);
@@ -569,12 +1062,73 @@ async function deleteParentAttachments(
       .withIndex("by_storage", (q) => q.eq("storageId", attachment.storageId))
       .first();
     if (remainingReference) continue;
-    const portfolioItem = attachment.portfolioItemId
-      ? await ctx.db.get(attachment.portfolioItemId)
-      : null;
-    if (portfolioItem?.fileStorageId === attachment.storageId) continue;
+    if (!(await attachmentOwnsBlob(ctx, attachment))) continue;
     await delBlob(ctx, counts, attachment.storageId);
   }
+}
+
+/** A scholar's own mentor/workshop conversations (never family threads). */
+async function scholarConversationThreads(ctx: MutationCtx, scholarId: Id<"users">) {
+  return (
+    await ctx.db.query("parentThreads").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect()
+  ).filter((thread) => thread.kind === "mentor" || thread.kind === "workshop");
+}
+
+/**
+ * Delete a scholar's mentor/workshop conversations with everything hanging off
+ * them. For purge paths that don't run purgeParentSide (adminCloneScholar).
+ */
+export async function deleteScholarConversationThreads(
+  ctx: MutationCtx,
+  counts: Counts,
+  scholarId: Id<"users">,
+) {
+  const threads = await scholarConversationThreads(ctx, scholarId);
+  for (const thread of threads) {
+    await deleteParentThreadContents(ctx, counts, thread._id);
+  }
+  await del(ctx, counts, "parentThreads", threads);
+}
+
+/** Everything hanging off one parentThreads row (not the row itself). */
+async function deleteParentThreadContents(
+  ctx: MutationCtx,
+  counts: Counts,
+  threadId: Id<"parentThreads">,
+) {
+  const msgs = await ctx.db.query("parentMessages").withIndex("by_thread", (q) => q.eq("threadId", threadId)).collect();
+  const threadAttachments = await ctx.db
+    .query("parentMessageAttachments")
+    .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+    .collect();
+  const messageAttachments = (
+    await Promise.all(
+      msgs.map((message) =>
+        ctx.db
+          .query("parentMessageAttachments")
+          .withIndex("by_message", (q) => q.eq("messageId", message._id))
+          .collect(),
+      ),
+    )
+  ).flat();
+  await deleteParentAttachments(ctx, counts, [
+    ...threadAttachments,
+    ...messageAttachments,
+  ]);
+  await del(
+    ctx,
+    counts,
+    "parentThreadParticipants",
+    await ctx.db
+      .query("parentThreadParticipants")
+      .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+      .collect(),
+  );
+  for (const m of msgs) {
+    await del(ctx, counts, "messageDeliveries", await ctx.db.query("messageDeliveries").withIndex("by_message", (q) => q.eq("messageId", m._id)).collect());
+  }
+  await del(ctx, counts, "parentMessages", msgs);
+  await del(ctx, counts, "parentSlackThreads", await ctx.db.query("parentSlackThreads").withIndex("by_parent_thread", (q) => q.eq("parentThreadId", threadId)).collect());
 }
 
 async function purgeParentSide(
@@ -608,43 +1162,29 @@ async function purgeParentSide(
       .collect(),
   );
 
-  const threads = await ctx.db.query("parentThreads").withIndex("by_parent", (q) => q.eq("parentUserId", uid)).collect();
+  // Threads anchored on this user (a guardian's family threads, and a
+  // scholar's own mentor/workshop threads — those are anchored on the scholar)
+  // plus any scholar ↔ staff thread ABOUT this scholar. A family thread about
+  // a deleted child stays with its surviving guardians (parent-owned history).
+  const anchored = await ctx.db.query("parentThreads").withIndex("by_parent", (q) => q.eq("parentUserId", uid)).collect();
+  const threads = [
+    ...new Map(
+      [...anchored, ...(await scholarConversationThreads(ctx, uid))].map((thread) => [thread._id, thread]),
+    ).values(),
+  ];
   for (const t of threads) {
-    const msgs = await ctx.db.query("parentMessages").withIndex("by_thread", (q) => q.eq("threadId", t._id)).collect();
-    const threadAttachments = await ctx.db
-      .query("parentMessageAttachments")
-      .withIndex("by_thread", (q) => q.eq("threadId", t._id))
-      .collect();
-    const messageAttachments = (
-      await Promise.all(
-        msgs.map((message) =>
-          ctx.db
-            .query("parentMessageAttachments")
-            .withIndex("by_message", (q) => q.eq("messageId", message._id))
-            .collect(),
-        ),
-      )
-    ).flat();
-    await deleteParentAttachments(ctx, counts, [
-      ...threadAttachments,
-      ...messageAttachments,
-    ]);
-    await del(
-      ctx,
-      counts,
-      "parentThreadParticipants",
-      await ctx.db
-        .query("parentThreadParticipants")
-        .withIndex("by_thread", (q) => q.eq("threadId", t._id))
-        .collect(),
-    );
-    for (const m of msgs) {
-      await del(ctx, counts, "messageDeliveries", await ctx.db.query("messageDeliveries").withIndex("by_message", (q) => q.eq("messageId", m._id)).collect());
-    }
-    await del(ctx, counts, "parentMessages", msgs);
-    await del(ctx, counts, "parentSlackThreads", await ctx.db.query("parentSlackThreads").withIndex("by_parent_thread", (q) => q.eq("parentThreadId", t._id)).collect());
+    await deleteParentThreadContents(ctx, counts, t._id);
   }
   await del(ctx, counts, "parentThreads", threads);
+  // A deleted mentor (or guardian) leaves the threads that survive them: drop
+  // their participant rows so no dangling named participant remains. The
+  // conversation itself stays with the scholar and their teachers.
+  await del(
+    ctx,
+    counts,
+    "parentThreadParticipants",
+    await ctx.db.query("parentThreadParticipants").withIndex("by_parent", (q) => q.eq("parentUserId", uid)).collect(),
+  );
 
   // Orphan-check each parent whose link to this (deleted) child we just removed:
   // a parent whose LAST remaining child has now gone, with no other institution
@@ -692,6 +1232,7 @@ async function purgeAuthAndTokens(ctx: MutationCtx, counts: Counts, uid: Id<"use
   await del(ctx, counts, "googleAccounts", await ctx.db.query("googleAccounts").withIndex("by_user", (q) => q.eq("userId", uid)).collect());
   await del(ctx, counts, "mcpSessions", await ctx.db.query("mcpSessions").withIndex("by_user", (q) => q.eq("userId", uid)).collect());
   await del(ctx, counts, "mcpOauthConsents", await ctx.db.query("mcpOauthConsents").withIndex("by_user_client", (q) => q.eq("userId", uid)).collect());
+  await del(ctx, counts, "mcpServiceTokens", await ctx.db.query("mcpServiceTokens").withIndex("by_user", (q) => q.eq("userId", uid)).collect());
   await del(ctx, counts, "mcpOauthCodes", await ctx.db.query("mcpOauthCodes").withIndex("by_user", (q) => q.eq("userId", uid)).collect());
 
   // Impersonation overlays where THIS user is the admin (their sessions vanish).
@@ -922,6 +1463,55 @@ export async function deleteInstitutionScopedBatch(
 ): Promise<number> {
   let deleted = 0;
   const room = () => budget - deleted;
+
+  // Devices first. A physical iPad in the field must lose its session and
+  // binding here: once the institution row is gone every per-institution staff
+  // gate fails closed, and nothing in the product can reach the device again.
+  //
+  // Managed claims take the same roster-removal sequence as staff "Remove"
+  // (removeManagedDeviceRow): sign the bound iPad out, drop its pairedDevices
+  // binding, schedule the relock, delete the claim. Deleting instead of
+  // leaving a `revoked` row is equivalent for the iPad — every reader it
+  // reaches (consumeManagedClaim, claimSubjectForDevice) answers a revoked row
+  // and a missing one identically — so its still-delivered MDM claim fails to
+  // exchange and the app lands on the manual sign-in/pairing screen. A revoked
+  // row would only be an orphan pointing at no school.
+  if (room() > 0) {
+    const claims = await ctx.db
+      .query("managedDeviceClaims")
+      .withIndex("by_institution", (q) => q.eq("institutionId", targetId))
+      .take(Math.min(room(), DEVICE_CHUNK));
+    for (const claim of claims) await removeManagedDeviceRow(ctx, claim);
+    bump(counts, "managedDeviceClaims", claims.length);
+    deleted += claims.length;
+  }
+  if (room() > 0) {
+    // Manually paired bindings, plus any managed binding its claim no longer
+    // owned: the unpair sequence without its per-device audit — revoke every
+    // session the binding ever attached, then drop it and its session log.
+    const bindings = await ctx.db
+      .query("pairedDevices")
+      .withIndex("by_institution", (q) => q.eq("institutionId", targetId))
+      .take(Math.min(room(), DEVICE_CHUNK));
+    for (const binding of bindings) {
+      await revokeAllDeviceAuthSessions(ctx, binding._id);
+      await ctx.db.delete(binding._id);
+      await deleteDeviceAuthSessionLog(ctx, binding._id);
+    }
+    bump(counts, "pairedDevices", bindings.length);
+    deleted += bindings.length;
+  }
+  if (room() > 0) {
+    // Only approved/exchanged requests carry an institution. An approved one
+    // left behind could still be exchanged inside its window and re-create a
+    // binding at the deleted school.
+    const rows = await ctx.db.query("devicePairingRequests").withIndex("by_institution", (q) => q.eq("institutionId", targetId)).take(room());
+    await del(ctx, counts, "devicePairingRequests", rows); deleted += rows.length;
+  }
+  if (room() > 0) {
+    const rows = await ctx.db.query("simpleMdmDeviceSnapshots").withIndex("by_institution", (q) => q.eq("institutionId", targetId)).take(room());
+    await del(ctx, counts, "simpleMdmDeviceSnapshots", rows); deleted += rows.length;
+  }
 
   // Indexed institution-scoped tables (by_institution), each with optional blobs.
   if (room() > 0) {

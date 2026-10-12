@@ -1,19 +1,32 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import type { Id } from "../_generated/dataModel";
 import {
   sseEvent,
   parseSessionStreamBody,
+  toolsForWorkshopMode,
   buildTutorSystemPrompt,
   buildTutorSystemPromptParts,
+  appendTurnContext,
+  TURN_CONTEXT_PREFIX,
   injectPendingWhisper,
-  magicAnnotationSystemPrompt,
   rubricCheckInstruction,
   kickoffInstruction,
-  bloomFromFloat,
-  mapObserverResultToDetailed,
+  kickoffInstructionForContext,
+  teacherBuildKickoffInstruction,
+  canRequestRenderCheck,
+  renderChecksEnabled,
+  runBuildToolWithTruncationGuard,
+  RENDER_CHECK_MAX_PER_TURN,
   type TutorPromptContext,
 } from "../sessionStreamHelpers";
-import type { ObserverResult } from "../lib/observerShared";
 import { buildSystemPrompt } from "../sessionHelpers";
+import {
+  buildToolsSection,
+  FIRST_DYNAMIC_TUTOR_SECTION,
+  TUTOR_PROMPT_SECTION_ORDER,
+  TUTOR_TURN_CONTEXT_SECTIONS,
+} from "../prompts";
+import { withConversationCacheBreakpoint } from "../lib/aideStream";
 
 describe("sseEvent", () => {
   test("formats a data frame terminated by a blank line", () => {
@@ -30,11 +43,68 @@ describe("sseEvent", () => {
   });
 });
 
+describe("toolsForWorkshopMode", () => {
+  const tools = [
+    { name: "create_code" },
+    { name: "edit_document" },
+    { name: "show_map" },
+    { name: "search" },
+  ];
+
+  test("Play drops the code tools so the tutor cannot rewrite the app (F9)", () => {
+    const play = toolsForWorkshopMode(tools, "play").map((t) => t.name);
+    expect(play).not.toContain("create_code");
+    expect(play).not.toContain("edit_document");
+    expect(play).toEqual(["show_map", "search"]);
+  });
+
+  test("Edit keeps the full tool set", () => {
+    const edit = toolsForWorkshopMode(tools, "edit").map((t) => t.name);
+    expect(edit).toEqual([
+      "create_code",
+      "edit_document",
+      "show_map",
+      "search",
+    ]);
+  });
+});
+
 describe("parseSessionStreamBody", () => {
   test("extracts sessionId + assistantMsgId, ignoring streamId", () => {
     expect(
       parseSessionStreamBody({ sessionId: "p1", streamId: "s1", assistantMsgId: "a1" }),
-    ).toEqual({ sessionId: "p1", assistantMsgId: "a1", platform: "web" });
+    ).toEqual({ sessionId: "p1", assistantMsgId: "a1", platform: "web", mode: "edit" });
+  });
+
+  test("defaults the workshop mode to edit and accepts play explicitly", () => {
+    expect(
+      parseSessionStreamBody({ sessionId: "p1", assistantMsgId: "a1" }).mode,
+    ).toBe("edit");
+    expect(
+      parseSessionStreamBody({ sessionId: "p1", assistantMsgId: "a1", mode: "play" })
+        .mode,
+    ).toBe("play");
+    expect(
+      parseSessionStreamBody({ sessionId: "p1", assistantMsgId: "a1", mode: "bogus" })
+        .mode,
+    ).toBe("edit");
+  });
+
+  test("accepts only an explicit render-check capability", () => {
+    expect(
+      parseSessionStreamBody({
+        sessionId: "p1",
+        assistantMsgId: "a1",
+        supportsRenderCheck: true,
+      }).supportsRenderCheck,
+    ).toBe(true);
+    expect(
+      parseSessionStreamBody({
+        sessionId: "p1",
+        assistantMsgId: "a1",
+        supportsRenderCheck: false,
+      }).supportsRenderCheck,
+    ).toBeUndefined();
   });
 
   test("accepts native explicitly and defaults every other platform to web", () => {
@@ -54,10 +124,66 @@ describe("parseSessionStreamBody", () => {
     ).toBe("web");
   });
 
+  describe("render-check cap", () => {
+    test("allows exactly two checks per turn", () => {
+      expect(canRequestRenderCheck(0)).toBe(true);
+      expect(canRequestRenderCheck(1)).toBe(true);
+      expect(canRequestRenderCheck(RENDER_CHECK_MAX_PER_TURN)).toBe(false);
+      expect(canRequestRenderCheck(RENDER_CHECK_MAX_PER_TURN + 1)).toBe(false);
+    });
+
+    test("requires a capable web or native Vibecode host", () => {
+      expect(
+        renderChecksEnabled({
+          supportsRenderCheck: true,
+          platform: "web",
+          sessionMode: "vibecode",
+        }),
+      ).toBe(true);
+      expect(
+        renderChecksEnabled({
+          supportsRenderCheck: true,
+          platform: "native",
+          sessionMode: "vibecode",
+        }),
+      ).toBe(true);
+      expect(
+        renderChecksEnabled({
+          supportsRenderCheck: true,
+          platform: "web",
+          sessionMode: "conversation",
+        }),
+      ).toBe(false);
+      expect(
+        renderChecksEnabled({
+          platform: "web",
+          sessionMode: "vibecode",
+        }),
+      ).toBe(false);
+    });
+  });
+
   test("a normal message body has no rubricCheck", () => {
     expect(
       parseSessionStreamBody({ sessionId: "p1", assistantMsgId: "a1" }).rubricCheck,
     ).toBeUndefined();
+  });
+
+  test("accepts bounded app context and ignores invalid context", () => {
+    expect(
+      parseSessionStreamBody({
+        sessionId: "p1",
+        assistantMsgId: "a1",
+        appRequest: { context: { selectedNode: "mars" } },
+      }).appRequest,
+    ).toEqual({ context: { selectedNode: "mars" } });
+    expect(
+      parseSessionStreamBody({
+        sessionId: "p1",
+        assistantMsgId: "a1",
+        appRequest: { context: ["not", "an", "object"] },
+      }).appRequest,
+    ).toEqual({});
   });
 
   test("accepts only a boolean true kickoff flag", () => {
@@ -112,13 +238,69 @@ describe("parseSessionStreamBody", () => {
   });
 });
 
-describe("rubricCheckInstruction", () => {
-  test("is explicitly flagged as NOT a scholar-typed message (honesty)", () => {
-    const out = rubricCheckInstruction("My Report");
-    expect(out).toContain("NOT a message the scholar typed");
-    expect(out).toContain("Check my work");
+describe("runBuildToolWithTruncationGuard", () => {
+  test("blocks missing code, then stops a second output-limited build retry", async () => {
+    const mutation = vi.fn(async () => "mutation ran");
+    const first = await runBuildToolWithTruncationGuard({
+      toolName: "create_code",
+      input: { title: "Rocket Shop" },
+      truncationsThisTurn: 0,
+      run: mutation,
+    });
+    expect(first).toMatchObject({
+      blocked: true,
+      truncationsThisTurn: 1,
+    });
+    expect(first.result).toContain("Build a SMALLER first version now");
+    expect(mutation).not.toHaveBeenCalled();
+
+    const second = await runBuildToolWithTruncationGuard({
+      toolName: "create_code",
+      input: { title: "Rocket Shop", code: "<!doctype html>" },
+      stopReason: "max_tokens",
+      truncationsThisTurn: first.truncationsThisTurn,
+      run: mutation,
+    });
+    expect(second).toMatchObject({
+      blocked: true,
+      truncationsThisTurn: 2,
+    });
+    expect(second.result).toContain(
+      "Do not call create_code again this turn",
+    );
+    expect(mutation).not.toHaveBeenCalled();
   });
 
+  test("lets an empty document create through — it carries no payload to truncate", async () => {
+    const mutation = vi.fn(async () => "mutation ran");
+    const guarded = await runBuildToolWithTruncationGuard({
+      toolName: "edit_document",
+      input: { command: "create", title: "My character's want" },
+      truncationsThisTurn: 0,
+      run: mutation,
+    });
+    expect(guarded).toMatchObject({ blocked: false, result: "mutation ran" });
+    expect(mutation).toHaveBeenCalledTimes(1);
+  });
+
+  test("blocks edit_document when its command-specific payload is missing", async () => {
+    const mutation = vi.fn(async () => "mutation ran");
+    const guarded = await runBuildToolWithTruncationGuard({
+      toolName: "edit_document",
+      input: {
+        command: "str_replace",
+        old_str: "old markup",
+      },
+      truncationsThisTurn: 0,
+      run: mutation,
+    });
+    expect(guarded.blocked).toBe(true);
+    expect(guarded.result).toContain("cut off by the output limit");
+    expect(mutation).not.toHaveBeenCalled();
+  });
+});
+
+describe("rubricCheckInstruction", () => {
   test("names the document and tells the tutor to call the scoring tool", () => {
     const out = rubricCheckInstruction("My Report");
     expect(out).toContain('"My Report"');
@@ -140,6 +322,42 @@ describe("kickoffInstruction", () => {
     expect(out).toContain("NOT a message the scholar typed");
     expect(out).toContain("ONE inviting question");
     expect(out).not.toMatch(/rubric/i);
+  });
+});
+
+describe("teacherBuildKickoffInstruction", () => {
+  test("builds immediately for teacher build contexts and leaves scholar copy unchanged", () => {
+    const teacherInstruction = teacherBuildKickoffInstruction();
+    expect(teacherInstruction).toBe(
+      "[SYSTEM — not a message the teacher typed. The teacher just opened this build session. Build the first working version of the app described in your APP BUILDER MODE lead-in NOW with create_code, then describe what you built and the judgment calls they may want to steer. Do not greet or ask what to build.]",
+    );
+    expect(
+      kickoffInstructionForContext({
+        isTestDrive: true,
+        lessonActivityContext: {
+          starterAppId: null,
+          appRequest: "Build a rocket shop.",
+        },
+      }),
+    ).toBe(teacherInstruction);
+    expect(
+      kickoffInstructionForContext({
+        isTestDrive: true,
+        lessonActivityContext: {
+          starterAppId: "starter" as Id<"customApps">,
+          appRequest: null,
+        },
+      }),
+    ).toBe(teacherInstruction);
+    expect(
+      kickoffInstructionForContext({
+        isTestDrive: false,
+        lessonActivityContext: {
+          starterAppId: null,
+          appRequest: "Teacher-only request",
+        },
+      }),
+    ).toBe(kickoffInstruction());
   });
 });
 
@@ -454,9 +672,12 @@ describe("buildTutorSystemPrompt", () => {
 });
 
 describe("buildTutorSystemPromptParts (prompt-cache split)", () => {
-  test("stable + dynamic is byte-identical to the full prompt", () => {
-    const { stable, dynamic } = buildTutorSystemPromptParts(baseCtx);
-    expect(stable + dynamic).toBe(buildTutorSystemPrompt(baseCtx));
+  test("all parts are byte-identical to the full prompt", () => {
+    const { stable, dynamic, turnContext } =
+      buildTutorSystemPromptParts(baseCtx);
+    expect(stable + dynamic + "\n\n" + turnContext).toBe(
+      buildTutorSystemPrompt(baseCtx),
+    );
   });
 
   test("invariant holds with a fully-populated dynamic context", () => {
@@ -478,8 +699,11 @@ describe("buildTutorSystemPromptParts (prompt-cache split)", () => {
       isFirstTurn: true,
       isFirstSession: true,
     };
-    const { stable, dynamic } = buildTutorSystemPromptParts(rich);
-    expect(stable + dynamic).toBe(buildTutorSystemPrompt(rich));
+    const { stable, dynamic, turnContext } =
+      buildTutorSystemPromptParts(rich);
+    expect(stable + dynamic + "\n\n" + turnContext).toBe(
+      buildTutorSystemPrompt(rich),
+    );
   });
 
   test("the cached stable prefix carries the base prompt, not the dynamic suffix", () => {
@@ -502,24 +726,23 @@ describe("buildTutorSystemPromptParts — stable prefix is wall-clock-independen
     vi.useRealTimers();
   });
 
-  // Regression for BOTH cache-busters that used to live inside the cached
-  // prefix (sections 0..STABLE_LEADING_SECTIONS-1):
+  // Regression for cache-busters that used to live before the rolling
+  // conversation breakpoint:
   //   1. the SESSION CONTEXT gap string (sections[3]) — fixed by anchoring the
   //      gap to sessionCreatedAt instead of Date.now();
-  //   2. the "Current date and time" clock line (formerly embedded in
-  //      buildBasePrompt) — fixed by moving it to buildClockLine, emitted as the
-  //      FIRST dynamic section.
-  // With both fixed, `stable` is byte-identical across wall-clock time for
-  // FIXED session state, so no normalization is needed here — assert RAW
-  // equality. Deliberately NOT covered (known, accepted one-time re-caches, not
-  // per-turn churn — each re-bills the prefix once and then re-caches):
-  //   - the turn-1→turn-2 flip of isFirstTurn/introduceNonHuman (sections 0/1/3
-  //     and the angle-kickoff tool),
+  //   2. the clock and timing sections — fixed by moving them after the latest
+  //      user message's rolling breakpoint.
+  // With both fixed, `stable` and `dynamic` are byte-identical across
+  // wall-clock time for FIXED session state. Deliberately NOT covered (known,
+  // accepted one-time re-caches, not per-turn churn):
   //   - set_activity_angle disappearing from the tool set once an angle is
   //     chosen (tools precede system in the cache prefix),
   //   - the school-day boundary flipping physicalEnvironmentContext +
   //     suggest_physical_task (a deliberate fail-closed product gate on
   //     Date.now() in getSessionContext; at most one flip per boundary).
+  // The turn-1→turn-2 flip of isFirstTurn used to be on this list; TRA-234
+  // moved every isFirstTurn-dependent byte into the dynamic tail (covered by
+  // the "turn 1 → turn 2" describe below).
   const sessionCreatedAt = 1_700_000_000_000;
   // Last session ended ~3h before THIS session opened (a returning scholar).
   const lastSessionAt = sessionCreatedAt - 3 * 60 * 60 * 1000;
@@ -531,27 +754,38 @@ describe("buildTutorSystemPromptParts — stable prefix is wall-clock-independen
     sessionCreatedAt,
   };
 
-  test("stable prefix is byte-identical (raw) across turns despite a moving wall clock", () => {
+  test("system parts are byte-identical while turn context changes with the wall clock", () => {
     vi.useFakeTimers();
-    // Turn 1: the wall clock is at the session's start.
     vi.setSystemTime(sessionCreatedAt);
-    const first = buildTutorSystemPromptParts(returningCtx);
+    const first = buildTutorSystemPromptParts({
+      ...returningCtx,
+      timingContext: {
+        sessionStartedAt: sessionCreatedAt,
+        unitEndsAt: sessionCreatedAt + 30 * 60 * 1000,
+        unitDurationMinutes: 30,
+      },
+    });
 
-    // Turn N: 90 minutes later — enough to (a) cross formatSessionGap buckets
-    // (3h → 5h) had the gap been anchored to Date.now(), and (b) advance the
-    // minute-granularity clock line had it still been in the cached prefix.
-    vi.setSystemTime(sessionCreatedAt + 90 * 60 * 1000);
-    const later = buildTutorSystemPromptParts(returningCtx);
+    vi.setSystemTime(sessionCreatedAt + 3 * 60 * 1000);
+    const later = buildTutorSystemPromptParts({
+      ...returningCtx,
+      timingContext: {
+        sessionStartedAt: sessionCreatedAt,
+        unitEndsAt: sessionCreatedAt + 30 * 60 * 1000,
+        unitDurationMinutes: 30,
+      },
+    });
 
-    // RAW byte equality — no clock normalization.
     expect(later.stable).toBe(first.stable);
-    // Guard: the gap string really is in the cached prefix (so this exercises
-    // the at-risk bytes), while the clock line is NOT (it moved to the tail).
+    expect(later.dynamic).toBe(first.dynamic);
+    expect(later.turnContext).not.toBe(first.turnContext);
     expect(first.stable).toContain("SESSION CONTEXT:");
     expect(first.stable).toContain("their last session was about 3 hours ago");
     expect(first.stable).not.toContain("Current date and time:");
-    // …and the clock line is present, just in the per-turn dynamic tail.
-    expect(later.dynamic).toContain("Current date and time:");
+    expect(first.dynamic).not.toContain("Current date and time:");
+    expect(first.dynamic).not.toContain("TIMING:");
+    expect(later.turnContext.startsWith("Current date and time:")).toBe(true);
+    expect(later.turnContext).toContain("TIMING:");
   });
 
   test("the gap reflects the session-start anchor, not prompt-build wall time", () => {
@@ -562,6 +796,278 @@ describe("buildTutorSystemPromptParts — stable prefix is wall-clock-independen
     const { stable } = buildTutorSystemPromptParts(returningCtx);
     expect(stable).toContain("their last session was about 3 hours ago");
     expect(stable).not.toContain("days ago");
+  });
+});
+
+describe("buildTutorSystemPromptParts — stable prefix is identical on turn 1 and turn 2 (TRA-234)", () => {
+  // Regression for the turn-2 cache miss seen on every prod session: the
+  // first-turn-only directives (FIRST MESSAGE primacy line, the intro <start>
+  // bullet, the SESSION CONTEXT fresh-start variants) used to sit inside the
+  // cached prefix, so turn 1 and turn 2 differed before the breakpoint and
+  // turn 2 re-wrote the whole ~18k-token prefix. Everything keyed on
+  // isFirstTurn now lives in the dynamic tail.
+  const sessionCreatedAt = 1_700_000_000_000;
+
+  function turns(overrides: Partial<TutorPromptContext>) {
+    const turn1 = buildTutorSystemPromptParts({
+      ...baseCtx,
+      ...overrides,
+      sessionCreatedAt,
+      isFirstTurn: true,
+    });
+    const turn2 = buildTutorSystemPromptParts({
+      ...baseCtx,
+      ...overrides,
+      sessionCreatedAt,
+      isFirstTurn: false,
+    });
+    return { turn1, turn2 };
+  }
+
+  test("first-ever session: FIRST MESSAGE + intro live only in the dynamic tail", () => {
+    const { turn1, turn2 } = turns({ isFirstSession: true, lastSessionAt: null });
+    expect(turn1.stable).toBe(turn2.stable);
+    expect(turn1.stable).not.toContain("FIRST MESSAGE");
+    expect(turn1.stable).not.toContain("Introduce yourself");
+    expect(turn1.dynamic).toContain("FIRST MESSAGE:");
+    expect(turn1.dynamic).toContain("## Introduce yourself");
+    expect(turn2.dynamic).not.toContain("FIRST MESSAGE");
+    expect(turn2.dynamic).not.toContain("## Introduce yourself");
+  });
+
+  test("returning scholar, new session after a gap: fresh-start guard only in the dynamic tail", () => {
+    const { turn1, turn2 } = turns({
+      isFirstSession: false,
+      lastSessionAt: sessionCreatedAt - 2 * 24 * 60 * 60 * 1000,
+    });
+    expect(turn1.stable).toBe(turn2.stable);
+    expect(turn1.stable).toContain("their last session was 2 days ago");
+    expect(turn1.stable).not.toContain("welcome back");
+    expect(turn1.dynamic).toContain("SESSION CONTEXT (opening turn)");
+    expect(turn1.dynamic).toContain('do NOT say "welcome back"');
+    expect(turn2.dynamic).not.toContain("SESSION CONTEXT (opening turn)");
+  });
+
+  test("returning scholar, same sitting: the same-sitting guard only in the dynamic tail", () => {
+    const { turn1, turn2 } = turns({
+      isFirstSession: false,
+      lastSessionAt: sessionCreatedAt - 5 * 60 * 1000,
+    });
+    expect(turn1.stable).toBe(turn2.stable);
+    expect(turn1.stable).toContain("no time gap to acknowledge");
+    expect(turn1.dynamic).toContain("same sitting");
+    expect(turn2.dynamic).not.toContain("same sitting");
+  });
+
+  test("the opening-turn directive leads the dynamic tail (max primacy after the breakpoint)", () => {
+    const { turn1 } = turns({ isFirstSession: true, lastSessionAt: null });
+    expect(turn1.dynamic.trimStart().startsWith("FIRST MESSAGE:")).toBe(true);
+  });
+});
+
+describe("buildTutorSystemPromptParts — session-stable sections join the cached prefix (TRA-185)", () => {
+  // Item 1 of TRA-185: curriculum context (unit / lesson / activity /
+  // deliverable), the static tools description, and the reading-level register
+  // do not change turn to turn, so they sit AHEAD of the breakpoint. The
+  // observer-written scholar record (mastery, signals), verdicts, whispers and
+  // seeds change per turn and stay behind it. Clock and timing ride in turn
+  // context after the conversation breakpoint.
+  const rich: TutorPromptContext = {
+    ...baseCtx,
+    readingLevel: "Grade 5",
+    unitContext: {
+      title: "Equal areas",
+      description: "Explore equivalence through geometry.",
+      systemPrompt: "Keep area as the invariant.",
+      rubric: null,
+      youtubeUrl: null,
+      videoTranscript: null,
+      bigIdea: "Shapes can look different while covering equal area.",
+      essentialQuestions: [{ key: "eq-area", text: "What makes two areas equal?" }],
+      enduringUnderstandings: null,
+    },
+    lessonActivityContext: {
+      title: "Tangram swap",
+      description: "Rearrange the pieces without changing the area.",
+      kind: "online",
+      systemPrompt: "Let the scholar cut and reassemble.",
+      durationMinutes: 20,
+      processTitle: null,
+      processEmoji: null,
+    },
+    standaloneDeliverableContext: {
+      activityTitle: "Tangram swap",
+      prompt: "Show two different shapes with the same area.",
+      rubric: "[c1] Uses a counting argument",
+      kind: "artifact",
+      isComplete: false,
+    },
+    currentVerdictsContext: [
+      {
+        kind: "artifact",
+        artifactId: "a1",
+        title: "My tangram",
+        verdicts: [{ criterionId: "c1", level: "half" }],
+      },
+    ],
+    masteryContext: [
+      {
+        concept: "area conservation",
+        domain: "math",
+        level: 2,
+        confidence: 0.6,
+        evidence: "Predicted equal area before counting.",
+        studentInitiated: false,
+      },
+    ],
+    signalContext: { curiosity: { count: 3, highCount: 1 } },
+    teacherWhisper: "nudge toward a counting argument",
+    seeds: [
+      {
+        topic: "arches",
+        domain: null,
+        approachHint: null,
+        suggestionType: "frontier",
+        approved: true,
+      },
+    ],
+  };
+
+  test("all parts are still byte-identical to the full prompt", () => {
+    const { stable, dynamic, turnContext } =
+      buildTutorSystemPromptParts(rich);
+    expect(stable + dynamic + "\n\n" + turnContext).toBe(
+      buildTutorSystemPrompt(rich),
+    );
+  });
+
+  test("curriculum, deliverable, tools description and reading level are in the cached prefix", () => {
+    const { stable, dynamic } = buildTutorSystemPromptParts(rich);
+    for (const marker of [
+      "Equal areas",
+      "Tangram swap",
+      "Show two different shapes with the same area.",
+      "READING LEVEL:",
+      "Uses a counting argument",
+    ]) {
+      expect(stable).toContain(marker);
+      expect(dynamic).not.toContain(marker);
+    }
+    // The tools description is the largest constant section.
+    expect(stable).toContain(buildToolsSection());
+    expect(dynamic).not.toContain(buildToolsSection());
+  });
+
+  test("per-turn scholar record, verdicts, whisper and seeds stay in the dynamic system tail", () => {
+    const { stable, dynamic, turnContext } =
+      buildTutorSystemPromptParts(rich);
+    for (const marker of [
+      "area conservation", // mastery
+      "LEARNER PROFILE (observed tendencies", // signals
+      "nudge toward a counting argument", // whisper
+      "arches", // seeds
+      "[c1] → half", // current verdicts
+    ]) {
+      expect(dynamic).toContain(marker);
+      expect(stable).not.toContain(marker);
+    }
+    expect(turnContext.startsWith("Current date and time:")).toBe(true);
+    expect(stable).not.toContain("Current date and time:");
+    expect(dynamic).not.toContain("Current date and time:");
+  });
+
+  test("the stable prefix is byte-identical when only the per-turn record moves", () => {
+    const turnA = buildTutorSystemPromptParts(rich);
+    const turnB = buildTutorSystemPromptParts({
+      ...rich,
+      masteryContext: [
+        { ...rich.masteryContext![0], level: 3, evidence: "Now justifies it." },
+      ],
+      signalContext: { curiosity: { count: 4, highCount: 2 } },
+      currentVerdictsContext: [
+        {
+          kind: "artifact",
+          artifactId: "a1",
+          title: "My tangram",
+          verdicts: [{ criterionId: "c1", level: "full" }],
+        },
+      ],
+      teacherWhisper: null,
+      dossierContent: "Updated by the observer.",
+    });
+    expect(turnB.stable).toBe(turnA.stable);
+    expect(turnB.dynamic).not.toBe(turnA.dynamic);
+  });
+
+  test("the section order constant is exhaustive and the breakpoint key is in it", () => {
+    const idx = TUTOR_PROMPT_SECTION_ORDER.indexOf(FIRST_DYNAMIC_TUTOR_SECTION);
+    expect(idx).toBeGreaterThan(0);
+    const allSections = [
+      ...TUTOR_PROMPT_SECTION_ORDER,
+      ...TUTOR_TURN_CONTEXT_SECTIONS,
+    ];
+    expect(new Set(allSections).size).toBe(
+      allSections.length,
+    );
+  });
+});
+
+describe("appendTurnContext", () => {
+  test("converts string content and appends after the cache breakpoint", () => {
+    const input = [{ role: "user" as const, content: "Explain tides." }];
+    const withBreakpoint = withConversationCacheBreakpoint(input);
+    const result = appendTurnContext(withBreakpoint, "Current date and time: now");
+    const blocks = result[0].content;
+
+    expect(Array.isArray(blocks)).toBe(true);
+    if (!Array.isArray(blocks)) throw new Error("expected content blocks");
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toMatchObject({
+      type: "text",
+      text: "Explain tides.",
+      cache_control: { type: "ephemeral" },
+    });
+    expect(blocks[1]).toEqual({
+      type: "text",
+      text: TURN_CONTEXT_PREFIX + "Current date and time: now",
+    });
+    expect(blocks[1]).not.toHaveProperty("cache_control");
+    expect(input).toEqual([{ role: "user", content: "Explain tides." }]);
+  });
+
+  test("appends to array content without moving or copying cache_control", () => {
+    const input = [
+      {
+        role: "user" as const,
+        content: [
+          { type: "text", text: "Look at this." },
+          { type: "image", source: { type: "base64", data: "abc" } },
+        ],
+      },
+    ];
+    const withBreakpoint = withConversationCacheBreakpoint(input);
+    const result = appendTurnContext(withBreakpoint, "TIMING: 10 minutes remain.");
+    const blocks = result[0].content;
+
+    expect(blocks).toHaveLength(3);
+    expect(blocks[1]).toMatchObject({
+      type: "image",
+      cache_control: { type: "ephemeral" },
+    });
+    expect(blocks[2]).toEqual({
+      type: "text",
+      text: TURN_CONTEXT_PREFIX + "TIMING: 10 minutes remain.",
+    });
+    expect(blocks[2]).not.toHaveProperty("cache_control");
+    expect(input[0].content).toHaveLength(2);
+    expect(input[0].content[1]).not.toHaveProperty("cache_control");
+  });
+
+  test("returns unchanged content when there is no user message", () => {
+    const input = [{ role: "assistant" as const, content: "Only assistant." }];
+    const result = appendTurnContext(input, "Current date and time: now");
+    expect(result).toEqual(input);
+    expect(result).not.toBe(input);
   });
 });
 
@@ -591,104 +1097,5 @@ describe("injectPendingWhisper", () => {
     const msgs = [{ role: "assistant", content: "only assistant" }];
     injectPendingWhisper(msgs, "whisper");
     expect(msgs).toHaveLength(1);
-  });
-});
-
-describe("magicAnnotationSystemPrompt", () => {
-  test("augments the base prompt with the magic-annotation reaction guidance", () => {
-    const out = magicAnnotationSystemPrompt("BASE PROMPT", "a soaring dragon");
-    expect(out.startsWith("BASE PROMPT")).toBe(true);
-    expect(out).toContain("[MAGIC ANNOTATION]");
-    expect(out).toContain("a soaring dragon");
-    expect(out).toContain("Do NOT call generate_image");
-  });
-});
-
-describe("bloomFromFloat", () => {
-  test("maps each band at its boundary", () => {
-    expect(bloomFromFloat(5)).toBe("create");
-    expect(bloomFromFloat(4.5)).toBe("create");
-    expect(bloomFromFloat(4.49)).toBe("evaluate");
-    expect(bloomFromFloat(3.5)).toBe("evaluate");
-    expect(bloomFromFloat(2.5)).toBe("analyze");
-    expect(bloomFromFloat(1.5)).toBe("apply");
-    expect(bloomFromFloat(0.5)).toBe("understand");
-    expect(bloomFromFloat(0.49)).toBe("remember");
-    expect(bloomFromFloat(0)).toBe("remember");
-  });
-});
-
-describe("mapObserverResultToDetailed", () => {
-  const pulse = {
-    engagementScore: 0.8,
-    complexityLevel: 0.7,
-    onTaskScore: 0.9,
-    topics: ["bridges", "forces"],
-    learningIndicators: [],
-    concernFlags: [],
-    summary: "Solid build session",
-    pulseScore: 4,
-  };
-  const obs = (conceptLabel: string, masteryLevel: number) => ({
-    conceptLabel,
-    domain: "physics",
-    masteryLevel,
-    confidenceScore: 0.8,
-    evidenceSummary: "e",
-    evidenceType: "direct_demonstration",
-    attemptContext: "conversation",
-    studentInitiated: false,
-    transcriptExcerpt: "x",
-  });
-
-  test("null → null", () => {
-    expect(mapObserverResultToDetailed(null)).toBeNull();
-  });
-
-  test("no observations → remember + placeholder description", () => {
-    const result: ObserverResult = {
-      pulse,
-      observations: [],
-      sessionSignals: [],
-      crossDomainConnections: [],
-      seeds: [],
-    };
-    const detailed = mapObserverResultToDetailed(result);
-    expect(detailed?.summary).toBe("Solid build session");
-    expect(detailed?.topics).toEqual(["bridges", "forces"]);
-    expect(detailed?.bloomLevel).toBe("remember");
-    expect(detailed?.bloomDescription).toBe("No observations yet");
-  });
-
-  test("bloomLevel from the max mastery; description is top-3 desc; input unmutated", () => {
-    const observations = [obs("tension", 2.0), obs("compression", 3.6), obs("load", 1.0), obs("span", 0.5)];
-    const result: ObserverResult = {
-      pulse,
-      observations,
-      sessionSignals: [],
-      crossDomainConnections: [],
-      seeds: [
-        { suggestionType: "depth_probe", topic: "trusses", rationale: "push deeper" },
-        { suggestionType: "frontier", topic: "suspension", rationale: "new frontier" },
-      ],
-    };
-    const detailed = mapObserverResultToDetailed(result);
-    expect(detailed?.bloomLevel).toBe("evaluate"); // 3.6 → evaluate
-    expect(detailed?.bloomDescription).toBe(
-      "compression: 3.6, tension: 2.0, load: 1.0",
-    );
-    expect(detailed?.nudges).toEqual([
-      { type: "challenge", message: "push deeper" },
-    ]);
-    expect(detailed?.suggestedFollowUps).toEqual([
-      { topic: "suspension", rationale: "new frontier" },
-    ]);
-    // The mapper must not reorder the caller's observations array.
-    expect(observations.map((o) => o.conceptLabel)).toEqual([
-      "tension",
-      "compression",
-      "load",
-      "span",
-    ]);
   });
 });

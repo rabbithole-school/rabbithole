@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -20,7 +20,18 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
-async function seedScholar(t: ReturnType<typeof convexTest>, username = "new_territory_scholar") {
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function seedScholar(t: TestConvex<typeof schema>, username = "new_territory_scholar") {
   return await t.run(async (ctx) => {
     const institution =
       (await ctx.db
@@ -50,7 +61,7 @@ async function seedScholar(t: ReturnType<typeof convexTest>, username = "new_ter
   });
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -62,7 +73,7 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 }
 
 async function seedFluent(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   scholarId: Id<"users">,
   skillKey: string,
   domain: string,
@@ -86,9 +97,8 @@ async function seedFluent(
 
 describe("practiceSkills — newTerritoryCards (the folded-in 'Explore a new territory' tiles)", () => {
   test("a scholar who has only started whole-number-arithmetic gets one card per OTHER registered domain, all not-started", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedScholar(t);
+    const t = sharedSeeded();
+    const scholar = await seedScholar(t, "new_territory_scholar_1");
     const asScholar = await asUser(t, scholar);
 
     // Start exactly one domain — every other registered domain is "new territory".
@@ -117,9 +127,8 @@ describe("practiceSkills — newTerritoryCards (the folded-in 'Explore a new ter
   });
 
   test("excludeDomains removes a domain from the result even if it's not started", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedScholar(t);
+    const t = sharedSeeded();
+    const scholar = await seedScholar(t, "new_territory_scholar_2");
     const asScholar = await asUser(t, scholar);
 
     const withoutExclusion = await asScholar.query(api.practiceSkills.newTerritoryCards, {});
@@ -133,9 +142,8 @@ describe("practiceSkills — newTerritoryCards (the folded-in 'Explore a new ter
   });
 
   test("a domain the scholar has already started never appears, even unexcluded", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedScholar(t);
+    const t = sharedSeeded();
+    const scholar = await seedScholar(t, "new_territory_scholar_3");
     const asScholar = await asUser(t, scholar);
 
     await seedFluent(t, scholar, "count_to_10", "whole-number-arithmetic", "counting");
@@ -147,8 +155,7 @@ describe("practiceSkills — newTerritoryCards (the folded-in 'Explore a new ter
   });
 
   test("choiceSetForSelf's own behavior is unaffected — still returns at most three balanced cards", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "unaffected_choiceset_scholar");
     const asScholar = await asUser(t, scholar);
     const domains = ["whole-number-arithmetic", "probability"];
@@ -188,7 +195,7 @@ describe("practiceSkills — newTerritoryCards offers reachable above-ring domai
   ];
 
   async function convergeDomains(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholarId: Id<"users">,
     domains: string[],
   ) {
@@ -230,8 +237,7 @@ describe("practiceSkills — newTerritoryCards offers reachable above-ring domai
   }
 
   test("Henry-shaped (grade 4, every Algebra 1 prereq domain converged) gets an algebra-1 card with a real mapping-probe sample", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const henry = await seedScholar(t, "henry_ceiling");
     await t.run(async (ctx) => ctx.db.patch(henry, { gradeLevel: "4" }));
     const asHenry = await asUser(t, henry);
@@ -255,8 +261,7 @@ describe("practiceSkills — newTerritoryCards offers reachable above-ring domai
   });
 
   test("Asha-shaped (grade K, nothing converged anywhere) gets NO algebra-1 card", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const asha = await seedScholar(t, "asha_ceiling");
     await t.run(async (ctx) => ctx.db.patch(asha, { gradeLevel: "K" }));
     const asAsha = await asUser(t, asha);
@@ -266,8 +271,7 @@ describe("practiceSkills — newTerritoryCards offers reachable above-ring domai
   });
 
   test("an ordinary eligible domain's card is unchanged by the reachable addition", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "ordinary_ceiling_scholar");
     const asScholar = await asUser(t, scholar);
 
@@ -301,8 +305,7 @@ describe("practiceSkills — newTerritoryCards offers reachable above-ring domai
 // cross-domain buildsOn prereq sets, same ring verdicts at every grade.
 describe("DOMAIN_REACHABILITY_STATIC drift", () => {
   test("static prereqs + ring verdicts match the seeded DB graph", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     // Scope to the REGISTERED practice domains — the node table also carries
     // Sky/concept domains the placement loader never touches.
     const registered = new Set(DOMAIN_REACHABILITY_STATIC.map((m) => m.domain));

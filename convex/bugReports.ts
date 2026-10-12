@@ -9,7 +9,7 @@ import {
 import type { ActionCtx, MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
-import { getActiveOverlay, getSessionOwner } from "./lib/auth";
+import { assertNotReadOnly, getActiveOverlay, getSessionOwner } from "./lib/auth";
 import {
   assertInstitutionActive,
   requireScholarsAccessible,
@@ -25,6 +25,7 @@ import { MODELS } from "./lib/models";
 import { requireAnthropicApiKey } from "./lib/anthropic";
 import { recordAnthropicUsage } from "./usage";
 import { sessionPath, siteUrl, withBase } from "./lib/channels";
+import { fileBugReportCard, syncBugReportCard } from "./scholarSuggestions";
 
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg"]);
 const AUDIO_MIME_TYPES = new Set([
@@ -98,6 +99,8 @@ const bugReportMutation = customMutation(mutation, {
   input: async (ctx) => {
     const actor = await getSessionOwner(ctx);
     if (!actor) throw new Error("Not authenticated");
+    // View-as may report; a read-only identity may not (TRA-494).
+    await assertNotReadOnly(ctx);
     await assertInstitutionActive(ctx, actor);
     const overlay = await getActiveOverlay(ctx);
     return { ctx: { ...ctx, actor, overlay }, args: {} };
@@ -174,6 +177,16 @@ export const submit = bugReportMutation({
         )
         .first();
       if (existing) {
+        // A retried outbox report may predate its Workshop card; reconcile.
+        if (existing.actorRole === ROLES.SCHOLAR && !existing.viewedUserId) {
+          await fileBugReportCard(ctx, {
+            scholarId: existing.actorUserId,
+            bugReportId: existing._id,
+            description: existing.description,
+            awaitingTranscript:
+              !!existing.audioStorageId && !existing.transcribedAt,
+          });
+        }
         return {
           ok: true as const,
           reportId: existing._id,
@@ -249,7 +262,23 @@ export const submit = bugReportMutation({
       status,
     });
 
-    if (channel) {
+    // A scholar reporting a bug in their OWN view also gets it on their
+    // Workshop board + a #workshop thread, where a staff reply reaches them.
+    // Never for a report filed while viewing as a scholar — that's the viewer's.
+    const workshopCard = ctx.actor.role === ROLES.SCHOLAR && !viewedUserId;
+    if (workshopCard) {
+      await fileBugReportCard(ctx, {
+        scholarId: ctx.actor._id,
+        bugReportId: reportId,
+        description: compactOptional(args.description, 8_000),
+        awaitingTranscript: !!args.audioStorageId,
+      });
+    }
+
+    // The pipeline transcribes before it looks for a triage channel, so a
+    // spoken scholar report still reaches #workshop while that channel is
+    // unlinked; the pipeline then parks the report as waiting.
+    if (channel || (workshopCard && args.audioStorageId)) {
       await ctx.scheduler.runAfter(0, internal.bugReports.processReport, {
         reportId,
       });
@@ -372,6 +401,11 @@ export const markTranscribed = internalMutation({
     await ctx.db.patch(args.reportId, {
       description,
       transcribedAt: Date.now(),
+    });
+    await syncBugReportCard(ctx, {
+      bugReportId: args.reportId,
+      description,
+      heldBack: !!report.audioStorageId,
     });
   },
 });
@@ -571,19 +605,19 @@ export const linkBugReportChannel = internalMutation({
 function reportRootMessage(context: ProcessingContext): string {
   const { report } = context;
   const lines = [
-    "🐛 *New Rabbithole bug report*",
-    `*Reported by:* ${escapeSlackText(context.actor.name)} (${escapeSlackText(context.actor.role)})`,
+    "🐛 **New Rabbithole bug report**",
+    `**Reported by:** ${escapeSlackText(context.actor.name)} (${escapeSlackText(context.actor.role)})`,
     context.viewed
-      ? `*Viewing:* ${escapeSlackText(context.viewed.name)} (${escapeSlackText(context.viewed.role)})`
+      ? `**Viewing:** ${escapeSlackText(context.viewed.name)} (${escapeSlackText(context.viewed.role)})`
       : null,
-    `*Surface:* ${report.surface}`,
-    `*Captured:* ${new Date(report._creationTime).toISOString()}`,
-    `*Where:* \`${escapeSlackText(report.url.replace(/`/g, "'"))}\``,
+    `**Surface:** ${report.surface}`,
+    `**Captured:** ${new Date(report._creationTime).toISOString()}`,
+    `**Where:** \`${escapeSlackText(report.url.replace(/`/g, "'"))}\``,
     context.session
-      ? `*Session:* <${withBase(siteUrl(), sessionPath(context.session.id, context.session.ownerId))}|${escapeSlackText(context.session.title)}>`
+      ? `**Session:** <${withBase(siteUrl(), sessionPath(context.session.id, context.session.ownerId))}|${escapeSlackText(context.session.title)}>`
       : null,
     "",
-    "*What went wrong*",
+    "**What went wrong**",
     ...(report.description
       ? escapeSlackText(report.description)
           .split("\n")

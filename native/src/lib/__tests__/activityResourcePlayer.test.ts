@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   buildYouTubeResourceDocument,
   isAllowedYouTubeResourceUrl,
+  youTubePlayerContent,
   YOUTUBE_RESOURCE_BASE_URL,
 } from "../activityResourcePlayer";
 
@@ -45,5 +46,24 @@ describe("activity resource YouTube player", () => {
     expect(html).toContain("player.getDuration()");
     expect(html).toContain("frame.style.visibility = 'hidden'");
     expect(html).toContain("Watch again");
+  });
+});
+
+describe("youTubePlayerContent", () => {
+  test("builds the locked sandbox player field set for a YouTube link", () => {
+    const content = youTubePlayerContent(
+      "https://www.youtube.com/watch?v=lZUyUkJMc3U",
+    );
+    expect(content).not.toBeNull();
+    expect(content?.navigationPolicy).toBe("youtube");
+    expect(content?.gestureMode).toBe("page");
+    expect(content?.documentBaseUrl).toBe(YOUTUBE_RESOURCE_BASE_URL);
+    expect(content?.url).toContain("youtube-nocookie.com/embed/lZUyUkJMc3U");
+    expect(content?.allowedHosts).toContain("youtube-nocookie.com");
+    expect(content?.documentHtml).toContain("enablejsapi=1");
+  });
+
+  test("returns null for a non-YouTube URL so the caller keeps its own shape", () => {
+    expect(youTubePlayerContent("https://example.com/learn")).toBeNull();
   });
 });

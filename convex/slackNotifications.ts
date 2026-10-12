@@ -35,6 +35,12 @@ import { owningGroupForScholar } from "../shared/scholarGroupRouting";
 import { scholarInstitutionId } from "./lib/scholarEnrollment";
 import { effectiveInstitutionTimeZone } from "./lib/institutionTime";
 import { checkinDayKey } from "./lib/eodCheckin";
+import {
+  institutionIdInLens,
+  resolveInstitutionLens,
+  scholarInLens,
+  scholarInstitutionReadableInLens,
+} from "./lib/institutionLens";
 
 const ACTIVITY_UPDATE_LIMIT = 50;
 const ACTIVITY_UPDATE_EVENT_TYPE = "rabbithole_activity_update";
@@ -90,6 +96,41 @@ export function scholarDeepLink(scholarId: Id<"users">): string {
 
 // ── Channel ↔ group linking (the opt-in) ────────────────────────────────
 
+export const linkedGroupForChannel = internalQuery({
+  args: {
+    callerUserId: v.id("users"),
+    slackChannelId: v.string(),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    id: Id<"scholarGroups">;
+    name: string;
+    memberCount: number;
+  } | null> => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller || !isTeacherRole(caller.role)) return null;
+
+    const lens = await resolveInstitutionLens(ctx, caller, "");
+    const group = (await ctx.db.query("scholarGroups").collect()).find(
+      (candidate) =>
+        candidate.slackChannelId === args.slackChannelId &&
+        institutionIdInLens(lens, candidate.institutionId),
+    );
+    if (!group) return null;
+
+    let memberCount = 0;
+    for (const scholarId of group.scholarIds) {
+      const scholar = await ctx.db.get(scholarId);
+      if (scholar?.role === "scholar" && scholarInLens(lens, scholar)) {
+        memberCount++;
+      }
+    }
+    return { id: group._id, name: group.name, memberCount };
+  },
+});
+
 export const linkChannelToGroup = internalMutation({
   args: {
     callerUserId: v.id("users"),
@@ -108,7 +149,10 @@ export const linkChannelToGroup = internalMutation({
     const query = args.groupName.trim().toLowerCase();
     if (!query) return { ok: false, message: "Which scholar group?" };
 
-    const groups = await ctx.db.query("scholarGroups").collect();
+    const lens = await resolveInstitutionLens(ctx, caller, "");
+    const groups = (await ctx.db.query("scholarGroups").collect()).filter(
+      (group) => scholarInstitutionReadableInLens(lens, group.institutionId),
+    );
     const matches = groups.filter((g) => g.name.toLowerCase().includes(query));
     if (matches.length === 0) {
       const names = groups.map((g) => g.name).join(", ") || "(none exist yet)";
@@ -139,10 +183,25 @@ export const linkChannelToGroup = internalMutation({
       return { ok: true, message: `Unlinked "${group.name}" from this channel — no more notifications here.` };
     }
 
+    const displacedGroups = groups.filter(
+      (candidate) =>
+        candidate._id !== group._id &&
+        candidate.slackChannelId === args.slackChannelId,
+    );
+    for (const displaced of displacedGroups) {
+      await ctx.db.patch(displaced._id, {
+        slackChannelId: undefined,
+        slackNotifyMode: undefined,
+      });
+    }
     await ctx.db.patch(group._id, { slackChannelId: args.slackChannelId });
+    const displacedMessage =
+      displacedGroups.length > 0
+        ? ` Unlinked ${displacedGroups.map((displaced) => `"${displaced.name}"`).join(", ")} from this channel first.`
+        : "";
     return {
       ok: true,
-      message: `Linked "${group.name}" to this channel. Activity notifications (completions, deliverable submissions) will collect into hourly updates on the day's check-in thread. Say "switch ${group.name} to immediate notifications" to change the cadence.`,
+      message: `Linked "${group.name}" to this channel.${displacedMessage} Activity notifications (completions, deliverable submissions) will collect into hourly updates on the day's check-in thread. Say "switch ${group.name} to immediate notifications" to change the cadence.`,
     };
   },
 });
@@ -578,7 +637,7 @@ export const claimActivityUpdate = internalMutation({
       .join(".")}`;
     const activityUpdate = {
       deliveryId,
-      text: `*Activity since the last update:*\n${batch
+      text: `**Activity since the last update:**\n${batch
         .map((row) => `• ${row.text}`)
         .join("\n")}`,
       queueIds: batch.map((row) => row._id),

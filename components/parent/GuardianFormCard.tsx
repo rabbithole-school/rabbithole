@@ -6,6 +6,7 @@ import { ArrowRight } from "@phosphor-icons/react";
 import { Box, Button, Heading, HStack, Stack, Text } from "@chakra-ui/react";
 
 import type { Id } from "@/convex/_generated/dataModel";
+import { formClosedMessage } from "@/convex/lib/formRegistry";
 import { FormCompletionBadge } from "./FormCompletionBadge";
 import { ParentFormCardShell } from "./ParentFormCardShell";
 
@@ -21,13 +22,47 @@ export function GuardianFormCard({
   title,
   status,
   icon,
+  closedOn = null,
 }: {
   scholarId: Id<"users">;
   path: string;
   title: string;
   status: GuardianFormStatus;
   icon: ReactNode;
+  /**
+   * The form's last open day once it has closed: the card becomes a
+   * read-only receipt of the response on file, with no action.
+   */
+  closedOn?: string | null;
 }) {
+  if (closedOn) {
+    return (
+      <ParentFormCardShell>
+        <HStack gap={3} align="start">
+          <Box
+            flexShrink={0}
+            position="relative"
+            p={2}
+            borderRadius="lg"
+            bg="green.50"
+            color="green.700"
+            aria-hidden="true"
+          >
+            {icon}
+            <FormCompletionBadge />
+          </Box>
+          <Box>
+            <Heading size="sm" color="navy.500">
+              {title}
+            </Heading>
+            <Text fontSize="sm" color="fg.muted" mt={1}>
+              {`Submitted ${status.submittedAt ? new Date(status.submittedAt).toLocaleDateString() : "earlier"}. ${formClosedMessage(closedOn)}`}
+            </Text>
+          </Box>
+        </HStack>
+      </ParentFormCardShell>
+    );
+  }
   const complete = status.status === "completed";
   const actionLabel =
     status.unsentChanges || status.status === "in_progress"

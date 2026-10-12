@@ -198,6 +198,9 @@ export interface SeedActivity {
   defaultMode?: "classFocus" | "homework" | "either";
   hasScholarAngles?: boolean;
   recipe?: "baseline" | "exitTicket";
+  /** Link materials attached as `activityResources` (program scheduling of
+   *  offline work requires at least one). */
+  materials?: { title: string; url: string }[];
   // kind === "web"
   webUrl?: string;
   webAllowedHosts?: string[];
@@ -237,6 +240,9 @@ export interface SeedUnit {
    * regular teacher-authored curriculum (teacherId = teacherKey).
    */
   authorScholarKey?: Key;
+  /** Stamp the unit to the dev school (Moli) instead of leaving it an
+   *  unstamped legacy row. */
+  stampDevSchool?: boolean;
   title: string;
   slug: string;
   emoji?: string;
@@ -254,7 +260,7 @@ export interface SeedUnit {
     | "analyze"
     | "evaluate"
     | "create";
-  /** @deprecated anti-parasocial — personas are no longer wired; this is inert (never read). See TODO.html. */
+  /** @deprecated anti-parasocial — personas are no longer wired; this is inert (never read). See the retired TODO.html. */
   personaSlug?: string;
   perspectiveSlug?: string;
   processSlug?: string;

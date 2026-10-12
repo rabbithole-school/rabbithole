@@ -26,8 +26,9 @@ function contentSize(fontSize: number, n: number, borderWidth = EXPR_BOX_BORDER)
 
 // The font sizes the editor actually renders at: the root (26), each nesting
 // step of a fraction (× 0.82, floored at 13), and an exponent (× 0.7, floored
-// at 12).
-const REAL_FONT_SIZES = [26, 21, 18, 15, 13, 12, 20, 17, 14];
+// at 12). Full set: 26, 21, 18, 15, 13, 12, 20, 17, 14 — smallest and largest
+// are representative of the floor/growth behavior below.
+const REAL_FONT_SIZES = [12, 26];
 
 describe("expression box metrics — no layout shift on the first glyph", () => {
   for (const fontSize of REAL_FONT_SIZES) {

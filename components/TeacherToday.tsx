@@ -353,9 +353,9 @@ function PrepWindowRows({
     <Stack gap={2} mb={4}>
       {active.map((g) => (
         // The prep-window shortcut. `view=tonight` lands on the Scholars tab's
-        // HOMEWORK tab, which lists every scholar's tonight/homework — the honest
-        // "open the prep board" destination now that the per-card tonight strip
-        // became its own tab. The link param is unchanged, so this and every
+        // HOMEWORK tab: one row per scholar with what is due, what they closed
+        // today, and their next question to assign — the Prep view. The link
+        // param is unchanged, so this and every
         // other legacy `view=tonight` link keep resolving.
         <Link
           key={g.groupId}
@@ -389,7 +389,7 @@ function PrepWindowRows({
                   Scholar&apos;s Prep is on now · {g.name}
                 </Text>
                 <Text fontFamily="body" fontSize="xs" color="charcoal.400">
-                  Open the board to see tonight&apos;s lists
+                  What&apos;s due, what got done today, and each scholar&apos;s next question
                 </Text>
               </Box>
               <HStack
@@ -400,7 +400,7 @@ function PrepWindowRows({
                 fontSize="sm"
                 fontWeight="700"
               >
-                <Text>Open prep board</Text>
+                <Text>Open prep</Text>
                 <ArrowRight size={14} weight="bold" />
               </HStack>
             </Flex>

@@ -1,16 +1,25 @@
 /**
- * AppUnlockingOverlay — the blocking modal shown while a managed iPad is being
- * asked to lift its MDM restriction on an installed app (Google Sheets, LEGO
- * SPIKE) so the scholar's tile tap can actually open it.
+ * AppUnlockingOverlay — the COLD-PATH READY SHEET: shown only while a managed
+ * iPad's app allowlist has not yet caught up with the teacher's grant, so the
+ * app the scholar tapped is not open-able yet.
+ *
+ * It used to front the whole launch-time unlock ceremony — five phases, one of
+ * them covering the window between "ready" and the app switch. It now has two
+ * states, waiting and failed, and is not mounted at all until iOS has said the
+ * app is not open-able yet. Two consequences worth keeping straight:
+ *
+ *  • A WARM launch never renders this. There is no acknowledgment phase to
+ *    flash, because the question it used to cover is now a local canOpenURL.
+ *  • Cancel is ALWAYS safe here. The sheet is dismissed BEFORE Single App Mode
+ *    is released (NativeAppLaunchContext's ordering invariant), so there is no
+ *    non-cancellable state left to model.
  *
  * Design intent:
  *  • It shows the APP, not a generic spinner: the same squircle icon treatment
  *    the launcher tile uses, so the scholar sees the thing they tapped.
  *  • The bar sets a wait expectation without pretending to read MDM progress:
  *    it fills over the normal 16-second window, while readiness remains gated
- *    on the backend plus this iPad's own canOpenURL result.
- *  • Cancel stays available while the unlock gate is safe to abandon. It
- *    disappears only for the short final handoff after ASAM release begins.
+ *    on this iPad's own canOpenURL result.
  *  • On failure it turns into a plain retry/cancel dialog. It never claims the
  *    app opened.
  *
@@ -20,7 +29,6 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   Animated,
   Easing,
   Modal,
@@ -36,12 +44,11 @@ import {
   unlockAccessibilityLabel,
   unlockHeadline,
   unlockProgressCopy,
-  type UnlockPhase,
 } from "@/lib/asam/appUnlockPolicy";
 import { AppTileMark } from "@/components/AppTileMark";
 import { fonts, palette, useColors } from "@/theme";
 
-/** The canonical identity of the app being unlocked, straight from its tile. */
+/** The canonical identity of the app being opened, straight from its tile. */
 export type UnlockingApp = {
   name: string;
   iconUrl: string | null;
@@ -56,22 +63,17 @@ const ICON_RADIUS = ICON_SIZE * 0.22; // squircle — matches the launcher tile
 
 export function AppUnlockingOverlay({
   app,
-  phase,
   startedAt,
   failure,
-  canCancel,
   onCancel,
   onRetry,
 }: {
-  /** Null when nothing is unlocking — the modal is not rendered. */
+  /** Null when nothing is pending — the modal is not rendered. */
   app: UnlockingApp | null;
-  phase: UnlockPhase;
   /** Epoch ms the wait began; the modal ticks its own elapsed copy from this. */
   startedAt: number;
   /** Non-null switches the modal into its retry/cancel failure state. */
   failure: UnlockFailure | null;
-  /** False only after ASAM release begins, when cancellation is no longer safe. */
-  canCancel: boolean;
   onCancel: () => void;
   onRetry: () => void;
 }) {
@@ -83,7 +85,6 @@ export function AppUnlockingOverlay({
   if (!app) return null;
 
   const busy = failure === null;
-  const opening = busy && (phase === "preparing" || phase === "opening");
 
   return (
     <Modal
@@ -91,7 +92,7 @@ export function AppUnlockingOverlay({
       transparent
       animationType="fade"
       statusBarTranslucent
-      onRequestClose={canCancel ? onCancel : () => {}}
+      onRequestClose={onCancel}
     >
       <View style={styles.backdrop}>
         <View style={styles.card} accessibilityViewIsModal>
@@ -100,11 +101,11 @@ export function AppUnlockingOverlay({
             accessibilityRole={busy ? "progressbar" : "alert"}
             accessibilityLabel={
               busy
-                ? unlockAccessibilityLabel(app.name, phase, elapsedMs)
+                ? unlockAccessibilityLabel(app.name, elapsedMs)
                 : `${failure.title}. ${failure.message}`
             }
             accessibilityValue={
-              busy && !opening
+              busy
                 ? {
                     min: 0,
                     max: 100,
@@ -120,8 +121,8 @@ export function AppUnlockingOverlay({
           >
             {/* Same mark the launcher tile drew, so the scholar sees the thing
                 they tapped — including its emoji/initial fallback. The status
-                group around it already names the app it is unlocking, so the
-                mark adds no second announcement of its own. */}
+                group around it already names the app, so the mark adds no
+                second announcement of its own. */}
             <AppTileMark
               key={app.name}
               name={app.name}
@@ -133,21 +134,13 @@ export function AppUnlockingOverlay({
               style={[styles.icon, busy ? null : styles.iconDimmed]}
             />
 
-            {opening ? (
-              <ActivityIndicator
-                size="large"
-                color={colors.violet}
-                importantForAccessibility="no-hide-descendants"
-              />
-            ) : null}
-
             <Text style={styles.headline}>
-              {busy ? unlockHeadline(app.name, phase) : failure.title}
+              {busy ? unlockHeadline(app.name) : failure.title}
             </Text>
             <Text style={styles.body}>
-              {busy ? unlockProgressCopy(phase, elapsedMs) : failure.message}
+              {busy ? unlockProgressCopy(elapsedMs) : failure.message}
             </Text>
-            {busy && !opening ? (
+            {busy ? (
               <View
                 style={styles.progressBlock}
                 importantForAccessibility="no-hide-descendants"
@@ -186,21 +179,19 @@ export function AppUnlockingOverlay({
                 <Text style={styles.primaryLabel}>Try again</Text>
               </Pressable>
             )}
-            {busy && !canCancel ? null : (
-              <Pressable
-                onPress={onCancel}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  busy ? `Stop opening ${app.name}` : "Close and stay in Rabbithole"
-                }
-                style={({ pressed }) => [
-                  styles.secondaryButton,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Text style={styles.secondaryLabel}>Cancel</Text>
-              </Pressable>
-            )}
+            <Pressable
+              onPress={onCancel}
+              accessibilityRole="button"
+              accessibilityLabel={
+                busy ? `Stop opening ${app.name}` : "Close and stay in Rabbithole"
+              }
+              style={({ pressed }) => [
+                styles.secondaryButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.secondaryLabel}>Cancel</Text>
+            </Pressable>
           </View>
         </View>
       </View>

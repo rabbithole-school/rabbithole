@@ -50,6 +50,9 @@ import {
   nextInsertFrame,
   resolvedImageFrame,
   SLIDES_COPY,
+  SLIDE_TEXT_COLORS,
+  SLIDE_BACKGROUND_COLORS,
+  SLIDE_TEXT_SIZES,
   textCommitOps,
   type ApplyResult,
   type Deck,
@@ -59,6 +62,7 @@ import {
   type SlideOp,
 } from "@/shared/slidesScene";
 import { SketchDialog } from "@/components/SketchDialog";
+import { SlideStyleControl } from "./SlideStyleControl";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { SlideCanvas } from "./SlideCanvas";
 import { pickImageFile } from "./imageFilePicker";
@@ -86,6 +90,14 @@ import {
 } from "./findImage";
 
 const INERT = () => {};
+
+/**
+ * Width of the fixed contextual slot at the toolbar's end, held CONSTANT across
+ * every selection state ([Slide background] / [Text style][Delete text] /
+ * [Delete]) so the toolbar's wrap — and thus its height — never depends on the
+ * selection. Sized to the widest variant, [Text style][Delete text].
+ */
+const CONTEXT_SLOT_WIDTH = "248px";
 
 interface SlidesEditorProps {
   deck: Deck;
@@ -761,6 +773,10 @@ export function SlidesEditor({
     (e: React.KeyboardEvent) => {
       if (editingTextId || notesEditing.current) return;
       const shortcut = matchHistoryShortcut(e);
+      // Enter/Delete on a focused toolbar or popover button belong to that
+      // button (React portals still bubble here), not to the selected element.
+      const buttonKey = e.key === "Enter" || e.key === "Delete" || e.key === "Backspace";
+      if (buttonKey && (e.target as HTMLElement).closest?.("button") != null) return;
       if (shortcut) {
         e.preventDefault();
         if (shortcut === "undo") handleUndo();
@@ -787,6 +803,7 @@ export function SlidesEditor({
   );
 
   const selectedType = selectedId ? slide?.elements[selectedId]?.type : undefined;
+  const selectedElement = selectedId ? slide?.elements[selectedId] : undefined;
 
   return (
     <Flex
@@ -953,20 +970,61 @@ export function SlidesEditor({
             </Button>
           </>
         )}
-        {selectedId && (
-          <Button
-            size="sm"
-            variant="ghost"
-            fontFamily="heading"
-            fontWeight="600"
-            color="red.500"
-            _hover={{ bg: "red.50" }}
-            onClick={deleteSelected}
-          >
-            <Trash />
-            {selectedType === "text" ? "Delete text" : "Delete"}
-          </Button>
-        )}
+        <Flex
+          w={CONTEXT_SLOT_WIDTH}
+          minH="32px"
+          align="center"
+          justify="flex-end"
+          gap={1}
+          flexShrink={0}
+        >
+          {selectedElement?.type === "text" && (
+            <SlideStyleControl
+              controlLabel={SLIDES_COPY.textStyle}
+              glyph="Aa"
+              swatchNoun="text"
+              currentColor={selectedElement.style.color}
+              colors={SLIDE_TEXT_COLORS}
+              onSelectColor={(color) =>
+                mutate([
+                  { op: "patchElement", slideId: slide.id, id: selectedElement.id, style: { color } },
+                ])
+              }
+              sizes={SLIDE_TEXT_SIZES}
+              currentSize={selectedElement.style.fontSize}
+              onSelectSize={(fontSize) =>
+                mutate([
+                  { op: "patchElement", slideId: slide.id, id: selectedElement.id, style: { fontSize } },
+                ])
+              }
+              sizeLabel={SLIDES_COPY.textSize}
+              colorLabel={SLIDES_COPY.color}
+            />
+          )}
+          {!selectedElement && slide && (
+            <SlideStyleControl
+              controlLabel={SLIDES_COPY.backgroundColor}
+              swatchNoun="background"
+              currentColor={slide.background}
+              colors={SLIDE_BACKGROUND_COLORS}
+              onSelectColor={(color) => mutate([{ op: "setBackground", slideId: slide.id, color }])}
+            />
+          )}
+          {selectedElement && (
+            <Button
+              size="sm"
+              variant="ghost"
+              fontFamily="heading"
+              fontWeight="600"
+              color="red.500"
+              _hover={{ bg: "red.50" }}
+              onClick={deleteSelected}
+            >
+              <Trash />
+              {selectedType === "text" ? "Delete text" : "Delete"}
+            </Button>
+          )}
+        </Flex>
       </Flex>
 
       {/*

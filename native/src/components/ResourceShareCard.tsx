@@ -6,12 +6,7 @@ import {
   activityResourceEmbedUrl,
   youtubeVideoId,
 } from "../../vendor/shared/activityResourceEmbed";
-import {
-  buildYouTubeResourceDocument,
-  YOUTUBE_RESOURCE_ALLOWED_HOSTS,
-  YOUTUBE_RESOURCE_BASE_URL,
-} from "@/lib/activityResourcePlayer";
-import { openInteractiveWebContent } from "@/lib/externalAppHost";
+import { openInteractiveWebContent, openYouTubeVideo } from "@/lib/externalAppHost";
 import {
   allowedHostsForUrl,
   webEmbedUrlError,
@@ -44,21 +39,21 @@ export function ResourceShareCard({
 
   const open = () => {
     if (!embedUrl || !available) return;
+    if (youtubeId && resource.url) {
+      openYouTubeVideo({
+        url: resource.url,
+        title: resource.title,
+        subtitle: resourceDetail(resource) ?? undefined,
+        id: `activity-resource:${resource.url}`,
+      });
+      return;
+    }
     openInteractiveWebContent({
       id: `activity-resource:${resource.url}`,
       title: resource.title,
       subtitle: resourceDetail(resource) ?? undefined,
       url: embedUrl,
-      ...(youtubeId
-        ? {
-            documentHtml: buildYouTubeResourceDocument(embedUrl),
-            documentBaseUrl: YOUTUBE_RESOURCE_BASE_URL,
-            allowedHosts: [...YOUTUBE_RESOURCE_ALLOWED_HOSTS],
-            navigationPolicy: "youtube" as const,
-          }
-        : {
-            allowedHosts: allowedHostsForUrl(embedUrl),
-          }),
+      allowedHosts: allowedHostsForUrl(embedUrl),
       gestureMode: "page",
     });
   };

@@ -12,7 +12,7 @@
  */
 
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -27,6 +27,17 @@ type Tester = ReturnType<typeof _makeTester>;
 
 const WHOLE = "whole-number-arithmetic";
 const SEED = 7;
+
+let sharedT: Tester;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
 
 async function seedScholar(t: Tester, username: string) {
   return await t.run(async (ctx) =>
@@ -88,8 +99,7 @@ async function step(
 
 describe("check-in — confirm before you cap (submitPlacementAnswer)", () => {
   test("a first typed miss offers the retry and re-serves the SAME skill (does not cap)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "confirm_retry");
     const asScholar = await asUser(t, scholar);
 
@@ -110,8 +120,7 @@ describe("check-in — confirm before you cap (submitPlacementAnswer)", () => {
   });
 
   test("a correct confirm supersedes the slip — the search climbs on (no retry)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "confirm_correct");
     const asScholar = await asUser(t, scholar);
 
@@ -129,8 +138,7 @@ describe("check-in — confirm before you cap (submitPlacementAnswer)", () => {
   });
 
   test("a second miss confirms a real ceiling — no third try is offered", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "confirm_two_miss");
     const asScholar = await asUser(t, scholar);
 
@@ -144,8 +152,7 @@ describe("check-in — confirm before you cap (submitPlacementAnswer)", () => {
   });
 
   test("an honest don't-know is the fast path — caps immediately, no retry", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "confirm_idk");
     const asScholar = await asUser(t, scholar);
 

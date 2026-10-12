@@ -3,12 +3,33 @@ import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
+import { unitListNeedsScholarEnumeration } from "../units";
 
 const modules = (
   import.meta as ImportMeta & {
     glob: (pattern: string) => Record<string, () => Promise<unknown>>;
   }
 ).glob("../**/*.ts");
+
+describe("units.list scholar enumeration", () => {
+  test("does not enumerate scholars for an omitted-scope platform-admin list", () => {
+    expect(
+      unitListNeedsScholarEnumeration({
+        adminAll: true,
+        legacySingleTenant: false,
+      }),
+    ).toBe(false);
+  });
+
+  test("does not enumerate scholars for the legacy single-tenant path", () => {
+    expect(
+      unitListNeedsScholarEnumeration({
+        adminAll: false,
+        legacySingleTenant: true,
+      }),
+    ).toBe(false);
+  });
+});
 
 type TestRole =
   | "scholar"
@@ -201,6 +222,36 @@ describe("curriculum institution privacy", () => {
     const ids = rows.map((row) => String(row._id));
     expect(ids).toContain(String(world.konaCatalogId));
     expect(ids).not.toContain(String(world.moliCatalogId));
+  });
+
+  test("a teacher's units.list excludes foreign-institution Independent Study units", async () => {
+    const t = convexTest(schema, modules);
+    const world = await seedTwoInstitutionWorld(t);
+    const asMoliTeacher = await withUser(t, world.moliTeacherId);
+
+    const rows = await asMoliTeacher.query(api.units.list, {});
+    const ids = rows.map((row) => String(row._id));
+    expect(ids).toContain(String(world.moliStudyId));
+    expect(ids).not.toContain(String(world.konaStudyId));
+  });
+
+  test("a teacher's units.list agrees with listScholarAuthored on visible Independent Study units", async () => {
+    const t = convexTest(schema, modules);
+    const world = await seedTwoInstitutionWorld(t);
+    const asMoliTeacher = await withUser(t, world.moliTeacherId);
+
+    const listed = await asMoliTeacher.query(api.units.list, {});
+    const board = await asMoliTeacher.query(
+      api.units.listScholarAuthored,
+      {},
+    );
+    const listedStudyIds = listed
+      .filter((unit) => unit.authorScholarId !== undefined)
+      .map((unit) => String(unit._id))
+      .sort();
+    const boardStudyIds = board.map((unit) => String(unit._id)).sort();
+
+    expect(listedStudyIds).toEqual(boardStudyIds);
   });
 
   test("units.get denies foreign catalog and Independent Study units", async () => {

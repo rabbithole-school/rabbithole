@@ -22,6 +22,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import { getValidAccessToken } from "./lib/googleTokens";
 import { isIngestibleMime, imageMediaType } from "./lib/ingestMimes";
 import { detectImageMime, type ImageMime } from "./lib/imageBytes";
+import { assertWritableAction } from "./lib/auth";
 
 /**
  * Extraction + matching pipeline for portfolioItems.
@@ -415,10 +416,6 @@ export const extractAndMatch = internalAction({
       await ctx.scheduler.runAfter(0, internal.portfolioThumbs.generate, {
         itemId: args.itemId,
       });
-      // Magic Annotations: a manually-uploaded image/PDF can carry a marker too.
-      await ctx.scheduler.runAfter(0, internal.magicAnnotations.processPortfolioItem, {
-        itemId: args.itemId,
-      });
       return { ok: true };
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -534,11 +531,6 @@ export const repairPdfRotation = internalAction({
       return { ...result, ok: false, error: "Portfolio item was deleted during repair" };
     }
     await ctx.scheduler.runAfter(0, internal.portfolioThumbs.generate, { itemId: args.itemId });
-    if (replacement.regenerateMagic) {
-      await ctx.scheduler.runAfter(0, internal.magicAnnotations.processPortfolioItem, {
-        itemId: args.itemId,
-      });
-    }
     return { ...result, dryRun: false, newSizeBytes: corrected.byteLength };
   },
 });
@@ -641,7 +633,7 @@ export const ingestScan = internalAction({
 
       // Non-PDF (image): single item, no split, no rotation (v1).
       if (mimeType !== "application/pdf") {
-        const { block: fileBlock, imgType, realMime } = visionFileBlock(bytes, mimeType);
+        const { block: fileBlock, realMime } = visionFileBlock(bytes, mimeType);
         const raw = await callClaude(
           ctx,
           [fileBlock, { type: "text", text: SINGLE_PROMPT + assignmentBlock }],
@@ -666,13 +658,13 @@ export const ingestScan = internalAction({
           matchedScholarId,
           assignments,
         );
-        const imageItemId = await ctx.runMutation(internal.portfolio.insertSegment, {
+        await ctx.runMutation(internal.portfolio.insertSegment, {
           source: args.source,
           driveFileId: args.driveFileId,
           title: segmentTitle(args.title, caption, { start: 1, end: 1 }, false),
           fileStorageId: args.originalStorageId,
           // Store the SNIFFED type, not the (possibly wrong) declared one, so
-          // thumbnails / magic / the portfolio <img> all see the truth.
+          // thumbnails and the portfolio <img> both see the truth.
           fileMimeType: realMime,
           fileSizeBytes: bytes.byteLength,
           detectedName: detectedName ?? undefined,
@@ -688,13 +680,6 @@ export const ingestScan = internalAction({
           assignmentStatus: assignment.assignmentStatus,
           institutionId: args.institutionId,
         });
-        // Magic Annotations: image scans can carry a Magic Corners marker.
-        // Non-blocking + failure-tolerant, like thumbnail generation.
-        if (imgType) {
-          await ctx.scheduler.runAfter(0, internal.magicAnnotations.processPortfolioItem, {
-            itemId: imageItemId,
-          });
-        }
         await dropPlaceholder();
         return { created: 1 };
       }
@@ -764,7 +749,7 @@ export const ingestScan = internalAction({
           matchedScholarId,
           assignments,
         );
-        const segItemId = await ctx.runMutation(internal.portfolio.insertSegment, {
+        await ctx.runMutation(internal.portfolio.insertSegment, {
           source: args.source,
           driveFileId: args.driveFileId,
           title: segmentTitle(
@@ -789,12 +774,6 @@ export const ingestScan = internalAction({
             : undefined,
           assignmentStatus: assignment.assignmentStatus,
           institutionId: args.institutionId,
-        });
-        // Magic Annotations: a scanned PDF (the Brother-printer path) can carry
-        // Magic Corners on any page. processPortfolioItem scans every page of
-        // this student's submission and substitutes the marked ones in place.
-        await ctx.scheduler.runAfter(0, internal.magicAnnotations.processPortfolioItem, {
-          itemId: segItemId,
         });
         created++;
       }
@@ -932,6 +911,7 @@ export const ingestUploadedScan = action({
   handler: async (ctx, args): Promise<{ scheduled: true }> => {
     const userId = await getAuthUserId(ctx);
     if (!userId) throw new Error("Not signed in");
+    await assertWritableAction(ctx);
     // Reject unknown MIME types. `_storage` ids are unguessable, so this
     // is defense-in-depth against a client passing a storageId pointed at a
     // non-scan blob (e.g. an avatar) that would crash extraction.
@@ -988,6 +968,7 @@ export const ingestDriveFileById = action({
   handler: async (ctx, args): Promise<{ scheduled: boolean; error?: string }> => {
     const userId = await getAuthUserId(ctx);
     if (!userId) throw new Error("Not signed in");
+    await assertWritableAction(ctx);
 
     // Pre-dedupe BEFORE we download + store. ingestScan dedupes too, but its
     // check happens AFTER ctx.storage.store, which leaks a blob on

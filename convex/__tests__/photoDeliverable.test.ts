@@ -1,5 +1,5 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -110,6 +110,257 @@ describe("photo deliverable submission", () => {
     expect(row!.activityId).toBe(activityId);
     // A fresh photo submission has no rubric verdict yet.
     expect(row!.rubricCheckedAt).toBeUndefined();
+  });
+
+  test("photo lookup ignores an earlier artifact-scoped row", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedScholar(t, "photo-scholar-with-document");
+    const asScholar = await withUser(t, scholarId);
+    const { activityId, sessionId } = await seedPhotoActivity(t, scholarId);
+
+    const artifactDeliverableId = await t.run(async (ctx) => {
+      const artifactId = await ctx.db.insert("artifacts", {
+        sessionId,
+        title: "Tutor document",
+        content: "A later document in the photo session.",
+        lastEditedBy: "ai",
+      });
+      return await ctx.db.insert("deliverables", {
+        activityId,
+        scholarId,
+        sessionId,
+        artifactId,
+        submittedAt: Date.now(),
+      });
+    });
+    const storageId = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob(["photo"], { type: "image/jpeg" })),
+    );
+    const photoDeliverableId = await asScholar.mutation(api.deliverables.submit, {
+      activityId,
+      sessionId,
+      fileStorageId: storageId,
+    });
+
+    const result = await asScholar.query(api.deliverables.getForSessionActivity, {
+      activityId,
+      sessionId,
+    });
+    expect(result?._id).toBe(photoDeliverableId);
+    expect(result?._id).not.toBe(artifactDeliverableId);
+    expect(result?.fileStorageId).toBe(storageId);
+  });
+
+  test("a submitted photo reaches the tutor context, unchecked", async () => {
+    // The regression this guards: the tutor's verdict context was keyed on
+    // artifactId, and a photo has none — so the tutor was told nothing had been
+    // submitted and said so to a scholar who had just submitted a photo.
+    const t = convexTest(schema, modules);
+    const scholarId = await seedScholar(t, "photo-scholar-context");
+    const asScholar = await withUser(t, scholarId);
+    const { activityId, sessionId } = await seedPhotoActivity(t, scholarId);
+
+    const before = await t.run(async (ctx) =>
+      ctx.runQuery(internal.sessionHelpers.getSessionContext, { sessionId }),
+    );
+    expect(before!.currentVerdictsContext).toBeNull();
+
+    const storageId = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob(["photo"], { type: "image/jpeg" })),
+    );
+    await asScholar.mutation(api.deliverables.submit, {
+      activityId,
+      sessionId,
+      fileStorageId: storageId,
+    });
+
+    const after = await t.run(async (ctx) =>
+      ctx.runQuery(internal.sessionHelpers.getSessionContext, { sessionId }),
+    );
+    const photoRow = after!.currentVerdictsContext?.find(
+      (row) => row.kind === "photo",
+    );
+    // Submitted but never checked: the tutor must still know it exists.
+    expect(photoRow).toEqual({ kind: "photo" });
+  });
+
+  test("the scholar's Check mints flair and reaches the tutor", async () => {
+    // TRA-345: the photo check stored verdicts but paid out no flair, and the
+    // tutor was handed a bare `{ kind: "photo" }` with nothing to ground
+    // "what should I fix?" in.
+    const t = convexTest(schema, modules);
+    const scholarId = await seedScholar(t, "photo-scholar-check");
+    const asScholar = await withUser(t, scholarId);
+    const { activityId, sessionId } = await seedPhotoActivity(t, scholarId);
+
+    const storageId = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob(["photo"], { type: "image/jpeg" })),
+    );
+    const deliverableId = await asScholar.mutation(api.deliverables.submit, {
+      activityId,
+      sessionId,
+      fileStorageId: storageId,
+      intent: "check",
+    });
+    const submitted = await t.run(async (ctx) => ctx.db.get(deliverableId));
+    const result = await t.mutation(internal.deliverables.applyCheckResult, {
+      deliverableId,
+      assessedSubmittedAt: submitted!.submittedAt,
+      verdicts: [
+        { criterionId: "c1", level: "full", note: "The crease is clear." },
+      ],
+      overall: "full",
+      feedback: "You can see exactly where you folded it.",
+      conceptLabel: "Fractions as equal parts",
+      domain: "Mathematics",
+      masteryLevel: 2,
+      confidence: 0.8,
+    });
+    expect(result).toEqual({ applied: true });
+
+    const row = await t.run(async (ctx) => ctx.db.get(deliverableId));
+    expect(row!.flairEarned).toEqual([
+      {
+        criterionId: "c1",
+        earnedAt: row!.rubricCheckedAt,
+        note: "The crease is clear.",
+      },
+    ]);
+
+    const context = await t.run(async (ctx) =>
+      ctx.runQuery(internal.sessionHelpers.getSessionContext, { sessionId }),
+    );
+    const photoRows = context!.currentVerdictsContext?.filter(
+      (entry) => entry.kind === "photo",
+    );
+    expect(photoRows).toEqual([
+      {
+        kind: "photo",
+        check: {
+          overall: "full",
+          verdicts: [{ criterionId: "c1", level: "full" }],
+          feedback: "You can see exactly where you folded it.",
+          checkedBy: "ai",
+        },
+      },
+    ]);
+  });
+
+  test("a retake hides the old photo's check and refuses its late result", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedScholar(t, "photo-scholar-retake-check");
+    const asScholar = await withUser(t, scholarId);
+    const { activityId, sessionId } = await seedPhotoActivity(t, scholarId);
+
+    const first = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob(["first"], { type: "image/jpeg" })),
+    );
+    const deliverableId = await asScholar.mutation(api.deliverables.submit, {
+      activityId,
+      sessionId,
+      fileStorageId: first,
+      intent: "check",
+    });
+    const firstSubmittedAt = (await t.run(async (ctx) =>
+      ctx.db.get(deliverableId),
+    ))!.submittedAt;
+    await t.mutation(internal.deliverables.applyCheckResult, {
+      deliverableId,
+      assessedSubmittedAt: firstSubmittedAt,
+      verdicts: [{ criterionId: "c1", level: "half", note: "Fold is faint." }],
+      overall: "half",
+      feedback: "Press the fold harder so it shows.",
+      conceptLabel: "Fractions as equal parts",
+      domain: "Mathematics",
+      masteryLevel: 2,
+      confidence: 0.6,
+    });
+
+    // Retake. Pin the clock forward so the new submission is strictly later.
+    const second = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob(["second"], { type: "image/jpeg" })),
+    );
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 60_000);
+    try {
+      await asScholar.mutation(api.deliverables.submit, {
+        activityId,
+        sessionId,
+        fileStorageId: second,
+        intent: "check",
+      });
+
+      // The tutor sees the new photo with no check: the stored verdicts are
+      // the first photo's.
+      const context = await t.run(async (ctx) =>
+        ctx.runQuery(internal.sessionHelpers.getSessionContext, { sessionId }),
+      );
+      expect(
+        context!.currentVerdictsContext?.filter(
+          (entry) => entry.kind === "photo",
+        ),
+      ).toEqual([{ kind: "photo" }]);
+
+      // A check of the FIRST photo that finishes after the retake is dropped:
+      // it must not mint flair or overwrite the row for the second photo.
+      const late = await t.mutation(internal.deliverables.applyCheckResult, {
+        deliverableId,
+        assessedSubmittedAt: firstSubmittedAt,
+        verdicts: [{ criterionId: "c1", level: "full", note: "Old photo." }],
+        overall: "full",
+        feedback: "Stale.",
+        conceptLabel: "Fractions as equal parts",
+        domain: "Mathematics",
+        masteryLevel: 2,
+        confidence: 0.8,
+      });
+      expect(late).toEqual({ applied: false });
+      const row = await t.run(async (ctx) => ctx.db.get(deliverableId));
+      expect(row!.fileStorageId).toBe(second);
+      expect(row!.flairEarned).toBeUndefined();
+      expect(row!.overall).toBe("half");
+      expect(row!.rubricFeedback).toBe("Press the fold harder so it shows.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a text artifact in the session does not evict the photo", async () => {
+    // The scholar-visible bug: once the tutor created a document, the panel's
+    // lookup scoped to it and the photo vanished from "Your work".
+    const t = convexTest(schema, modules);
+    const scholarId = await seedScholar(t, "photo-scholar-context-3");
+    const asScholar = await withUser(t, scholarId);
+    const { activityId, sessionId } = await seedPhotoActivity(t, scholarId);
+
+    const storageId = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob(["photo"], { type: "image/jpeg" })),
+    );
+    await asScholar.mutation(api.deliverables.submit, {
+      activityId,
+      sessionId,
+      fileStorageId: storageId,
+    });
+    await t.run(async (ctx) => {
+      await ctx.db.insert("artifacts", {
+        sessionId,
+        title: "Build It — Answers",
+        content: "",
+        lastEditedBy: "ai",
+      });
+    });
+
+    const context = await t.run(async (ctx) =>
+      ctx.runQuery(internal.sessionHelpers.getSessionContext, { sessionId }),
+    );
+    expect(
+      context!.currentVerdictsContext?.some((row) => row.kind === "photo"),
+    ).toBe(true);
+    const still = await asScholar.query(api.deliverables.getForSessionActivity, {
+      activityId,
+      sessionId,
+    });
+    expect(still?.fileStorageId).toBe(storageId);
   });
 
   test("getAssessFile resolves the SUBMITTED photo's stored file", async () => {

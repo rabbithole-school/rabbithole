@@ -60,14 +60,16 @@ export function isSchoolAdminRole(role: Role | undefined | null): boolean {
  * here (a leaf module) so both the delete and suspension paths share one source
  * of truth without importing each other.
  */
+export const GLOBALLY_PRIVILEGED_ROLES: readonly Role[] = [
+  ROLES.PLATFORM_ADMIN,
+  ROLES.CURRICULUM_DESIGNER,
+  ROLES.LIFELONG_LEARNER,
+];
+
 export function isGloballyPrivilegedRole(
   role: string | undefined | null,
 ): boolean {
-  return (
-    role === ROLES.PLATFORM_ADMIN ||
-    role === ROLES.CURRICULUM_DESIGNER ||
-    role === ROLES.LIFELONG_LEARNER
-  );
+  return GLOBALLY_PRIVILEGED_ROLES.includes(role as Role);
 }
 
 /**
@@ -102,6 +104,38 @@ export const STAFF_ROLES: readonly Role[] = [
 
 export function isStaffRole(role: Role | undefined | null): boolean {
   return !!role && STAFF_ROLES.includes(role);
+}
+
+/**
+ * "School standing" roles — the memberships that make someone actual STAFF
+ * AT a school: the set a school's staff directory lists, the set the
+ * enforcement audit checks for a missing institution, and the set
+ * `/admin/accounts` offers when attaching a staff membership to an existing
+ * account.
+ *
+ * Deliberately NOT `STAFF_ROLES`, and the difference is load-bearing:
+ * `STAFF_ROLES` also carries `platform_admin`, whose standing is global. A
+ * membership row is what ties a person to ONE school, and an
+ * institution-scoped `platform_admin` row would grant authority while never
+ * listing the holder in that school's directory — `school_admin` is the row
+ * that means "max permissions at one school". Granting the wrong one is the
+ * specific way this gets subtly wrong (TRA-349), so keep `platform_admin`
+ * out of this set.
+ *
+ * Every role here is institution-scoped in practice: `curriculum_designer`
+ * may also be held UNSCOPED for deployment-wide curriculum standing
+ * (`isGloballyPrivilegedMembership`), but only a scoped row puts a designer
+ * in a school's directory.
+ */
+export const SCHOOL_STANDING_ROLES: readonly Role[] = [
+  ROLES.TEACHER,
+  ROLES.STAFF,
+  ROLES.SCHOOL_ADMIN,
+  ROLES.CURRICULUM_DESIGNER,
+];
+
+export function isSchoolStandingRole(role: string | undefined | null): boolean {
+  return SCHOOL_STANDING_ROLES.includes(role as Role);
 }
 
 /**

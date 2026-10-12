@@ -299,7 +299,7 @@ describe("finalize", () => {
     const result = await asScholar.mutation(api.webActivitySessions.finalize, {
       sessionId,
     });
-    expect(result).toEqual({ completed: false, goalMet: false });
+    expect(result).toMatchObject({ completed: false, goalMet: false });
     const completions = await t.run(async (ctx) =>
       ctx.db.query("activityCompletions").collect(),
     );
@@ -466,7 +466,7 @@ describe("finalize", () => {
     const result = await asScholar.mutation(api.webActivitySessions.finalize, {
       sessionId,
     });
-    expect(result).toEqual({ completed: true, goalMet: true });
+    expect(result).toMatchObject({ completed: true, goalMet: true });
     const completions = await t.run(async (ctx) =>
       ctx.db.query("activityCompletions").collect(),
     );

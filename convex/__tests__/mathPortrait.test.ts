@@ -154,7 +154,7 @@ describe("mathPortrait.forScholar — teacher read", () => {
 });
 
 describe("parents.childMathPortrait — guardian-gated", () => {
-  test("a linked guardian reads their child; a non-guardian is refused", async () => {
+  test("a linked guardian reads their child; same-school staff may preview; another school is refused", async () => {
     const t = convexTest(schema, modules);
     const admin = await t.run(async (ctx) =>
       ctx.db.insert("users", { name: "A", username: "admin", role: "platform_admin" }),
@@ -177,11 +177,26 @@ describe("parents.childMathPortrait — guardian-gated", () => {
     });
     expect(portrait.domains[0].gradeLabel).toBe("Grade 1.9");
 
-    // A teacher who is NOT a guardian of kai is refused.
+    // A teacher who is NOT a guardian of kai but can reach kai in their own
+    // school may PREVIEW the family's portrait ("View as parent") — the same
+    // non-sensitive read they already have on the teacher dashboard.
     const teacher = await seedStaffWithMembership(t, { institutionId: await seedTestInstitution(t), name: "T", username: "t4" });
     const asTeacher = await withUser(t, teacher);
+    const previewed = await asTeacher.query(api.parents.childMathPortrait, {
+      scholarId: kai,
+    });
+    expect(previewed.domains[0].gradeLabel).toBe("Grade 1.9");
+
+    // A teacher at ANOTHER school is refused — the preview never crosses the
+    // institution boundary.
+    const outsider = await seedStaffWithMembership(t, {
+      institutionId: await seedTestInstitution(t, { slug: "other-school" }),
+      name: "O",
+      username: "outsider",
+    });
+    const asOutsider = await withUser(t, outsider);
     await expect(
-      asTeacher.query(api.parents.childMathPortrait, { scholarId: kai }),
+      asOutsider.query(api.parents.childMathPortrait, { scholarId: kai }),
     ).rejects.toThrow(/not a guardian/i);
   });
 });

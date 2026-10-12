@@ -282,6 +282,9 @@ export function createWebPracticeSubmitter<T>(
         ? { prepareBreakerRepair: args.prepareBreakerRepair }
         : {}),
       ...(args.dontKnow !== undefined ? { dontKnow: args.dontKnow } : {}),
+      ...(args.servedLane !== undefined
+        ? { servedLane: args.servedLane }
+        : {}),
       ...(args.latencyMs !== undefined
         ? { firstKeyMs: args.latencyMs }
         : {}),

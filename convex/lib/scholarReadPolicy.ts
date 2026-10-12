@@ -19,6 +19,7 @@ import { ROLES, type Role } from "./roles";
 export const SCHOLAR_READ_TOOLS = [
   "list_scholars",
   "get_scholar_dossier",
+  "get_scholar_interests",
   "get_scholar_mastery",
   "get_scholar_signals",
   "get_scholar_seeds",
@@ -59,6 +60,7 @@ export type ScholarReadToolName = (typeof SCHOLAR_READ_TOOLS)[number];
  * (scholarReadTools.ts / mcp.ts), not the policy gate.
  */
 const TIER_1: readonly ScholarReadToolName[] = [
+  "get_scholar_interests",
   "get_scholar_mastery",
   "get_scholar_signals",
   "get_scholar_seeds",
@@ -91,7 +93,10 @@ const TIER_1: readonly ScholarReadToolName[] = [
  * Unknown/missing roles get NOTHING — default-deny, because the MCP
  * surface serves whatever role authenticates.
  */
-const TOOLS_BY_ROLE: Record<Role, readonly ScholarReadToolName[] | "all"> = {
+const TOOLS_BY_ROLE: Record<
+  Role,
+  readonly ScholarReadToolName[] | "all"
+> = {
   [ROLES.TEACHER]: "all",
   [ROLES.PLATFORM_ADMIN]: "all",
   [ROLES.SCHOOL_ADMIN]: "all",
@@ -125,5 +130,7 @@ export function isScholarReadToolAllowed(
   tool: ScholarReadToolName,
   options?: ScholarReadPolicyOptions,
 ): boolean {
-  return allowedScholarReadTools(role, options).includes(tool);
+  return (
+    allowedScholarReadTools(role, options) as readonly ScholarReadToolName[]
+  ).includes(tool);
 }

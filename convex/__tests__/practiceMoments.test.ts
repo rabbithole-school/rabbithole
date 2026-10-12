@@ -10,6 +10,30 @@ import {
 import schema from "../schema";
 import { api } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
+import { MATH_CROSS_DOMAIN_SEEDS } from "../lib/practice/crossDomainSeeds";
+
+// The question lookups are content (owned by the content lanes). Every story
+// edge / seed topic gets this fixture question unless a test lists its key in
+// `noQuestion`, so the ledger/policy tests below stay independent of coverage.
+const questionFixture = vi.hoisted(() => ({
+  noQuestion: new Set<string>(),
+  question: {
+    prompt: "Which one wins?",
+    choices: ["The first", "The second", "Neither"],
+    answerIndex: 1,
+    reveal: "The second one wins.",
+  },
+}));
+vi.mock("../lib/practice/storyCardQuestions", () => ({
+  storyCardQuestion: (fromKey: string, toKey: string) =>
+    questionFixture.noQuestion.has(`${fromKey}→${toKey}`)
+      ? undefined
+      : questionFixture.question,
+}));
+vi.mock("../lib/practice/seedCardQuestions", () => ({
+  seedCardQuestion: (topic: string) =>
+    questionFixture.noQuestion.has(topic) ? undefined : questionFixture.question,
+}));
 
 const modules = (
   import.meta as ImportMeta & {
@@ -22,6 +46,7 @@ const DAY_MS = 24 * HOUR_MS;
 const NOW = Date.UTC(2026, 6, 12, 12);
 
 beforeEach(() => {
+  questionFixture.noQuestion.clear();
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
 });
@@ -111,7 +136,48 @@ async function seedStoryScenario(
       becameFluentAt: options.becameFluentAt ?? NOW - HOUR_MS,
     });
   });
-  return { fromKey, toKey };
+  return { kind: "story" as const, fromKey, toKey };
+}
+
+async function seedCrossDomainSeed(
+  t: ReturnType<typeof convexTest>,
+  scholarId: Id<"users">,
+  options: { topic?: string; scholarInvitation?: string } = {},
+) {
+  return await t.run(async (ctx) => {
+    const seedId = await ctx.db.insert("seeds", {
+      scholarId,
+      origin: "ai",
+      status: "active",
+      suggestionType: "cross_domain",
+      topic: options.topic ?? "How rhythm carries fractions",
+      rationale: "A nearby idea unlocked by recent fluency.",
+      scholarInvitation:
+        options.scholarInvitation ??
+        "What changes when a fraction becomes a beat?",
+      connectionTo: "Fractions as equal parts",
+      domain: "music",
+    });
+    const seed = await ctx.db.get(seedId);
+    if (!seed) throw new Error("cross-domain seed was not inserted");
+    return { seedId, createdAt: seed._creationTime };
+  });
+}
+
+async function removeStoryEdges(
+  t: ReturnType<typeof convexTest>,
+  fromKey: string,
+) {
+  await t.run(async (ctx) => {
+    const edges = await ctx.db
+      .query("knowledgeNodeEdges")
+      .collect();
+    await Promise.all(
+      edges
+        .filter((edge) => edge.fromKey === fromKey)
+        .map((edge) => ctx.db.delete(edge._id)),
+    );
+  });
 }
 
 async function seedMomentEvent(
@@ -183,6 +249,7 @@ describe("practiceMoments.storyMomentForScholar", () => {
     );
 
     expect(moment).toEqual({
+      kind: "story",
       fromKey,
       toKey,
       skillLabel: "Fractions as equal parts",
@@ -193,6 +260,7 @@ describe("practiceMoments.storyMomentForScholar", () => {
       probe: "How many quarter notes fit in one whole measure?",
       kindLabel: "applies to",
       hasApplication: false,
+      question: questionFixture.question,
     });
   });
 
@@ -214,9 +282,11 @@ describe("practiceMoments.storyMomentForScholar", () => {
         "fromKey",
         "hasApplication",
         "hook",
+        "kind",
         "kindLabel",
         "narrative",
         "probe",
+        "question",
         "skillLabel",
         "toKey",
         "visualEmoji",
@@ -345,6 +415,8 @@ describe("practiceMoments.storyMomentForScholar", () => {
       { scholarId },
     );
     expect(moment?.teaser).toBe("Two quarter notes take the same time.");
+    expect(moment?.kind).toBe("story");
+    if (moment?.kind !== "story") throw new Error("Expected a story moment");
     // The full narrative still rides along for the "Find out more" thread.
     expect(moment?.narrative).toBe(
       "Half notes and quarter notes divide a measure into equal parts.",
@@ -391,12 +463,251 @@ describe("practiceMoments.storyMomentForScholar", () => {
       { scholarId },
     );
 
+    expect(moment?.kind).toBe("story");
+    if (moment?.kind !== "story") throw new Error("Expected a story moment");
     expect(moment?.artUrl).toBe(artUrl);
     expect(moment).not.toHaveProperty("artStorageId");
     expect(moment).not.toHaveProperty("artContentHash");
     expect(moment).not.toHaveProperty("artStatus");
     const { artUrl: _servedUrl, ...redacted } = moment!;
     expect(JSON.stringify(redacted)).not.toContain(String(artStorageId));
+  });
+
+  test("returns a cross-domain seed when no story edge is eligible", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { fromKey } = await seedStoryScenario(t, scholarId);
+    await removeStoryEdges(t, fromKey);
+    const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+    // Deliberately beyond the former 24-hour story-transition window.
+    vi.setSystemTime(createdAt + 3 * DAY_MS);
+    const asScholar = await withUser(t, scholarId);
+
+    // A topic the registry doesn't carry falls back to the row's own copy.
+    await expect(
+      asScholar.query(api.practiceMoments.storyMomentForScholar, {
+        scholarId,
+      }),
+    ).resolves.toEqual({
+      kind: "seed",
+      seedId,
+      hook: "How rhythm carries fractions",
+      teaser: "What changes when a fraction becomes a beat?",
+      hasApplication: false,
+      question: questionFixture.question,
+    });
+  });
+
+  test("a seed minted with old copy shows the registry's current card", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { fromKey } = await seedStoryScenario(t, scholarId);
+    await removeStoryEdges(t, fromKey);
+    const def = MATH_CROSS_DOMAIN_SEEDS.find(
+      (s) => s.gateSkillKey === "exponents_repeated_mult",
+    )!;
+    const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId, {
+      topic: def.topic,
+      scholarInvitation: "OLD_WORKSHEET_INVITATION",
+    });
+    vi.setSystemTime(createdAt + HOUR_MS);
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.query(api.practiceMoments.storyMomentForScholar, {
+        scholarId,
+      }),
+    ).resolves.toEqual({
+      kind: "seed",
+      seedId,
+      hook: def.cardTitle,
+      teaser: def.scholarInvitation,
+      visualEmoji: def.visualEmoji,
+      hasApplication: false,
+      question: questionFixture.question,
+    });
+  });
+
+  // Seed cards have no age window: a topic mints once per scholar ever, so a
+  // window would strand every seed that ages out before a slot comes round.
+  test("returns a never-carded cross-domain seed at thirty days old", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { fromKey } = await seedStoryScenario(t, scholarId);
+    await removeStoryEdges(t, fromKey);
+    const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+    vi.setSystemTime(createdAt + 30 * DAY_MS);
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.query(api.practiceMoments.storyMomentForScholar, {
+        scholarId,
+      }),
+    ).resolves.toMatchObject({ kind: "seed", seedId });
+  });
+
+  test("a seed dismissed beyond the 45-day reserve read is never re-carded", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { fromKey } = await seedStoryScenario(t, scholarId);
+    await removeStoryEdges(t, fromKey);
+    const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("momentEvents", {
+        scholarId,
+        kind: "seed",
+        seedId,
+        trigger: "fluency_transition",
+        offeredAt: createdAt,
+        outcome: "dismissed",
+        outcomeAt: createdAt + 1,
+        clientEventId: "dismissed-long-ago",
+      });
+    });
+    vi.setSystemTime(createdAt + 60 * DAY_MS);
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.query(api.practiceMoments.storyMomentForScholar, {
+        scholarId,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      asScholar.mutation(api.practiceMoments.recordMomentOffered, {
+        scholarId,
+        kind: "seed",
+        seedId,
+        clientEventId: "re-offer-dismissed",
+      }),
+    ).rejects.toThrow(/not eligible/);
+  });
+
+  test("an old seed offered but unsettled within 45 days is not re-carded", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { fromKey } = await seedStoryScenario(t, scholarId);
+    await removeStoryEdges(t, fromKey);
+    const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("momentEvents", {
+        scholarId,
+        kind: "seed",
+        seedId,
+        trigger: "fluency_transition",
+        offeredAt: createdAt + 25 * DAY_MS,
+        outcome: "offered",
+        clientEventId: "offered-unsettled",
+      });
+    });
+    vi.setSystemTime(createdAt + 30 * DAY_MS);
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.query(api.practiceMoments.storyMomentForScholar, {
+        scholarId,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  test("a story edge wins over an eligible cross-domain seed", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { createdAt } = await seedCrossDomainSeed(t, scholarId);
+    // An aged seed is still eligible, and a fresh story still takes the slot.
+    vi.setSystemTime(createdAt + 30 * DAY_MS);
+    const { fromKey, toKey } = await seedStoryScenario(t, scholarId, {
+      becameFluentAt: createdAt + 30 * DAY_MS - HOUR_MS,
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.query(api.practiceMoments.storyMomentForScholar, {
+        scholarId,
+      }),
+    ).resolves.toMatchObject({
+      kind: "story",
+      fromKey,
+      toKey,
+    });
+  });
+
+  test("the 20-hour cooldown blocks a story after a seed moment", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+    vi.setSystemTime(createdAt + HOUR_MS);
+    await seedStoryScenario(t, scholarId, {
+      becameFluentAt: createdAt,
+    });
+    await t.run(async (ctx) => {
+      await ctx.db.insert("momentEvents", {
+        scholarId,
+        kind: "seed",
+        seedId,
+        trigger: "fluency_transition",
+        offeredAt: createdAt,
+        outcome: "offered",
+        clientEventId: "seed-before-story",
+      });
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.query(api.practiceMoments.storyMomentForScholar, {
+        scholarId,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  test("the 20-hour cooldown blocks a seed after a story moment", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { fromKey } = await seedStoryScenario(t, scholarId);
+    await removeStoryEdges(t, fromKey);
+    const { createdAt } = await seedCrossDomainSeed(t, scholarId);
+    vi.setSystemTime(createdAt + HOUR_MS);
+    await seedMomentEvent(t, scholarId, {
+      fromKey: "another_skill",
+      toKey: "another_world",
+      offeredAt: createdAt - 18 * HOUR_MS,
+      outcome: "opened",
+      clientEventId: "story-before-seed",
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.query(api.practiceMoments.storyMomentForScholar, {
+        scholarId,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  test("the 45-day per-item reserve blocks a seed after global cooldown", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { fromKey } = await seedStoryScenario(t, scholarId);
+    await removeStoryEdges(t, fromKey);
+    const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+    vi.setSystemTime(createdAt + 21 * HOUR_MS);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("momentEvents", {
+        scholarId,
+        kind: "seed",
+        seedId,
+        trigger: "fluency_transition",
+        offeredAt: createdAt,
+        outcome: "opened",
+        outcomeAt: createdAt + 1,
+        clientEventId: "reserved-preview-seed",
+      });
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.query(api.practiceMoments.storyMomentForScholar, {
+        scholarId,
+      }),
+    ).resolves.toBeNull();
   });
 });
 
@@ -482,7 +793,7 @@ describe("practiceMoments event lifecycle", () => {
     expect(events[0]?.outcome).toBe("offered");
   });
 
-  test("a third spaced offer dismisses the oldest invitation, keeps all seeds, and the dismissal stays terminal", async () => {
+  test("new offers never evict earlier open moments (the Quests list has no cap)", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedUser(t);
     const edges = [
@@ -494,30 +805,30 @@ describe("practiceMoments event lifecycle", () => {
         fromKey: "skill_middle",
         toKey: "story_middle",
       }),
-      await seedStoryScenario(t, scholarId, {
-        fromKey: "skill_newest",
-        toKey: "story_newest",
-      }),
     ];
+    const { seedId } = await seedCrossDomainSeed(t, scholarId);
     const asScholar = await withUser(t, scholarId);
-    const offered: Array<{
-      eventId: Id<"momentEvents">;
-      seedId: Id<"seeds"> | null;
-    }> = [];
 
+    const offered: Array<{ eventId: Id<"momentEvents"> }> = [];
     for (const [index, edge] of edges.entries()) {
       vi.setSystemTime(NOW + index * 21 * HOUR_MS);
       offered.push(
-        await asScholar.mutation(
-          api.practiceMoments.recordMomentOffered,
-          {
-            scholarId,
-            ...edge,
-            clientEventId: `governed-offer-${index}`,
-          },
-        ),
+        await asScholar.mutation(api.practiceMoments.recordMomentOffered, {
+          scholarId,
+          ...edge,
+          clientEventId: `governed-offer-${index}`,
+        }),
       );
     }
+    vi.setSystemTime(NOW + 42 * HOUR_MS);
+    offered.push(
+      await asScholar.mutation(api.practiceMoments.recordMomentOffered, {
+        scholarId,
+        kind: "seed",
+        seedId,
+        clientEventId: "governed-offer-seed",
+      }),
+    );
 
     const events = await t.run(async (ctx) =>
       ctx.db
@@ -526,50 +837,16 @@ describe("practiceMoments event lifecycle", () => {
         .collect(),
     );
     expect(events.map((event) => event.outcome)).toEqual([
-      "dismissed",
+      "offered",
       "offered",
       "offered",
     ]);
-    expect(events[0]).toMatchObject({
-      _id: offered[0].eventId,
-      outcomeAt: NOW + 42 * HOUR_MS,
-    });
-
-    const standing = await asScholar.query(
-      api.seeds.standingStoryInvitationsForSelf,
-      {},
-    );
-    expect(standing.map((invitation) => invitation.eventId)).toEqual([
+    const queue = await asScholar.query(api.questionQueue.forSelf, {});
+    expect(queue.map((row) => row.eventId)).toEqual([
       offered[2].eventId,
       offered[1].eventId,
+      offered[0].eventId,
     ]);
-
-    const seeds = await t.run(async (ctx) =>
-      ctx.db
-        .query("seeds")
-        .withIndex("by_scholar_status", (q) =>
-          q.eq("scholarId", scholarId).eq("status", "active"),
-        )
-        .collect(),
-    );
-    expect(seeds).toHaveLength(3);
-    expect(new Set(seeds.map((seed) => seed._id))).toEqual(
-      new Set(offered.map((offer) => offer.seedId)),
-    );
-
-    vi.setSystemTime(NOW + 43 * HOUR_MS);
-    await asScholar.mutation(api.practiceMoments.recordMomentOutcome, {
-      eventId: offered[0].eventId,
-      outcome: "opened",
-    });
-    await expect(
-      t.run(async (ctx) =>
-        ctx.db.get("momentEvents", offered[0].eventId),
-      ),
-    ).resolves.toMatchObject({
-      outcome: "dismissed",
-      outcomeAt: NOW + 42 * HOUR_MS,
-    });
   });
 
   test("recordMomentOffered returns the minted seedId, and the idempotent retry re-reads it", async () => {
@@ -636,6 +913,7 @@ describe("practiceMoments event lifecycle", () => {
     await expect(
       asScholar.mutation(api.practiceMoments.recordMomentOffered, {
         scholarId,
+        kind: "story",
         fromKey: "not_a_node",
         toKey: "also_not_a_node",
         clientEventId: "render-nostory",
@@ -649,6 +927,84 @@ describe("practiceMoments event lifecycle", () => {
         .collect(),
     );
     expect(seeds).toHaveLength(0);
+  });
+
+  test("recordMomentOffered for a seed mints no souvenir seed", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+    // The mutation shares the card's eligibility rule (no age window).
+    vi.setSystemTime(createdAt + 3 * DAY_MS);
+    const asScholar = await withUser(t, scholarId);
+
+    const offer = await asScholar.mutation(
+      api.practiceMoments.recordMomentOffered,
+      {
+        scholarId,
+        kind: "seed",
+        seedId,
+        clientEventId: "render-preview-seed",
+      },
+    );
+
+    expect(offer.seedId).toBe(seedId);
+    const seeds = await t.run(async (ctx) =>
+      ctx.db
+        .query("seeds")
+        .withIndex("by_scholar_status", (q) => q.eq("scholarId", scholarId))
+        .collect(),
+    );
+    expect(seeds).toHaveLength(1);
+    await expect(
+      t.run(async (ctx) => ctx.db.get("momentEvents", offer.eventId)),
+    ).resolves.toMatchObject({
+      kind: "seed",
+      seedId,
+      outcome: "offered",
+    });
+
+    await asScholar.mutation(api.practiceMoments.recordMomentOutcome, {
+      eventId: offer.eventId,
+      outcome: "opened",
+    });
+    await expect(
+      t.run(async (ctx) => ctx.db.get("momentEvents", offer.eventId)),
+    ).resolves.toMatchObject({
+      kind: "seed",
+      seedId,
+      outcome: "opened",
+    });
+  });
+
+  test("recordMomentOffered rejects a second offer for a reserved seed", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+    vi.setSystemTime(createdAt + HOUR_MS);
+    const asScholar = await withUser(t, scholarId);
+
+    const offer = await asScholar.mutation(
+      api.practiceMoments.recordMomentOffered,
+      {
+        scholarId,
+        kind: "seed",
+        seedId,
+        clientEventId: "first-preview-seed",
+      },
+    );
+    await asScholar.mutation(api.practiceMoments.recordMomentOutcome, {
+      eventId: offer.eventId,
+      outcome: "dismissed",
+    });
+
+    await expect(
+      asScholar.mutation(api.practiceMoments.recordMomentOffered, {
+        scholarId,
+        kind: "seed",
+        seedId,
+        clientEventId: "second-preview-seed",
+      }),
+    ).rejects.toThrow(/not eligible/);
   });
 
   test("recordMomentOffered enforces cooldown and terminal suppression", async () => {
@@ -767,6 +1123,209 @@ describe("practiceMoments event lifecycle", () => {
     });
   });
 
+  describe("sessions.createFromSeed", () => {
+    test("a cross-domain seed opens directly without a quest bake", async () => {
+      const t = convexTest(schema, modules);
+      const scholarId = await seedUser(t);
+      const { seedId } = await seedCrossDomainSeed(t, scholarId);
+      const asScholar = await withUser(t, scholarId);
+
+      const { id } = await asScholar.mutation(api.sessions.createFromSeed, {
+        seedId,
+      });
+
+      const session = await t.run(async (ctx) => ctx.db.get("sessions", id));
+      expect(session?.seedId).toBe(seedId);
+      expect(session?.questBakeStatus).toBeUndefined();
+    });
+
+    // The card is gift-only and the standing-invitation surface is
+    // story-only, so this launch is the ONLY place a seed moment can learn
+    // that the scholar followed the preview. Without it every seed row reads
+    // "offered" forever (prod, 2026-09-18) and the funnel is unmeasurable.
+    test("following a carded seed advances its moment to opened", async () => {
+      const t = convexTest(schema, modules);
+      const scholarId = await seedUser(t);
+      const { fromKey } = await seedStoryScenario(t, scholarId);
+      await removeStoryEdges(t, fromKey);
+      const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+      vi.setSystemTime(createdAt + HOUR_MS);
+      const asScholar = await withUser(t, scholarId);
+      const { eventId } = await asScholar.mutation(
+        api.practiceMoments.recordMomentOffered,
+        { scholarId, kind: "seed", seedId, clientEventId: "seed-card" },
+      );
+
+      const openedAt = createdAt + 2 * HOUR_MS;
+      vi.setSystemTime(openedAt);
+      await asScholar.mutation(api.sessions.createFromSeed, { seedId });
+
+      const event = await t.run(async (ctx) =>
+        ctx.db.get("momentEvents", eventId),
+      );
+      expect(event?.outcome).toBe("opened");
+      // convex-test nudges the fake clock a fraction of a ms per operation.
+      expect(event?.outcomeAt).toBeCloseTo(openedAt, 0);
+    });
+
+    test("following a seed invitation retires it while both writers leave it opened", async () => {
+      const t = convexTest(schema, modules);
+      const scholarId = await seedUser(t);
+      const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+      vi.setSystemTime(createdAt + HOUR_MS);
+      const asScholar = await withUser(t, scholarId);
+      const { eventId } = await asScholar.mutation(
+        api.practiceMoments.recordMomentOffered,
+        { scholarId, kind: "seed", seedId, clientEventId: "seed-follow-card" },
+      );
+
+      // It stands in the "New quests" section until the scholar acts on it.
+      await expect(
+        asScholar.query(api.seeds.standingStoryInvitationsForSelf, {}),
+      ).resolves.toMatchObject([{ kind: "seed", seedId, eventId }]);
+
+      vi.setSystemTime(createdAt + 2 * HOUR_MS);
+      // Follow: createFromSeed's server-side `opened` write and the client's
+      // own `opened` write both land — the shared precedence rule makes the
+      // pair idempotent, never an error or a downgrade.
+      await asScholar.mutation(api.sessions.createFromSeed, { seedId });
+      await asScholar.mutation(api.practiceMoments.recordMomentOutcome, {
+        eventId,
+        outcome: "opened",
+      });
+
+      const event = await t.run(async (ctx) =>
+        ctx.db.get("momentEvents", eventId),
+      );
+      expect(event?.outcome).toBe("opened");
+      // A started session (session.seedId) retires the standing invitation.
+      await expect(
+        asScholar.query(api.seeds.standingStoryInvitationsForSelf, {}),
+      ).resolves.toEqual([]);
+    });
+
+    test("a seed launched with no card of its own leaves the ledger alone", async () => {
+      const t = convexTest(schema, modules);
+      const scholarId = await seedUser(t);
+      const edge = await seedStoryScenario(t, scholarId);
+      const asScholar = await withUser(t, scholarId);
+      // A story moment is live; the scholar opens an unrelated Sky star.
+      const { eventId } = await asScholar.mutation(
+        api.practiceMoments.recordMomentOffered,
+        { scholarId, ...edge, clientEventId: "story-card" },
+      );
+      const { seedId } = await seedCrossDomainSeed(t, scholarId);
+
+      await asScholar.mutation(api.sessions.createFromSeed, { seedId });
+
+      const event = await t.run(async (ctx) =>
+        ctx.db.get("momentEvents", eventId),
+      );
+      expect(event?.outcome).toBe("offered");
+      expect(event?.outcomeAt).toBeUndefined();
+    });
+
+    test("a card followed months later is still followed", async () => {
+      const t = convexTest(schema, modules);
+      const scholarId = await seedUser(t);
+      const { fromKey } = await seedStoryScenario(t, scholarId);
+      await removeStoryEdges(t, fromKey);
+      const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+      vi.setSystemTime(createdAt + HOUR_MS);
+      const asScholar = await withUser(t, scholarId);
+      const { eventId } = await asScholar.mutation(
+        api.practiceMoments.recordMomentOffered,
+        { scholarId, kind: "seed", seedId, clientEventId: "seed-card" },
+      );
+
+      // Past the offer side's 45-day reserve window; the seed itself is still
+      // an active star in the Sky.
+      vi.setSystemTime(createdAt + 60 * DAY_MS);
+      await asScholar.mutation(api.sessions.createFromSeed, { seedId });
+
+      const event = await t.run(async (ctx) =>
+        ctx.db.get("momentEvents", eventId),
+      );
+      expect(event?.outcome).toBe("opened");
+    });
+
+    // The question card writes `probed` on answer, which outranks `opened`, so
+    // the follow needs its own stamp or the funnel's last step is invisible.
+    test("an answered story card followed into a session is stamped followed", async () => {
+      const t = convexTest(schema, modules);
+      const scholarId = await seedUser(t);
+      const { fromKey, toKey } = await seedStoryScenario(t, scholarId);
+      const asScholar = await withUser(t, scholarId);
+      const { eventId, seedId } = await asScholar.mutation(
+        api.practiceMoments.recordMomentOffered,
+        { scholarId, kind: "story", fromKey, toKey, clientEventId: "story-q" },
+      );
+      await asScholar.mutation(api.practiceMoments.recordMomentAnswer, {
+        eventId,
+        choiceIndex: 0,
+      });
+      expect(seedId).not.toBeNull();
+
+      await asScholar.mutation(api.sessions.createFromSeed, { seedId: seedId! });
+
+      const event = await t.run(async (ctx) => ctx.db.get("momentEvents", eventId));
+      expect(event?.outcome).toBe("probed");
+      expect(event?.followedAt).toBeDefined();
+    });
+
+    test("following a carded seed stamps followed once", async () => {
+      const t = convexTest(schema, modules);
+      const scholarId = await seedUser(t);
+      const { fromKey } = await seedStoryScenario(t, scholarId);
+      await removeStoryEdges(t, fromKey);
+      const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+      vi.setSystemTime(createdAt + HOUR_MS);
+      const asScholar = await withUser(t, scholarId);
+      const { eventId } = await asScholar.mutation(
+        api.practiceMoments.recordMomentOffered,
+        { scholarId, kind: "seed", seedId, clientEventId: "seed-q" },
+      );
+      vi.setSystemTime(createdAt + 2 * HOUR_MS);
+      await asScholar.mutation(api.sessions.createFromSeed, { seedId });
+      const first = await t.run(async (ctx) => ctx.db.get("momentEvents", eventId));
+      vi.setSystemTime(createdAt + 3 * HOUR_MS);
+      await asScholar.mutation(api.sessions.createFromSeed, { seedId });
+      const second = await t.run(async (ctx) => ctx.db.get("momentEvents", eventId));
+
+      expect(first?.followedAt).toBeDefined();
+      expect(second?.followedAt).toBe(first?.followedAt);
+    });
+
+    test("a re-open never walks a settled seed moment backwards", async () => {
+      const t = convexTest(schema, modules);
+      const scholarId = await seedUser(t);
+      const { fromKey } = await seedStoryScenario(t, scholarId);
+      await removeStoryEdges(t, fromKey);
+      const { seedId, createdAt } = await seedCrossDomainSeed(t, scholarId);
+      vi.setSystemTime(createdAt + HOUR_MS);
+      const asScholar = await withUser(t, scholarId);
+      const { eventId } = await asScholar.mutation(
+        api.practiceMoments.recordMomentOffered,
+        { scholarId, kind: "seed", seedId, clientEventId: "seed-card" },
+      );
+      const dismissedAt = createdAt + 2 * HOUR_MS;
+      vi.setSystemTime(dismissedAt);
+      await asScholar.mutation(api.practiceMoments.recordMomentOutcome, {
+        eventId,
+        outcome: "dismissed",
+      });
+
+      vi.setSystemTime(createdAt + 3 * HOUR_MS);
+      await asScholar.mutation(api.sessions.createFromSeed, { seedId });
+
+      const event = await t.run(async (ctx) =>
+        ctx.db.get("momentEvents", eventId),
+      );
+      expect(event?.outcome).toBe("dismissed");
+      expect(event?.outcomeAt).toBeCloseTo(dismissedAt, 0);
+    });
+  });
+
   test("tried records the started Go-deeper round and remains terminal", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedUser(t);
@@ -829,5 +1388,139 @@ describe("practiceMoments event lifecycle", () => {
         outcome: "opened",
       }),
     ).rejects.toThrow(/Forbidden/);
+  });
+});
+
+
+describe("question cards", () => {
+  test("the selector skips a story edge with no question and keeps looking", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { fromKey, toKey } = await seedStoryScenario(t, scholarId);
+    questionFixture.noQuestion.add(`${fromKey}→${toKey}`);
+    const asScholar = await withUser(t, scholarId);
+
+    // No other eligible moment: nothing is offered rather than a questionless card.
+    await expect(
+      asScholar.query(api.practiceMoments.storyMomentForScholar, { scholarId }),
+    ).resolves.toBeNull();
+
+    // A seed with a question is then found past the questionless story.
+    const { seedId } = await seedCrossDomainSeed(t, scholarId);
+    const moment = await asScholar.query(
+      api.practiceMoments.storyMomentForScholar,
+      { scholarId },
+    );
+    expect(moment).toMatchObject({ kind: "seed", seedId });
+  });
+
+  test("the selector skips a seed with no question; recordMomentOffered agrees", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t);
+    const { seedId } = await seedCrossDomainSeed(t, scholarId, {
+      topic: "No question topic",
+    });
+    questionFixture.noQuestion.add("No question topic");
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.query(api.practiceMoments.storyMomentForScholar, { scholarId }),
+    ).resolves.toBeNull();
+    await expect(
+      asScholar.mutation(api.practiceMoments.recordMomentOffered, {
+        scholarId,
+        kind: "seed",
+        seedId,
+        clientEventId: "q-seed-1",
+      }),
+    ).rejects.toThrow(/not eligible/);
+  });
+
+  async function offeredStory(t: ReturnType<typeof convexTest>) {
+    const scholarId = await seedUser(t);
+    const { fromKey, toKey } = await seedStoryScenario(t, scholarId);
+    const asScholar = await withUser(t, scholarId);
+    const { eventId } = await asScholar.mutation(
+      api.practiceMoments.recordMomentOffered,
+      { scholarId, kind: "story", fromKey, toKey, clientEventId: "q-1" },
+    );
+    return { scholarId, asScholar, eventId };
+  }
+
+  test("recordMomentAnswer computes correctness server-side, stamps the row, advances to probed", async () => {
+    const t = convexTest(schema, modules);
+    const { asScholar, eventId } = await offeredStory(t);
+
+    await expect(
+      asScholar.mutation(api.practiceMoments.recordMomentAnswer, {
+        eventId,
+        choiceIndex: 0,
+      }),
+    ).resolves.toEqual({ correct: false, answerIndex: 0 });
+
+    const row = await t.run(async (ctx) => ctx.db.get(eventId));
+    expect(row).toMatchObject({
+      answerIndex: 0,
+      answerCorrect: false,
+      outcome: "probed",
+    });
+    expect(row?.answeredAt).toBe(NOW);
+  });
+
+  test("first answer wins: a second call returns the stored result unchanged", async () => {
+    const t = convexTest(schema, modules);
+    const { asScholar, eventId } = await offeredStory(t);
+    await asScholar.mutation(api.practiceMoments.recordMomentAnswer, {
+      eventId,
+      choiceIndex: 0,
+    });
+    await expect(
+      asScholar.mutation(api.practiceMoments.recordMomentAnswer, {
+        eventId,
+        choiceIndex: 1,
+      }),
+    ).resolves.toEqual({ correct: false, answerIndex: 0 });
+    const row = await t.run(async (ctx) => ctx.db.get(eventId));
+    expect(row?.answerIndex).toBe(0);
+  });
+
+  test("an answer never regresses a later outcome", async () => {
+    const t = convexTest(schema, modules);
+    const { asScholar, eventId } = await offeredStory(t);
+    await asScholar.mutation(api.practiceMoments.recordMomentOutcome, {
+      eventId,
+      outcome: "dismissed",
+    });
+    await expect(
+      asScholar.mutation(api.practiceMoments.recordMomentAnswer, {
+        eventId,
+        choiceIndex: 1,
+      }),
+    ).resolves.toEqual({ correct: true, answerIndex: 1 });
+    const row = await t.run(async (ctx) => ctx.db.get(eventId));
+    expect(row?.outcome).toBe("dismissed");
+  });
+
+  test("recordMomentAnswer refuses another user's row and out-of-range choices", async () => {
+    const t = convexTest(schema, modules);
+    const { eventId, asScholar } = await offeredStory(t);
+    const otherId = await seedUser(t, "someone-else");
+    const asOther = await withUser(t, otherId);
+    await expect(
+      asOther.mutation(api.practiceMoments.recordMomentAnswer, {
+        eventId,
+        choiceIndex: 1,
+      }),
+    ).rejects.toThrow(/Not your moment/);
+    for (const choiceIndex of [-1, 3, 1.5]) {
+      await expect(
+        asScholar.mutation(api.practiceMoments.recordMomentAnswer, {
+          eventId,
+          choiceIndex,
+        }),
+      ).rejects.toThrow(/out of range/);
+    }
+    const row = await t.run(async (ctx) => ctx.db.get(eventId));
+    expect(row?.answerIndex).toBeUndefined();
   });
 });

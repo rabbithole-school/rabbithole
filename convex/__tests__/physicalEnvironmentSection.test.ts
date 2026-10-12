@@ -46,9 +46,6 @@ describe("buildPhysicalEnvironmentSection", () => {
     expect(section).toContain("Set of hand bells");
     expect(section).toContain("8 bells (C–C)");
     expect(section).toContain("Ring two together");
-    // The anti-offloading contract is stated.
-    expect(section).toContain("what did you notice");
-    expect(section).toMatch(/never.*result they're meant to discover/i);
     // Phase 2: the tutor is told to render the task as a card via the tool.
     expect(section).toContain("suggest_physical_task");
   });

@@ -384,6 +384,22 @@ describe("createStaticApp + resolveByToken", () => {
     ).rejects.toThrow(/too large/i);
   });
 
+  test("rejects app asset references that were not copied by starter promotion", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedTeacher(t);
+    await expect(
+      t.mutation(internal.customApps.createStaticApp, {
+        name: "Unowned image",
+        html: '<!doctype html><img src="/app-assets/foreign">',
+        token: generateAppToken(),
+        callerUserId: teacher,
+        scholarLensResolved: true,
+        scholarIds: [],
+        groupIds: [],
+      }),
+    ).rejects.toThrow(/copied from a vibecode rehearsal/i);
+  });
+
   test("resolveByToken returns null for an unknown token", async () => {
     const t = convexTest(schema, modules);
     const resolved = await t.query(api.customApps.resolveByToken, {

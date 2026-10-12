@@ -43,15 +43,23 @@ function parseManipulativeSpec(json: string): ManipulativeSpec | null {
  */
 export function ChatPracticeItem({
   scholarId,
+  sessionId,
   item,
   interactive = true,
 }: {
   scholarId: Id<"users">;
+  /** The durable session the item was served in — routes a storyThread item to
+   *  its feedback-only grader. Always present: the item is only ever rendered
+   *  inside a session transcript. */
+  sessionId: Id<"sessions">;
   item: ChatPracticePayload;
   /** False in read-only contexts (e.g. a teacher reading the transcript). */
   interactive?: boolean;
 }) {
   const submit = useMutation(api.practiceSkills.submitAnswer);
+  const submitStory = useMutation(
+    api.practiceSkills.submitStoryThreadApplication,
+  );
   const [value, setValue] = useState("");
   const [manipulativeState, setManipulativeState] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
@@ -61,6 +69,10 @@ export function ChatPracticeItem({
   // graded unit verdict persists with `status`, like any other miss line.
   const [unitGateNudge, setUnitGateNudge] = useState(false);
   const [unitOutcome, setUnitOutcome] = useState<"missing" | "wrong" | undefined>();
+  // A rejected mutation (e.g. an invalid story card or a transient failure)
+  // shows a visible line rather than silently un-spinning —
+  // matching the native widget.
+  const [error, setError] = useState<string | null>(null);
   const itemRenderAtRef = useRef(0);
   const firstKeyAtRef = useRef<number | null>(null);
 
@@ -103,6 +115,10 @@ export function ChatPracticeItem({
   const onTemplateKeyDispatched = useCallback((isNav: boolean) => {
     if (!isNav && firstKeyAtRef.current === null) firstKeyAtRef.current = Date.now();
   }, []);
+  // A manipulative's first tap/drag starts the same clock a keystroke does (TRA-221).
+  const onManipulativeInteraction = useCallback(() => {
+    if (firstKeyAtRef.current === null) firstKeyAtRef.current = Date.now();
+  }, []);
   const { templateState, onTemplateKey, onSetCaret, onInsertFraction, onInsertPower, onInsertSquareRoot, onInsertRoot } =
     useExpressionTemplate({
       enabled: usesTemplateEditor && interactive && status !== "correct",
@@ -125,20 +141,30 @@ export function ChatPracticeItem({
         return;
       }
       setBusy(true);
+      setError(null);
       try {
-        const timing = computeTiming({
-          firstAttempt: attempts === 0,
-          nowMs: Date.now(),
-          renderAtMs: itemRenderAtRef.current,
-          firstKeyAtMs: firstKeyAtRef.current,
-        });
-        const res = await submit({
-          scholarId,
-          itemId: item.itemId,
-          answer: normalized,
-          record: attempts === 0,
-          ...timing,
-        });
+        const res =
+          item.mode === "storyThread"
+            ? // The one application on a durable story thread grades through the
+              // feedback-only path (no mastery, no attempt row); it still
+              // returns correct/unitOutcome so the UI behaves identically.
+              await submitStory({
+                sessionId,
+                itemId: item.itemId,
+                answer: normalized,
+              })
+            : await submit({
+                scholarId,
+                itemId: item.itemId,
+                answer: normalized,
+                record: attempts === 0,
+              ...computeTiming({
+                firstAttempt: attempts === 0,
+                nowMs: Date.now(),
+                renderAtMs: itemRenderAtRef.current,
+                firstKeyAtMs: firstKeyAtRef.current,
+              }),
+            });
         setAttempts((n) => n + 1);
         setUnitOutcome(res.unitOutcome);
         if (res.correct) {
@@ -149,11 +175,15 @@ export function ChatPracticeItem({
           haptic("light");
           setValue("");
         }
+      } catch (e) {
+        setError(
+          e instanceof Error ? e.message : "Couldn't check that — try again.",
+        );
       } finally {
         setBusy(false);
       }
     },
-    [busy, status, submit, scholarId, item.itemId, attempts, answerUnit],
+    [busy, status, submit, submitStory, sessionId, scholarId, item.itemId, item.mode, attempts, answerUnit],
   );
 
   const submitTyped = useCallback(() => {
@@ -223,6 +253,7 @@ export function ChatPracticeItem({
             <Box
               pointerEvents={interactive && status !== "correct" ? "auto" : "none"}
               opacity={status === "correct" ? 0.65 : 1}
+              onPointerDownCapture={onManipulativeInteraction}
             >
               <ManipulativeStage
                 spec={spec}
@@ -369,6 +400,11 @@ export function ChatPracticeItem({
                       "Not quite — take another look and try again.")}
                 </Text>
               </Flex>
+            )}
+            {error && (
+              <Text mt={2} color="red.600" fontSize="xs" fontFamily="body">
+                {error}
+              </Text>
             )}
           </>
         )}

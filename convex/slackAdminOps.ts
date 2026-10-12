@@ -18,6 +18,7 @@ import { ROLES, isScholarAdminRole } from "./lib/roles";
 import { createTokenForUser, enrollPath, mintScholarPinToken } from "./enrollment";
 import { requireScholarsAccessible } from "./lib/access";
 import { siteUrl } from "./lib/channels";
+import { parentInLens, resolveInstitutionLens } from "./lib/institutionLens";
 import { schoolOperationsInstitutionIds } from "./lib/staffCapabilities";
 
 async function schoolOperationsInstitutions(
@@ -60,24 +61,17 @@ export const issueParentEnrollLink = internalMutation({
       .query("users")
       .withIndex("by_role", (q) => q.eq("role", ROLES.PARENT))
       .collect();
+    const lens = await resolveInstitutionLens(ctx, caller);
     const matches = [];
     for (const parent of parents) {
+      // Cheap string match first; the lens check costs DB reads per parent.
       if (
         !(parent.name ?? "").toLowerCase().includes(query) &&
         !(parent.email ?? "").toLowerCase().includes(query)
       ) {
         continue;
       }
-      if (operations) {
-        const links = await ctx.db
-          .query("guardianships")
-          .withIndex("by_parent", (q) => q.eq("parentUserId", parent._id))
-          .collect();
-        const hasGrantedScholar = (
-          await Promise.all(links.map((link) => ctx.db.get(link.scholarUserId)))
-        ).some((scholar) => !!scholar?.institutionId && operations.has(scholar.institutionId));
-        if (!hasGrantedScholar) continue;
-      }
+      if (!(await parentInLens(ctx, lens, parent._id))) continue;
       matches.push(parent);
     }
     if (matches.length === 0) {

@@ -23,6 +23,7 @@ export default function TeacherIndexPage() {
     const home = teacherHomePath(
       user?.role,
       user?.hasSchoolOperationsAccess,
+      user?.hasCurriculumAccess,
     );
     if (home !== "/teacher") {
       router.replace(withInstitutionScope(home, inst));
@@ -31,7 +32,11 @@ export default function TeacherIndexPage() {
 
   if (
     !isLoading &&
-    teacherHomePath(user?.role, user?.hasSchoolOperationsAccess) === "/teacher"
+    teacherHomePath(
+      user?.role,
+      user?.hasSchoolOperationsAccess,
+      user?.hasCurriculumAccess,
+    ) === "/teacher"
   ) {
     return <TeacherToday />;
   }

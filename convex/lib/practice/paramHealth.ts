@@ -664,7 +664,7 @@ export function renderParamHealthSection(
   const { metrics, signal, decision } = input;
   const lines: string[] = [];
 
-  lines.push("🩺 *Practice parameter health* — last 28 days");
+  lines.push("🩺 **Practice parameter health** — last 28 days");
 
   // ── Layer 1: calibration table ──
   const calBuckets = metrics.calibration.filter((b) => b.n > 0);
@@ -730,7 +730,7 @@ export function renderParamHealthSection(
   const bp = metrics.bandPressure;
   if (bp.challengeAttempts >= POLICY_CHALLENGE_MIN_N) {
     lines.push(
-      `⚖️ *Discussion prompt (policy — not a recommendation):* ${bp.challengeAttempts} challenge item${bp.challengeAttempts === 1 ? "" : "s"} taken this window, ${bp.challengeCorrect} correct (${xInTen(bp.challengeSuccessRate)}-in-10, across ${bp.distinctChallengeScholars} scholar${bp.distinctChallengeScholars === 1 ? "" : "s"}). Is the grade band too conservative? This is a values call, not a metric — your decision.`,
+      `⚖️ **Discussion prompt (policy — not a recommendation):** ${bp.challengeAttempts} challenge item${bp.challengeAttempts === 1 ? "" : "s"} taken this window, ${bp.challengeCorrect} correct (${xInTen(bp.challengeSuccessRate)}-in-10, across ${bp.distinctChallengeScholars} scholar${bp.distinctChallengeScholars === 1 ? "" : "s"}). Is the grade band too conservative? This is a values call, not a metric — your decision.`,
     );
   } else if (bp.challengeAttempts > 0) {
     lines.push(
@@ -760,7 +760,7 @@ function renderVerdict(
         ? "children retain more than the model predicts"
         : "reviews are coming back too late — retention is over-estimated";
     return (
-      `📈 *Recommendation (memory-model):* ${signal.direction === "raise" ? "raise" : "lower"} ${arrow(d)}. ` +
+      `📈 **Recommendation (memory-model):** ${signal.direction === "raise" ? "raise" : "lower"} ${arrow(d)}. ` +
       `Review success was ${signal.direction === "raise" ? "above" : "below"} the healthy band for two consecutive windows (this window ${rsPhrase(signal)}) — ${why}. ` +
       `Logged as an OPEN recommendation for human review; never auto-applied.`
     );
@@ -769,20 +769,20 @@ function renderVerdict(
   if (decision.kind === "pending") {
     const d = decision.draft;
     return (
-      `👀 *No action yet* — review success is ${signal.direction === "raise" ? "above" : "below"} the healthy band this window (${rsPhrase(signal)}), ` +
+      `👀 **No action yet** — review success is ${signal.direction === "raise" ? "above" : "below"} the healthy band this window (${rsPhrase(signal)}), ` +
       `but a recommendation needs the same signal two windows running. Watching for a second before proposing ${arrow(d)}.`
     );
   }
 
   // none — a first-class, healthy outcome (or a wide interval doing its job).
   if (signal.reviewSuccess.n === 0) {
-    return "🩺 *No parameter change* — no review attempts logged this window, so there is nothing to calibrate against yet.";
+    return "🩺 **No parameter change** — no review attempts logged this window, so there is nothing to calibrate against yet.";
   }
   if (signal.direction !== "none") {
     return (
-      `🩺 *No parameter change* — review success leans ${signal.direction === "raise" ? "high" : "low"} this window (${rsPhrase(signal)}), ` +
+      `🩺 **No parameter change** — review success leans ${signal.direction === "raise" ? "high" : "low"} this window (${rsPhrase(signal)}), ` +
       "but the 95% interval still overlaps the healthy band, so it is too wide to act on. That is the interval doing its job — a wide interval is a reason NOT to move a parameter."
     );
   }
-  return "🩺 *No parameter change* — review success sits inside the healthy band and calibration is on target. A quiet week here is the system working, not a failure.";
+  return "🩺 **No parameter change** — review success sits inside the healthy band and calibration is on target. A quiet week here is the system working, not a failure.";
 }

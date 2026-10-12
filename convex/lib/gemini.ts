@@ -1,12 +1,10 @@
 /**
  * Single entry point for the Gemini image model ("Nano Banana Pro").
  *
- * Two call sites use it: the `generate_image` tutor tool (text -> image) and
- * Magic Annotations (image + instruction -> edited image). Both build the same
- * generateContent request, parse the same response shape, and decode the same
- * inline base64 — so the endpoint, model id, request body, and parsing live
- * here once. Runtime-agnostic (fetch + atob), usable from both the default
- * Convex runtime (http.ts) and "use node" actions.
+ * Shared callers build the same generateContent request, parse the same
+ * response shape, and decode the same inline base64, so the endpoint, model id,
+ * request body, and parsing live here once. Runtime-agnostic (fetch + atob),
+ * usable from both the default Convex runtime and "use node" actions.
  */
 
 import {
@@ -14,6 +12,18 @@ import {
   type GeminiImageModel,
 } from "./models";
 import { base64ToBytes } from "./imageBytes";
+
+/**
+ * Request timeout for a single Gemini generateContent call. Since PR #3962
+ * every tutor turn heartbeats for its whole life, so a hung tool call no
+ * longer surfaces as a Convex action timeout — it reads as "pending" in the
+ * composer until something here gives up, which without a timeout was
+ * "forever". Sized comfortably above measured image-generation latency: the
+ * comparable OpenAI image model (lib/openaiImage.ts) measured 9-19s
+ * end-to-end on 2026-09-15; Gemini has no equivalent measurement on file, so
+ * this triples that ceiling rather than assuming parity.
+ */
+export const GEMINI_FETCH_TIMEOUT_MS = 60_000;
 
 /** A content part: either a text instruction or an inline input image. */
 export type GeminiPart =
@@ -53,6 +63,12 @@ export async function geminiGenerateImage(
     image: { bytes: Uint8Array; mimeType: string; model: GeminiImageModel } | null;
     quotaExhausted: boolean;
   }> => {
+    // AbortController + timer rather than AbortSignal.timeout: this runs in
+    // the Convex default runtime (the tutor's generate_image tool in http.ts),
+    // where only the controller pattern is used elsewhere in the repo. The
+    // timer is cleared after the body is read, so a stalled body aborts too.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), GEMINI_FETCH_TIMEOUT_MS);
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
@@ -63,6 +79,7 @@ export async function geminiGenerateImage(
             contents: [{ parts }],
             generationConfig,
           }),
+          signal: controller.signal,
         },
       );
       if (!res.ok) {
@@ -95,6 +112,8 @@ export async function geminiGenerateImage(
     } catch (err) {
       console.error("[gemini] generateContent failed:", model, err);
       return { image: null, quotaExhausted: false };
+    } finally {
+      clearTimeout(timeout);
     }
   };
 

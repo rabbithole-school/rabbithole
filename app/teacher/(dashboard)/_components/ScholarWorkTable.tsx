@@ -25,8 +25,7 @@
 
 import { useMemo, useState, type ReactNode } from "react";
 import NextLink from "next/link";
-import { Box, Button, HStack, Link as ChakraLink, Text } from "@chakra-ui/react";
-import { CaretDown, CaretUp } from "@phosphor-icons/react";
+import { Box, Flex, HStack, Link as ChakraLink, Text } from "@chakra-ui/react";
 import { useNow } from "@/hooks/useNow";
 import { useQueries } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
@@ -34,6 +33,8 @@ import type { FunctionReturnType } from "convex/server";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Avatar } from "@/components/Avatar";
+import { SortableColumnHeader } from "@/components/ui/SortableColumnHeader";
+import { sortRows, type SortColumn, type SortDir as TableSortDir } from "@/lib/tableSort";
 import { gradeForAgeFromDob } from "@/components/practice/chronologicalGrade";
 import type { RoundsCadenceKind } from "@/lib/roundsCadence";
 import {
@@ -49,9 +50,16 @@ import {
   HOMEWORK_PAGE_SIZE,
   type HomeworkPlanRow,
 } from "./HomeworkContent";
+import { AssignQuestionMenu } from "./AssignQuestionMenu";
 
 export type WorkTab = "homework" | "academic-rounds" | "sel-rounds";
-type SortDir = "asc" | "desc";
+type SortDir = TableSortDir;
+
+/** Grade-for-age, youngest first; a missing grade (no valid DOB) sorts last. */
+const GRADE_COLUMN: SortColumn<{ gradeForAge: number | null }> = {
+  compare: (a, b) => a.gradeForAge! - b.gradeForAge!,
+  isMissing: (r) => r.gradeForAge === null,
+};
 type WeekPayload = FunctionReturnType<typeof api.rounds.week>;
 
 /** Fixed width of the leading "Grade" column, so the header label sits directly
@@ -64,6 +72,8 @@ const GRADE_COL_W = "3rem";
  *  lineClamp ellipsis. Narrower on base so a phone viewport doesn't crush the
  *  content cell (this is a desktop/iPad-first teacher surface). */
 const IDENTITY_COL_W = { base: "9.5rem", md: "14rem" };
+/** Fixed width of the Homework tab's trailing action column ("Assign…"). */
+const ASSIGN_COL_W = "7.5rem";
 /** Stable empty roster for the synthesis batch a non-SEL tab does not read. */
 const EMPTY_IDS: string[] = [];
 
@@ -108,15 +118,7 @@ export function ScholarWorkTable({
       scholar,
       gradeForAge: gradeForAgeFromDob(scholar.dateOfBirth, nowDate),
     }));
-    withGrade.sort((a, b) => {
-      if (a.gradeForAge === null || b.gradeForAge === null) {
-        return a.gradeForAge === b.gradeForAge ? 0 : a.gradeForAge === null ? 1 : -1;
-      }
-      return sortDir === "asc"
-        ? a.gradeForAge - b.gradeForAge
-        : b.gradeForAge - a.gradeForAge;
-    });
-    return withGrade;
+    return sortRows(withGrade, GRADE_COLUMN, sortDir);
   }, [scholars, sortDir, nowDate]);
 
   // ── Homework content: the windowed, batched read, joined by scholarId ──────
@@ -150,22 +152,53 @@ export function ScholarWorkTable({
     return q;
   }, [homeworkPages, minuteNow]);
   const homeworkResults = useQueries(homeworkQueries);
-  const { homeworkByScholar, homeworkLoadingIds } = useMemo(() => {
+  const { liveHomework, pendingIds } = useMemo(() => {
     const map = new Map<string, HomeworkPlanRow>();
-    const loading = new Set<string>();
+    const pending = new Set<string>();
     homeworkPages.forEach((chunk, i) => {
       const res = homeworkResults[`p${i}`] as
         | FunctionReturnType<typeof api.takeHomePlans.forVisibleScholarsAsTeacher>
         | undefined
         | Error;
       if (res === undefined) {
-        for (const id of chunk) loading.add(id);
+        for (const id of chunk) pending.add(id);
       } else if (!(res instanceof Error)) {
         for (const row of res.scholars ?? []) map.set(String(row.scholarId), row);
       }
     });
-    return { homeworkByScholar: map, homeworkLoadingIds: loading };
+    return { liveHomework: map, pendingIds: pending };
   }, [homeworkPages, homeworkResults]);
+  // Keep-previous per row (the useSmoothedQuery rule, TRA-364): every minute
+  // the `now` arg re-arms each page and `useQueries` reports it undefined for a
+  // round-trip. Without retention every row's cell flashes to "…" and the
+  // row's "Assign…" menu UNMOUNTS mid-interaction. Retained rows advance during
+  // render whenever a live row object changes (Convex keeps unchanged results
+  // referentially stable, so this settles in one extra render).
+  const [retainedHomework, setRetainedHomework] = useState(
+    () => new Map<string, HomeworkPlanRow>(),
+  );
+  let retainedStale = false;
+  for (const [id, row] of liveHomework) {
+    if (retainedHomework.get(id) !== row) {
+      retainedStale = true;
+      break;
+    }
+  }
+  if (retainedStale) {
+    setRetainedHomework(new Map([...retainedHomework, ...liveHomework]));
+  }
+  const homeworkByScholar = useMemo(() => {
+    const map = new Map(liveHomework);
+    for (const id of pendingIds) {
+      const kept = retainedHomework.get(id);
+      if (kept) map.set(id, kept);
+    }
+    return map;
+  }, [liveHomework, pendingIds, retainedHomework]);
+  const homeworkLoadingIds = useMemo(
+    () => new Set([...pendingIds].filter((id) => !retainedHomework.has(id))),
+    [pendingIds, retainedHomework],
+  );
 
   // ── Rounds content: the week payload joined by scholarId ───────────────────
   const weekByScholar = useMemo(() => {
@@ -229,6 +262,26 @@ export function ScholarWorkTable({
     );
   }
 
+  // Homework (Scholar's Prep) rows carry ONE action beside the anchor: assign
+  // the scholar's best next question as homework. A fixed-width slot (empty
+  // when there is no open question) keeps the columns aligned row to row.
+  function assignFor(scholarId: string, scholarName: string): ReactNode {
+    const plan = homeworkByScholar.get(scholarId);
+    return (
+      <Box w={ASSIGN_COL_W} flexShrink={0} pr={{ base: 3, md: 4 }} textAlign="right">
+        {plan?.bestNext && plan.dayKey && (
+          <AssignQuestionMenu
+            scholarId={scholarId}
+            scholarName={scholarName}
+            seedId={plan.bestNext.seedId}
+            todayKey={plan.dayKey}
+            assignDays={plan.assignDays ?? []}
+          />
+        )}
+      </Box>
+    );
+  }
+
   return (
     // pt=0: the tab bar above owns the gap below itself (DRY spacing rule).
     <Box px={{ base: 4, lg: 8 }} pb={{ base: 5, lg: 8 }} pt={0}>
@@ -256,30 +309,13 @@ export function ScholarWorkTable({
               borderColor="gray.200"
               role="row"
             >
-              <Box role="columnheader" aria-sort={sortDir === "asc" ? "ascending" : "descending"}>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  px={0}
-                  minW="auto"
-                  h="auto"
-                  gap={1}
-                  onClick={onToggleSort}
-                  aria-label={`Sort by grade, currently ${sortDir === "asc" ? "ascending — youngest first" : "descending — oldest first"}`}
-                  data-testid="rounds-sort-grade"
-                  fontFamily="heading"
-                  fontWeight="700"
-                  fontSize="sm"
-                  color="charcoal.500"
-                >
-                  Grade
-                  {sortDir === "asc" ? (
-                    <CaretUp size={13} weight="bold" />
-                  ) : (
-                    <CaretDown size={13} weight="bold" />
-                  )}
-                </Button>
-              </Box>
+              <SortableColumnHeader
+                label="Grade"
+                dir={sortDir}
+                onToggle={onToggleSort}
+                ariaLabel={`Sort by grade, currently ${sortDir === "asc" ? "ascending — youngest first" : "descending — oldest first"}`}
+                testId="rounds-sort-grade"
+              />
             </HStack>
 
             {rows.map(({ scholar, gradeForAge }, i) => (
@@ -299,6 +335,7 @@ export function ScholarWorkTable({
                     : `${scholar.name || "Scholar"} — open scholar.`
                 }
                 topBorder={i > 0}
+                trailing={rounds ? null : assignFor(scholar.id, scholar.name || "Scholar")}
               >
                 {contentFor(scholar.id)}
               </ScholarWorkRow>
@@ -324,6 +361,7 @@ export function ScholarWorkRow({
   isRounds,
   ariaLabel,
   topBorder,
+  trailing = null,
   children,
 }: {
   scholarId: string;
@@ -334,13 +372,23 @@ export function ScholarWorkRow({
   isRounds: boolean;
   ariaLabel: string;
   topBorder: boolean;
+  /** A row ACTION (Prep's "Assign…"), rendered BESIDE the anchor — never
+   *  nested inside it — so the row stays one link and the action one button. */
+  trailing?: ReactNode;
   children: ReactNode;
 }) {
   return (
-    <Box borderTopWidth={topBorder ? "1px" : "0"} borderColor="gray.100">
+    <Flex
+      borderTopWidth={topBorder ? "1px" : "0"}
+      borderColor="gray.100"
+      align="center"
+      minW={0}
+    >
       <ChakraLink
         asChild
         display="block"
+        flex={1}
+        minW={0}
         px={{ base: 3, md: 4 }}
         py={3}
         _hover={{ bg: "gray.50", textDecoration: "none" }}
@@ -387,7 +435,8 @@ export function ScholarWorkRow({
           </HStack>
         </NextLink>
       </ChakraLink>
-    </Box>
+      {trailing}
+    </Flex>
   );
 }
 

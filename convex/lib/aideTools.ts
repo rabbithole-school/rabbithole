@@ -21,18 +21,35 @@ import type { ActionCtx } from "../_generated/server";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import { ROLES, isTeacherRole, type Role } from "./roles";
-import { postMessage, escapeSlackText } from "./slackApi";
+import { MODELS, modelLabel } from "./models";
+import { resolveAideModel } from "./aideModel";
+import {
+  postMessage,
+  escapeSlackText,
+  escapeSlackInline,
+  slackMention,
+  openConversation,
+  getMessagePermalink,
+} from "./slackApi";
 import {
   deliverableSchemaFragment,
   advanceRubricSchemaFragment,
+  tutorModelSchemaFragment,
   parseDeliverableArg,
   parseAdvanceRubricArg,
   refusedRecoveryMessage,
+  VIBECODE_BUILD_BRIEF_DESCRIPTION,
+  buildContractSchemaFragment,
+  allowSilenceSchemaFragment,
+  assessesWritingMechanicsSchemaFragment,
+  scholarEditSchemaFragment,
+  scholarEditToEditAccess,
   WEB_SEARCH_TOOL,
   WEB_FETCH_TOOL,
   type RawBotDeliverable,
   type RawBotAdvanceRubric,
 } from "./botTools";
+import { normalizeBuildContract, parseBuildContractArg } from "./buildContract";
 import {
   makeScholarReadTools,
   makeListScholarGroupsTool,
@@ -49,9 +66,12 @@ import { makeCustomAppTools } from "./customAppTools";
 import { makeSuggestionTools } from "./suggestionTools";
 import { makePracticePoolTools } from "./practicePoolTools";
 import { makePracticeSkillTreeTools } from "./practiceSkillTreeTools";
+import { makeMathPlanTools } from "./mathPlanTools";
 import { makeMasterScheduleTools } from "./masterScheduleTools";
 import { makeExternalAppsTools } from "./externalAppsTools";
+import { makeAuditLogTools } from "./auditLogTools";
 import { makeHealthRecordTools } from "./healthRecordTools";
+import { makeSpellingEvidenceTools } from "./spellingEvidenceTools";
 import { makeListGeomapAssetsTool } from "./geomapAssetsTool";
 import { makeAssignmentTools } from "./assignmentTools";
 import { makeActivityKindTools } from "./activityKindTools";
@@ -130,9 +150,11 @@ export async function assembleCurriculumTools(
     linkBase?: string;
     // Conversation surface — gates the credential-bearing + destructive +
     // file-upload scholar-write tools (private only, never a Slack channel).
-    // Defaults to "private" (the in-app teacher session / MCP). Slack passes
-    // its real surface.
-    surface?: WriteSurface;
+    // REQUIRED, no default: this used to default to "private", and the MCP
+    // connector — whose service accounts are one identity shared by a whole
+    // channel — inherited it and was handed the password/passkey resets and
+    // the External App login tool. Every caller names its surface.
+    surface: WriteSurface;
     // Guardian-form answers use their own approved boundary: Slack group DMs
     // are deliberately composed private rooms, unlike channels. Other tools
     // continue to use `surface` above.
@@ -161,6 +183,8 @@ export async function assembleCurriculumTools(
     hasSchoolOperationsAccess?: boolean;
     /** Established by the transport through the server-side health capability. */
     hasHealthManagementAccess?: boolean;
+    /** Audit entry path for app-grant mutations; omitted means in-app/MCP aide. */
+    appGrantVia?: "aide" | "slack";
     /** Transport-owned file delivery; intentionally absent outside Slack. */
     attachFile?: (args: {
       filename: string;
@@ -176,7 +200,7 @@ export async function assembleCurriculumTools(
     callerUserId,
     sessionId,
     linkBase = "",
-    surface = "private",
+    surface,
     guardianFormAnswersSurface = "private",
     attachedFiles,
     docsEmbeddableImages,
@@ -187,6 +211,7 @@ export async function assembleCurriculumTools(
     institutionId,
     hasSchoolOperationsAccess = false,
     hasHealthManagementAccess = false,
+    appGrantVia,
     attachFile,
   } = opts;
   const isSchoolOperator =
@@ -251,6 +276,13 @@ export async function assembleCurriculumTools(
     institutionScope,
     hasHealthManagementAccess,
   });
+  // Spelling evidence from a scholar's typed messages (TRA-505) — scholar-admin
+  // roles only, every surface (Slack channels included).
+  const spellingEvidenceTools = await makeSpellingEvidenceTools(ctx, emit, {
+    role,
+    callerUserId,
+    allowedScholarIds,
+  });
 
   // School physical-inventory tools (rooms + equipment) — read + write, for
   // ALL staff (same audience as the /school-space editor). Read lets the bot
@@ -271,6 +303,7 @@ export async function assembleCurriculumTools(
     role,
     callerUserId,
     sessionId,
+    linkBase,
     allowedScholarIds,
     lensLabel,
     // Same derivation as the master-schedule tools: an explicit resolved flag
@@ -279,6 +312,7 @@ export async function assembleCurriculumTools(
     // that never resolved one.
     scholarLensResolved:
       scholarLensResolved === true || allowedScholarIds !== undefined,
+    via: appGrantVia,
   });
 
   // Workshop tools (read the scholar-idea queue + reply to an idea) —
@@ -311,6 +345,13 @@ export async function assembleCurriculumTools(
     callerUserId,
     allowedScholarIds,
   });
+  // Math-plan tools (read + replace Practice scope / Checkpoint) — the same
+  // teacher/admin audience and scholar lens as the skill-tree tool.
+  const mathPlanTools = await makeMathPlanTools(ctx, emit, {
+    role,
+    callerUserId,
+    allowedScholarIds,
+  });
 
   // Master-schedule tools (the recurring weekly timetable: blocks, class
   // placements, the shelf, teleport, bulk teacher reassignment, materialize a
@@ -329,6 +370,20 @@ export async function assembleCurriculumTools(
     role,
     callerUserId,
     hasSchoolOperationsAccess,
+    surface,
+    via: appGrantVia,
+  });
+  // Audit-trail reader (get_audit_log) — the same audience as the
+  // External-Apps tools, spread beside them below; institution- and
+  // health-scoped server-side, and answers only on a PRIVATE surface (a
+  // channel gets a refusal notice). Empty for anyone the External-Apps gate
+  // refuses.
+  const auditLogTools = await makeAuditLogTools(ctx, emit, {
+    role,
+    callerUserId,
+    hasSchoolOperationsAccess,
+    institutionScope,
+    surface,
   });
   const googleDocsTools = await makeGoogleDocsTools(ctx, emit, {
     role,
@@ -453,7 +508,7 @@ export async function assembleCurriculumTools(
   const listUnitsTool = betaTool({
     name: "list_units",
     description:
-      "List all curriculum units with title, description, target Bloom's level, and building block names (persona, perspective, process).",
+      "List all curriculum units with title, description, target Bloom's level, building block names (persona, perspective, process), and `unpublished` (true = teachers only until published or assigned).",
     inputSchema: {
       type: "object" as const,
       properties: {},
@@ -781,7 +836,7 @@ export async function assembleCurriculumTools(
   const createUnitTool = betaTool({
     name: "create_unit",
     description:
-      "Create a new GENERAL curriculum unit (visible to all teachers in the curriculum index, owned by you). THIS IS THE DEFAULT unit-creation tool: use it whenever a teacher describes a unit they want to build, including every unit meant for a class, cohort, pod, or group — translate their description into a real unit. Idempotent by title for this author — re-running with the same title returns the existing unitId instead of duplicating. IMPORTANT: a unit is an empty container; after creating it, populate it with create_scholar_lesson (pass the returned unitId) — or tell the teacher to open the unit and keep designing with the unit's Curriculum Bot. Use create_scholar_quest instead ONLY when the teacher explicitly asks for a Quest (independent study) owned by one named scholar.",
+      "Create a new GENERAL curriculum unit (visible to all teachers in the curriculum index, owned by you). THIS IS THE DEFAULT unit-creation tool: use it whenever a teacher describes a unit they want to build, including every unit meant for a class, cohort, pod, or group — translate their description into a real unit. Idempotent by title for this author — re-running with the same title returns the existing unitId instead of duplicating. A new unit is UNPUBLISHED: teachers see it, scholars do not, until it is assigned (assign_unit publishes it) or published with publish_unit. IMPORTANT: a unit is an empty container; after creating it, populate it with create_scholar_lesson (pass the returned unitId) — or tell the teacher to open the unit and keep designing with the unit's Curriculum Bot. Use create_scholar_quest instead ONLY when the teacher explicitly asks for a Quest (independent study) owned by one named scholar.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1077,7 +1132,7 @@ export async function assembleCurriculumTools(
   const createScholarActivityTool = betaTool({
     name: "create_scholar_activity",
     description:
-      "Create an activity inside a lesson. Idempotent by (lessonId, title). When creating multiple activities for the same lesson, ALWAYS pass each activity's zero-based position in the intended sequence (0, 1, 2, ...) because tool calls may run in parallel. Without position, a new activity appends. If position is already occupied, the activity inserts there and shifts the consecutive occupied slots after it by one — but when the lesson ALREADY has activities, prefer positions continuing after the existing ones: parallel insert-at into occupied slots can land relative to pre-existing activities in arrival order.\n\n**kind** selects the activity type (default `online`):\n  - `online` — the scholar opens this in Rabbithole and it drives an AI tutor session. Give it a `systemPrompt` AND exactly ONE evaluation shape — a `deliverable` OR an `advanceRubric` (see below).\n  - `offline` — a teacher-run classroom task (discussion, lab, worksheet). Not opened in Rabbithole; no systemPrompt or rubric needed.\n  - `vibecode` — a full-screen app-builder workshop: the scholar describes an app/game and DIRECTS an AI builder that writes + iterates a live web app; the app is the artifact. Reach for this whenever the teacher wants scholars to make/build/\"vibecode\" something interactive. Here the `systemPrompt` IS the BUILD BRIEF (what to build + the learning goal), NOT a tutor prompt. No rubric needed. (If the teacher may instead want a fixed simulation the scholar TUNES and observes, that's a Simulator — use `create_simulator_activity`, and ask first if it's ambiguous.)\nFor a Simulator activity (stored as `world`), use `create_simulator_activity`; for `problem_set`, use `create_problem_set`. Do NOT widen this tool's kind: both dedicated tools validate payloads this generic writer cannot carry. For `game`, `web`, or `shareBack`, create the lesson, link its Edit surface, and hand off to the teacher to choose the catalog-backed activity there.\n\n**Choosing the evaluation shape for an ONLINE activity — the most important decision.** Pick ONE:\n\n  • **`deliverable`** — when the scholar produces any ARTIFACT/PRODUCT (a story, drawing, photo, code, slide deck, audio, a written write-up). This explicitly includes kind 'map' when the saved map itself is the work scholars should repeatedly 'Check my work' or 'Send'. Its criteria are a private quality map for the tutor, NOT a scholar checklist or a completion gate. The scholar clicks 'Check my work' and the AI verdicts each criterion 'not'/'half'/'full'. A full criterion permanently awards it as scholar-visible flair; its label and description are shown together. Half/not-full remain private, and normal completion is separate.\n\n  • **`advanceRubric`** — when the learning happens IN CONVERSATION or through interactions and there is NO produced artifact: a Socratic discussion, or an INTERACTIVE MAP / GEOGRAPHY DISCOVERY activity. The tutor grades the scholar's talk + map interactions (pins, predictions, explanations) against the criteria and a full pass completes the activity — with no noise document. Criteria grade what the scholar DEMONSTRATES ('Located the requested places', 'Predicted before revealing', 'Explained the pattern in their own words', 'Transferred it to a new case').\n\nCriteria written only into `systemPrompt` are decorative and cannot award flair or complete an advance rubric.\n\n**GEOGRAPHY / MAP activities specifically:** do NOT build a rapid verbal quiz over a mute base map, and do NOT force a write-up document onto it. For a discovery sequence, build it as an `online` activity whose `systemPrompt` drives the tutor's `show_map` tool — open ONE map (op 'create', once), then before each change call op 'read' and reveal ONE variable with op 'patch'. Ask a question between patches, and have the scholar COMMIT a pin BEFORE each reveal (predict-before-reveal). Set a checkable `task` on the map when there's a right answer to locate, and design the prompt so the scholar drops a pin before each reveal. Give discovery sequences an `advanceRubric`; when the saved map itself is the product scholars should repeatedly 'Check my work' or 'Send', use a kind 'map' deliverable instead. (See the seeded Geography Quests for the canonical shape.)\n\n**criteria** (in either shape) is an array of 3-6 DIMENSIONAL items, each { label, description }. Give each a short label and put the concrete quality bar in its description. State what counts as 'full' vs 'half'/'not'. Never attach BOTH a deliverable and an advanceRubric.",
+      "Create an activity inside a lesson. Idempotent by (lessonId, title). When creating multiple activities for the same lesson, ALWAYS pass each activity's zero-based position in the intended sequence (0, 1, 2, ...) because tool calls may run in parallel. Without position, a new activity appends. If position is already occupied, the activity inserts there and shifts the consecutive occupied slots after it by one — but when the lesson ALREADY has activities, prefer positions continuing after the existing ones: parallel insert-at into occupied slots can land relative to pre-existing activities in arrival order.\n\n**kind** selects the activity type (default `online`):\n  - `online` — the scholar opens this in Rabbithole and it drives an AI tutor session. Give it a `systemPrompt` AND exactly ONE evaluation shape — a `deliverable` OR an `advanceRubric` (see below).\n  - `offline` — a teacher-run classroom task (discussion, lab, worksheet). Not opened in Rabbithole; no systemPrompt or rubric needed.\n  - `vibecode` — a full-screen app-builder workshop: the scholar describes an app/game and DIRECTS an AI builder that writes + iterates a live web app; the app is the artifact. Reach for this whenever the teacher wants scholars to make/build/\"vibecode\" something interactive. Here the `systemPrompt` IS the BUILD BRIEF (what to build + the learning goal), NOT a tutor prompt. No rubric needed. ALWAYS also write a `buildContract` (2–3 testable invariants, the scholar's freedoms, one gate) and set `allowSilence: true` — see the buildContract property; never ask the teacher how off-topic ideas should be handled. Also set `scholarEdit`: `build` when scholars make/remix their own app (the default when omitted), `play` when they only USE an app — and when it's genuinely unclear which the teacher wants, ASK one short question before creating (\"Should scholars just play it, or be able to change it?\"). (If the teacher may instead want a fixed simulation the scholar TUNES and observes, that's a Simulator — use `create_simulator_activity`, and ask first if it's ambiguous.)\nFor a Simulator activity (stored as `world`), use `create_simulator_activity`; for `problem_set`, use `create_problem_set`. Do NOT widen this tool's kind: both dedicated tools validate payloads this generic writer cannot carry. For `game`, `web`, or `shareBack`, create the lesson, link its Edit surface, and hand off to the teacher to choose the catalog-backed activity there.\n\n**Choosing the evaluation shape for an ONLINE activity — the most important decision.** Pick ONE:\n\n  • **`deliverable`** — when the scholar produces any ARTIFACT/PRODUCT (a story, drawing, photo, code, slide deck, audio, a written write-up). This explicitly includes kind 'map' when the saved map itself is the work scholars should repeatedly 'Check my work' or 'Send'. Its criteria are a private quality map for the tutor, NOT a scholar checklist or a completion gate. The scholar clicks 'Check my work' and the AI verdicts each criterion 'not'/'half'/'full'. A full criterion permanently awards it as scholar-visible flair; its label and description are shown together. Half/not-full remain private, and normal completion is separate.\n\n  • **`advanceRubric`** — when the learning happens IN CONVERSATION or through interactions and there is NO produced artifact: a Socratic discussion, or an INTERACTIVE MAP / GEOGRAPHY DISCOVERY activity. The tutor grades the scholar's talk + map interactions (pins, predictions, explanations) against the criteria and a full pass completes the activity — with no noise document. Criteria grade what the scholar DEMONSTRATES ('Located the requested places', 'Predicted before revealing', 'Explained the pattern in their own words', 'Transferred it to a new case').\n\nCriteria written only into `systemPrompt` are decorative and cannot award flair or complete an advance rubric.\n\n**GEOGRAPHY / MAP activities specifically:** do NOT build a rapid verbal quiz over a mute base map, and do NOT force a write-up document onto it. For a discovery sequence, build it as an `online` activity whose `systemPrompt` drives the tutor's `show_map` tool — open ONE map (op 'create', once), then before each change call op 'read' and reveal ONE variable with op 'patch'. Ask a question between patches, and have the scholar COMMIT a pin BEFORE each reveal (predict-before-reveal). Set a checkable `task` on the map when there's a right answer to locate, and design the prompt so the scholar drops a pin before each reveal. Give discovery sequences an `advanceRubric`; when the saved map itself is the product scholars should repeatedly 'Check my work' or 'Send', use a kind 'map' deliverable instead. (See the seeded Geography Quests for the canonical shape.)\n\n**criteria** (in either shape) is an array of 3-6 DIMENSIONAL items, each { label, description }. Give each a short label and put the concrete quality bar in its description. State what counts as 'full' vs 'half'/'not'. Never attach BOTH a deliverable and an advanceRubric.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1108,9 +1163,9 @@ export async function assembleCurriculumTools(
         },
         systemPrompt: {
           type: "string" as const,
-          description:
-            "For online: the AI tutor's system prompt during this activity (overrides lesson/unit prompts). For vibecode: the BUILD BRIEF (what to build + the learning goal). Omit for offline.",
+          description: `For online: the AI tutor's system prompt during this activity (overrides lesson/unit prompts). For vibecode: ${VIBECODE_BUILD_BRIEF_DESCRIPTION} Omit for offline.`,
         },
+        tutorModel: tutorModelSchemaFragment(),
         durationMinutes: {
           type: "number" as const,
           description: "Optional expected duration in minutes.",
@@ -1123,6 +1178,12 @@ export async function assembleCurriculumTools(
         },
         deliverable: deliverableSchemaFragment(),
         advanceRubric: advanceRubricSchemaFragment(),
+        buildContract: buildContractSchemaFragment(),
+        allowSilence: allowSilenceSchemaFragment(),
+        assessesWritingMechanics: assessesWritingMechanicsSchemaFragment(),
+        scholarEdit: scholarEditSchemaFragment(
+          "Omitted on a vibecode activity = `build` (scholars make their own app).",
+        ),
       },
       required: ["lessonId", "title"] as const,
     },
@@ -1143,6 +1204,15 @@ export async function assembleCurriculumTools(
           kind === "online"
             ? parseAdvanceRubricArg(input.advanceRubric as RawBotAdvanceRubric)
             : undefined;
+        // Model contract: vibecode only. The mutation rejects it on any other
+        // kind, which surfaces as a Refused message the model can recover from.
+        const rawContract = parseBuildContractArg(input.buildContract);
+        const buildContract = rawContract
+          ? normalizeBuildContract(rawContract)
+          : undefined;
+        // Scholar edit policy: vibecode only; the mutation refuses it on any
+        // other kind (TRA-477).
+        const editAccess = scholarEditToEditAccess(input.scholarEdit);
         if (kind === "online" && deliverable && advanceRubric) {
           throw new Error(
             "Attach EITHER a deliverable (document product) OR an advanceRubric " +
@@ -1169,10 +1239,19 @@ export async function assembleCurriculumTools(
             description: input.description,
             scholarDescription: input.scholarDescription,
             systemPrompt: input.systemPrompt,
+            tutorModel: input.tutorModel as
+              | "sonnet"
+              | "fable"
+              | undefined,
             durationMinutes: input.durationMinutes,
             position: input.position,
             deliverable,
             advanceRubric,
+            buildContract,
+            allowSilence: input.allowSilence === true ? true : undefined,
+            assessesWritingMechanics:
+              input.assessesWritingMechanics === true ? true : undefined,
+            editAccess,
           },
         );
       } catch (err) {
@@ -1399,68 +1478,127 @@ export async function assembleCurriculumTools(
   // lib/aideModel.ts). Every staff role, every surface, so a Slack user
   // can opt in by just asking ("switch my aide to fable"). The backing
   // mutation re-checks the caller's role server-side.
+  //
+  // Two rules this tool exists under, both written from a real incident
+  // (2026-09-03) where the aide talked a staff member into a permanent pin:
+  //
+  //  1. "default" is a first-class choice, and it CLEARS the pin. Before, the
+  //     enum was sonnet|opus|fable with `required: ["model"]`, so a person
+  //     asking to "reset" could only ever be given an explicit `fable` pin —
+  //     which strands them the moment the fleet default moves off Fable.
+  //     Un-pinning was already supported by the mutation and unreachable
+  //     from every surface above it.
+  //  2. A model is NEVER the fix for a style complaint. The aide answered
+  //     "you want less commentary?" by recommending a model switch and
+  //     writing a forever-pin. Verbosity is the aide's own prose; it fixes
+  //     that by writing differently.
+  //
+  // Every model name below is derived from MODELS/MODEL_DISPLAY: the old
+  // hand-written copy said "Claude Fable 5 … the current default" for the
+  // entire Fable 5 → 5.1 rollout, telling staff the default was a model that
+  // no longer ran.
+  const defaultModelLabel = modelLabel(resolveAideModel(undefined));
   const setAideModelTool = betaTool({
     name: "set_aide_model",
     description:
-      "Switch which Claude model powers this assistant for the person you're talking to — a per-person preference covering all their aide surfaces (this chat, the Curriculum Bot, Slack). Options: 'sonnet' (Claude Sonnet 5 — fast, balanced, the cheapest), 'opus' (Claude Opus 4.8 — quickest to start answering, terse), 'fable' (Claude Fable 5 — Anthropic's most capable model, and the current default; pauses to think ~10-30s before each answer). Takes effect from their next message. Use when they ask to switch, try, or reset their aide/assistant model.",
+      `Change which Claude model powers this assistant for the person you're talking to — a per-person preference covering all their aide surfaces (this chat, the Curriculum Bot, Slack). Options: 'default' (clear their pin and follow the fleet default, currently ${defaultModelLabel} — always offer this when someone asks to reset, or when their pin no longer suits them), 'sonnet' (${modelLabel(MODELS.SONNET)} — fastest to answer, the cheapest), 'opus' (${modelLabel(MODELS.OPUS_5_5)} — the same model as the current default, frozen there; thinks briefly before answering), 'fable' (${modelLabel(MODELS.FABLE)} — the most capable; pauses to think ~10-30s before each answer). Takes effect from their next message. ` +
+      `ONLY call this when the person explicitly asks to change, try, or reset their model. Model choice trades off speed, thinking-pause, and cost — it is NOT a remedy for anything about how you write. If they want shorter answers, less commentary, fewer caveats, or a different tone, that is YOUR prose: write differently. Never propose a model change as the fix for a style complaint, and never steer someone off the default to solve one. A pin is permanent and applies everywhere, so prefer leaving people on the default.`,
     inputSchema: {
       type: "object" as const,
       properties: {
         model: {
           type: "string" as const,
-          enum: ["sonnet", "opus", "fable"],
+          enum: ["default", "sonnet", "opus", "fable"],
           description:
-            "Each value pins that model for this person; 'fable' is the current fleet default, 'sonnet' is the cheapest.",
+            `'default' CLEARS any pin so they follow the fleet default (currently ${defaultModelLabel}) and keep getting future upgrades automatically; the other three pin that model permanently, on every surface, until it is changed again.`,
         },
       },
       required: ["model"] as const,
     },
     run: async (input) => {
-      const choice = input.model as "sonnet" | "opus" | "fable";
+      const choice = input.model as "default" | "sonnet" | "opus" | "fable";
+      // `undefined` removes the field entirely — the mutation's documented
+      // clear path, now finally reachable from a surface.
+      const pref = choice === "default" ? undefined : choice;
       await ctx.runMutation(internal.users.setAideModelInternal, {
         callerUserId,
-        model: choice,
+        model: pref,
       });
-      const label =
-        choice === "fable"
-          ? "Claude Fable 5"
-          : choice === "opus"
-            ? "Claude Opus 4.8"
-            : "Claude Sonnet 5";
+      const label = pref
+        ? modelLabel(resolveAideModel(pref))
+        : `the default (${defaultModelLabel})`;
       emit({
         toolComplete: {
           name: "set_aide_model",
-          result: `Aide model set to ${label}`,
+          result: pref
+            ? `Aide model set to ${label}`
+            : `Aide model pin cleared — following ${label}`,
         },
       });
-      return `Done — this assistant now runs on ${label} for you, starting with your next message.${
+      if (!pref) {
+        return `Done — their pin is cleared, so this assistant follows ${label} from their next message, and they'll pick up future model upgrades automatically.`;
+      }
+      return `Done — this assistant now runs on ${label} for them, starting with their next message. This is a permanent pin across every surface until they change it or reset to the default.${
         choice === "fable"
-          ? " Heads up: Fable thinks before it speaks, so expect a longer pause before the first words of each reply."
+          ? ` Heads up: ${modelLabel(MODELS.FABLE)} thinks before it speaks, so expect a longer pause before the first words of each reply.`
           : ""
       }`;
     },
   });
 
-  // Relay a Slack DM to a linked staff member ON BEHALF of the current staff
-  // user — the courier the aide was missing ("send that to Andy on Slack").
-  // Every staff role, every surface (in-app dock, Slack, MCP). The DM is
-  // posted by the bot but ALWAYS opens with a bold attribution line naming the
-  // HUMAN sender so it can never read as the bot's own words, then their
-  // message verbatim (escaped). Recipient must be a STAFF user WITH a linked
-  // slackUserId — never a scholar/parent (they aren't even candidates: the
-  // backing directory query is staff-only). Mirrors the parentMessageSlack
-  // attribution + escape + markdown posting pattern.
+  // How many matching staff `send_slack_dm` will name back when a recipient is
+  // ambiguous. Above this it refuses to list rather than enumerating the staff
+  // table — see the reasoning at the call site.
+  const AMBIGUOUS_RECIPIENT_LIST_CAP = 5;
+
+  // Relay a Slack message to a linked staff member ON BEHALF of the current
+  // staff user — the courier the aide was missing ("send that to Andy on
+  // Slack"). Every staff role, every surface (in-app dock, Slack, MCP).
+  //
+  // It lands in a GROUP DM holding the sender, the recipient, and the bot —
+  // NOT a 1:1 bot→recipient DM. Same reasoning as the reviewer notification
+  // (`notifyReviewerPrClaim` / `.claude/rules/rabbithole-slack-bot.md`): two
+  // disconnected conversations leave neither party able to see the handoff,
+  // and a recipient who wants to answer a relay has nowhere to answer it. One
+  // room containing both people makes the relay self-evidencing and gives them
+  // somewhere to talk it through. `conversations.open` is idempotent on the
+  // member set, so repeat relays between the same pair reuse the same room
+  // rather than spawning new ones. Falls back to a 1:1 DM to the recipient
+  // when the SENDER has no linked Slack identity (or the open fails) —
+  // degraded, never dropped.
+  //
+  // The message is posted by the bot but ALWAYS opens with a bold attribution
+  // line naming the HUMAN sender so it can never read as the bot's own words,
+  // then their message verbatim (escaped). Bold is `**…**`, not `*…*`: these
+  // go out as `markdown_text`, which is CommonMark, where a single asterisk is
+  // EMPHASIS — the live relay that motivated this work rendered its
+  // "bold" attribution in italics.
+  //
+  // Recipient must be a STAFF user WITH a linked slackUserId — never a
+  // scholar/parent (they aren't even candidates: the backing directory query
+  // is staff-only).
+  //
+  // There is deliberately NO confirm-before-send turn. It had one until
+  // 2026-09-17, and the failure it caused is the reason this shape exists: a
+  // teacher asked the aide to pass a bug report to Andy, the aide asked him to
+  // confirm, he didn't answer — and because the confirmation lived only in
+  // prose and an unsent relay looks exactly like a sent one, he left believing
+  // Rabbithole had sent it. The send is attributed and a colleague DM is cheap
+  // to correct; a silently dropped one is not. The receipt (with the Slack
+  // permalink) is what makes the send legible, not a prompt.
   const sendSlackDmTool = betaTool({
     name: "send_slack_dm",
     description:
-      "Send a REAL Slack direct message to another STAFF member, as a relay FROM the current staff user — you are a courier, not the author. Use when the person asks to 'message / DM / tell / ping <someone> on Slack'. The DM is posted by the Rabbithole bot but ALWAYS opens with a bold line attributing it to the human sender, followed by their message verbatim; you must never write your own words into it or reword theirs. BEFORE calling, show the person the EXACT message text and the resolved recipient and get an explicit yes — never send speculatively. `recipient` is a staff member's name or username; an ambiguous name is rejected with the candidate list so you can ask which one they mean. Only staff who are linked to Slack can be reached (an admin links them in /admin); scholars and parents can never be DMed.",
+      "Send a REAL Slack message to another STAFF member the sender can reach, as a relay FROM the current staff user — you are a courier, not the author. Use when the person asks to 'message / DM / tell / ping / send that to <someone> on Slack'. It lands in a Slack GROUP DM holding the sender, the recipient, and this bot, so the recipient can reply straight to the sender; the message is posted by the bot but ALWAYS opens with a bold line attributing it to the human sender, followed by their words verbatim. Never write your own words into it or reword theirs. " +
+      "SEND IT IMMEDIATELY — do NOT stop to ask 'shall I send this?' first. An unanswered confirmation looks exactly like a message that was sent, which is how a relay gets silently dropped and the sender walks away believing it went. Call the tool, then tell them it's sent and give them the Slack link this returns. The only time to ask first is when you genuinely don't know WHAT to send or WHO to send it to: if they're wondering aloud whether to tell someone, or haven't given you the message, ask for the missing piece — that is a gap in the instruction, not a confirmation step. " +
+      "`recipient` is a staff member's name or username; an ambiguous name is rejected with the candidate list so you can ask which one they mean. Reachable means staff at the sender's own school(s), plus deployment-wide staff who belong to no single school (the platform admin, curriculum designers) — staff at a DIFFERENT school are not reachable and simply won't be found. Only staff linked to Slack can be reached (an admin links them in /admin); scholars and parents can never be messaged this way.",
     inputSchema: {
       type: "object" as const,
       properties: {
         recipient: {
           type: "string" as const,
           description:
-            "The STAFF recipient's name or username (case-insensitive). An ambiguous partial name is rejected with the candidate list rather than guessed.",
+            "The STAFF recipient's name or username (case-insensitive), resolved against the staff the sender can reach. An ambiguous partial name is rejected with the candidate list rather than guessed.",
         },
         message: {
           type: "string" as const,
@@ -1481,12 +1619,15 @@ export async function assembleCurriculumTools(
       }
 
       // Resolve against the STAFF directory (staff-only, so a scholar/parent
-      // never matches). Exact username wins outright (usernames are unique);
-      // otherwise fall back to the strict, ambiguity-rejecting name matcher the
-      // emergency-info tool uses.
+      // never matches) SCOPED TO WHAT THE SENDER CAN REACH — their own
+      // school(s), plus staff who belong to no single school. Knowing a name at
+      // another institution is not authority to message that person. Exact
+      // username wins outright (usernames are unique); otherwise fall back to
+      // the strict, ambiguity-rejecting name matcher the emergency-info tool
+      // uses.
       const staff = await ctx.runQuery(
         internal.users.listStaffForSlackDmInternal,
-        {},
+        { callerUserId },
       );
       const lower = recipient.toLowerCase();
       const byUsername = staff.filter(
@@ -1497,13 +1638,32 @@ export async function assembleCurriculumTools(
           ? ({ kind: "match", scholar: byUsername[0] } as const)
           : matchScholarByName(recipient, staff);
       if (m.kind === "none") {
-        return `I couldn't find a staff member named "${recipient}" to DM on Slack. I can only send Slack DMs to staff (teachers, admins, and other staff) — not scholars or parents.`;
+        return `I couldn't find a staff member named "${recipient}" the sender can reach on Slack. I can reach staff at the sender's own school(s), plus staff who belong to no single school — not scholars, not parents, and not staff at a different school. If they meant someone at another school, that person has to be reached directly in Slack.`;
       }
       if (m.kind === "ambiguous") {
+        // Listing candidates is a DISAMBIGUATION PROMPT, not a directory.
+        // `matchByName` falls back to substring matching, so a one-character
+        // recipient matches most of the directory. That directory is now
+        // scoped to the staff the sender can reach, so this no longer leaks
+        // ACROSS schools the way it did when the backing query was
+        // deployment-wide —
+        // but being read every colleague's name and username is a directory
+        // dump within a school too, which is what the cap is for. Refusing
+        // past a handful removes the enumeration primitive: you can still
+        // confirm a name you already know, but you cannot ask the tool to list
+        // people.
+        //
+        // The cap isn't a tuned classifier threshold — it's the point past
+        // which a question stops being a question. Choosing between two or
+        // three colleagues is a real ask; being read twenty names is a
+        // directory dump wearing a question mark.
+        if (m.candidates.length > AMBIGUOUS_RECIPIENT_LIST_CAP) {
+          return `"${recipient}" matches too many staff to choose between. Ask them for the person's full name or username and try again — I won't list everyone who matches.`;
+        }
         const candidates = m.candidates
           .map((c) => (c.username ? `${c.name} (@${c.username})` : c.name))
           .join(", ");
-        return `"${recipient}" is ambiguous — more than one staff member matches: ${candidates}. Ask which one they mean, then try again with a full name or username.`;
+        return `"${recipient}" is ambiguous — more than one reachable staff member matches: ${candidates}. Ask which one they mean, then try again with a full name or username.`;
       }
       const target = m.scholar;
       if (!target.slackUserId) {
@@ -1515,42 +1675,129 @@ export async function assembleCurriculumTools(
         return "Slack isn't configured on this deployment, so I can't send Slack DMs.";
       }
 
-      // Attribution is mandatory: the DM opens with a bold line naming the
-      // HUMAN sender, then their message verbatim — both interpolated values
-      // run through escapeSlackText so the bot never emits text that could read
-      // as its own (or someone else's) authored words.
       const sender = await ctx.runQuery(internal.users.getByIdInternal, {
         id: callerUserId,
       });
       const senderName =
         sender?.name ?? sender?.username ?? "a Rabbithole staff member";
-      const text = `*From ${escapeSlackText(senderName)} (via Rabbithole):*\n${escapeSlackText(
-        message,
-      )}`;
+      const senderSlackId = sender?.slackUserId ?? null;
 
-      let res: { ok: boolean; ts?: string };
+      // Put BOTH people in one room, so the recipient can answer the relay
+      // where it arrived. Three distinct reasons that can't happen, tracked
+      // SEPARATELY rather than collapsed into one "not in a group" boolean:
+      // the receipt explains itself to a human, and "Slack refused to open the
+      // room" must never be reported as "you aren't linked to Slack" — that
+      // sends someone to /admin to fix something that isn't broken. (The
+      // engineering-principles scar: an agent-facing string describing normal
+      // operation as breakage manufactures work for a person.)
+      type Placement = "group" | "self" | "sender_unlinked" | "open_failed";
+      let placement: Placement;
+      let channel = target.slackUserId;
+      if (senderSlackId === target.slackUserId) {
+        // Relaying to yourself — already a 1:1 conversation, nothing to open.
+        placement = "self";
+      } else if (!senderSlackId) {
+        placement = "sender_unlinked";
+      } else {
+        const opened = await openConversation(token, [
+          senderSlackId,
+          target.slackUserId,
+        ]);
+        if (opened.ok && opened.channelId) {
+          channel = opened.channelId;
+          placement = "group";
+        } else {
+          // Degraded, never dropped — delivering the message matters more than
+          // the room it lands in. `missing_scope` here means the app needs
+          // mpim:write granted AND reinstalled (see the Slack rule).
+          console.warn(
+            `[send_slack_dm] could not open the sender/recipient group DM (${opened.error ?? "no channel id"}) — falling back to a 1:1 DM to the recipient`,
+          );
+          placement = "open_failed";
+        }
+      }
+      const inGroup = placement === "group";
+
+      // Attribution is mandatory: the message opens with a BOLD line naming the
+      // HUMAN sender, then their words verbatim. Every interpolated value is
+      // either a character-allowlisted mention or inline-escaped, so neither a
+      // crafted display name nor anything else can close the attribution span
+      // and open a second, equally convincing one.
+      // `**` not `*` — markdown_text is CommonMark. Probed live 2026-09-17:
+      // Slack stores `**x**` back as mrkdwn `*x*` (bold) and `*x*` as `_x_`.
+      const from = inGroup && senderSlackId
+        ? slackMention(senderSlackId)
+        : escapeSlackInline(senderName);
+      // The footer is the BOT's own voice under a line attributing everything
+      // above it to a human, so it says so out loud. Without the prefix a
+      // recipient can reasonably read it as the sender's words — which is the
+      // exact confusion the attribution line exists to prevent.
+      const footer =
+        placement === "group"
+          ? `_Relayed by Rabbithole — reply here and ${from} will see it._`
+          : placement === "self"
+            ? null
+            : `_Relayed by Rabbithole. ${escapeSlackInline(senderName)} isn't in this conversation, so a reply here won't reach them._`;
+      const text = [
+        `**From ${from} (via Rabbithole):**`,
+        escapeSlackText(message),
+        ...(footer ? [footer] : []),
+      ].join("\n\n");
+
+      let res: Awaited<ReturnType<typeof postMessage>>;
       try {
         // chat.postMessage with channel: <slackUserId> opens the IM implicitly
-        // (im:write) — the same pattern slackNotifications.postNow uses.
+        // (im:write) — the same pattern slackNotifications.postNow uses. With a
+        // group channel id it simply posts into the opened room.
         res = await postMessage(token, {
-          channel: target.slackUserId,
+          channel,
           text,
           markdown: true,
         });
       } catch (err) {
         console.error("send_slack_dm postMessage threw:", err);
-        return `Something went wrong reaching Slack to DM ${target.name}. Please try again in a moment.`;
+        return `Something went wrong reaching Slack to message ${target.name}. Please try again in a moment.`;
       }
       if (!res.ok) {
-        return `Slack wouldn't deliver the DM to ${target.name}. An admin may need to re-check their Slack link in /admin.`;
+        // `ambiguous` means Slack may have accepted the post and lost the
+        // response. Saying "it didn't send" there invites a retry that
+        // double-pings a colleague, so report the uncertainty instead of
+        // resolving it in the direction that causes the duplicate.
+        return res.ambiguous
+          ? `Slack didn't confirm the message to ${target.name}, and it may or may not have gone through. Do NOT resend automatically — tell the sender to check Slack first.`
+          : `Slack wouldn't deliver the message to ${target.name}. An admin may need to re-check their Slack link in /admin.`;
       }
+
+      // The permalink is the receipt: it is the only durable trace of the send
+      // that outlives the stream (tool activity is cleared when the turn ends),
+      // and it is the sender's way into the conversation to follow up.
+      //
+      // Address it by the channel SLACK resolved, not the one we passed. On the
+      // 1:1 paths we pass a user id, which is not a conversation id —
+      // chat.getPermalink rejects it with `channel_not_found`, so every
+      // fallback silently lost its receipt (probed live 2026-09-17). Still
+      // best-effort: it returns null rather than throwing, and a delivered
+      // message with no link beats a failed send.
+      const postedChannel = res.channel ?? channel;
+      const permalink = res.ts
+        ? await getMessagePermalink(token, postedChannel, res.ts)
+        : null;
+
       emit({
         toolComplete: {
           name: "send_slack_dm",
-          result: `DM sent to ${target.name}`,
+          result: `Sent to ${target.name} on Slack`,
         },
       });
-      return `Sent to ${target.name} on Slack.`;
+      const where: Record<Placement, string> = {
+        group: `Sent to ${target.name} on Slack, in a group DM with the two of them, so ${target.name} can reply straight back to the sender.`,
+        self: `Sent to ${target.name} on Slack — that's the sender's own DM with Rabbithole.`,
+        sender_unlinked: `Sent to ${target.name} on Slack as a 1:1 DM from the bot. The sender has no linked Slack account (an admin can link them in /admin), so I couldn't put them both in one conversation and ${target.name}'s reply won't come back to them.`,
+        open_failed: `Sent to ${target.name} on Slack as a 1:1 DM from the bot. Slack wouldn't open a shared conversation this time — nothing is wrong with either account — so ${target.name}'s reply won't come back to the sender.`,
+      };
+      return permalink
+        ? `${where[placement]} Tell the sender it's sent, and GIVE THEM THIS LINK so they can follow up in Slack: ${permalink}`
+        : `${where[placement]} Tell the sender it's sent. (Slack didn't return a link to the message this time.)`;
     },
   });
 
@@ -1575,6 +1822,7 @@ export async function assembleCurriculumTools(
         ...scholarReadTools,
         ...scholarWriteTools,
         ...externalAppsTools,
+        ...auditLogTools,
       );
     }
     if (hasHealthManagementAccess) tools.push(...healthRecordTools);
@@ -1592,6 +1840,9 @@ export async function assembleCurriculumTools(
     // independently re-authorized in the backing query. Channel calls return
     // only a DM instruction; private surfaces receive the minimum emergency set.
     ...healthRecordTools,
+    // A scholar's typed-message spelling evidence — teacher/admin only; the
+    // factory returns [] for every other role (designer, staff, parent, scholar).
+    ...spellingEvidenceTools,
     // General curriculum reads + the quality-run kickoffs — teacher /
     // admin / curriculum_designer. Scholar-agnostic, so safe for designers
     // (rehearse/debrief gate the same as the public start/groundExperiment,
@@ -1679,11 +1930,15 @@ export async function assembleCurriculumTools(
     // Practice skill-tree tool (get_scholar_skill_tree) — teacher/admin only,
     // already gated inside makePracticeSkillTreeTools; empty otherwise.
     ...practiceSkillTreeTools,
+    // Math-plan tools (get_scholar_math_plan / set_scholar_math_plan) —
+    // teacher/admin only, already gated inside makeMathPlanTools.
+    ...mathPlanTools,
     // Master-schedule tools (weekly timetable direct-manipulation parity for
     // the bot) — teacher/admin only, gated inside makeMasterScheduleTools;
     // empty otherwise.
     ...masterScheduleTools,
     ...externalAppsTools,
+    ...auditLogTools,
     ...googleDocsTools,
   );
   return tools;

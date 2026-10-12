@@ -5,6 +5,7 @@ import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { buildObserverSystemPrompt } from "./prompts";
+import { resolveObserverOrigin } from "./lib/observerOrigin";
 import { MODELS } from "./lib/models";
 import { recordAnthropicUsage } from "./usage";
 import { ROLES } from "./lib/roles";
@@ -20,7 +21,7 @@ import { conceptLabelsNearDuplicate, AUTO_MERGE_THRESHOLD } from "./lib/conceptL
 //
 // Rebuild a scholar's mastery record FROM SCRATCH with the current (post-#288,
 // better-calibrated) observer, to retire the inflated/accumulated records the
-// old observer left. See evals/observer/FINDINGS-rigor.md + TODO.html (#observer-mastery-dedup).
+// old observer left. See evals/observer/FINDINGS-rigor.md + Linear TRA-130.
 //
 // Why not re-call observer.analyzeSession: that ALSO writes seeds, sessionSignals,
 // crossDomainConnections, granuleEvidence, the analyses/pulse row, reading-level
@@ -238,8 +239,12 @@ export const run = internalAction({
       }
 
       const transcript = buildObserverTranscript(context.chatHistory);
+      const origin = resolveObserverOrigin(context);
       // Independent fresh pass: no prior observations / seeds / signals.
-      const userMessage = buildObserverUserMessage(transcript, [], [], [], context);
+      const userMessage = buildObserverUserMessage(transcript, [], [], [], {
+        ...context,
+        origin,
+      });
 
       const observations: typeof proposed = [];
       try {

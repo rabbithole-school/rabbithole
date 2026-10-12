@@ -27,6 +27,7 @@ import { requireAnthropicApiKey } from "./lib/anthropic";
 import { recordAnthropicUsage } from "./usage";
 import { ROLES } from "./lib/roles";
 import { STUDIO_VOCABULARY, type StudioFix, type StudioFixResult } from "../shared/studioContract";
+import { assertWritableAction } from "./lib/auth";
 
 const VOCAB_LIST = STUDIO_VOCABULARY.join(", ");
 
@@ -213,6 +214,7 @@ export const fix = action({
 
     const scholarId = await getAuthUserId(ctx);
     if (!scholarId) throw new Error("Not authenticated");
+    await assertWritableAction(ctx);
 
     if (args.source.length > MAX_FIXER_SOURCE_LENGTH) return fallback;
 

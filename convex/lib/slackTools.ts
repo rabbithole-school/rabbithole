@@ -17,6 +17,7 @@
 //   set_group_notify_mode      teacher/admins
 //   link_alerts_channel         platform_admin
 //   link_parent_message_channel platform_admin
+//   link_admissions_channel     platform_admin
 //   issue_parent_enroll_link   scholar-admin       (enrollment.issueParentEnrollLink)
 
 import type { ActionCtx } from "../_generated/server";
@@ -26,6 +27,11 @@ import { isTeacherRole, isScholarAdminRole, isPlatformAdminRole, type Role } fro
 import type { AideEmit } from "./aideStream";
 import { setConversationTopic, listItemInfo, listItems, listItemCreate, listItemUpdate, listItemDelete, postMessage } from "./slackApi";
 import { parseListId, buildListCell, listSchemaColumns, formatListForModel, WRITABLE_LIST_TYPES, type SlackListColumn } from "./slackLists";
+import { audienceFromSlackSurface, isPrivateAudience } from "./aideAudience";
+import {
+  canOperateSchoolDevices,
+  makeDeviceOpsTools,
+} from "./deviceOpsTools";
 
 let institutionSlugExamples = '"primary", "guests"';
 
@@ -98,9 +104,16 @@ export type SlackSurface = "channel" | "dm" | "mpim";
  * named option instead of changing this — `guardianFormAnswersSurface` is the
  * worked example (guardian-form answers, where a deliberately-composed private
  * group DM does count as private).
+ *
+ * Derived from the shared audience axis (`lib/aideAudience.ts`) rather than
+ * re-testing `surface === "dm"` here, so the gate the TOOLS enforce and the
+ * disclosure doctrine the PROMPTS state cannot drift apart. Behaviour is
+ * unchanged: only a 1:1 DM is private.
  */
 export function writeSurfaceFor(surface: SlackSurface): "private" | "channel" {
-  return surface === "dm" ? "private" : "channel";
+  return isPrivateAudience(audienceFromSlackSurface(surface))
+    ? "private"
+    : "channel";
 }
 
 // Described only when the Lists tools are actually assembled (scholar-admin).
@@ -172,9 +185,12 @@ export async function makeSlackTools(
     token,
     hasSchoolOperationsAccess = false,
   } = opts;
-  const canOperateSchool =
-    isScholarAdminRole(role) ||
-    (role === "staff" && hasSchoolOperationsAccess);
+  // One predicate, shared with the MCP connector (lib/deviceOpsTools.ts) so a
+  // gating change cannot land on one agent surface and miss the other.
+  const canOperateSchool = canOperateSchoolDevices(
+    role,
+    hasSchoolOperationsAccess,
+  );
   const { betaTool } = await import(
     "@anthropic-ai/sdk/helpers/beta/json-schema"
   );
@@ -444,6 +460,7 @@ export async function makeSlackTools(
   }
 
 
+
   // ── link_parent_message_channel — platform admin only, CHANNEL surface ─
   // The shared private staff inbox for teacher↔parent messages. Parent/child
   // PII is intentionally visible to members, so the tool's success text always
@@ -528,111 +545,21 @@ export async function makeSlackTools(
   }
 
 
-  // ── Rabbithole Lock — school operations, both Slack surfaces ─────────
-  // The read-before-write split is load-bearing: the model must resolve opaque
-  // paired-device ids and show the exact iPads to the requester before a remote
-  // disarm. The internal functions repeat role + institution checks; prompt
-  // confirmation is never treated as the authorization boundary.
-  if (canOperateSchool) {
-    tools.push(
-      betaTool({
-        name: "list_rabbithole_lock_devices",
-        description:
-          "List paired school iPads and their Rabbithole Lock state. Use this BEFORE set_rabbithole_lock to resolve the exact paired_device_ids and show the requester which iPads will change. Optionally search by device label, serial, scholar name/username, or id. The inventory is complete; rows for Extended Education (program-guest) scholars are tagged extendedEducation: true.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            search: {
-              type: "string" as const,
-              description:
-                "Optional device label, serial, scholar name/username, or id filter.",
-            },
-          },
-          required: [] as const,
-        },
-        run: async (input) => {
-          const result = await ctx.runQuery(internal.deviceLock.listForSlack, {
-            callerUserId,
-            search: input.search?.trim() || undefined,
-          });
-          if (!result.ok) return result.message;
-          emit({
-            toolComplete: {
-              name: "list_rabbithole_lock_devices",
-              result: `${result.devices.length} iPad${result.devices.length === 1 ? "" : "s"}`,
-            },
-          });
-          return JSON.stringify(result.devices, null, 2);
-        },
-      }),
-    );
 
-    tools.push(
-      betaTool({
-        name: "set_rabbithole_lock",
-        description:
-          "Arm or disarm Rabbithole Lock on one or more paired school iPads. You MUST call list_rabbithole_lock_devices first, show the exact resolved devices and action to the requester, and receive confirmation before calling this write tool. Disarm defaults to until_midnight in each iPad's school timezone; alternatives are one_time (re-arms when Rabbithole is entered again), until_further_notice, and timed (re-arms automatically after a fixed number of minutes — pass disarm_minutes, 5-480, whenever disarm_mode is timed).",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            paired_device_ids: {
-              type: "array" as const,
-              description:
-                "Exact pairedDeviceId values returned by list_rabbithole_lock_devices.",
-              items: { type: "string" as const },
-            },
-            state: {
-              type: "string" as const,
-              enum: ["armed", "disarmed"] as const,
-            },
-            disarm_mode: {
-              type: "string" as const,
-              enum: [
-                "one_time",
-                "until_midnight",
-                "until_further_notice",
-                "timed",
-              ] as const,
-              description:
-                "For disarm only. Defaults to until_midnight.",
-            },
-            disarm_minutes: {
-              type: "number" as const,
-              description:
-                "Required when disarm_mode is timed: how many minutes from now to stay disarmed (integer, 5-480). Ignored for every other disarm_mode.",
-            },
-          },
-          required: ["paired_device_ids", "state"] as const,
-        },
-        run: async (input) => {
-          const result = await ctx.runMutation(
-            internal.deviceLock.setFromSlack,
-            {
-              callerUserId,
-              pairedDeviceIds: (input.paired_device_ids ?? []) as Id<"pairedDevices">[],
-              state: input.state as "armed" | "disarmed",
-              disarmMode: input.disarm_mode as
-                | "one_time"
-                | "until_midnight"
-                | "until_further_notice"
-                | "timed"
-                | undefined,
-              disarmMinutes: input.disarm_minutes as number | undefined,
-            },
-          );
-          if (result.ok) {
-            emit({
-              toolComplete: {
-                name: "set_rabbithole_lock",
-                result: result.message,
-              },
-            });
-          }
-          return result.message;
-        },
-      }),
-    );
-  }
+  // ── Managed-device operations — school operations, both Slack surfaces ─
+  // Defined ONCE in lib/deviceOpsTools.ts and shared verbatim with the MCP
+  // connector, because the read-before-write safety contract lives in the
+  // tool prose and must not exist in two drifting copies. The internal
+  // functions behind them repeat role + institution checks; prompt
+  // confirmation is never the authorization boundary.
+  tools.push(
+    ...(await makeDeviceOpsTools(ctx, emit, {
+      role,
+      callerUserId,
+      hasSchoolOperationsAccess,
+      source: "slack",
+    })),
+  );
 
   // ── Class focus — teachers, both Slack surfaces ────────────────────────
   // The headline ad-hoc capability: put an app, a video, or any link in

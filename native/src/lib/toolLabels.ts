@@ -17,7 +17,7 @@ export const SCHOLAR_TOOL_LABELS: Readonly<Record<string, string>> = {
   list_rabbithole_files: "Looking through Rabbithole's code",
   read_rabbithole_file: "Reading Rabbithole's code",
   search_rabbithole_code: "Searching Rabbithole's code",
-  // Scholar tutor tools (/project-stream). `generate_image` is intentionally
+  // Scholar tutor tools (/session-stream). `generate_image` is intentionally
   // absent — image generation has its own dedicated activity state.
   create_code: "Writing some code",
   edit_document: "Working on the document",
@@ -29,6 +29,10 @@ export const SCHOLAR_TOOL_LABELS: Readonly<Record<string, string>> = {
   finish_teach_back: "Thanks for teaching me",
   share_resource: "Sharing a resource",
   run_app_action: "Setting up the app",
+  // App designer parking lot. stay_silent has no label on purpose: the stream
+  // never announces it.
+  park_idea: "Parking an idea",
+  unpark_idea: "Taking an idea off the lot",
 };
 
 /** A tool id → its kid-facing gerund label. Unknown ids get neutral copy rather

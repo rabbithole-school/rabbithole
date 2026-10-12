@@ -81,7 +81,7 @@ The live LLM pass (`run.ts`) is manual, like `evals/tutor-quality/run.ts`.
   teacher feedback on student writing**, not conversational Socratic tutoring.
   `acknowledges-strength` in particular can read a good withholding question as
   "no strength named". Treat `manageable` as the high-signal dimension.
-- **Model swap.** CZI's reference model is `gpt-5.4`; we run our `JUDGE_MODEL`.
+- **Model swap.** CZI's reference model is `gpt-5.4`; we run our tutor-quality judge (`TUTOR_JUDGE_MODEL`, Fable 5.1).
   Scores are indicative, not identical to CZI's published behaviour.
 - **Single-turn.** Each turn is judged with its immediate predecessor, without
   full conversation history — so "anchored"-style provenance checks are out of

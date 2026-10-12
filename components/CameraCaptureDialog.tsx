@@ -2,7 +2,21 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Flex, IconButton, Text, Button } from "@chakra-ui/react";
-import { Camera, CameraRotate, X } from "@phosphor-icons/react";
+import { Camera, CameraRotate, Stop, X } from "@phosphor-icons/react";
+import { useClipRecorder } from "@/hooks/useClipRecorder";
+import { buildContactSheet, clipFileName, containerMimeType } from "@/lib/mediaRecording";
+import {
+  MESSAGE_VIDEO_BITS_PER_SECOND,
+  MESSAGE_VIDEO_MAX_MS,
+} from "@/shared/messageAttachments";
+import { formatCaptureDuration } from "@/shared/captureMedia";
+
+export type CapturedMedia = {
+  file: File;
+  durationMs: number;
+  /** JPEG contact sheet of the clip, or undefined if extraction failed. */
+  poster?: File;
+};
 
 /**
  * Shared in-chat camera capture. Renders a full-bleed overlay with a live
@@ -18,6 +32,8 @@ export function CameraCaptureDialog({
   open,
   onClose,
   onCapture,
+  onCaptureMedia,
+  mode = "photo",
   /** Where the overlay anchors. "absolute" (default) fills the nearest
    *  positioned ancestor — the scholar chat pane, so the camera stays inside
    *  the chat column. "fixed" covers the viewport for composers with no such
@@ -39,6 +55,13 @@ export function CameraCaptureDialog({
   open: boolean;
   onClose: () => void;
   onCapture: (file: File) => void;
+  /** Video mode only: hands back the recorded clip + its duration + a poster
+   *  contact sheet. Photo mode never calls this (it uses onCapture). */
+  onCaptureMedia?: (media: CapturedMedia) => void;
+  /** "photo" (default) is the historical still-capture flow, byte-for-byte
+   *  unchanged for every existing consumer. "video" turns the shutter into a
+   *  record/stop control with an in-dialog playback preview. */
+  mode?: "photo" | "video";
   overlayPosition?: "absolute" | "fixed";
   multiShot?: boolean;
   capturedCount?: number;
@@ -50,6 +73,11 @@ export function CameraCaptureDialog({
   // lets the add-by-photo flow open rear-first instead.
   const [facing, setFacing] = useState<"user" | "environment">(initialFacing);
   const [error, setError] = useState<string | null>(null);
+  // Video mode: whether the live stream is acquired (Record stays disabled
+  // until it is, so the button can't fire before getUserMedia resolves) and
+  // whether we fell back to a silent (no-mic) capture.
+  const [streamReady, setStreamReady] = useState(false);
+  const [audioUnavailable, setAudioUnavailable] = useState(false);
   // Brief white flash on a burst capture so the tap registers even though the
   // viewfinder stays live (no dialog close to signal the shot).
   const [flash, setFlash] = useState(false);
@@ -64,8 +92,28 @@ export function CameraCaptureDialog({
   // it, leaving the camera (and its indicator light) on until page reload.
   const genRef = useRef(0);
 
+  // Video mode: the clip recorder + a preview object URL for the recorded blob.
+  const {
+    phase: recPhase,
+    elapsedMs,
+    durationMs,
+    recordedBlob,
+    recordedUrl,
+    mimeType: recMime,
+    error: recorderError,
+    startRecording,
+    stopRecording,
+    reset: resetRecording,
+  } = useClipRecorder({
+    kind: "video",
+    maxMs: MESSAGE_VIDEO_MAX_MS,
+    bitsPerSecond: MESSAGE_VIDEO_BITS_PER_SECOND,
+  });
+  const [preparing, setPreparing] = useState(false);
+
   const stopStream = useCallback(() => {
     genRef.current++;
+    setStreamReady(false);
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
   }, []);
@@ -85,10 +133,37 @@ export function CameraCaptureDialog({
       }
       try {
         stopStream();
+        setAudioUnavailable(false);
         const gen = genRef.current;
-        const stream = await navigator.mediaDevices
-          .getUserMedia({ video: { facingMode: { ideal: face } } })
-          .catch(() => navigator.mediaDevices.getUserMedia({ video: true }));
+        const gum = (c: MediaStreamConstraints) =>
+          navigator.mediaDevices.getUserMedia(c);
+        let stream: MediaStream;
+        let silent = false;
+        if (mode === "video") {
+          // Video mode wants the microphone so the clip has an audio track (its
+          // transcript is the model's only read of what was said). But a camera
+          // with no mic — or camera-allowed / mic-denied — must still record: on
+          // audio+video failure, retry video-only and record a silent clip.
+          try {
+            stream = await gum({
+              video: { facingMode: { ideal: face } },
+              audio: true,
+            });
+          } catch {
+            try {
+              stream = await gum({ video: true, audio: true });
+            } catch {
+              stream = await gum({
+                video: { facingMode: { ideal: face } },
+              }).catch(() => gum({ video: true }));
+              silent = true;
+            }
+          }
+        } else {
+          stream = await gum({ video: { facingMode: { ideal: face } } }).catch(
+            () => gum({ video: true }),
+          );
+        }
         // Closed/unmounted or restarted while we were acquiring: release the now-
         // orphaned stream instead of parking it in a ref nothing will ever stop.
         if (gen !== genRef.current) {
@@ -96,6 +171,8 @@ export function CameraCaptureDialog({
           return;
         }
         streamRef.current = stream;
+        setAudioUnavailable(silent);
+        setStreamReady(true);
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           void videoRef.current.play().catch(() => {});
@@ -111,7 +188,7 @@ export function CameraCaptureDialog({
         );
       }
     },
-    [stopStream],
+    [stopStream, mode],
   );
 
   // Start the camera when the dialog opens; stop it when it closes/unmounts.
@@ -124,8 +201,9 @@ export function CameraCaptureDialog({
 
   const handleClose = useCallback(() => {
     stopStream();
+    resetRecording();
     onClose();
-  }, [stopStream, onClose]);
+  }, [stopStream, resetRecording, onClose]);
 
   const flipCamera = useCallback(() => {
     const next = facing === "user" ? "environment" : "user";
@@ -169,7 +247,34 @@ export function CameraCaptureDialog({
     [],
   );
 
+  const startVideoRecording = useCallback(() => {
+    if (streamRef.current) startRecording(streamRef.current);
+  }, [startRecording]);
+
+  const handleUseVideo = useCallback(async () => {
+    if (!recordedBlob) return;
+    setPreparing(true);
+    const fullMime = recMime ?? recordedBlob.type ?? "video/webm";
+    // The contact sheet reads the blob directly, so it keeps the full codecs
+    // mime; the File's `type` becomes the upload Content-Type and MUST be the
+    // bare container (a codecs comma is an invalid header — Convex 400s).
+    const poster = await buildContactSheet(recordedBlob, { durationMs });
+    const file = new File([recordedBlob], clipFileName("video", fullMime), {
+      type: containerMimeType(fullMime),
+    });
+    onCaptureMedia?.({ file, durationMs, poster });
+    setPreparing(false);
+    resetRecording();
+    handleClose();
+  }, [recordedBlob, recMime, durationMs, onCaptureMedia, resetRecording, handleClose]);
+
   if (!open) return null;
+
+  const videoRecording = mode === "video" && recPhase === "recording";
+  const videoReviewing = mode === "video" && recPhase === "recorded";
+  // The recorder's error (unsupported / mid-recording failure) surfaces through
+  // the same full-screen treatment as a camera-permission error.
+  const shownError = error ?? recorderError;
 
   return (
     <Flex
@@ -181,10 +286,10 @@ export function CameraCaptureDialog({
       align="center"
       justify="center"
     >
-      {error ? (
+      {shownError ? (
         <Flex flexDir="column" align="center" gap={5} px={8} maxW="md" textAlign="center">
           <Text color="white" fontFamily="heading" fontSize="md" lineHeight="1.5">
-            {error}
+            {shownError}
           </Text>
           <Button
             onClick={handleClose}
@@ -217,34 +322,92 @@ export function CameraCaptureDialog({
             alignItems="center"
             justifyContent="center"
           >
-            <video
-              ref={(el) => {
-                videoRef.current = el;
-                if (el && streamRef.current) el.srcObject = streamRef.current;
-              }}
-              autoPlay
-              playsInline
-              muted
-              // Mirror only the selfie preview (like the system camera);
-              // captures stay unmirrored so photographed text reads right.
-              style={{
-                // Fill the available space (not the video's small intrinsic
-                // size, which left a big black letterbox); objectFit:contain
-                // keeps the aspect ratio without cropping.
-                width: "100%",
-                height: "100%",
-                objectFit: "contain",
-                transform: facing === "user" ? "scaleX(-1)" : undefined,
-              }}
-            />
+            {videoReviewing && recordedUrl ? (
+              <video
+                key="playback"
+                src={recordedUrl}
+                controls
+                autoPlay
+                playsInline
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                }}
+              />
+            ) : (
+              <video
+                key="live"
+                ref={(el) => {
+                  videoRef.current = el;
+                  if (el && streamRef.current) el.srcObject = streamRef.current;
+                }}
+                autoPlay
+                playsInline
+                muted
+                // Mirror only the selfie preview (like the system camera);
+                // captures stay unmirrored so photographed text reads right.
+                style={{
+                  // Fill the available space (not the video's small intrinsic
+                  // size, which left a big black letterbox); objectFit:contain
+                  // keeps the aspect ratio without cropping.
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                  transform: facing === "user" ? "scaleX(-1)" : undefined,
+                }}
+              />
+            )}
+            {videoRecording && (
+              <Flex
+                position="absolute"
+                top={4}
+                left="50%"
+                transform="translateX(-50%)"
+                align="center"
+                gap={2}
+                bg="blackAlpha.600"
+                borderRadius="full"
+                px={3}
+                py={1.5}
+                pointerEvents="none"
+              >
+                <Box w="10px" h="10px" borderRadius="full" bg="red.500" />
+                <Text
+                  color="white"
+                  fontFamily="heading"
+                  fontSize="sm"
+                  css={{ fontVariantNumeric: "tabular-nums" }}
+                >
+                  {formatCaptureDuration(elapsedMs)} /{" "}
+                  {formatCaptureDuration(MESSAGE_VIDEO_MAX_MS)}
+                </Text>
+              </Flex>
+            )}
+            {mode === "video" && audioUnavailable && !videoReviewing && (
+              <Flex
+                position="absolute"
+                bottom={4}
+                left="50%"
+                transform="translateX(-50%)"
+                bg="blackAlpha.600"
+                borderRadius="full"
+                px={3}
+                py={1.5}
+                pointerEvents="none"
+              >
+                <Text color="white" fontFamily="heading" fontSize="xs">
+                  Recording without sound — microphone unavailable
+                </Text>
+              </Flex>
+            )}
           </Box>
-          <Flex gap={4} py={4} align="center">
-            {multiShot ? (
-              // In burst mode the close control finishes the run — make it a
-              // clear labeled "Done" pill, not a corner glyph.
+          {videoReviewing ? (
+            <Flex gap={4} py={4} align="center">
               <Button
-                onClick={handleClose}
-                bg="whiteAlpha.300"
+                onClick={resetRecording}
+                disabled={preparing}
+                bg="whiteAlpha.200"
                 color="white"
                 _hover={{ bg: "whiteAlpha.400" }}
                 borderRadius="full"
@@ -254,75 +417,152 @@ export function CameraCaptureDialog({
                 px={7}
                 h={14}
               >
-                Done
+                Retake
               </Button>
-            ) : (
+              <Button
+                onClick={() => void handleUseVideo()}
+                loading={preparing}
+                loadingText="Preparing…"
+                bg="white"
+                color="gray.800"
+                _hover={{ bg: "gray.200" }}
+                borderRadius="full"
+                fontFamily="heading"
+                fontSize="sm"
+                size="lg"
+                px={7}
+                h={14}
+              >
+                Use video
+              </Button>
+            </Flex>
+          ) : (
+            <Flex gap={4} py={4} align="center">
+              {multiShot ? (
+                // In burst mode the close control finishes the run — make it a
+                // clear labeled "Done" pill, not a corner glyph.
+                <Button
+                  onClick={handleClose}
+                  bg="whiteAlpha.300"
+                  color="white"
+                  _hover={{ bg: "whiteAlpha.400" }}
+                  borderRadius="full"
+                  fontFamily="heading"
+                  fontSize="sm"
+                  size="lg"
+                  px={7}
+                  h={14}
+                >
+                  Done
+                </Button>
+              ) : (
+                <IconButton
+                  aria-label="Cancel"
+                  onClick={handleClose}
+                  bg="whiteAlpha.200"
+                  color="white"
+                  _hover={{ bg: "whiteAlpha.400" }}
+                  borderRadius="full"
+                  size="lg"
+                  w={14}
+                  h={14}
+                >
+                  <X size={24} />
+                </IconButton>
+              )}
               <IconButton
-                aria-label="Cancel"
-                onClick={handleClose}
+                aria-label="Switch camera"
+                onClick={flipCamera}
+                disabled={videoRecording}
                 bg="whiteAlpha.200"
                 color="white"
                 _hover={{ bg: "whiteAlpha.400" }}
+                _disabled={{ opacity: 0.4, cursor: "not-allowed" }}
                 borderRadius="full"
                 size="lg"
                 w={14}
                 h={14}
               >
-                <X size={24} />
+                <CameraRotate size={24} />
               </IconButton>
-            )}
-            <IconButton
-              aria-label="Switch camera"
-              onClick={flipCamera}
-              bg="whiteAlpha.200"
-              color="white"
-              _hover={{ bg: "whiteAlpha.400" }}
-              borderRadius="full"
-              size="lg"
-              w={14}
-              h={14}
-            >
-              <CameraRotate size={24} />
-            </IconButton>
-            <Box position="relative">
-              <IconButton
-                aria-label="Take photo"
-                onClick={capturePhoto}
-                bg="white"
-                color="gray.800"
-                _hover={{ bg: "gray.200" }}
-                borderRadius="full"
-                size="lg"
-                w={16}
-                h={16}
-              >
-                <Camera size={28} />
-              </IconButton>
-              {multiShot && capturedCount > 0 && (
-                <Flex
-                  position="absolute"
-                  top="-4px"
-                  right="-4px"
-                  minW="22px"
-                  h="22px"
-                  px={1.5}
-                  bg="violet.500"
-                  color="white"
-                  borderWidth="1px"
-                  borderColor="white"
-                  borderRadius="full"
-                  align="center"
-                  justify="center"
-                  fontFamily="heading"
-                  fontSize="xs"
-                  fontWeight="700"
-                  pointerEvents="none"
-                >
-                  {capturedCount}
-                </Flex>
-              )}
-            </Box>
-          </Flex>
+              <Box position="relative">
+                {mode === "video" ? (
+                  videoRecording ? (
+                    <IconButton
+                      aria-label="Stop recording"
+                      onClick={stopRecording}
+                      bg="white"
+                      color="red.500"
+                      _hover={{ bg: "gray.200" }}
+                      borderRadius="full"
+                      size="lg"
+                      w={16}
+                      h={16}
+                    >
+                      <Stop size={28} weight="fill" />
+                    </IconButton>
+                  ) : (
+                    <IconButton
+                      aria-label="Record video"
+                      onClick={startVideoRecording}
+                      disabled={!streamReady}
+                      bg="white"
+                      _hover={{ bg: "gray.200" }}
+                      _disabled={{ opacity: 0.4, cursor: "not-allowed" }}
+                      borderRadius="full"
+                      size="lg"
+                      w={16}
+                      h={16}
+                    >
+                      <Box
+                        w="26px"
+                        h="26px"
+                        borderRadius="full"
+                        bg="red.500"
+                      />
+                    </IconButton>
+                  )
+                ) : (
+                  <IconButton
+                    aria-label="Take photo"
+                    onClick={capturePhoto}
+                    bg="white"
+                    color="gray.800"
+                    _hover={{ bg: "gray.200" }}
+                    borderRadius="full"
+                    size="lg"
+                    w={16}
+                    h={16}
+                  >
+                    <Camera size={28} />
+                  </IconButton>
+                )}
+                {multiShot && capturedCount > 0 && (
+                  <Flex
+                    position="absolute"
+                    top="-4px"
+                    right="-4px"
+                    minW="22px"
+                    h="22px"
+                    px={1.5}
+                    bg="violet.500"
+                    color="white"
+                    borderWidth="1px"
+                    borderColor="white"
+                    borderRadius="full"
+                    align="center"
+                    justify="center"
+                    fontFamily="heading"
+                    fontSize="xs"
+                    fontWeight="700"
+                    pointerEvents="none"
+                  >
+                    {capturedCount}
+                  </Flex>
+                )}
+              </Box>
+            </Flex>
+          )}
         </>
       )}
     </Flex>

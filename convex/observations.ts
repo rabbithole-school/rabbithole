@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { internalMutation } from "./_generated/server";
 import { authedQuery, authedMutation, teacherQuery } from "./lib/customFunctions";
 import { isTeacherRole } from "./lib/roles";
 import { requireTeacherOrSelf } from "./lib/auth";
@@ -119,6 +120,56 @@ export const add = authedMutation({
       type: args.type,
       weight: args.weight,
       category: args.category,
+    });
+    return await ctx.db.get(id);
+  },
+});
+
+/**
+ * Add an operator-authored observation without a signed-in user.
+ *
+ * Use type "note" for neutral operational notes. `source` identifies the
+ * calling process but is not persisted because observations have no source
+ * field.
+ */
+export const addSystemNote = internalMutation({
+  args: {
+    username: v.string(),
+    note: v.string(),
+    type: observationTypeValidator,
+    source: v.optional(v.string()),
+    authorUsername: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const scholar = await ctx.db
+      .query("users")
+      .withIndex("by_username", (q) => q.eq("username", args.username))
+      .unique();
+    if (!scholar) throw new Error(`Scholar user not found: ${args.username}`);
+
+    if (!args.authorUsername) {
+      throw new Error(
+        "authorUsername is required because observations require an author user",
+      );
+    }
+    const author = await ctx.db
+      .query("users")
+      .withIndex("by_username", (q) =>
+        q.eq("username", args.authorUsername),
+      )
+      .unique();
+    if (!author) {
+      throw new Error(`Observation author user not found: ${args.authorUsername}`);
+    }
+
+    const id = await ctx.db.insert("observations", {
+      teacherId: author._id,
+      scholarId: scholar._id,
+      sessionId: undefined,
+      note: args.note.trim(),
+      type: args.type,
+      weight: undefined,
+      category: undefined,
     });
     return await ctx.db.get(id);
   },

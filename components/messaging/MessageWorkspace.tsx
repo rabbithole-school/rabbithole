@@ -11,11 +11,14 @@ import {
   VisuallyHidden,
 } from "@chakra-ui/react";
 import type { Id } from "@/convex/_generated/dataModel";
-import { MessageThread } from "@/components/messaging/MessageThread";
+import {
+  MessageThread,
+  ScholarMessageThread,
+} from "@/components/messaging/MessageThread";
 
 /**
- * The shared family-messaging workspace: conversation list on the left and the
- * active thread or compose surface on the right.
+ * The shared messaging workspace (families, mentors, Workshop): conversation
+ * list on the left and the active thread or compose surface on the right.
  */
 export function MessageWorkspace({
   list,
@@ -38,12 +41,19 @@ export function MessageWorkspace({
       <Splitter.Panel
         id="list"
         h="full"
-        overflowY="auto"
+        overflow="hidden"
         borderRight="1px solid"
         borderColor="gray.200"
         bg="white"
       >
-        {list}
+        {/* Splitter panels clip overflow (an inline `overflow: hidden`), so
+            the child owns vertical scrolling. `relative` keeps absolutely
+            positioned bits inside it — a row's visually hidden "Unread"
+            label — which would otherwise hang off <body> below the fold and
+            give the whole page scrollable overflow. */}
+        <Box h="full" overflowY="auto" position="relative">
+          {list}
+        </Box>
       </Splitter.Panel>
 
       <Splitter.ResizeTrigger
@@ -58,16 +68,24 @@ export function MessageWorkspace({
   );
 }
 
-export function MessageThreadPane({
-  threadId,
-  surface,
-}: {
-  threadId: Id<"parentThreads">;
-  surface: "staff" | "parent";
-}) {
+/** `family` threads act as the explicit `surface`; `scholar` (mentor /
+ *  Workshop) threads derive the viewer server-side. */
+export function MessageThreadPane(
+  props:
+    | { threadId: Id<"parentThreads">; surface: "staff" | "parent" }
+    | { threadId: Id<"parentThreads">; conversation: "scholar" },
+) {
   return (
     <Box h="full" overflow="hidden">
-      <MessageThread key={threadId} threadId={threadId} surface={surface} />
+      {"conversation" in props ? (
+        <ScholarMessageThread key={props.threadId} threadId={props.threadId} />
+      ) : (
+        <MessageThread
+          key={props.threadId}
+          threadId={props.threadId}
+          surface={props.surface}
+        />
+      )}
     </Box>
   );
 }
@@ -157,4 +175,16 @@ export function MessageConversationRow({
       </NextLink>
     </Link>
   );
+}
+
+/** Every conversation list row's preview line (family, mentor, Workshop): the
+ *  latest message, prefixed with whoever wrote it ("You: …" / "Chris: …") so
+ *  it's clear whose turn it is. The server names the author per viewer —
+ *  "You" only for the viewer's own words. */
+export function threadPreview(
+  preview: string,
+  authorName: string | null,
+): string {
+  if (!preview) return "No messages yet";
+  return authorName ? `${authorName}: ${preview}` : preview;
 }

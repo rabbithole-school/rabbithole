@@ -45,12 +45,9 @@ export function PhysicalTaskCard({
   const attachPhoto = useMutation(api.physicalTasks.attachPhoto);
   const image = useImageAttachment();
   const [returningWithPhoto, setReturningWithPhoto] = useState(false);
-  const photoUrl = useQuery(
-    api.files.getUrl,
-    task?.photoStorageId ? { storageId: task.photoStorageId } : "skip",
-  );
 
   if (task === undefined || task === null) return null;
+  const photoUrl = task.photoUrl;
   const done = task.status === "completed";
   const busy = image.uploading || returningWithPhoto;
 

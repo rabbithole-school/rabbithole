@@ -65,9 +65,9 @@
  *      state and re-claiming — NEVER render stale scholar data after an auth
  *      failure.
  *   2. Immediately after signIn succeeds, call
- *      api.devicePairing.attachDeviceSession({ deviceId }) so a lost iPad can
- *      be signed out remotely (revokeDeviceSession) without disturbing the
- *      scholar's other sessions.
+ *      api.devicePairing.attachDeviceSession({ deviceId }) so claim lifecycle
+ *      actions can revoke that iPad's session without disturbing the scholar's
+ *      other sessions.
  *   3. Missing claim → fall back to manual pairing / normal sign-in.
  *      Revoked/invalid claim → signIn throws → show "couldn't auto-sign-in, ask
  *      your teacher" + offer manual pairing.
@@ -100,7 +100,16 @@
  * lib/oauthCrypto) — no "use node" — matching the auth provider's `authorize`.
  */
 import { v } from "convex/values";
-import { internalMutation, type MutationCtx } from "./_generated/server";
+import {
+  internalMutation,
+  internalQuery,
+  query,
+  type MutationCtx,
+  type QueryCtx,
+} from "./_generated/server";
+import { getAuthUserId } from "@convex-dev/auth/server";
+import { requireUser } from "./lib/auth";
+import { internal } from "./_generated/api";
 import { authedMutation, authedQuery } from "./lib/customFunctions";
 import { sha256Hex, randomToken } from "./lib/oauthCrypto";
 import { resolveInstitutionLens } from "./lib/institutionLens";
@@ -118,7 +127,11 @@ import {
   unassignedManagedClaimPatch,
   auditManagedClaim,
 } from "./lib/managedDeviceClaimState";
-import { isUnlockStateSettled } from "./deviceAppUnlock";
+import {
+  forgetClaimVerification,
+  snapshotForInstitutionSerial,
+} from "./lib/simpleMdmSnapshots";
+import { isTeardownStopped, isUnlockStateSettled } from "./deviceAppUnlock";
 import {
   scheduleClaimDecommissionLock,
   scheduleDeviceOwnershipRefresh,
@@ -127,6 +140,33 @@ import {
   hasSchoolOperationsAccessAtInstitution,
   schoolOperationsInstitutionIds,
 } from "./lib/staffCapabilities";
+import {
+  managedAppGrantsForScholar,
+  pushedManagedAppKeysForScholar,
+} from "./lib/deviceAppProjection";
+import {
+  managedNativeAppKeyForApp,
+  type ManagedNativeAppKey,
+} from "./lib/managedNativeApps";
+import {
+  buildAppAccessRows,
+  scheduleByKeyForGroups,
+  type AppAccessRow,
+  type AppPlacementWindow,
+} from "./lib/deviceAppAccess";
+import { groupIdsForScholar } from "./lib/scholarGroupMembership";
+import { timeZoneForInstitution } from "./lib/institutionTime";
+import {
+  APP_PLACEMENT_GRACE_MS,
+  APP_PLACEMENT_LEAD_MS,
+  loadInstitutionClosures,
+  parseHHMM,
+} from "./masterSchedule";
+import { shiftLocalLabel } from "./appAudiences";
+import { primaryInstitutionId } from "./lib/primaryInstitution";
+import { dayKeyForTimezone } from "../shared/institutionDay";
+import { scheduleWeekStartMs } from "../shared/scheduleWeek";
+import { dayKeyForWeekday, isClosedDay } from "../shared/schoolClosures";
 
 /** The contract version stamped into every AppConfig payload. Bump only on a
  *  breaking change to the dictionary shape so old + new apps can coexist. */
@@ -207,10 +247,19 @@ async function requireManagedDeviceInstitutionAccessible(
  * Pre-load serials before scholar assignments are known. The institution comes
  * only from the caller's active lens; a client cannot register hardware into a
  * different school by supplying an institution id.
+ *
+ * `institutionScope` is the SAME lens value the console's reads use (a slug,
+ * "all", or "" for the caller's home school) — not an institution id, and it
+ * still buys no authority: resolveInstitutionLens honors it only for an admin
+ * or a member of that school, and the operations check below gates whatever it
+ * resolves to. Hardcoding "" here silently filed every registration under the
+ * caller's HOME school while the console was lensed at another one, so the row
+ * never appeared in the list the operator was looking at.
  */
 export const registerManagedDeviceSerials = authedMutation({
   args: {
     serials: v.array(v.string()),
+    institutionScope: v.optional(v.string()),
     // Deprecated rollout compatibility for already-open clients. Ignored.
     label: v.optional(v.string()),
   },
@@ -220,9 +269,21 @@ export const registerManagedDeviceSerials = authedMutation({
       throw new Error("Too many devices in one batch (max 200).");
     }
 
-    const lens = await resolveInstitutionLens(ctx, ctx.user, "");
+    const lens = await resolveInstitutionLens(
+      ctx,
+      ctx.user,
+      args.institutionScope ?? "",
+    );
+    // An unhonored scope means the requested school was unknown or closed to
+    // this caller. The lens quietly falls back to their home school for reads;
+    // for a WRITE that fallback is the bug this argument exists to fix, so
+    // refuse instead of filing the hardware somewhere the operator can't see.
+    if (args.institutionScope && !lens.honored) {
+      throw new Error("That school isn't available to you.");
+    }
     const institution = lens.institution;
     if (!institution || !lens.allowedInstitutionIds.has(institution._id)) {
+      // Also the "all" lens, which names no single school to register into.
       throw new Error("Choose a school before registering devices.");
     }
     if (
@@ -259,15 +320,21 @@ export const registerManagedDeviceSerials = authedMutation({
         .withIndex("by_serial", (q) => q.eq("serial", serial))
         .unique();
       if (existing) {
+        // `by_serial` is unique GLOBALLY, so this lookup can land on a row
+        // owned by another institution. Say the serial is taken — refusing
+        // silently is the no-op bug PR #3477 fixed — but hand back the row's
+        // id ONLY when the operator's own school owns it (the console may
+        // legitimately link to it). A foreign row's id is an opaque handle
+        // into another tenant's data and must not cross the boundary.
+        const sameInstitution = existing.institutionId === institution._id;
         results.push({
           serial,
           ok: false,
           skipped: true,
-          managedDeviceId: existing._id,
-          error:
-            existing.institutionId === institution._id
-              ? "Already on this school's roster."
-              : "That serial is already registered.",
+          ...(sameInstitution ? { managedDeviceId: existing._id } : {}),
+          error: sameInstitution
+            ? "Already on this school's roster."
+            : "That serial is already registered.",
         });
         continue;
       }
@@ -291,6 +358,7 @@ export const registerManagedDeviceSerials = authedMutation({
         "managed-claim.register",
         ctx.user._id,
         `serial ${serial}`,
+        institution._id,
       );
       results.push({ serial, ok: true, managedDeviceId });
     }
@@ -531,6 +599,7 @@ export const setManagedDeviceAutoAssignExcluded = authedMutation({
         : "managed-claim.auto-assign-include",
       ctx.user._id,
       `serial ${row.serial}`,
+      row.institutionId,
     );
   },
 });
@@ -643,6 +712,7 @@ export async function mintForSerial(
       // state stamped under the OLD generation as stale either way.
       claimGeneration: (existing.claimGeneration ?? 0) + 1,
     });
+    await forgetClaimVerification(ctx, existing.institutionId, serial);
 
     await auditManagedClaim(
       ctx,
@@ -650,6 +720,7 @@ export async function mintForSerial(
       opts.auditAction ?? "managed-claim.mint",
       scholar._id,
       `serial ${serial} (reassign/rotate)`,
+      existing.institutionId,
     );
     return mintSuccess(existing._id, serial, scholar, claimToken, reassignedFrom);
   }
@@ -674,6 +745,7 @@ export async function mintForSerial(
     opts.auditAction ?? "managed-claim.mint",
     scholar._id,
     `serial ${serial} (new)`,
+    scholar.institutionId ?? null,
   );
   return mintSuccess(managedDeviceId, serial, scholar, claimToken, null);
 }
@@ -707,12 +779,14 @@ export async function stageClaimReplacementForSimpleMdm(
     pendingSimplemdmPushedAt: undefined,
     updatedAt: pendingClaimIssuedAt,
   });
+  await forgetClaimVerification(ctx, row.institutionId, row.serial);
   await auditManagedClaim(
     ctx,
     actorId,
     "managed-claim.simplemdm-mint",
     row.scholarId,
     `serial ${row.serial} (staged replacement)`,
+    row.institutionId,
   );
   return {
     claimToken,
@@ -796,6 +870,7 @@ export const unassignManagedDevice = authedMutation({
     // re-paired/cleared/repointed away from this claim in the meantime.
     await revokeManagedClaimSessions(ctx, row._id, row.claimGeneration ?? 0);
     await ctx.db.patch(row._id, unassignedManagedClaimPatch(Date.now(), row.claimGeneration));
+    await forgetClaimVerification(ctx, row.institutionId, row.serial);
 
     await auditManagedClaim(
       ctx,
@@ -803,6 +878,7 @@ export const unassignManagedDevice = authedMutation({
       "managed-claim.unassign",
       priorScholarId ?? ctx.user._id,
       `serial ${row.serial}`,
+      row.institutionId,
     );
     return { sessionRevoked };
   },
@@ -828,9 +904,7 @@ export const revokeManagedDeviceClaim = authedMutation({
     const sessionRevoked = await signOutBoundDevice(ctx, row);
     // The shared decommission sequence: schedule the relock BEFORE
     // invalidating the claim, revoke by immutable claim+generation, bump
-    // the generation, and audit — see decommissionManagedClaim's doc
-    // comment (also used by devicePairing.revokeDeviceSession's managed
-    // remote-signout path, which must have identical effect).
+    // the generation, and audit — see decommissionManagedClaim's doc comment.
     await decommissionManagedClaim(
       ctx,
       row,
@@ -853,52 +927,7 @@ export const removeManagedDevice = authedMutation({
     if (!row) throw new Error("That device is no longer on the roster.");
     await requireManagedDeviceInstitutionAccessible(ctx, ctx.user, row);
 
-    const sessionRevoked = await signOutBoundDevice(ctx, row);
-    // Schedule the device relock BEFORE deleting the claim row (see
-    // scheduleClaimDecommissionLock's doc comment). deviceAppUnlockStates/
-    // deviceAppUnlockBindings are separate tables keyed by managedDeviceClaimId
-    // and are looked up by that id regardless of whether the claim doc itself
-    // still exists, so ordering here is about documenting fail-closed intent
-    // (never depend on a post-delete read succeeding), not working around a
-    // real lookup failure.
-    await scheduleClaimDecommissionLock(ctx, row._id);
-    // Belt-and-suspenders (Finding 2): also revoke by IMMUTABLE claim+
-    // generation, which finds a session even if `pairedDevices` was manually
-    // re-paired/cleared/repointed away from this claim in the meantime —
-    // must happen BEFORE the row itself is deleted below.
-    await revokeManagedClaimSessions(ctx, row._id, row.claimGeneration ?? 0);
-
-    // Finding 3 (final gate): deleting the claim row must never orphan its
-    // dedicated-profile binding/unlock-state rows — they are looked up by
-    // managedDeviceClaimId regardless of whether the claim doc still exists,
-    // so `deviceAppUnlockBindings.by_profile`'s pointer to this (about to be
-    // deleted) claim id would otherwise block a fresh re-registration of the
-    // same serial/profile forever, and deleting them unconditionally here
-    // could strand an in-flight relock PATCH with nothing left to record
-    // success/failure against. Only clean up immediately when nothing is in
-    // motion; otherwise stamp durable cleanup-after-lock intent and let
-    // `recordMdmPatch`'s accepted=true branch finish the deletion once the
-    // baseline PATCH the reconciler just scheduled is durably accepted.
-    const activeState = await ctx.db
-      .query("deviceAppUnlockStates")
-      .withIndex("by_managed_device", (q) =>
-        q.eq("managedDeviceClaimId", row._id),
-      )
-      .unique();
-    const binding = await ctx.db
-      .query("deviceAppUnlockBindings")
-      .withIndex("by_managed_device", (q) =>
-        q.eq("managedDeviceClaimId", row._id),
-      )
-      .unique();
-    if (isUnlockStateSettled(activeState)) {
-      if (activeState) await ctx.db.delete(activeState._id);
-      if (binding) await ctx.db.delete(binding._id);
-    } else if (activeState) {
-      await ctx.db.patch(activeState._id, { cleanupAfterLockIntent: true });
-    }
-
-    await ctx.db.delete(row._id);
+    const { sessionRevoked } = await removeManagedDeviceRow(ctx, row);
 
     await auditManagedClaim(
       ctx,
@@ -906,6 +935,7 @@ export const removeManagedDevice = authedMutation({
       "managed-claim.remove",
       row.scholarId ?? ctx.user._id,
       `serial ${row.serial}`,
+      row.institutionId,
     );
     return { sessionRevoked };
   },
@@ -929,7 +959,7 @@ export const removeManagedDevice = authedMutation({
  * unknown token, a revoked/unassigned row, another institution's device —
  * returns "unknown" and no name.
  */
-export const claimSubjectForDevice = authedQuery({
+export const claimSubjectForDevice = query({
   args: { claimToken: v.string() },
   handler: async (
     ctx,
@@ -939,6 +969,17 @@ export const claimSubjectForDevice = authedQuery({
     scholarName: string | null;
   }> => {
     const unknown = { subject: "unknown" as const, scholarName: null };
+    // Not an authedQuery, on purpose: an iPad can still hold a sign-in for an
+    // account that has since been DELETED (2026-10-06: demo accounts deleted
+    // before their iPads re-claimed). requireUser throws for that caller, the
+    // app reads the throw as "unknown", defers the hand-over forever, and its
+    // other queries keep throwing until the app quits on every launch
+    // (TRA-466). A claim can never name a deleted account, so for that caller
+    // the honest answer is "other" — which makes the app clear the dead
+    // session and exchange the claim.
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) throw new Error("Not authenticated");
+    const callerExists = (await ctx.db.get(userId)) !== null;
     const token = args.claimToken.trim();
     // Same shape guard the exchange uses: never let a garbage or "revoked:…"
     // sentinel reach an index lookup.
@@ -960,12 +1001,16 @@ export const claimSubjectForDevice = authedQuery({
     if (row.claimState === "unassigned" || row.claimState === "revoked") {
       return unknown;
     }
+    // Deleted caller: no institution to scope a name to, so no name — only
+    // the verdict the app needs to recover.
+    if (!callerExists) return { subject: "other", scholarName: null };
+    const user = await requireUser(ctx);
     // Institution scoping: the caller is the scholar currently signed in on the
     // iPad, so their own institution is the only one they may learn names from.
-    if (!ctx.user.institutionId || row.institutionId !== ctx.user.institutionId) {
+    if (!user.institutionId || row.institutionId !== user.institutionId) {
       return unknown;
     }
-    if (row.scholarId === ctx.user._id) {
+    if (row.scholarId === user._id) {
       return { subject: "self", scholarName: null };
     }
     const scholar = await ctx.db.get(row.scholarId);
@@ -975,6 +1020,412 @@ export const claimSubjectForDevice = authedQuery({
 });
 
 /**
+ * Every schedule placement that opens one of these managed apps to a group
+ * this week, in a term of this school, with the app's window on its day.
+ * These are the placements the materializer turns into app pushes
+ * (masterSchedule.reconcilePlacement and reconcileAppPlacement): placed on a
+ * weekday and block (with or without a teacher, TRA-450), in a term that
+ * covers `now`, either recurring or pinned to this week, and not on a day the
+ * term's school is closed this week (`placementOnClosedDay`). The window is
+ * the block opened APP_PLACEMENT_LEAD_MS before the bell and closed
+ * APP_PLACEMENT_GRACE_MS after it.
+ *
+ * Only this school's terms: its own and, for the primary school, the legacy
+ * unstamped ones (the rule the staff aide's `termBelongsTo` applies), read by
+ * index, so another school's timetable is neither shown nor read. This query
+ * re-runs every minute; a read of every school's placements of these apps
+ * would re-run it whenever any school edited one. The rule leaves out one
+ * window the materializer does open: a legacy unstamped group placed in
+ * another school's term, whose push is stamped with the group's school. While
+ * that push is live the console still reads it as the grant it is. Each
+ * device then keeps its own scholar's groups.
+ */
+async function appPlacementWindowsThisWeek(
+  ctx: QueryCtx,
+  keyByAppId: ReadonlyMap<string, ManagedNativeAppKey>,
+  institutionId: Id<"institutions">,
+  now: number,
+): Promise<AppPlacementWindow[]> {
+  const legacyTerms =
+    (await primaryInstitutionId(ctx)) === institutionId
+      ? await ctx.db
+          .query("reportingPeriods")
+          .withIndex("by_institution", (q) => q.eq("institutionId", undefined))
+          .collect()
+      : [];
+  const terms = [
+    ...(await ctx.db
+      .query("reportingPeriods")
+      .withIndex("by_institution", (q) => q.eq("institutionId", institutionId))
+      .collect()),
+    ...legacyTerms,
+    // The materializer skips a term that does not cover now.
+  ].filter((term) => term.startsAt <= now && now <= term.endsAt);
+  const windows: AppPlacementWindow[] = [];
+  const blocks = new Map<string, Doc<"scheduleBlocks"> | null>();
+  for (const term of terms) {
+    // This week's Monday on the term's school calendar, with that school's
+    // zone and no-school days.
+    const timeZone = await timeZoneForInstitution(ctx, term.institutionId);
+    const weekStart = scheduleWeekStartMs(now, timeZone);
+    const closures = await loadInstitutionClosures(ctx, term.institutionId);
+    const placements = await ctx.db
+      .query("schedulePlacements")
+      .withIndex("by_period", (q) => q.eq("periodId", term._id))
+      .collect();
+    for (const p of placements) {
+      const key = p.externalAppId ? keyByAppId.get(String(p.externalAppId)) : undefined;
+      if (!key || p.weekday == null || p.blockId == null) continue;
+      if (p.weekStartMs != null && p.weekStartMs !== weekStart) continue;
+      if (isClosedDay(dayKeyForWeekday(weekStart, p.weekday, timeZone), closures)) continue;
+      let block = blocks.get(String(p.blockId));
+      if (block === undefined) {
+        block = await ctx.db.get(p.blockId);
+        blocks.set(String(p.blockId), block);
+      }
+      if (!block) continue;
+      const start = parseHHMM(block.startLocal);
+      const end = parseHHMM(block.endLocal);
+      // The materializer never opens a window it cannot resolve.
+      if (start === null || end === null || end <= start) continue;
+      windows.push({
+        key,
+        groupId: String(p.groupId),
+        weekday: p.weekday,
+        subject: p.subject,
+        block: block.label,
+        opensLocal: shiftLocalLabel(block.startLocal, -APP_PLACEMENT_LEAD_MS / 60_000),
+        closesLocal: shiftLocalLabel(block.endLocal, APP_PLACEMENT_GRACE_MS / 60_000),
+      });
+    }
+  }
+  return windows;
+}
+
+/**
+ * The managed-device roster read, factored out of `listManagedDevices` so the
+ * agent transports (`lib/deviceOpsTools.ts`) answer from the SAME rows the
+ * staff console renders rather than a second, drifting projection. Both
+ * institution gates stay here: the caller's lens AND their school:operations
+ * grants.
+ */
+export async function readManagedDevices(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  opts: { institutionScope?: string } = {},
+) {
+  const lens = await resolveInstitutionLens(ctx, user, opts.institutionScope ?? "");
+  const now = Date.now();
+
+  const institutionIds =
+    lens.scope === "all"
+      ? [...lens.allowedInstitutionIds]
+      : lens.institution
+        ? [lens.institution._id]
+        : [];
+  const operationsInstitutions = await schoolOperationsInstitutionIds(
+    ctx,
+    user,
+  );
+  const authorizedInstitutionIds =
+    operationsInstitutions === "all"
+      ? institutionIds
+      : institutionIds.filter((id) => operationsInstitutions.has(id));
+
+  const rows: Doc<"managedDeviceClaims">[] = [];
+  for (const instId of authorizedInstitutionIds) {
+    const forInst = await ctx.db
+      .query("managedDeviceClaims")
+      .withIndex("by_institution", (q) => q.eq("institutionId", instId))
+      .collect();
+    rows.push(...forInst);
+  }
+
+  const claimsById = new Map(rows.map((row) => [String(row._id), row]));
+  const bindingsByClaimId = new Map<string, Doc<"pairedDevices">>();
+  const legacyClaimByBinding = new Map(
+    rows
+      .filter(
+        (row): row is Doc<"managedDeviceClaims"> & {
+          scholarId: Id<"users">;
+          lastDeviceId: string;
+        } => !!row.scholarId && !!row.lastDeviceId,
+      )
+      .map((row) => [
+        `${row.institutionId}:${row.scholarId}:${row.lastDeviceId}`,
+        row,
+      ]),
+  );
+  for (const instId of authorizedInstitutionIds) {
+    const bindings = await ctx.db
+      .query("pairedDevices")
+      .withIndex("by_institution", (q) => q.eq("institutionId", instId))
+      .collect();
+    for (const binding of bindings) {
+      if (binding.managedDeviceClaimId) {
+        // A claim can only have its current install binding here. Keeping the
+        // lastDeviceId check aligned with isStaleManagedBinding prevents an old
+        // install from being presented as the live managed device.
+        const claim = claimsById.get(String(binding.managedDeviceClaimId));
+        if (claim?.lastDeviceId === binding.deviceId) {
+          bindingsByClaimId.set(String(binding.managedDeviceClaimId), binding);
+        }
+        continue;
+      }
+      if (binding.lastRequestId) continue;
+      const legacyClaim = legacyClaimByBinding.get(
+        `${binding.institutionId}:${binding.scholarId}:${binding.deviceId}`,
+      );
+      if (legacyClaim && !bindingsByClaimId.has(String(legacyClaim._id))) {
+        bindingsByClaimId.set(String(legacyClaim._id), binding);
+      }
+    }
+  }
+
+  // Catalog ids for the managed native apps, resolved ONCE for the whole
+  // roster: the truth panel offers a one-click grant through the ordinary
+  // `scholarApps` add paths, which need the catalog row, and the mapping is
+  // fleet-wide rather than per device.
+  const catalogAppIdByKey: Partial<Record<ManagedNativeAppKey, string>> = {};
+  const keyByAppId = new Map<string, ManagedNativeAppKey>();
+  for (const app of await ctx.db
+    .query("externalApps")
+    .withIndex("by_archived", (q) => q.eq("archived", undefined))
+    .collect()) {
+    const key = managedNativeAppKeyForApp(app);
+    if (!key) continue;
+    if (!catalogAppIdByKey[key]) catalogAppIdByKey[key] = String(app._id);
+    keyByAppId.set(String(app._id), key);
+  }
+  // The blocks that open those apps this week, read once per school; each
+  // device keeps its scholar's groups' (TRA-444). The school is the iPad's
+  // (its claim's), one the caller was authorized for above, so a scholar
+  // since moved to another school never brings that school's blocks with
+  // them. The promise is what is cached, since the devices below resolve
+  // concurrently.
+  const placementWindowsBySchool = new Map<string, Promise<AppPlacementWindow[]>>();
+  const placementWindowsFor = (institutionId: Id<"institutions">) => {
+    let windows = placementWindowsBySchool.get(String(institutionId));
+    if (!windows) {
+      windows = appPlacementWindowsThisWeek(ctx, keyByAppId, institutionId, now);
+      placementWindowsBySchool.set(String(institutionId), windows);
+    }
+    return windows;
+  };
+  const timeZoneByInstitution = new Map<string, string>();
+  const institutionTimeZone = async (institutionId: Id<"institutions">) => {
+    let timeZone = timeZoneByInstitution.get(String(institutionId));
+    if (timeZone === undefined) {
+      timeZone = await timeZoneForInstitution(ctx, institutionId);
+      timeZoneByInstitution.set(String(institutionId), timeZone);
+    }
+    return timeZone;
+  };
+
+  const enriched = await Promise.all(
+    rows.map(async (row) => {
+      const scholar = row.scholarId ? await ctx.db.get(row.scholarId) : null;
+      // Deleting a scholar leaves their claim here for staff to reassign
+      // (lib/cascade.ts purges people, not a school's hardware), so the claim
+      // still names an id that resolves to nothing. Keep the row (TRA-434):
+      // this roster is the one place staff can reassign the iPad, and while
+      // its app-access row keeps retrying a reset SimpleMDM refuses, the one
+      // place that error can surface. It reads as unassigned, since nobody is
+      // left to hold a grant, and `scholarDeleted` says why it still needs a
+      // person.
+      const scholarId = scholar?._id ?? null;
+      const scholarDeleted = !!row.scholarId && !scholar;
+      const createdByUser = row.createdBy ? await ctx.db.get(row.createdBy) : null;
+      let hasLiveSession = false;
+      const binding = bindingsByClaimId.get(String(row._id)) ?? null;
+      if (binding?.authSessionId) {
+        const session = await ctx.db.get(binding.authSessionId);
+        hasLiveSession = !!session && session.expirationTime > now;
+      }
+      // The dated SimpleMDM read-back (simplemdm.ts writes it; the console
+      // renders it as-is and never fetches SimpleMDM on its own).
+      const snapshot = await snapshotForInstitutionSerial(
+        ctx,
+        row.institutionId,
+        row.serial,
+      );
+      // Device truth panel (TRA-241 step 1) — the four-fact "App access"
+      // row set. Reads only already-stored state, exactly like `snapshot`
+      // above: bindings/states via their `by_managed_device` index, the
+      // granted/pushed key sets via the same helpers the projector itself
+      // uses, and the tiled set from the committed layout constant.
+      const appUnlockBinding = await ctx.db
+        .query("deviceAppUnlockBindings")
+        .withIndex("by_managed_device", (q) =>
+          q.eq("managedDeviceClaimId", row._id),
+        )
+        .unique();
+      const unlockState = await ctx.db
+        .query("deviceAppUnlockStates")
+        .withIndex("by_managed_device", (q) =>
+          q.eq("managedDeviceClaimId", row._id),
+        )
+        .unique();
+      // An earlier, removed registration of this same iPad may still owe its
+      // old dedicated profile a relock (`cleanupAfterLockIntent`). Its claim
+      // row is gone, so the serial is the only handle staff have on it.
+      let unfinishedTeardown: {
+        simpleMdmProfileId: string;
+        lastError: string | null;
+        stopped: boolean;
+      } | null = null;
+      for (const earlier of await ctx.db
+        .query("deviceAppUnlockBindings")
+        .withIndex("by_serial", (q) => q.eq("serial", row.serial))
+        .collect()) {
+        if (
+          earlier.managedDeviceClaimId === row._id ||
+          earlier.institutionId !== row.institutionId
+        ) {
+          continue;
+        }
+        const earlierState = await ctx.db
+          .query("deviceAppUnlockStates")
+          .withIndex("by_managed_device", (q) =>
+            q.eq("managedDeviceClaimId", earlier.managedDeviceClaimId),
+          )
+          .unique();
+        if (!earlierState?.cleanupAfterLockIntent) continue;
+        unfinishedTeardown = {
+          simpleMdmProfileId: earlier.simpleMdmProfileId,
+          lastError: earlierState.lastMdmError ?? null,
+          stopped: isTeardownStopped(earlierState),
+        };
+      }
+      const [grants, pushedKeys]: [
+        Map<ManagedNativeAppKey, { endsAt: number | null }>,
+        Set<ManagedNativeAppKey>,
+      ] = scholarId
+        ? await Promise.all([
+            managedAppGrantsForScholar(ctx, scholarId),
+            pushedManagedAppKeysForScholar(ctx, scholarId),
+          ])
+        : [new Map(), new Set()];
+      // The school's calendar: the day a grant that ends runs through, and
+      // today, which "Open all day today" and "Open until…" start from.
+      const timeZone = await institutionTimeZone(row.institutionId);
+      const grantThroughDayByKey: Partial<Record<ManagedNativeAppKey, string>> = {};
+      for (const [key, { endsAt }] of grants) {
+        // An end is always a local midnight, so the millisecond before it
+        // falls on the last day the grant covers.
+        if (endsAt !== null) grantThroughDayByKey[key] = dayKeyForTimezone(endsAt - 1, timeZone);
+      }
+      const scheduleByKey = scholar
+        ? scheduleByKeyForGroups(
+            await placementWindowsFor(row.institutionId),
+            new Set((await groupIdsForScholar(ctx, scholar)).map(String)),
+          )
+        : {};
+      const appAccess: AppAccessRow[] = buildAppAccessRows({
+        hasScholar: scholarId !== null,
+        grantedKeys: new Set(grants.keys()),
+        grantThroughDayByKey,
+        scheduleByKey,
+        pushedKeys,
+        hasBinding: !!appUnlockBinding,
+        profilePayloadIdentifier:
+          appUnlockBinding?.profilePayloadIdentifier ?? null,
+        desiredBundleIds:
+          unlockState?.desiredBundleIds ??
+          appUnlockBinding?.baselineBundleIds ??
+          null,
+        appliedBundleIds: unlockState?.appliedBundleIds,
+        projectionFormatVersion: unlockState?.projectionFormatVersion,
+        installedBundleIds: snapshot?.installedBundleIds ?? null,
+        installedAppsAt: snapshot?.installedAppsAt ?? null,
+        catalogAppIdByKey,
+      });
+      return {
+        _id: row._id,
+        serial: row.serial,
+        scholarId,
+        scholarDeleted,
+        scholarName: scholar?.name ?? null,
+        scholarUsername: scholar?.username ?? null,
+        scholarImage: scholar?.image ?? null,
+        claimState: row.claimState,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        claimIssuedAt: row.claimIssuedAt,
+        rotationCount: row.rotationCount,
+        claimCount: row.claimCount,
+        lastClaimedAt: row.lastClaimedAt ?? null,
+        createdByName: createdByUser?.name ?? null,
+        hasLiveSession,
+        pairedDeviceId: binding?._id ?? null,
+        pairedDeviceLabel: binding?.deviceLabel ?? null,
+        autoAssignExcluded: row.autoAssignExcluded ?? false,
+        simplemdmPushedAt: row.simplemdmPushedAt ?? null,
+        hasPendingClaim: row.pendingClaimTokenHash !== undefined,
+        pendingSimplemdmPushedAt: row.pendingSimplemdmPushedAt ?? null,
+        simpleMdm: snapshot
+          ? {
+              // null = SimpleMDM has never been asked about this serial
+              // (the row may hold only a push outcome).
+              checkedAt: snapshot.inventoryAt ?? null,
+              foundInSimpleMdm: snapshot.foundInSimpleMdm ?? null,
+              name: snapshot.name ?? null,
+              batteryLevel: snapshot.batteryLevel ?? null,
+              lastSeenAt: snapshot.lastSeenAt ?? null,
+              isSupervised: snapshot.isSupervised ?? null,
+              lostModeEnabled: snapshot.lostModeEnabled ?? null,
+              claimVerifyStatus: snapshot.claimVerifyStatus ?? null,
+              claimVerifiedAt: snapshot.claimVerifiedAt ?? null,
+              lastPushAt: snapshot.lastPushAt ?? null,
+              lastPushStatus: snapshot.lastPushStatus ?? null,
+              lastPushMessage: snapshot.lastPushMessage ?? null,
+            }
+          : null,
+        appAccess,
+        // Today on the school's calendar ("YYYY-MM-DD"), judged at the server
+        // clock this read re-arms on. "Open until…" picks a day from it.
+        todayDayKey: dayKeyForTimezone(now, timeZone),
+        // Device-level projection clock for the App access panel's hovers.
+        // Read straight off the state row the projector already keeps; no
+        // history table exists, so `expectedAvailableAt` is the projector's
+        // own estimate for the in-flight change, not a fleet average.
+        // NOTE `mdmAcceptedAt`/`expectedAvailableAt` are UNLOCK-LEASE fields
+        // the projection path never writes; do not read them as projection
+        // progress.
+        appAccessProjection: appUnlockBinding
+          ? {
+              appliedAt: unlockState?.projectionAppliedAt ?? null,
+              verifiedAt: unlockState?.projectionVerifiedAt ?? null,
+              dueAt: unlockState?.projectionDueAt ?? null,
+              mdmAcceptedAt: unlockState?.mdmAcceptedAt ?? null,
+              operationStartedAt: unlockState?.operationStartedAt ?? null,
+              // Which kind of work holds the profile. An unlock ceremony and
+              // the allowlist projector share `operationStartedAt`, so
+              // without this the panel would describe a lock/unlock as an
+              // allowlist push. Absent means no operation is in flight;
+              // otherwise it is a ceremony (see `operationKind`).
+              operationKind: unlockState?.operationStartedAt
+                ? unlockState.tokenKind === "projection"
+                  ? ("projection" as const)
+                  : ("ceremony" as const)
+                : null,
+              expectedAvailableAt: unlockState?.expectedAvailableAt ?? null,
+              lastError:
+                unlockState?.projectionError ??
+                unlockState?.lastMdmError ??
+                null,
+              updatedAt: unlockState?.updatedAt ?? null,
+            }
+          : null,
+        unfinishedTeardown,
+      };
+    }),
+  );
+
+  return enriched.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/**
  * The managed-device roster for the console, scoped to the caller's institution
  * lens. Never returns the token or its hash — only the assignment + claim
  * state. `hasLiveSession` reflects the linked `pairedDevices` binding (via the
@@ -982,116 +1433,113 @@ export const claimSubjectForDevice = authedQuery({
  * signed in right now.
  */
 export const listManagedDevices = authedQuery({
-  args: { institutionScope: v.optional(v.string()) },
+  args: {
+    institutionScope: v.optional(v.string()),
+    // Minute-rounded client clock, same cache-buster contract as
+    // `pushes.livePushesForMe` and never a time authority. This read reports
+    // which managed apps each device can currently reach, which consults push
+    // liveness (`pushedManagedAppKeysForScholar`) — and that is day-scoped, so
+    // it changes at the institution day boundary with no database write for a
+    // subscription to notice. Without this the staff device table would keep
+    // claiming an app is reachable after its push stopped showing.
+    now: v.optional(v.number()),
+  },
   handler: async (ctx, args) => {
-    const lens = await resolveInstitutionLens(ctx, ctx.user, args.institutionScope ?? "");
-    const now = Date.now();
+    void args.now;
+    return await readManagedDevices(ctx, ctx.user, {
+      institutionScope: args.institutionScope,
+    });
+  },
+});
 
-    const institutionIds =
-      lens.scope === "all"
-        ? [...lens.allowedInstitutionIds]
-        : lens.institution
-          ? [lens.institution._id]
-          : [];
-    const operationsInstitutions = await schoolOperationsInstitutionIds(
-      ctx,
-      ctx.user,
-    );
-    const authorizedInstitutionIds =
-      operationsInstitutions === "all"
-        ? institutionIds
-        : institutionIds.filter((id) => operationsInstitutions.has(id));
-
-    const rows: Doc<"managedDeviceClaims">[] = [];
-    for (const instId of authorizedInstitutionIds) {
-      const forInst = await ctx.db
-        .query("managedDeviceClaims")
-        .withIndex("by_institution", (q) => q.eq("institutionId", instId))
-        .collect();
-      rows.push(...forInst);
+/**
+ * The agent-transport view of the same roster (Slack bot + MCP connector, via
+ * `lib/deviceOpsTools.ts`). Scoped with `institutionScope: "all"`, which
+ * resolves to the caller's OWN allowed institutions — not every school — and
+ * is then intersected with their school:operations grants inside
+ * `readManagedDevices`. A chat client has no URL to carry a lens, so asking
+ * for one school would silently hide a second school's iPads from a staffer
+ * who legitimately runs both.
+ *
+ * The payload is trimmed on purpose: the console's row carries projection
+ * clocks, rotation counters and avatars that cost a model tokens and answer
+ * no question it can act on. What survives is the four-fact app-access answer
+ * (`appAccess[].blocker` is the first thing standing in the way) plus the
+ * ids — `pairedDeviceId` above all — a follow-up write needs, plus what the
+ * console tells staff about a stuck iPad: that its scholar was deleted
+ * (`scholarDeleted`), and the last error updating its app access.
+ *
+ * NO `now` ARG, deliberately. `listManagedDevices` takes a minute-rounded
+ * client clock because a SUBSCRIBED console must re-run when day-scoped push
+ * liveness rolls over with no database write to notice. An agent turn is a
+ * one-shot read from an action — nothing subscribes, and `readManagedDevices`
+ * takes a fresh `Date.now()` on every call — so the staleness that arg exists
+ * to defeat cannot occur here, and carrying it would be an inert parameter a
+ * model has to guess a value for.
+ */
+export const listForAgent = internalQuery({
+  args: {
+    callerUserId: v.id("users"),
+    search: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller) {
+      return { ok: false as const, message: "Forbidden: school staff role required" };
     }
-
-    const claimsById = new Map(rows.map((row) => [String(row._id), row]));
-    const bindingsByClaimId = new Map<string, Doc<"pairedDevices">>();
-    const legacyClaimByBinding = new Map(
-      rows
-        .filter(
-          (row): row is Doc<"managedDeviceClaims"> & {
-            scholarId: Id<"users">;
-            lastDeviceId: string;
-          } => !!row.scholarId && !!row.lastDeviceId,
-        )
-        .map((row) => [
-          `${row.institutionId}:${row.scholarId}:${row.lastDeviceId}`,
-          row,
-        ]),
-    );
-    for (const instId of authorizedInstitutionIds) {
-      const bindings = await ctx.db
-        .query("pairedDevices")
-        .withIndex("by_institution", (q) => q.eq("institutionId", instId))
-        .collect();
-      for (const binding of bindings) {
-        if (binding.managedDeviceClaimId) {
-          // A claim can only have its current install binding here. Keeping the
-          // lastDeviceId check aligned with isStaleManagedBinding prevents an old
-          // install from being presented as the live managed device.
-          const claim = claimsById.get(String(binding.managedDeviceClaimId));
-          if (claim?.lastDeviceId === binding.deviceId) {
-            bindingsByClaimId.set(String(binding.managedDeviceClaimId), binding);
-          }
-          continue;
-        }
-        if (binding.lastRequestId) continue;
-        const legacyClaim = legacyClaimByBinding.get(
-          `${binding.institutionId}:${binding.scholarId}:${binding.deviceId}`,
-        );
-        if (legacyClaim && !bindingsByClaimId.has(String(legacyClaim._id))) {
-          bindingsByClaimId.set(String(legacyClaim._id), binding);
-        }
-      }
+    const operations = await schoolOperationsInstitutionIds(ctx, caller);
+    if (operations !== "all" && operations.size === 0) {
+      return {
+        ok: false as const,
+        message: "Forbidden: school operations access required",
+      };
     }
-
-    const enriched = await Promise.all(
-      rows.map(async (row) => {
-        const scholar = row.scholarId ? await ctx.db.get(row.scholarId) : null;
-        if (row.scholarId && !scholar) return null; // deleted scholar — hide orphan
-        const createdByUser = row.createdBy ? await ctx.db.get(row.createdBy) : null;
-        let hasLiveSession = false;
-        const binding = bindingsByClaimId.get(String(row._id)) ?? null;
-        if (binding?.authSessionId) {
-          const session = await ctx.db.get(binding.authSessionId);
-          hasLiveSession = !!session && session.expirationTime > now;
-        }
-        return {
-          _id: row._id,
-          serial: row.serial,
-          scholarId: row.scholarId ?? null,
-          scholarName: scholar?.name ?? null,
-          scholarUsername: scholar?.username ?? null,
-          scholarImage: scholar?.image ?? null,
-          claimState: row.claimState,
-          createdAt: row.createdAt,
-          updatedAt: row.updatedAt,
-          claimIssuedAt: row.claimIssuedAt,
-          rotationCount: row.rotationCount,
-          claimCount: row.claimCount,
-          lastClaimedAt: row.lastClaimedAt ?? null,
-          createdByName: createdByUser?.name ?? null,
-          hasLiveSession,
-          pairedDeviceId: binding?._id ?? null,
-          pairedDeviceLabel: binding?.deviceLabel ?? null,
-          autoAssignExcluded: row.autoAssignExcluded ?? false,
-          simplemdmPushedAt: row.simplemdmPushedAt ?? null,
-          hasPendingClaim: row.pendingClaimTokenHash !== undefined,
-          pendingSimplemdmPushedAt: row.pendingSimplemdmPushedAt ?? null,
-        };
-      }),
-    );
-
-    return enriched
-      .filter((r): r is NonNullable<typeof r> => r !== null)
-      .sort((a, b) => b.updatedAt - a.updatedAt);
+    const rows = await readManagedDevices(ctx, caller, {
+      institutionScope: "all",
+    });
+    const search = args.search?.trim().toLowerCase() ?? "";
+    const devices = rows
+      .filter((row) => {
+        if (!search) return true;
+        return [
+          String(row._id),
+          row.serial,
+          row.scholarName,
+          row.scholarUsername,
+          row.pairedDeviceLabel,
+        ].some((value) => value?.toLowerCase().includes(search));
+      })
+      .slice(0, 50)
+      .map((row) => ({
+        serial: row.serial,
+        scholar: row.scholarName ?? row.scholarUsername ?? null,
+        // The iPad of a scholar who has since been deleted (TRA-434): no
+        // scholar, and staff need to reassign it, exactly as the console
+        // shows it.
+        scholarDeleted: row.scholarDeleted,
+        claimState: row.claimState,
+        hasLiveSession: row.hasLiveSession,
+        // The handle every write tool takes. Null means this iPad has never
+        // completed a sign-in binding, so Rabbithole Lock cannot address it.
+        pairedDeviceId: row.pairedDeviceId,
+        pairedDeviceLabel: row.pairedDeviceLabel,
+        simpleMdm: row.simpleMdm,
+        // Why an iPad's apps are stuck, when the last attempt to update its
+        // app-access profile failed; null otherwise. It retries on its own.
+        appAccessError: row.appAccessProjection?.lastError ?? null,
+        appAccess: row.appAccess.map((app) => ({
+          key: app.key,
+          label: app.label,
+          bundleId: app.bundleId,
+          granted: app.granted,
+          allowed: app.allowed,
+          installed: app.installed,
+          tiled: app.tiled,
+          onDevice: app.onDevice,
+          blocker: app.blocker,
+        })),
+      }));
+    return { ok: true as const, devices };
   },
 });
 
@@ -1152,7 +1600,6 @@ export const consumeManagedClaim = internalMutation({
     ) {
       return null;
     }
-
     // Optional integrity cross-check: if the app forwarded the config serial,
     // it must match the claim's serial (defense in depth; the token is the
     // real credential).
@@ -1262,8 +1709,8 @@ export const consumeManagedClaim = internalMutation({
     }
 
     // Upsert the durable `pairedDevices` binding so the existing "Paired
-    // devices" roster + remote sign-out (revokeDeviceSession/attachDeviceSession)
-    // cover managed devices too — reuse, not a parallel roster. Keyed on
+    // devices" roster and session attachment cover managed devices too —
+    // reuse, not a parallel roster. Keyed on
     // (institutionId, deviceId); deviceId is now guaranteed present (fail-
     // closed above).
     const sessionId = await mintAuthSessionForUser(ctx, row.scholarId);
@@ -1373,6 +1820,7 @@ export const consumeManagedClaim = internalMutation({
       "managed-claim.exchange",
       row.scholarId,
       `serial ${row.serial} device ${deviceId}`,
+      row.institutionId,
     );
 
     return { userId: row.scholarId, sessionId };
@@ -1485,6 +1933,81 @@ async function removeStaleBindingsForExchange(
   }
 }
 
+/**
+ * The roster-removal sequence behind `removeManagedDevice`, without its
+ * authorization or audit: sign the bound iPad out and drop its binding,
+ * schedule the relock, revoke by immutable claim+generation, settle the
+ * dedicated-profile unlock rows, then delete the claim. Also run for every
+ * claim when an institution is deleted (`lib/cascade.ts`), so a field iPad
+ * loses its session and falls back to manual pairing exactly as it does when
+ * staff remove it. Returns whether a live session was killed.
+ */
+export async function removeManagedDeviceRow(
+  ctx: MutationCtx,
+  row: Doc<"managedDeviceClaims">,
+): Promise<{ sessionRevoked: boolean }> {
+  const sessionRevoked = await signOutBoundDevice(ctx, row);
+  // Schedule the device relock BEFORE deleting the claim row (see
+  // scheduleClaimDecommissionLock's doc comment). deviceAppUnlockStates/
+  // deviceAppUnlockBindings are separate tables keyed by managedDeviceClaimId
+  // and are looked up by that id regardless of whether the claim doc itself
+  // still exists, so ordering here is about documenting fail-closed intent
+  // (never depend on a post-delete read succeeding), not working around a
+  // real lookup failure.
+  await scheduleClaimDecommissionLock(ctx, row._id);
+  // Belt-and-suspenders (Finding 2): also revoke by IMMUTABLE claim+
+  // generation, which finds a session even if `pairedDevices` was manually
+  // re-paired/cleared/repointed away from this claim in the meantime —
+  // must happen BEFORE the row itself is deleted below.
+  await revokeManagedClaimSessions(ctx, row._id, row.claimGeneration ?? 0);
+
+  // Finding 3 (final gate): deleting the claim row must never orphan its
+  // dedicated-profile binding/unlock-state rows — they are looked up by
+  // managedDeviceClaimId regardless of whether the claim doc still exists,
+  // so `deviceAppUnlockBindings.by_profile`'s pointer to this (about to be
+  // deleted) claim id would otherwise block a fresh re-registration of the
+  // same serial/profile forever, and deleting them unconditionally here
+  // could strand an in-flight relock PATCH with nothing left to record
+  // success/failure against. So stamp durable cleanup-after-lock intent and
+  // let `recordMdmPatch`'s accepted=true branch finish the deletion once the
+  // baseline PATCH the reconciler just scheduled is durably accepted.
+  // Stamping intent leaves the revision and token alone, so a relock already
+  // in flight still records against this row. Its target was projected for
+  // the scholar being removed and can carry their apps, which is why that
+  // branch deletes only on a PATCH of the bare baseline (TRA-436).
+  //
+  // A BOUND device takes that path even when its state row is settled
+  // (TRA-427). "Settled" meant "the profile holds the bare baseline" under
+  // the lease model; under the grant projection a settled row's profile
+  // holds baseline ∪ the scholar's granted and pushed apps, and deleting the
+  // binding here would leave them on the iPad with nothing left to narrow
+  // them. `normalizeCleanupIntent` moves the row onto the pending-lock path,
+  // which relocks to baseline (the claim is gone). Without a state row,
+  // nothing has written the profile since `configureDedicatedProfile`
+  // verified it at baseline, so the binding can go now.
+  const activeState = await ctx.db
+    .query("deviceAppUnlockStates")
+    .withIndex("by_managed_device", (q) =>
+      q.eq("managedDeviceClaimId", row._id),
+    )
+    .unique();
+  const binding = await ctx.db
+    .query("deviceAppUnlockBindings")
+    .withIndex("by_managed_device", (q) =>
+      q.eq("managedDeviceClaimId", row._id),
+    )
+    .unique();
+  if (activeState && (binding || !isUnlockStateSettled(activeState))) {
+    await ctx.db.patch(activeState._id, { cleanupAfterLockIntent: true });
+  } else {
+    if (activeState) await ctx.db.delete(activeState._id);
+    if (binding) await ctx.db.delete(binding._id);
+  }
+
+  await ctx.db.delete(row._id);
+  return { sessionRevoked };
+}
+
 /** Sign out and remove the physical-device binding owned by a managed claim,
  * without touching the scholar's other sessions. The serial-keyed managed row
  * remains the canonical roster entry. Returns whether a live session was killed. */
@@ -1542,3 +2065,36 @@ async function revokeBoundDeviceSessions(
 // implementation now lives in the neutral lib module so devicePairing.ts can
 // also share it (see the doc comment on the canonical definition).
 export { auditManagedClaim };
+
+/**
+ * Staff "Re-sync" for one iPad's app-access projection: pulls the projector's
+ * next tick forward to now for this device and kicks the reconciler. The
+ * scholar-side twin is `deviceAppUnlock.nudgeProjection` (keyed by the
+ * iPad's own pairing); this one is keyed by the roster row and gated by the
+ * same institution check as every other drawer action. It does not touch
+ * SimpleMDM directly and does not re-inventory apps — that is "Check now".
+ */
+export const resyncManagedDeviceProjection = authedMutation({
+  args: { managedDeviceId: v.id("managedDeviceClaims") },
+  handler: async (ctx, args): Promise<{ nudged: boolean }> => {
+    const row = await ctx.db.get(args.managedDeviceId);
+    if (!row) throw new Error("That device is no longer on the roster.");
+    await requireManagedDeviceInstitutionAccessible(ctx, ctx.user, row);
+    const binding = await ctx.db
+      .query("deviceAppUnlockBindings")
+      .withIndex("by_managed_device", (q) =>
+        q.eq("managedDeviceClaimId", row._id),
+      )
+      .unique();
+    if (!binding) return { nudged: false };
+    const state = await ctx.db
+      .query("deviceAppUnlockStates")
+      .withIndex("by_managed_device", (q) =>
+        q.eq("managedDeviceClaimId", row._id),
+      )
+      .unique();
+    if (state) await ctx.db.patch(state._id, { projectionDueAt: 0 });
+    await ctx.scheduler.runAfter(0, internal.deviceAppUnlock.reconcileActiveUnlocks, {});
+    return { nudged: true };
+  },
+});

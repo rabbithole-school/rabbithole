@@ -25,6 +25,17 @@
  * also reuses regular practice's strategy hint as the middle step between
  * working independently and "I haven't learned this yet."
  *
+ * QUESTION FIRST, STRATEGY OPTIONAL. For a kind whose board has a derivable
+ * numeric answer (`derivedQuestion` in vendor/manipulative/logic.ts — today
+ * `distribute` and exact `distributor`), the card headlines the QUESTION
+ * ("What is 6 × 13?"), demotes the stored prompt to a muted strategy line, and
+ * offers a numeric answer box beside the board. The box and Done are always
+ * enabled: we grade problem solving, not whether the scholar performed the
+ * strategy — the board is there to show WHY the strategy helps, and a scholar
+ * who already knows the product may just type it. The typed value rides in
+ * the same `answer` JSON as the board state (`withTypedValue`), so the server
+ * path is unchanged and old `{"column":10}` attempts still grade.
+ *
  * Done is controlled through the parent, not a second submit path: an
  * in-playlist caller (native/src/app/practice.tsx) supplies
  * `submitAnswerOverride`, which routes the answer through the shared practice
@@ -43,12 +54,16 @@ import { Component, useCallback, useEffect, useMemo, useRef, useState } from "re
 import type { ReactNode } from "react";
 import {
   ActivityIndicator,
+  Keyboard,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 import { ScrollView } from "react-native-gesture-handler";
+import Animated from "react-native-reanimated";
+import { AppTextInput } from "@/components/AppTextInput";
+import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 
 import { api, type Id } from "@/lib/convex";
 import { useMutation, useQuery } from "convex/react";
@@ -67,12 +82,18 @@ import {
 } from "@/lib/webEmbedConfig";
 import { openManipulativeEmbed } from "@/lib/externalAppHost";
 import { isChallenge, type ManipulativeSpec } from "../../../vendor/manipulative/types";
+import { derivedQuestion, withTypedValue } from "../../../vendor/manipulative/logic";
 import {
   computeTiming,
   payloadClientEventReceipt,
   type PayloadClientEventReceipt,
 } from "../../../vendor/shared/practiceLoop";
-import { ManipulativeScrollContext, successNotify, warningNotify } from "./kit";
+import {
+  ManipulativeIdleContext,
+  ManipulativeScrollContext,
+  successNotify,
+  warningNotify,
+} from "./kit";
 import {
   isNativeManipulativeKind,
   NativeManipulative,
@@ -158,6 +179,9 @@ export interface NativeManipulativeItemProps {
    * like a pad item. Absent ⇒ no skip link (e.g. an embed with no parent loop).
    */
   onDontKnow?: () => void;
+  /** Overrides the skip link's text (default `DONT_KNOW_LABEL`) — the
+   *  "Can you already do this?" framed item reads "Not yet — show me". */
+  dontKnowLabel?: string;
   /**
    * The parent's live connectivity signal (`useConvexOnline`). Offline, the
    * skip link is HIDDEN rather than merely disabled — matching the pad items'
@@ -202,12 +226,18 @@ export function NativeManipulativeItem({
   getSubmissionContext,
   submitAnswerOverride,
   onDontKnow,
+  dontKnowLabel,
   online = true,
   onRequestClose,
 }: NativeManipulativeItemProps) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
-  const scrollRef = useRef(null);
+  const scrollRef = useRef<ScrollView>(null);
+  const answerFocused = useRef(false);
+  const { style: keyboardInsetStyle } = useKeyboardInset();
+  const revealFocusedAnswer = useCallback(() => {
+    if (answerFocused.current) scrollRef.current?.scrollToEnd({ animated: false });
+  }, []);
   // The standalone launcher has no parent machine to retain a failed attempt's
   // receipt. In-playlist practice omits this field and lets the machine remain
   // the sole owner of clientEventId/clientEventKey. The payload fingerprint
@@ -219,10 +249,15 @@ export function NativeManipulativeItem({
   const submitAnswer = useMutation(api.practiceSkills.submitAnswer);
 
   const spec = useMemo(() => parseSpec(item?.manipulativeSpec), [item]);
+  // The question this board can answer with one number, if any (see header).
+  const question = useMemo(() => (spec ? derivedQuestion(spec) : null), [spec]);
 
-  // The kind's latest runtime state, lifted so Done can submit it. The Done
-  // button stays disabled until the scholar has actually shaped a state.
+  // The kind's latest runtime state, lifted so Done can submit it. Without a
+  // derived question, Done stays disabled until the scholar has shaped a state;
+  // WITH one, Done is always live — a typed answer or an untouched board is a
+  // legitimate submission (the board is the hint, not the task).
   const [state, setState] = useState<unknown>(null);
+  const [typedAnswer, setTypedAnswer] = useState("");
   const [committed, setCommitted] = useState(false);
   const [grading, setGrading] = useState(false);
   const gradingInFlightRef = useRef(false);
@@ -234,12 +269,36 @@ export function NativeManipulativeItem({
   const [error, setError] = useState<string | null>(null);
   const [showHint, setShowHint] = useState(false);
   const itemRenderAtRef = useRef<number | null>(null);
+  // First touch on the stage — the manipulative's "first keystroke", so the
+  // render→first-interaction latency reaches `firstKeyMs` (TRA-221). Observed
+  // with `onTouchStart` on the stage wrapper: it sees every touch that lands in
+  // a child gesture without joining the responder negotiation, so a kind's own
+  // pan/tap handling is untouched. Kinds report their initial state on mount,
+  // so `onStateChange` can't serve as the signal — only a real touch can.
+  const firstInteractionAtRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (spec && itemRenderAtRef.current === null) {
       itemRenderAtRef.current = Date.now();
     }
   }, [spec]);
+
+  // Idle = nothing has happened on the card yet. Drives the handle's
+  // invitation pulse (kit `idlePulse`); flips false — permanently — on the
+  // first board touch, keystroke, or Done.
+  const [everTouched, setEverTouched] = useState(false);
+  const onStageTouchStart = useCallback(() => {
+    if (firstInteractionAtRef.current === null) firstInteractionAtRef.current = Date.now();
+    setEverTouched(true);
+  }, []);
+  // Typing in the answer box is a first interaction too (TRA-221 semantics:
+  // the scholar has started answering, whichever route they took).
+  const onTypedChange = useCallback((text: string) => {
+    if (firstInteractionAtRef.current === null) firstInteractionAtRef.current = Date.now();
+    setEverTouched(true);
+    setTypedAnswer(text);
+  }, []);
+  const cardIdle = !everTouched && !committed;
 
   const onSolvedChange = useCallback(() => {
     // Optimistic self-check is UI feel only; the card never reveals a verdict
@@ -284,11 +343,14 @@ export function NativeManipulativeItem({
   }, [unsupported, item, itemId, scholarId, onRequestClose]);
 
   const onDone = useCallback(async () => {
-    if (committed || grading || gradingInFlightRef.current || state === null) return;
+    if (committed || grading || gradingInFlightRef.current) return;
+    if (state === null && !question) return;
+    Keyboard.dismiss();
     gradingInFlightRef.current = true;
     setGrading(true);
     setError(null);
     setCommitted(true);
+    setEverTouched(true);
     const timing =
       itemRenderAtRef.current === null
         ? {}
@@ -296,9 +358,13 @@ export function NativeManipulativeItem({
             firstAttempt: true,
             nowMs: Date.now(),
             renderAtMs: itemRenderAtRef.current,
-            firstKeyAtMs: null,
+            firstKeyAtMs: firstInteractionAtRef.current,
           });
-    const answer = JSON.stringify(state);
+    // Board state plus the typed number (if any) in ONE payload — the server's
+    // `*Solved` reads `value` first, then falls back to the board.
+    const answer = JSON.stringify(
+      question ? withTypedValue(state, typedAnswer) : state,
+    );
     const submissionContext = getSubmissionContext?.(itemId);
     const payloadKey = JSON.stringify({
       itemId,
@@ -375,6 +441,8 @@ export function NativeManipulativeItem({
     committed,
     grading,
     state,
+    question,
+    typedAnswer,
     submitAnswer,
     submitAnswerOverride,
     scholarId,
@@ -382,7 +450,7 @@ export function NativeManipulativeItem({
     getSubmissionContext,
     onGraded,
   ]);
-  const doneDisabled = committed || grading || state === null;
+  const doneDisabled = committed || grading || (state === null && !question);
   // First-look "I haven't learned this yet" gate — mirrors the pad items: shown
   // only before the scholar has committed / been graded/queued, only while
   // online (matching web's `skipVisible`'s `!isOffline` exactly — a
@@ -454,16 +522,20 @@ export function NativeManipulativeItem({
 
   return (
     <ManipulativeScrollContext.Provider value={scrollRef}>
-      <View style={styles.screen}>
+    <ManipulativeIdleContext.Provider value={cardIdle}>
+      <Animated.View style={[styles.screen, keyboardInsetStyle]}>
         {/* Vertically-centered stage — the SAME scroll container every other item
             type uses, so a manipulative's question sits centered, not top-pinned. */}
         <ScrollView
           ref={scrollRef}
           style={shell.stageScrollFlex}
           contentContainerStyle={shell.stageScroll}
+          keyboardShouldPersistTaps="handled"
+          onLayout={revealFocusedAnswer}
         >
           <View style={styles.column}>
             <View
+              onTouchStart={onStageTouchStart}
               style={[
                 styles.card,
                 verdict === "correct" && shell.stemBoxCorrect,
@@ -473,7 +545,19 @@ export function NativeManipulativeItem({
               <View style={styles.head}>
                 <View style={styles.headText}>
                   <Text style={styles.concept}>{spec.concept.toUpperCase()}</Text>
-                  <Text style={styles.prompt}>{spec.prompt}</Text>
+                  {question ? (
+                    <>
+                      {/* The QUESTION leads; the strategy is offered, not
+                          required — parenthesised and muted so it reads as a
+                          way in, never as the thing being graded. Derived from
+                          the spec (not the stored prompt, which restates the
+                          question) so every item of the kind reads the same. */}
+                      <Text style={styles.prompt}>{question.question}</Text>
+                      <Text style={styles.strategy}>{`(${question.strategy.replace(/\.$/, "")})`}</Text>
+                    </>
+                  ) : (
+                    <Text style={styles.prompt}>{spec.prompt}</Text>
+                  )}
                 </View>
                 <View style={[styles.badge, badgeStyle]}>
                   <Text style={[styles.badgeText, { color: badgeColor }]}>{badgeLabel}</Text>
@@ -497,6 +581,30 @@ export function NativeManipulativeItem({
                   />
                 </ManipulativeRendererBoundary>
               </View>
+
+              {question ? (
+                <View style={styles.answerRow}>
+                  <AppTextInput
+                    accessibilityLabel="Your answer"
+                    value={typedAnswer}
+                    onChangeText={onTypedChange}
+                    onFocus={() => {
+                      answerFocused.current = true;
+                      onStageTouchStart();
+                      revealFocusedAnswer();
+                    }}
+                    onBlur={() => { answerFocused.current = false; }}
+                    onSubmitEditing={() => void onDone()}
+                    editable={!committed && !grading}
+                    keyboardType="number-pad"
+                    returnKeyType="done"
+                    placeholder="Your answer"
+                    placeholderTextColor={colors.charcoalSubtle}
+                    contextMenuHidden
+                    style={[styles.answerInput, committed && styles.answerInputCommitted]}
+                  />
+                </View>
+              ) : null}
 
               <PracticeVerdictStamp
                 feedback={
@@ -601,12 +709,13 @@ export function NativeManipulativeItem({
                 accessibilityElementsHidden={!showSkip}
                 importantForAccessibility={showSkip ? "auto" : "no-hide-descendants"}
               >
-                <Text style={shell.linkBtnText}>{DONT_KNOW_LABEL}</Text>
+                <Text style={shell.linkBtnText}>{dontKnowLabel ?? DONT_KNOW_LABEL}</Text>
               </Pressable>
             </View>
           ) : null}
         </View>
-      </View>
+      </Animated.View>
+    </ManipulativeIdleContext.Provider>
     </ManipulativeScrollContext.Provider>
   );
 }
@@ -658,6 +767,34 @@ function makeStyles(c: ColorSet) {
       color: c.navy,
       marginTop: 2,
     },
+    // The optional strategy under a derived question — plainly secondary.
+    strategy: {
+      fontFamily: fonts.regular,
+      fontSize: 14,
+      lineHeight: 19,
+      color: c.charcoalSubtle,
+      marginTop: 4,
+    },
+    // The numeric answer box under the board (the question is the header; it
+    // is not repeated here).
+    answerRow: {
+      alignItems: "center",
+      paddingTop: 4,
+    },
+    answerInput: {
+      minWidth: 180,
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      borderRadius: 12,
+      borderWidth: 1.5,
+      borderColor: c.border,
+      backgroundColor: c.bg,
+      fontFamily: fonts.bold,
+      fontSize: 20,
+      color: c.navy,
+      textAlign: "center",
+    },
+    answerInputCommitted: { opacity: 0.6 },
     badge: {
       paddingHorizontal: 10,
       paddingVertical: 4,

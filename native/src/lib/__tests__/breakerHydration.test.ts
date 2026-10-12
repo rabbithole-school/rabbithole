@@ -22,10 +22,10 @@ import { newBreakerFlow } from "../../../vendor/shared/practiceLoop";
 // (server episode shape → reducer event shape: stringifying the branded
 // attempt id, defaulting optional fields to null, hardcoding
 // recoveryAvailable) produces an event that, fed into the REAL reducer,
-// lands the exact fields and survives being re-delivered — exactly what a
-// `useQuery(api.practiceSkills.activeBreakerEpisode)` refetch across a
-// process relaunch actually does: deliver a NEW JS object with the SAME
-// server-side field values, not the same reference.
+// lands the exact fields and survives being re-delivered — exactly what the
+// host's `activeBreakerEpisode` subscription does across a process relaunch,
+// and again at every per-minute re-arm of its `now` argument: deliver a NEW
+// JS object with the SAME server-side field values, not the same reference.
 // ─────────────────────────────────────────────────────────────────────────
 
 const SCHOLAR = "scholar-1" as never;
@@ -338,5 +338,10 @@ describe("breakerHydrationEvent (native binding seam)", () => {
     });
     expect(mismatch.state).toBe(hydrated.state);
     expect(mismatch.commands).toEqual([]);
+  });
+
+  it("passes the run input key the screen is serving through to the machine", () => {
+    expect(breakerHydrationEvent(serverEpisode(), "inputs-k").inputKey).toBe("inputs-k");
+    expect(breakerHydrationEvent(serverEpisode())).not.toHaveProperty("inputKey");
   });
 });

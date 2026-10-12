@@ -3,10 +3,11 @@
  * the recorder in convex/usage.ts and the streaming loops in
  * convex/lib/aideStream.ts + convex/http.ts.
  *
- * The four counts mirror Anthropic's `usage` object so the weekly cost
- * report (convex/lib/usageReport.ts) can price each independently:
+ * The counts mirror Anthropic's `usage` object so the weekly cost report
+ * (convex/lib/usageReport.ts) can price each independently:
  *   - inputTokens      → base (uncached) input
- *   - cacheWriteTokens → cache_creation_input_tokens (5-min ephemeral write)
+ *   - cacheWriteTokens → cache_creation_input_tokens (all cache writes)
+ *   - cacheWrite1hTokens → 1-hour subset of cacheWriteTokens
  *   - cacheReadTokens  → cache_read_input_tokens (cache hit)
  *   - outputTokens     → output (for Fable, includes always-on thinking)
  *
@@ -18,6 +19,10 @@ export interface AnthropicUsage {
   input_tokens?: number | null;
   output_tokens?: number | null;
   cache_creation_input_tokens?: number | null;
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: number | null;
+    ephemeral_1h_input_tokens?: number | null;
+  } | null;
   cache_read_input_tokens?: number | null;
 }
 
@@ -25,6 +30,7 @@ export interface AnthropicUsage {
 export interface UsageBreakdown {
   inputTokens: number;
   cacheWriteTokens: number;
+  cacheWrite1hTokens: number;
   cacheReadTokens: number;
   outputTokens: number;
 }
@@ -33,6 +39,7 @@ export function emptyUsage(): UsageBreakdown {
   return {
     inputTokens: 0,
     cacheWriteTokens: 0,
+    cacheWrite1hTokens: 0,
     cacheReadTokens: 0,
     outputTokens: 0,
   };
@@ -46,9 +53,14 @@ export function normalizeAnthropicUsage(
   u: AnthropicUsage | null | undefined,
 ): UsageBreakdown {
   if (!u) return emptyUsage();
+  const cacheWriteTokens = n(u.cache_creation_input_tokens);
   return {
     inputTokens: n(u.input_tokens),
-    cacheWriteTokens: n(u.cache_creation_input_tokens),
+    cacheWriteTokens,
+    cacheWrite1hTokens: Math.min(
+      n(u.cache_creation?.ephemeral_1h_input_tokens),
+      cacheWriteTokens,
+    ),
     cacheReadTokens: n(u.cache_read_input_tokens),
     outputTokens: n(u.output_tokens),
   };
@@ -68,7 +80,12 @@ export function addStartUsage(
 ): void {
   if (!u) return;
   acc.inputTokens += n(u.input_tokens);
-  acc.cacheWriteTokens += n(u.cache_creation_input_tokens);
+  const cacheWriteTokens = n(u.cache_creation_input_tokens);
+  acc.cacheWriteTokens += cacheWriteTokens;
+  acc.cacheWrite1hTokens += Math.min(
+    n(u.cache_creation?.ephemeral_1h_input_tokens),
+    cacheWriteTokens,
+  );
   acc.cacheReadTokens += n(u.cache_read_input_tokens);
 }
 

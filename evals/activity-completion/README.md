@@ -91,7 +91,9 @@ Use the wrapper rather than bare `npx tsx`: it sets
 `NODE_OPTIONS=--conditions=import`, which this import chain needs because
 `@convex-dev/auth/server` only publishes an `import` exports condition.
 
-Override the tutor model with `TUTOR_MODEL` (defaults to `MODELS.SONNET`).
+Override the tutor model with `TUTOR_MODEL` (defaults to the live
+`TUTOR_DEFAULT_MODEL`). `TUTOR_EFFORT` can override the effort selected by the
+live `tutorRuntime`.
 
 ## Output
 

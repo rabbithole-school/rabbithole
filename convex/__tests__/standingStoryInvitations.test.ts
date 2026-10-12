@@ -11,6 +11,7 @@ import schema from "../schema";
 import { api } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import { STANDING_STORY_INVITATION_CAP } from "../lib/scholarReads";
+import { MATH_CROSS_DOMAIN_SEEDS } from "../lib/practice/crossDomainSeeds";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -141,6 +142,59 @@ async function seedInvitation(
       clientEventId: `event-${options.key}`,
     });
     return { seedId, eventId, fromKey, toKey, skillLabel, hook };
+  });
+}
+
+type SeedSuggestionType = Doc<"seeds">["suggestionType"];
+
+/** Plant a cross-domain SEED invitation: a Sky constellation seed plus (unless
+ *  `withMoment: false`) its `kind:"seed"` momentEvent, mirroring the done-screen
+ *  seed card being shown. */
+async function seedCrossDomainInvitation(
+  t: Harness,
+  scholarId: Id<"users">,
+  options: {
+    key: string;
+    offeredAt: number;
+    outcome?: MomentOutcome;
+    suggestionType?: SeedSuggestionType;
+    status?: SeedStatus;
+    withMoment?: boolean;
+    topic?: string;
+    scholarInvitation?: string | null;
+    rationale?: string;
+  },
+) {
+  const outcome = options.outcome ?? "offered";
+  return await t.run(async (ctx) => {
+    const seedId = await ctx.db.insert("seeds", {
+      scholarId,
+      origin: "ai-constellation",
+      status: options.status ?? "active",
+      topic: options.topic ?? `SEED_TOPIC_${options.key}`,
+      domain: `SEED_DOMAIN_${options.key}`,
+      suggestionType: options.suggestionType ?? "cross_domain",
+      rationale: options.rationale ?? `SEED_RATIONALE_${options.key}`,
+      scholarInvitation:
+        options.scholarInvitation === null
+          ? undefined
+          : (options.scholarInvitation ?? `SEED_INVITATION_${options.key}`),
+      connectionTo: `Skill ${options.key}`,
+    });
+    let eventId: Id<"momentEvents"> | null = null;
+    if (options.withMoment !== false) {
+      eventId = await ctx.db.insert("momentEvents", {
+        scholarId,
+        kind: "seed",
+        seedId,
+        trigger: "fluency_transition",
+        offeredAt: options.offeredAt,
+        outcome,
+        ...(outcome === "offered" ? {} : { outcomeAt: options.offeredAt + 1 }),
+        clientEventId: `seed-event-${options.key}`,
+      });
+    }
+    return { seedId, eventId };
   });
 }
 
@@ -357,6 +411,7 @@ describe("seeds.standingStoryInvitationsForSelf", () => {
 
     expect(invitations).toEqual([
       {
+        kind: "story",
         seedId: invitation.seedId,
         eventId: invitation.eventId,
         fromKey: invitation.fromKey,
@@ -389,7 +444,9 @@ describe("seeds.standingStoryInvitationsForSelf", () => {
     expect(invitations[0]).not.toHaveProperty("artStorageId");
     expect(invitations[0]).not.toHaveProperty("artContentHash");
     expect(invitations[0]).not.toHaveProperty("artStatus");
-    const { artUrl: _servedUrl, ...redacted } = invitations[0]!;
+    const first = invitations[0]!;
+    if (first.kind !== "story") throw new Error("expected a story invitation");
+    const { artUrl: _servedUrl, ...redacted } = first;
     expect(JSON.stringify(redacted)).not.toContain(String(artStorageId));
   });
 
@@ -406,5 +463,212 @@ describe("seeds.standingStoryInvitationsForSelf", () => {
     await expect(
       asMine.query(api.seeds.standingStoryInvitationsForSelf, {}),
     ).resolves.toEqual([]);
+  });
+});
+
+describe("seeds.standingStoryInvitationsForSelf — cross-domain seeds", () => {
+  test("an offered cross-domain seed moment appears as a seed invitation", async () => {
+    const t = makeHarness();
+    const scholarId = await seedUser(t);
+    const { seedId, eventId } = await seedCrossDomainInvitation(t, scholarId, {
+      key: "seed",
+      offeredAt: NOW,
+      topic: "How rhythm carries fractions",
+      scholarInvitation: "What changes when a fraction becomes a beat?",
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    const invitations = await asScholar.query(
+      api.seeds.standingStoryInvitationsForSelf,
+      {},
+    );
+
+    expect(invitations).toEqual([
+      {
+        kind: "seed",
+        seedId,
+        eventId,
+        hook: "How rhythm carries fractions",
+        teaser: "What changes when a fraction becomes a beat?",
+        offeredAt: NOW,
+      },
+    ]);
+  });
+
+  test("a seed minted with old copy shows the registry's current card, matching the done-screen card", async () => {
+    const t = makeHarness();
+    const scholarId = await seedUser(t);
+    const def = MATH_CROSS_DOMAIN_SEEDS.find(
+      (s) => s.gateSkillKey === "add_3digit_regroup",
+    )!;
+    const { seedId, eventId } = await seedCrossDomainInvitation(t, scholarId, {
+      key: "registry",
+      offeredAt: NOW,
+      topic: def.topic,
+      scholarInvitation: "OLD_WORKSHEET_INVITATION",
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    const invitations = await asScholar.query(
+      api.seeds.standingStoryInvitationsForSelf,
+      {},
+    );
+    expect(invitations).toEqual([
+      {
+        kind: "seed",
+        seedId,
+        eventId,
+        hook: def.cardTitle,
+        teaser: def.scholarInvitation,
+        visualEmoji: def.visualEmoji,
+        offeredAt: NOW,
+      },
+    ]);
+  });
+
+  test("a seed teaser falls back to the rationale when no invitation is set", async () => {
+    const t = makeHarness();
+    const scholarId = await seedUser(t);
+    await seedCrossDomainInvitation(t, scholarId, {
+      key: "fallback",
+      offeredAt: NOW,
+      scholarInvitation: null,
+      rationale: "A nearby idea unlocked by recent fluency.",
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    const [invitation] = await asScholar.query(
+      api.seeds.standingStoryInvitationsForSelf,
+      {},
+    );
+    expect(invitation).toMatchObject({
+      kind: "seed",
+      teaser: "A nearby idea unlocked by recent fluency.",
+    });
+  });
+
+  test("a cross-domain seed with no seed moment never appears", async () => {
+    const t = makeHarness();
+    const scholarId = await seedUser(t);
+    await seedCrossDomainInvitation(t, scholarId, {
+      key: "unshown",
+      offeredAt: NOW,
+      withMoment: false,
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.query(api.seeds.standingStoryInvitationsForSelf, {}),
+    ).resolves.toEqual([]);
+  });
+
+  test("a non-cross_domain seed with a moment never appears", async () => {
+    const t = makeHarness();
+    const scholarId = await seedUser(t);
+    await seedCrossDomainInvitation(t, scholarId, {
+      key: "frontier",
+      offeredAt: NOW,
+      suggestionType: "frontier",
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.query(api.seeds.standingStoryInvitationsForSelf, {}),
+    ).resolves.toEqual([]);
+  });
+
+  test.each(["dismissed", "tried"] as const)(
+    "a seed whose latest moment is %s never appears",
+    async (outcome) => {
+      const t = makeHarness();
+      const scholarId = await seedUser(t);
+      await seedCrossDomainInvitation(t, scholarId, {
+        key: `terminal-${outcome}`,
+        offeredAt: NOW,
+        outcome,
+      });
+      const asScholar = await withUser(t, scholarId);
+
+      await expect(
+        asScholar.query(api.seeds.standingStoryInvitationsForSelf, {}),
+      ).resolves.toEqual([]);
+    },
+  );
+
+  test("a seed with a started session never appears", async () => {
+    const t = makeHarness();
+    const scholarId = await seedUser(t);
+    const { seedId } = await seedCrossDomainInvitation(t, scholarId, {
+      key: "started-seed",
+      offeredAt: NOW,
+    });
+    await t.run(async (ctx) => {
+      await ctx.db.insert("sessions", {
+        userId: scholarId,
+        seedId,
+        title: "Started seed",
+        isArchived: false,
+      });
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.query(api.seeds.standingStoryInvitationsForSelf, {}),
+    ).resolves.toEqual([]);
+  });
+
+  test("mixed story + seed invitations sort newest-offered first across kinds", async () => {
+    const t = makeHarness();
+    const scholarId = await seedUser(t);
+    const oldestStory = await seedInvitation(t, scholarId, {
+      key: "mixed-story",
+      offeredAt: NOW - 2,
+    });
+    const seed = await seedCrossDomainInvitation(t, scholarId, {
+      key: "mixed-seed",
+      offeredAt: NOW,
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    const invitations = await asScholar.query(
+      api.seeds.standingStoryInvitationsForSelf,
+      {},
+    );
+
+    expect(
+      invitations.map((invitation) => [invitation.kind, invitation.eventId]),
+    ).toEqual([
+      ["seed", seed.eventId],
+      ["story", oldestStory.eventId],
+    ]);
+  });
+
+  test("the two-card cap applies across story and seed kinds", async () => {
+    const t = makeHarness();
+    const scholarId = await seedUser(t);
+    await seedInvitation(t, scholarId, {
+      key: "cap-story",
+      offeredAt: NOW - 3,
+    });
+    const middleSeed = await seedCrossDomainInvitation(t, scholarId, {
+      key: "cap-seed-mid",
+      offeredAt: NOW - 1,
+    });
+    const newestSeed = await seedCrossDomainInvitation(t, scholarId, {
+      key: "cap-seed-new",
+      offeredAt: NOW,
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    const invitations = await asScholar.query(
+      api.seeds.standingStoryInvitationsForSelf,
+      {},
+    );
+
+    expect(invitations).toHaveLength(STANDING_STORY_INVITATION_CAP);
+    expect(invitations.map((invitation) => invitation.eventId)).toEqual([
+      newestSeed.eventId,
+      middleSeed.eventId,
+    ]);
   });
 });

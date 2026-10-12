@@ -19,6 +19,7 @@ import {
   type HealthRecordFields,
 } from "../lib/healthRecord";
 import {
+  documentKindUsesExtraction,
   requireKindAccess,
   uploadableKinds,
   visibleUploadKinds,
@@ -421,6 +422,35 @@ describe("document kind → capability map", () => {
     expect(uploadableKinds("staff")).toHaveLength(0);
   });
 
+  test("operations staff are offered the administrative scholar-document kinds, never a teacher-only one", () => {
+    // `school:operations` alone: the records the front office files from the
+    // scanner (asked for 2026-08-26) lead the menu. (The health group has
+    // always been listed for this grant too — `scholar_admin` capability —
+    // with the server refusing the actual filing without `health:manage`.)
+    expect(
+      uploadableKinds("staff", true, false).map((k) => k.kind).slice(0, 5),
+    ).toEqual([
+      "report_card",
+      "incident_report",
+      "transfer_record",
+      "conference_notes",
+      "doctor_note",
+    ]);
+    // Both grants: administrative kinds first, then the health group.
+    const both = uploadableKinds("staff", true, true).map((k) => k.kind);
+    expect(both.slice(0, 5)).toEqual([
+      "report_card",
+      "incident_report",
+      "transfer_record",
+      "conference_notes",
+      "doctor_note",
+    ]);
+    expect(both).toContain("immunization_record");
+    for (const teacherOnly of ["assessment", "iep", "identity_document", "parent_email", "observation", "other"]) {
+      expect(both).not.toContain(teacherOnly);
+    }
+  });
+
   test("the dialog hides health kinds when forms are unavailable for the scholar's school", () => {
     expect(
       visibleUploadKinds("teacher", false).map((kind) => kind.kind),
@@ -431,9 +461,24 @@ describe("document kind → capability map", () => {
       "identity_document",
       "parent_email",
       "observation",
+      "incident_report",
+      "transfer_record",
+      "conference_notes",
+      "doctor_note",
       "other",
     ]);
     expect(visibleUploadKinds("staff", false, false, true)).toHaveLength(0);
+    // Operations staff keep their administrative kinds even where health
+    // forms are unavailable — those never depended on a health record.
+    expect(
+      visibleUploadKinds("staff", false, true, true).map((kind) => kind.kind),
+    ).toEqual([
+      "report_card",
+      "incident_report",
+      "transfer_record",
+      "conference_notes",
+      "doctor_note",
+    ]);
     expect(visibleUploadKinds("teacher", true)).toEqual(
       uploadableKinds("teacher"),
     );
@@ -460,6 +505,26 @@ describe("document kind → capability map", () => {
     expect(requireKindAccess("teacher", "assessment").store).toBe(
       "scholarDocuments",
     );
+    // An administrative kind needs `school:operations` specifically — a
+    // health-only grant does not unlock it, and it lands in scholarDocuments.
+    expect(() =>
+      requireKindAccess("staff", "incident_report", false, true),
+    ).toThrow(/may not upload/i);
+    expect(
+      requireKindAccess("staff", "incident_report", true, false).store,
+    ).toBe("scholarDocuments");
+  });
+
+  test("only the registry's pipeline column decides what document AI reads", () => {
+    for (const skipped of ["identity_document", "incident_report", "doctor_note"]) {
+      expect(documentKindUsesExtraction(skipped)).toBe(false);
+    }
+    for (const extracted of ["assessment", "report_card", "transfer_record", "conference_notes", "parent_email"]) {
+      expect(documentKindUsesExtraction(extracted)).toBe(true);
+    }
+    // Health record documents never enter the pipeline, whatever the column says.
+    expect(documentKindUsesExtraction("immunization_record")).toBe(false);
+    expect(documentKindUsesExtraction("not_a_kind")).toBe(false);
   });
 });
 
@@ -1642,6 +1707,178 @@ describe("a 'needs replacement' verdict re-opens the family's follow-up", () => 
     expect(resetFile?.reviewedBy).toBeUndefined();
     expect(resetFile?.reviewedAt).toBeUndefined();
     expect(resetFile?.reviewNote).toBeUndefined();
+  });
+});
+
+describe("emailing a medication 'needs replacement' review note to guardians", () => {
+  async function fileMedicationAuthorization(
+    t: ReturnType<typeof convexTest>,
+    guardianId: Id<"users">,
+    scholarId: Id<"users">,
+  ) {
+    const guardian = await withUser(t, guardianId);
+    const ticket = await guardian.mutation(
+      api.scholarHealthRecords.generateHealthDocumentUploadUrl,
+      { scholarId, kind: "medication_authorization" },
+    );
+    const storageId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([Uint8Array.from(PDF_BYTES).buffer], {
+          type: "application/pdf",
+        }),
+      ),
+    );
+    const upload = await guardian.action(
+      api.scholarHealthRecords.finalizeHealthDocumentUpload,
+      { fileId: ticket.fileId, storageId, fileName: "med-auth.pdf" },
+    );
+    if (!upload.ok) throw new Error("Expected the parent upload to finalize");
+    await guardian.mutation(api.scholarHealthRecords.saveHealthRecord, {
+      scholarId,
+      ...completeFields({
+        schoolMedicationMode: "stored_at_school",
+        medicationDocumentDelivery: "upload",
+        medicationDocumentId: upload.document.fileId,
+      }),
+      expectedDraftVersion: 0,
+      expectedSignedRevision: 0,
+      currentStep: 10,
+      lastCompletedStep: 9,
+      submit: true,
+    });
+    // Signing also schedules a guardian confirmation-email send. Drain it now
+    // (harmlessly, with no Resend key set yet) so it can't leak into a later
+    // test's mocked-fetch assertions.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await t.finishInProgressScheduledFunctions();
+    return upload.document.fileId;
+  }
+
+  async function withResendMock<T>(run: () => Promise<T>): Promise<{
+    result: T;
+    requests: { url: string; body: Record<string, unknown> }[];
+  }> {
+    const previousKey = process.env.AUTH_RESEND_KEY;
+    const realFetch = globalThis.fetch;
+    process.env.AUTH_RESEND_KEY = "re_test";
+    const requests: { url: string; body: Record<string, unknown> }[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body ?? "{}")),
+      });
+      return new Response(JSON.stringify({ id: `email-${requests.length}` }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const result = await run();
+      return { result, requests };
+    } finally {
+      globalThis.fetch = realFetch;
+      if (previousKey === undefined) delete process.env.AUTH_RESEND_KEY;
+      else process.env.AUTH_RESEND_KEY = previousKey;
+    }
+  }
+
+  test("sends the reviewer's note to the guardian on file and stamps reviewEmailSentAt", async () => {
+    const { t, guardianId, scholarId, registrarId, institutionId } =
+      await setupSchool();
+    const fileId = await fileMedicationAuthorization(t, guardianId, scholarId);
+    const registrar = await withUser(t, registrarId);
+
+    const { requests } = await withResendMock(async () => {
+      await registrar.mutation(
+        api.scholarHealthRecords.setHealthDocumentReviewStatus,
+        {
+          fileId,
+          institutionScope: institutionId,
+          reviewStatus: "needs_replacement",
+          reviewNote: "Albuterol expires soon — please renew.",
+          emailGuardians: true,
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await t.finishInProgressScheduledFunctions();
+    });
+
+    const sent = requests.filter(
+      (request) => request.url === "https://api.resend.com/emails",
+    );
+    expect(sent).toHaveLength(1);
+    expect(sent[0].body.to).toBe("guardian-a@example.test");
+    expect(String(sent[0].body.text)).toContain(
+      "Albuterol expires soon — please renew.",
+    );
+
+    const file = await t.run((ctx) => ctx.db.get(fileId));
+    expect(file?.reviewEmailSentAt).toEqual(expect.any(Number));
+  });
+
+  test("does not email when the checkbox is unchecked", async () => {
+    const { t, guardianId, scholarId, registrarId, institutionId } =
+      await setupSchool();
+    const fileId = await fileMedicationAuthorization(t, guardianId, scholarId);
+    const registrar = await withUser(t, registrarId);
+
+    const { requests } = await withResendMock(async () => {
+      await registrar.mutation(
+        api.scholarHealthRecords.setHealthDocumentReviewStatus,
+        {
+          fileId,
+          institutionScope: institutionId,
+          reviewStatus: "needs_replacement",
+          reviewNote: "Albuterol expires soon — please renew.",
+          emailGuardians: false,
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await t.finishInProgressScheduledFunctions();
+    });
+
+    expect(
+      requests.filter((r) => r.url === "https://api.resend.com/emails"),
+    ).toHaveLength(0);
+    const file = await t.run((ctx) => ctx.db.get(fileId));
+    expect(file?.reviewEmailSentAt).toBeUndefined();
+  });
+
+  test("a later review verdict clears the earlier email-sent stamp", async () => {
+    const { t, guardianId, scholarId, registrarId, institutionId } =
+      await setupSchool();
+    const fileId = await fileMedicationAuthorization(t, guardianId, scholarId);
+    const registrar = await withUser(t, registrarId);
+
+    await withResendMock(async () => {
+      await registrar.mutation(
+        api.scholarHealthRecords.setHealthDocumentReviewStatus,
+        {
+          fileId,
+          institutionScope: institutionId,
+          reviewStatus: "needs_replacement",
+          reviewNote: "Albuterol expires soon — please renew.",
+          emailGuardians: true,
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await t.finishInProgressScheduledFunctions();
+    });
+
+    const emailed = await t.run((ctx) => ctx.db.get(fileId));
+    expect(emailed?.reviewEmailSentAt).toEqual(expect.any(Number));
+
+    await registrar.mutation(
+      api.scholarHealthRecords.setHealthDocumentReviewStatus,
+      {
+        fileId,
+        institutionScope: institutionId,
+        reviewStatus: "accepted",
+        reviewNote: "Renewed",
+      },
+    );
+    const accepted = await t.run((ctx) => ctx.db.get(fileId));
+    expect(accepted?.reviewEmailSentAt).toBeUndefined();
   });
 });
 

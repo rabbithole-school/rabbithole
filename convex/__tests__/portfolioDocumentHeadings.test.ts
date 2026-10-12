@@ -4,11 +4,6 @@ import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import {
-  HEADING_ONLY_PROMPT,
-  SEGMENTS_PROMPT,
-  SINGLE_PROMPT,
-} from "../portfolioActions";
-import {
   seedScholarInInstitution,
   seedStaffWithMembership,
   seedTestInstitution,
@@ -53,20 +48,6 @@ async function headingJobs(t: ReturnType<typeof convexTest>) {
 }
 
 describe("portfolio document headings", () => {
-  test("all extraction prompts distinguish document names from section headings", () => {
-    for (const prompt of [
-      SINGLE_PROMPT,
-      SEGMENTS_PROMPT,
-      HEADING_ONLY_PROMPT,
-    ]) {
-      const normalizedPrompt = prompt.replace(/\s+/g, " ");
-      expect(normalizedPrompt).toContain("I. Strengths and Interests");
-      expect(normalizedPrompt).toContain("Part B: Reflection");
-      expect(normalizedPrompt.toLowerCase()).toContain("prefer null over a guess");
-      expect(normalizedPrompt).toContain("page/template code");
-    }
-  });
-
   test("insert, extraction patch, and public scholar list preserve the heading", async () => {
     const t = convexTest(schema, modules);
     const institutionId = await seedTestInstitution(t);

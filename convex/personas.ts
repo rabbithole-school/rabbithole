@@ -18,7 +18,7 @@ import { requireActiveLearnerInstitution } from "./lib/scholarEnrollment";
  * and conversation history survive and re-enabling is reversible. Nothing in
  * the active UI calls create/update anymore.
  *
- * See TODO.html ("Reimagine personas") for the parasocially-safe redesign and
+ * See the retired TODO.html ("Reimagine personas") for the parasocially-safe redesign and
  * review/anti-parasocial-design.md for the broader initiative.
  */
 

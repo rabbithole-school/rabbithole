@@ -2,7 +2,7 @@
 
 /**
  * Latency marks for the voice-first loop. The headline metric for the
- * provider bake-off (TODO.html) is kid-stops-talking → tutor-voice-starts.
+ * provider bake-off (Linear TRA-57) is kid-stops-talking → tutor-voice-starts.
  * One module owns the whole vocabulary — both dictation paths report here:
  *
  *   Legacy (record-then-Whisper) turns arm at `micClosed`;

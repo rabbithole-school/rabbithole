@@ -1,4 +1,4 @@
-// Base URL for Convex HTTP Actions (/project-stream, /tts, /parent-api, …).
+// Base URL for Convex HTTP Actions (/session-stream, /tts, /parent-api, …).
 //
 // In the cloud the HTTP-actions host derives mechanically from the deployment
 // URL (foo.convex.cloud → foo.convex.site). A LOCAL Convex backend (plane

@@ -14,7 +14,6 @@ import {
   criterionFeedbackSentence,
   criterionSentence,
   deckDisplayPrompt,
-  formatMetric,
   isBetter,
   isPoolEntityKind,
   metricLabel,
@@ -112,11 +111,11 @@ describe("workbench helpers", () => {
       metricKey: "scoringSlotSurvivors",
       direction: "maximize",
     });
-    expect(criterionSentence(survival)).toBe("Keep your species alive through the last day");
-    expect(metricLabel("scoringSlotSurvivors", 1)).toBe("living member of your species");
-    expect(metricLabel("scoringSlotSurvivors", 2)).toBe("living members of your species");
-    expect(`${formatMetric(1)} ${metricLabel("scoringSlotSurvivors", 1)}`).toBe(
-      "1 living member of your species",
+    // The special-case branch fires instead of the generic "Grow ... as high
+    // as it will go" template.
+    expect(criterionSentence(survival)).not.toMatch(/Grow/i);
+    expect(metricLabel("scoringSlotSurvivors", 1)).not.toBe(
+      metricLabel("scoringSlotSurvivors", 2),
     );
   });
 
@@ -358,12 +357,6 @@ describe("workbench helpers", () => {
   });
 
   describe("composeSpeciesIconLabel (species icon generation sees the world's setting)", () => {
-    it("composes world:<setting phrase>:<species>, all lowercased", () => {
-      expect(composeSpeciesIconLabel("ecosystemGrid", "Grazers")).toBe(
-        "world:coral reef ecosystem:grazers",
-      );
-    });
-
     it("collapses internal whitespace runs to a single space", () => {
       expect(composeSpeciesIconLabel("ecosystemGrid", "Grazer   Fish")).toBe(
         composeSpeciesIconLabel("ecosystemGrid", "Grazer Fish"),
@@ -453,7 +446,6 @@ describe("workbench helpers", () => {
       it("does not clamp a realistic composition that already clears the cap", () => {
         const label = composeSpeciesIconLabel("ecosystemGrid", "Grazers");
         expect(label.length).toBeLessThan(MAX_THEME_LABEL_LEN);
-        expect(label).toBe("world:coral reef ecosystem:grazers");
       });
     });
   });

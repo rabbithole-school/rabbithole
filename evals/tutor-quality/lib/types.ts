@@ -51,6 +51,9 @@ export interface TutorCase {
     frontierLabels: string[];
     dueLabels: string[];
   };
+  /** Regenerate mode: render the open-exploration "Wrap up" note, as the live
+   *  tutor does for a session with no activity (set by --offers-wrap-up). */
+  offersWrapUp?: boolean;
   scoringTarget?: string;
   preferredOutcome?: string;
   secondBeat?: FixtureSecondBeat;

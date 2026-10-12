@@ -1,9 +1,11 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import { FLUENT_REPS } from "../lib/practice/scheduler";
+import { PRACTICE_DOMAINS } from "../lib/practice/domains";
+import { roundRobin } from "../lib/practice/mixedQueue";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -11,8 +13,25 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
+
 async function seedUser(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   role: "scholar" | "teacher" = "scholar",
   username = `choice_${role}`,
 ) {
@@ -51,7 +70,7 @@ async function seedUser(
   });
 }
 
-async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function withUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -66,7 +85,7 @@ async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 }
 
 async function insertChoiceItem(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   skillKey: string,
   domain: string,
 ) {
@@ -84,7 +103,7 @@ async function insertChoiceItem(
 }
 
 async function seedFluent(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   scholarId: Id<"users">,
   skillKey: string,
   domain: string,
@@ -185,8 +204,7 @@ describe("practiceSkills — scholar practice choices", () => {
   });
 
   test("choiceSetForSelf returns at most three balanced frontier-strand cards", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedUser(t, "scholar", "choice_set_scholar");
     const asScholar = await withUser(t, scholar);
     const domains = ["whole-number-arithmetic", "probability"];
@@ -215,8 +233,7 @@ describe("practiceSkills — scholar practice choices", () => {
   });
 
   test("choiceCardsForSelf matches the standalone choice set and derives its new-territory exclusions", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedUser(t, "scholar", "combined_choice_cards");
     const asScholar = await withUser(t, scholar);
     const domains = ["whole-number-arithmetic", "probability"];
@@ -243,6 +260,37 @@ describe("practiceSkills — scholar practice choices", () => {
     expect(
       combined.newTerritory.every((card) => !choiceDomains.has(card.domain)),
     ).toBe(true);
+  });
+
+  test("an open-scope choice set stops early but matches round-robin over every domain", async () => {
+    const t = sharedSeeded();
+    const scholar = await seedUser(t, "scholar", "open_scope_choice_cards");
+    const asScholar = await withUser(t, scholar);
+
+    // What the old all-domains computation returned: round-robin of every
+    // domain's cards, first three. Each single-domain call is that domain's
+    // own card list (capped at 3, which is all three rounds can ever use).
+    const perDomain = [];
+    for (const { domain } of PRACTICE_DOMAINS) {
+      perDomain.push(
+        await asScholar.query(api.practiceSkills.choiceSetForSelf, {
+          domains: [domain],
+        }),
+      );
+    }
+    const expected = roundRobin(perDomain).slice(0, 3);
+    expect(expected).toHaveLength(3);
+
+    const openScope = await asScholar.query(
+      api.practiceSkills.choiceSetForSelf,
+      {},
+    );
+    expect(openScope).toEqual(expected);
+    const combined = await asScholar.query(
+      api.practiceSkills.choiceCardsForSelf,
+      {},
+    );
+    expect(combined.choiceSet).toEqual(expected);
   });
 
   test("logPracticeChoice is idempotent per scholar and clientPickId", async () => {
@@ -304,7 +352,7 @@ describe("practiceSkills — scholar practice choices", () => {
 // ── bonusSkillsForChoice — the "More of your pick" done-screen bonus set ────
 describe("practiceSkills — bonusSkillsForChoice", () => {
   async function insertBonusNode(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     node: { nodeKey: string; domain: string; strand: string },
   ) {
     await t.run(async (ctx) =>
@@ -319,7 +367,7 @@ describe("practiceSkills — bonusSkillsForChoice", () => {
   }
 
   async function insertBonusEdge(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     fromKey: string,
     toKey: string,
     domain: string,
@@ -330,8 +378,7 @@ describe("practiceSkills — bonusSkillsForChoice", () => {
   }
 
   test("returns only same-strand candidates, capped at count", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedUser(t, "scholar", "bonus_strand_scholar");
     const asScholar = await withUser(t, scholar);
 

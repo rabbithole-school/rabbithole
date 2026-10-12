@@ -26,6 +26,7 @@ import {
   parseIdentification,
   type EquipmentIdentification,
 } from "./lib/equipmentIdentify";
+import { assertWritableAction } from "./lib/auth";
 
 export const identifyPhoto = action({
   args: { storageId: v.id("_storage") },
@@ -36,6 +37,7 @@ export const identifyPhoto = action({
       id: userId,
     });
     if (!caller || !isStaffRole(caller.role)) throw new Error("Forbidden");
+    await assertWritableAction(ctx);
 
     const blob = await ctx.storage.get(args.storageId);
     if (!blob) throw new Error("Photo not found");

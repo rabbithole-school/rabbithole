@@ -44,7 +44,8 @@ const TOOL_LABELS: Record<ScholarReadToolName, string> = {
   list_scholars: "List scholars",
   get_scholar_dossier: "Read scholar learning profiles (dossiers)",
   get_scholar_mastery: "Read concept mastery",
-  get_scholar_signals: "Read learning signals (curiosity, persistence, …)",
+  get_scholar_interests: "Read what a scholar is into (with how we know it)",
+  get_scholar_signals: "Read learning signals (persistence, self-direction, …)",
   get_scholar_seeds: "Read suggested exploration topics",
   get_scholar_observations: "Read teacher observations",
   get_scholar_sessions: "List recent learning sessions",
@@ -433,19 +434,23 @@ function AuthorizeInner() {
 }
 
 function CenteredCard({ children }: { children: React.ReactNode }) {
+  // globals.css locks html/body to overflow:hidden for the app shell, so a
+  // standalone page must own its scroll container (same as /dev-login).
   return (
-    <Container maxW="md" py={16}>
-      <VStack
-        gap={5}
-        align="start"
-        borderWidth="1px"
-        borderColor="border"
-        borderRadius="lg"
-        p={8}
-      >
-        {children}
-      </VStack>
-    </Container>
+    <Box h="100dvh" overflowY="auto">
+      <Container maxW="md" py={16}>
+        <VStack
+          gap={5}
+          align="start"
+          borderWidth="1px"
+          borderColor="border"
+          borderRadius="lg"
+          p={8}
+        >
+          {children}
+        </VStack>
+      </Container>
+    </Box>
   );
 }
 

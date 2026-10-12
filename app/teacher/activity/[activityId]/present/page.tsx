@@ -56,7 +56,12 @@ export default function ActivityPresenterPage({
   }, [redirectToGoogle, googleUrl]);
 
   if (rabbitDeck) {
-    return <TeacherDeckPresenter deck={rabbitDeck} />;
+    return (
+      <TeacherDeckPresenter
+        deck={rabbitDeck}
+        activityId={activityId as Id<"activities">}
+      />
+    );
   }
 
   return (

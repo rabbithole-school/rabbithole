@@ -1,0 +1,562 @@
+[
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "addition-dropped-carries",
+    "trial": 1,
+    "rawNudge": "Check what you wrote in the ones column: 8 + 5 should give you ___.",
+    "visibleNudge": "Check what you wrote in the ones column: 8 + 5 should give you ___.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 4,
+      "notes": "The hint targets the scholar's visible ones-column line (8 + 5 = 13) where the carry was dropped, following their column method. It doesn't reveal the final answer 423 or supply the correct sum; it prompts recomputation of a sub-step. Could be stronger by explicitly pointing to the missing carry, but it grounds well in the specific slip."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "addition-dropped-carries",
+    "trial": 2,
+    "rawNudge": "Check the ones column where you added 8 + 5 to make sure that sum is correct.",
+    "visibleNudge": "Check the ones column where you added 8 + 5 to make sure that sum is correct.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 2,
+      "notes": "The scholar's actual slip is not that 8+5 is wrong—they correctly got 13—but that they never carried the regrouped tens into the next columns. The hint tells them to check whether 8+5 is \"correct,\" which it is, so it points at the wrong thing and misses the real error (dropping the carries). It references a visible column but not the actual slip, and doesn't follow the regrouping method needed. No answer content is revealed."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "addition-dropped-carries",
+    "trial": 3,
+    "rawNudge": "Look at the ones column where you added 8 + 5 to get 13—now check the tens column to see if you carried that 1.",
+    "visibleNudge": "Look at the ones column where you added 8 + 5 to get 13—now check the tens column to see if you carried that 1.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The hint names the specific visible move (8 + 5 = 13 in the ones column) and points to the exact slip—failing to carry the regrouped 1 into the tens column. It follows the scholar's own column-addition method rather than reciting a generic algorithm. No correct final value (423) or copyable arithmetic yielding it is provided; the scholar must still do the carrying and re-add themselves."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "addition-dropped-carries",
+    "trial": 4,
+    "rawNudge": "Check what you got when you added the ones column (8 + 5).",
+    "visibleNudge": "Check what you got when you added the ones column (8 + 5).",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 4,
+      "notes": "The hint points to the ones column (8 + 5 = 13), which is exactly where the scholar's slip begins—failing to carry the regrouped ten. It references their specific visible step rather than a generic algorithm. It doesn't quite name the carry explicitly, but directing attention to the 13 result is a solid, method-following nudge toward noticing the uncarried ten. No correct value (423) or copyable final answer is revealed."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "subtraction-borrow-then-smaller-from-larger",
+    "trial": 1,
+    "rawNudge": "Look at the third row where you found 5 − 8; check what you wrote in the ones place of your answer.",
+    "visibleNudge": "Look at the third row where you found 5 − 8; check what you wrote in the ones place of your answer.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 3,
+      "notes": "The hint does not state or confirm the correct answer (265), nor supply arithmetic yielding it, so no leak. However, it partially misdirects: the scholar's real slip is in the tens column (5 - 8 = 3, wrong, should trigger a borrow) and the failure to reduce the hundreds, not the ones place. The hint points to the third row \"5 - 8\" but then tells them to check the ones place of their answer, which conflates two columns and doesn't cleanly target the actual visible slip. It does reference a specific visible move (the \"5 - 8\" row) but misapplies which column to fix, so it only moderately grounds in their method."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "subtraction-borrow-then-smaller-from-larger",
+    "trial": 2,
+    "rawNudge": "Look at line 2 where you found the ones-place difference: check whether 12 - 7 = 5 is the value you should subtract from your tens column.",
+    "visibleNudge": "Look at line 2 where you found the ones-place difference: check whether 12 - 7 = 5 is the value you should subtract from your tens column.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 2,
+      "notes": "The scholar's actual slip is in the tens column (\"5 - 8 = 3\", where they should have borrowed and never reduced the hundreds). The hint instead points to line 2's ones-place result (12 - 7 = 5), which is actually correct, and vaguely asks whether it's \"the value you should subtract from your tens column\"—a confusing framing that doesn't target the real error (the missing borrow into the tens and the un-reduced hundreds). It references a visible line but misidentifies the slip, so it only loosely follows their method. No answer value (265) or copyable arithmetic is provided, so no leak."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "subtraction-borrow-then-smaller-from-larger",
+    "trial": 3,
+    "rawNudge": "Look at your second row where you found 12 - 7 = 5; check whether that 5 correctly represents the tens column of your subtraction.",
+    "visibleNudge": "Look at your second row where you found 12 - 7 = 5; check whether that 5 correctly represents the tens column of your subtraction.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 3,
+      "notes": "The hint references their actual work by pointing to the second row (\"12 - 7 = 5\"), but it misidentifies the problem. The scholar's real slip is in the tens column (5 - 8 = 3, which mishandles the borrow) and the failure to reduce the hundreds. The nudge instead directs attention to the ones-column result \"12 - 7 = 5\" and calls it the tens column, which is confused about where the error actually lies. It follows their method somewhat but doesn't cleanly target the visible slip (the tens/hundreds borrow), so it's only partially grounded. No answer value (265) is revealed or computable from the hint."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "subtraction-borrow-then-smaller-from-larger",
+    "trial": 4,
+    "rawNudge": "Check the second row where you found T: does 12 − T = 5 match what T should be from the row below?",
+    "visibleNudge": "Check the second row where you found T: does 12 − T = 5 match what T should be from the row below?",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 2,
+      "notes": "The hint doesn't reveal the correct answer (265) or any copyable final value, so no leak. However, it grounds poorly. The actual visible slip is in the tens column: they wrote \"5 - 8 = 3\" without borrowing/reducing the hundreds, and never reduced the hundreds after borrowing. The hint instead points at the ones-column result (\"12 − T = 5\") and references a confusing variable \"T\" that doesn't clearly map to the visible rows. It misdirects toward the ones column (which was actually done correctly: 12 - 7 = 5) rather than the tens/hundreds borrowing error that produced the wrong result. It does loosely follow their column-subtraction method but targets the wrong row, so it earns only partial credit."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "division-by-five-own-method",
+    "trial": 1,
+    "rawNudge": "Check the first line: does 3615 ÷ 5 match your computation?",
+    "visibleNudge": null,
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 1,
+      "notes": "No verified model nudge reached the scholar."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "division-by-five-own-method",
+    "trial": 2,
+    "rawNudge": "Look at your second line: you divided 361.5 by 2, so check whether that arithmetic is correct.",
+    "visibleNudge": "Look at your second line: you divided 361.5 by 2, so check whether that arithmetic is correct.",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 2,
+      "notes": "The hint does not leak the answer (723 is never stated or confirmed, and no correct arithmetic is supplied). However, it grounds poorly: it misdescribes the scholar's actual second line. The pad shows \"361.5 x 2 = 723\" (multiplication/doubling), but the nudge claims \"you divided 361.5 by 2.\" This misreference does not follow their real method and could mislead, so it scores low on groundsInTheirWork."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "division-by-five-own-method",
+    "trial": 3,
+    "rawNudge": "Check how you used the result 361.5 in your second line to find the final answer.",
+    "visibleNudge": "Check how you used the result 361.5 in your second line to find the final answer.",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 4,
+      "notes": "The nudge points to the scholar's specific second line (using 361.5 to reach the final answer) and follows their divide-by-10-then-double method rather than offering a canonical long-division approach. It does not state or confirm 723, nor supply arithmetic yielding it. No answer leak. Grounding is strong but slightly short of naming the exact operation (doubling) to check, so 4 rather than 5."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "division-by-five-own-method",
+    "trial": 4,
+    "rawNudge": "Check the second line: you multiplied 361.5 by 2, so verify what 361.5 × 2 should equal.",
+    "visibleNudge": null,
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 1,
+      "notes": "No verified model nudge reached the scholar."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "multiplication-dropped-carry",
+    "trial": 1,
+    "rawNudge": "Check how you combined the two products in the bottom line.",
+    "visibleNudge": "Check how you combined the two products in the bottom line.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 3,
+      "notes": "The hint points to combining the two products in the bottom line, which is roughly the right area. However, it doesn't specifically name the slip: they forgot to carry the 2 tens from 24 into the 18. It's somewhat generic (\"check how you combined\") rather than pinpointing the missing carry. No correct answer (204) is stated or computable from the hint, so no leak."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "multiplication-dropped-carry",
+    "trial": 2,
+    "rawNudge": "Check what you wrote for 4 × 6 in the second row.",
+    "visibleNudge": "Check what you wrote for 4 × 6 in the second row.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 3,
+      "notes": "The hint points to the 4 × 6 = 24 row, which is where the slip originates (the scholar failed to carry the 2 tens). However, the actual error is the missing carry into the 3 × 6 step, not the value of 24 itself, which is correct. The nudge references a specific visible row from their work but slightly misdirects—24 is right; the problem is the carry. It follows their column-multiplication method and stays near the slip, so it earns a middling score. No correct answer (204) or copyable final value is stated or derivable, so no leak."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "multiplication-dropped-carry",
+    "trial": 3,
+    "rawNudge": "Check how you broke down 34 in your first line—what does each part represent, and does the multiplication match what comes below?",
+    "visibleNudge": "Check how you broke down 34 in your first line—what does each part represent, and does the multiplication match what comes below?",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 2,
+      "notes": "The actual slip is a carry error: they got 24 in the ones step but failed to carry the 2 tens into the 3×6=18 (tens) result, yielding 184 instead of 204. The hint instead directs attention to the \"34\" breakdown and whether each part's multiplication matches the lines below. It vaguely gestures at the place-value/breakdown but does not name the missed carry of the 2 from the 24, nor point to how the two partial products should combine (180 + 24). It follows the scholar's partial-product method loosely but is fairly generic and doesn't pinpoint the specific carry/addition slip. No answer or copyable value is revealed."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "multiplication-dropped-carry",
+    "trial": 4,
+    "rawNudge": "Look at how you broke down 34 × 6 in the first two lines—check whether the sum of those two partial products gives you the right total.",
+    "visibleNudge": null,
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 1,
+      "notes": "No verified model nudge reached the scholar."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "place-value-reversed-comparison",
+    "trial": 1,
+    "rawNudge": "Look at the tens place in each number—which digit is larger there?",
+    "visibleNudge": "Look at the tens place in each number—which digit is larger there?",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The scholar's slip was comparing the ones digits (7 > 0) and ignoring the tens place, where the numbers actually differ. The hint directly redirects them to the tens place—the specific spot their method went wrong—without stating which number is greater or supplying the answer. It follows their digit-comparison method rather than offering a generic algorithm, and does not confirm 570 as the answer."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "place-value-reversed-comparison",
+    "trial": 2,
+    "rawNudge": "Look at the hundreds places in 507 and 570 to see which number is larger.",
+    "visibleNudge": "Look at the hundreds places in 507 and the result you wrote to see which number is larger.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 2,
+      "notes": "The scholar's slip was comparing ones digits (7 > 0) instead of noticing the tens digits differ. The hint redirects to \"hundreds places,\" but both numbers share the same hundreds digit (5), so this doesn't address the actual place-value comparison that matters (the tens digit: 0 vs 7). The hint mentions the visible numbers but points to the wrong place value and doesn't follow the tens-digit slip they made. No answer value is stated or computed, so no leak."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "place-value-reversed-comparison",
+    "trial": 3,
+    "rawNudge": "Look at the hundreds places in 507 and 570 to see which number is larger.",
+    "visibleNudge": "Look at the hundreds places in 507 and the result you wrote to see which number is larger.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 2,
+      "notes": "The hint does not leak the answer (570) — it directs attention to the hundreds place, which is a redirection. However, it misidentifies the actual slip: the scholar compared ones digits (7 > 0) while ignoring the differing tens digits (0 vs 7). Both numbers share the same hundreds digit (5), so pointing to the hundreds place is unhelpful and doesn't follow their visible method. A better nudge would target the tens comparison where the slip occurred. Grounded partly in their written work (referencing 507 and their result) but aimed at the wrong place value."
+    }
+  },
+  {
+    "model": "claude-haiku-4-5-20251001",
+    "fixtureId": "place-value-reversed-comparison",
+    "trial": 4,
+    "rawNudge": "Look at the hundreds places in 507 and 570 to compare which number is larger.",
+    "visibleNudge": "Look at the hundreds places in 507 and the result you wrote to compare which number is larger.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 2,
+      "notes": "The scholar's actual slip was comparing the ones digits (7 > 0) while both numbers share the same hundreds digit (5). The nudge points to the hundreds place, but since both are 5, that doesn't address the real error — the deciding difference is in the tens place (0 vs 7). The hint misdirects to hundreds rather than tens, so it only weakly references their method and could confuse. No correct answer (570) is stated or computed, so no leak."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "addition-dropped-carries",
+    "trial": 1,
+    "rawNudge": "You've added the ones (8+5=13) and tens (6+5=11) columns correctly — now check how you'll combine those two results with the hundreds column when carrying over.",
+    "visibleNudge": "You've added the ones (8+5=13) and tens (6+5=11) columns correctly — now check how you'll combine those two results with the hundreds column when carrying over.",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 4,
+      "notes": "The hint references the scholar's specific column sums (8+5=13, 6+5=11) and points at the exact slip — failing to carry the regrouped tens into the next column. It follows their method rather than reciting a generic algorithm. It does not state or confirm 423, nor give copyable arithmetic yielding the answer; it just prompts them to reconsider carrying. Slight imprecision: says \"hundreds column\" loosely and doesn't pinpoint that the carry from 13 goes into the tens sum, but it does direct attention to the correct operation."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "addition-dropped-carries",
+    "trial": 2,
+    "rawNudge": "You've written the three column sums 13, 11, and 3 — now check how these overlap by place value before combining them into one number.",
+    "visibleNudge": "You've written the three column sums 13, 11, and 3 — now check how these overlap by place value before combining them into one number.",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 4,
+      "notes": "The hint references the scholar's specific visible sums (13, 11, 3) and points to the place-value overlap, which is exactly the missed-carry slip. It follows their column-by-column method rather than reciting a generic algorithm. It does not state or confirm 423, nor provide arithmetic yielding the correct answer, so no leak. Slightly short of 5 because it doesn't explicitly name the carry operation, but it clearly targets the overlap issue."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "addition-dropped-carries",
+    "trial": 3,
+    "rawNudge": "You've got the ones (13) and tens (11) column sums written down - now think about how those two carries combine with the hundreds column before writing one final number.",
+    "visibleNudge": "You've got the ones (13) and tens (11) column sums written down - now think about how those two carries combine with the hundreds column before writing one final number.",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The hint directly references the scholar's visible column sums (13 and 11) and pinpoints the exact slip: failing to carry the regrouped tens into the next column. It follows their column-addition method rather than offering a generic algorithm. No correct answer (423) or copyable final value is stated or implied; it only prompts reflection on combining the carries. No arithmetic yielding 423 is provided."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "addition-dropped-carries",
+    "trial": 4,
+    "rawNudge": "You've added ones (8+5=13) and tens (6+5=11) separately - now check how the tens column's carry combines with the hundreds digits before writing the final sum.",
+    "visibleNudge": "You've added ones (8+5=13) and tens (6+5=11) separately - now check how the tens column's carry combines with the hundreds digits before writing the final sum.",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 4,
+      "notes": "The hint references the scholar's actual column sums (8+5=13, 6+5=11) and targets the specific slip—failing to propagate carries—by prompting them to combine the tens carry with the hundreds digits. It follows their column-by-column method rather than giving a generic algorithm. It does not state or compute the correct answer (423), nor supply arithmetic evaluating to it; the ones-carry into tens is left implicit and the final value is not given. Could be slightly more explicit about the ones-to-tens carry, but no leak."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "subtraction-borrow-then-smaller-from-larger",
+    "trial": 1,
+    "rawNudge": "Check that second line: since 5 is less than 8, did you borrow from the hundreds column before writing that 3?",
+    "visibleNudge": "Check that second line: since 5 is less than 8, did you borrow from the hundreds column before writing that 3?",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The hint targets the exact visible slip: the \"5 - 8 = 3\" line in the tens column where borrowing was needed. It follows the scholar's own column-by-column method and asks them to check whether they borrowed from the hundreds before writing that digit, without revealing the corrected tens value, the hundreds reduction, or the final answer 265. No copyable correct value or answer-equivalent arithmetic is supplied."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "subtraction-borrow-then-smaller-from-larger",
+    "trial": 2,
+    "rawNudge": "In the second line, 5 minus 8 needs borrowing since 8 is bigger than 5 — check how that borrow changes the tens digit before writing the result.",
+    "visibleNudge": "In the second line, 5 minus 8 needs borrowing since 8 is bigger than 5 — check how that borrow changes the tens digit before writing the result.",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 4,
+      "notes": "The hint targets the scholar's specific visible line \"5 - 8 = 3\" in the tens column, correctly identifying that 8 > 5 requires borrowing, which they failed to account for. It follows their column-by-column method rather than imposing a generic algorithm. It doesn't reveal the correct answer 265 or any final digit. Slightly less than perfect because it says \"check how that borrow changes the tens digit\" while the deeper slip is the failure to reduce the hundreds after borrowing — but it does point at the right column and the borrow mechanics, so it's well-grounded."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "subtraction-borrow-then-smaller-from-larger",
+    "trial": 3,
+    "rawNudge": "Check that middle line: since 5 is less than 8, you need to borrow from the hundreds column before subtracting, so look again at what \"5 - 8\" should become after borrowing.",
+    "visibleNudge": "Check that middle line: since 5 is less than 8, you need to borrow from the hundreds column before subtracting, so look again at what \"5 - 8\" should become after borrowing.",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The hint targets the exact visible slip: the \"5 - 8 = 3\" middle line where they failed to borrow from the hundreds. It follows their column-subtraction method and points to the specific tens-column step without stating the corrected value or the final answer (265). No arithmetic leaking the answer is supplied."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "subtraction-borrow-then-smaller-from-larger",
+    "trial": 4,
+    "rawNudge": "Check that middle line: since 5 is less than 8, did you borrow from the hundreds column before subtracting there?",
+    "visibleNudge": "Check that middle line: since 5 is less than 8, did you borrow from the hundreds column before subtracting there?",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The hint targets the exact slip: the middle line \"5 - 8 = 3\" where they subtracted the smaller from larger without borrowing from the hundreds. It follows their column-by-column method and prompts the specific borrow they missed, without stating the correct answer (265) or supplying copyable arithmetic that yields it."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "division-by-five-own-method",
+    "trial": 1,
+    "rawNudge": "You divided by 10 then doubled to account for the extra factor of 2 needed to get back to dividing by 5 — check that your doubling step was applied to the correct quotient value.",
+    "visibleNudge": "You divided by 10 then doubled to account for the extra factor of 2 needed to get back to dividing by 5 — check that your doubling step was applied to the correct quotient value.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 4,
+      "notes": "The hint references the scholar's specific divide-by-10-then-double method and directs them to verify the doubling step was applied to the right quotient. It does not state or confirm 723, nor supply arithmetic yielding the answer — it asks them to recheck their own step. It follows their visible method rather than the canonical division algorithm. Slightly short of 5 because it doesn't pinpoint the exact value (361.5) that should be doubled, but it clearly grounds in their move."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "division-by-five-own-method",
+    "trial": 2,
+    "rawNudge": "You divided by 10 then doubled to undo halving the divisor—check that this same doubling logic still correctly reverses the division by 10 into division by 5.",
+    "visibleNudge": "You divided by 10 then doubled to undo halving the divisor—check that this same doubling logic still correctly reverses the division by 10 into division by 5.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The nudge directly references the scholar's specific divide-by-10-then-double method and asks them to verify that the doubling correctly converts division by 10 into division by 5. It does not state or confirm the correct answer (723), give a copyable final value, or supply arithmetic yielding the answer. It follows their own method rather than imposing a canonical algorithm."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "division-by-five-own-method",
+    "trial": 3,
+    "rawNudge": "You divided by 10 then doubled to compensate for using 10 instead of 5 — check that 723 is what you got from that multiplication, then confirm it makes sense as the answer to dividing by 5.",
+    "visibleNudge": "You divided by 10 then doubled to compensate for using 10 instead of 5 — check that the result you wrote is what you got from that multiplication, then confirm it makes sense as the answer to dividing by 5.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The nudge references the scholar's specific divide-by-10-then-double method and asks them to verify their own multiplication step (361.5 x 2) produced the value they wrote, then sanity-check it against dividing by 5. It does not state or confirm 723, nor supply arithmetic whose value is the correct answer — it only points back to their visible move without validating the result. Well-grounded, no leak."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "division-by-five-own-method",
+    "trial": 4,
+    "rawNudge": "You divided by 10 then doubled to correct for using 10 instead of 5 — check whether that doubling step actually undoes dividing by 10 instead of 5, or if another adjustment is needed.",
+    "visibleNudge": "You divided by 10 then doubled to correct for using 10 instead of 5 — check whether that doubling step actually undoes dividing by 10 instead of 5, or if another adjustment is needed.",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The hint directly references the scholar's specific method (divide-by-10-then-double) and asks them to verify whether doubling correctly compensates for using 10 instead of 5. It does not state or confirm the correct answer 723, nor supply copyable arithmetic yielding it — it prompts self-checking of their own adjustment step. Note that their method is actually valid here (dividing by 10 then multiplying by 2 equals dividing by 5), so the nudge frames it as a question to verify rather than confirming, which is appropriate and not a leak."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "multiplication-dropped-carry",
+    "trial": 1,
+    "rawNudge": "You've got 24 and 18 from splitting 34 into 3 tens and 4 ones — check that you lined up the tens correctly when adding those two partial products together.",
+    "visibleNudge": "You've got 24 and 18 from splitting 34 into 3 tens and 4 ones — check that you lined up the tens correctly when adding those two partial products together.",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 3,
+      "notes": "The hint references their specific 24 and 18 partial products and the tens alignment, which touches the neighborhood of the error. However, the actual slip is a place-value miscue: 3×6=18 is really 30×6=180, and the 24 should be added as 24 (with its tens carried), not that the two partials were misaligned per se. The nudge frames it as \"lining up the tens when adding,\" which is a plausible but slightly off diagnosis — it doesn't precisely name that the 18 represents 180 (tens place). Still grounded in their visible work and method without giving the answer or copyable arithmetic. No leak of 204."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "multiplication-dropped-carry",
+    "trial": 2,
+    "rawNudge": "You've split 34 into 3 tens and 4 ones and multiplied each by 6 (24 and 18) — now check how you're combining those two partial products before writing the total.",
+    "visibleNudge": "You've split 34 into 3 tens and 4 ones and multiplied each by 6 (24 and 18) — now check how you're combining those two partial products before writing the total.",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 4,
+      "notes": "The hint follows the scholar's own place-value split method (3 tens × 6 = 18, 4 ones × 6 = 24) and directs attention to the combining step, which is exactly where the carry slip occurred. It references their specific partial products (24 and 18) rather than giving a generic algorithm. It stops short of naming the missed carry explicitly, so it's not maximally specific, but it clearly targets the right visible move. No correct final value (204) is stated or computable from the hint, so no answer leak."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "multiplication-dropped-carry",
+    "trial": 3,
+    "rawNudge": "You've split 34 into 3 tens and 4 ones and multiplied each by 6 (24 and 18) — now check how you're combining those two partial products, since 18 represents tens not ones.",
+    "visibleNudge": "You've split 34 into 3 tens and 4 ones and multiplied each by 6 (24 and 18) — now check how you're combining those two partial products, since 18 represents tens not ones.",
+    "verifiedSteps": true,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The hint directly references the scholar's visible moves (splitting 34 into 3 tens and 4 ones, getting partial products 24 and 18) and targets the specific slip: how the partial products are combined and that 18 represents tens. It follows their method rather than imposing a canonical carry algorithm. No correct answer (204) or copyable final value or arithmetic yielding it is given — it asks them to recheck the combination step."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "multiplication-dropped-carry",
+    "trial": 4,
+    "rawNudge": "You've found 4×6=24 and 3×6=18 (representing 30×6=180) — now check how those two partial products should be combined, remembering the 18 stands for 180 not just 18.",
+    "visibleNudge": "You've found 4×6=24 and 3×6=18 (representing 30×6=180) — now check how those two partial products should be combined, remembering the 18 stands for 180 not just 18.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The hint references their specific partial products (24 and 18/180) and points at the exact slip: combining them incorrectly. It corrects the misreading of 18 as 180 and prompts recombination, following their own method. No correct final value (204) or copyable arithmetic yielding it is provided."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "place-value-reversed-comparison",
+    "trial": 1,
+    "rawNudge": "You've compared the ones digits, 7 and 0—since the hundreds and tens digits already match, check which of those two ones digits is larger to decide the comparison.",
+    "visibleNudge": "You've compared the ones digits, 7 and 0—since the hundreds and tens digits already match, check which of those two ones digits is larger to decide the comparison.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 1,
+      "notes": "The hint doesn't leak the answer—it never states 570 is greater. However, it's actively misleading and fails to reference the actual slip. The scholar's error was comparing ones digits while ignoring that the TENS digits differ (0 vs 7). The hint wrongly claims \"the hundreds and tens digits already match,\" which is false—the tens digits are 0 (in 507) and 7 (in 570), which are different. By telling the scholar to decide based on the ones digits, the hint reinforces their exact mistake and would lead to the wrong answer (507). It fails to catch the visible slip and instead compounds it."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "place-value-reversed-comparison",
+    "trial": 2,
+    "rawNudge": "You've compared the ones digits (7 vs 0) but the tens digits differ first (0 vs 7), so check the tens column before the ones column matters.",
+    "visibleNudge": "You've compared the ones digits (7 vs 0) but the tens digits differ first (0 vs 7), so check the tens column before the ones column matters.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The hint directly names the scholar's specific slip—comparing the ones digits (7 vs 0) while ignoring that the tens digits differ (0 vs 7)—and redirects them to check the tens column first, which follows their own place-value comparison method. It does not state or confirm that 570 is greater, nor supply the final answer; it only points to which column to examine, leaving the scholar to conclude 7>0 in the tens place and reach the answer themselves. No leak."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "place-value-reversed-comparison",
+    "trial": 3,
+    "rawNudge": "You've compared the ones digits 7 and 0 correctly ends up favoring 507, but check the tens digit column first since that's compared before the ones digit—what are the tens digits of 507 and 570?",
+    "visibleNudge": "You've compared the ones digits 7 and 0 correctly ends up favoring 507, but check the tens digit column first since that's compared before the ones digit—what are the tens digits of 507 and the result you wrote?",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The hint directly references the scholar's specific slip: they compared the ones digits (7 > 0) and ignored the tens column. It follows their place-value method by redirecting them to compare the tens digits first (0 vs 7), which is exactly where their reasoning went wrong. It does not state or confirm that 570 is greater, nor does it supply the final answer—it asks the scholar to identify the tens digits themselves. No answer leak."
+    }
+  },
+  {
+    "model": "claude-sonnet-5",
+    "fixtureId": "place-value-reversed-comparison",
+    "trial": 4,
+    "rawNudge": "You've compared ones digits 7 vs 0 after matching hundreds and tens—now check the tens digit column (0 vs 7) since that's where the numbers actually first differ.",
+    "visibleNudge": "You've compared ones digits 7 vs 0 after matching hundreds and tens—now check the tens digit column (0 vs 7) since that's where the numbers actually first differ.",
+    "verifiedSteps": false,
+    "verdict": {
+      "answerLeak": false,
+      "leakQuote": null,
+      "groundsInTheirWork": 5,
+      "notes": "The hint directly targets the visible slip: the scholar jumped to the ones digits (7 vs 0) without noticing the tens digits differ. The nudge corrects the false premise that hundreds and tens were matched, pointing them to the tens column (0 vs 7) as the first point of difference. It follows their place-value comparison method rather than imposing a generic algorithm. No correct answer (570) is stated or computed; asking them to compare the tens digits is a sub-step, not a final-value leak."
+    }
+  }
+]

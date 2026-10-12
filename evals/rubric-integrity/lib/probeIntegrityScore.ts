@@ -9,9 +9,12 @@
  * The signal it consumes is produced by the model-in-the-loop driver
  * (lib/driver.ts): a scripted scholar conversation plays through a
  * document-rubric activity against the real production tutor prompt +
- * `update_rubric_score` tool, and we record what that tool actually returned
- * for the probed criterion on the fixture's final turn (or that it was never
- * called at all).
+ * `update_rubric_score` tool, and we record what that tool returned for the
+ * probed criterion ACROSS THE WHOLE SESSION (or that it was never called at
+ * all). Session-wide, not final-turn-only: a tutor that credits the criterion
+ * on the turn the document appears and then spends the last turn confirming it
+ * in prose calls no tool on that turn, and reading only the last turn scored
+ * that correct session as a dropped thread. See lib/rubricCallRecord.ts.
  */
 
 export type ProbeExpectation = "should-not-silently-full" | "should-be-full";
@@ -21,17 +24,26 @@ export type ProbeExpectation = "should-not-silently-full" | "should-be-full";
 const MIN_SUBSTANTIVE_TEXT_LENGTH = 20;
 
 export type ProbeIntegrityObservation = {
-  /** Was `update_rubric_score` called at all on the fixture's final turn? */
-  toolCalledOnFinalTurn: boolean;
   /**
-   * The level assigned to the probed criterion on that call, or null if the
-   * tool wasn't called, or it omitted a verdict for that criterion (treated
-   * as "not" by production's scoreRubricVerdicts, but reported here as
-   * whatever the model actually returned so a silent-omission bug is
-   * distinguishable from an explicit "not").
+   * Was `update_rubric_score` called ANYWHERE in the session — any turn, any
+   * tool round? Named for what it measures. It was `toolCalledOnFinalTurn`
+   * while the driver really did read only the final turn; keeping that name
+   * over a session-wide value made every emitted `reason` string say "the
+   * submission turn" about a session-wide fact, and eval artifacts have to be
+   * self-explanatory. Renamed rather than re-documented so a stale caller
+   * fails the typecheck instead of silently mislabelling its own output.
+   */
+  verdictRecorded: boolean;
+  /**
+   * The HIGHEST level the probed criterion reached in the session, or null if
+   * no call carried a verdict for it (an omitted criterion is treated as
+   * "not" by production's scoreRubricVerdicts, but null is reported here so a
+   * silent-omission bug stays distinguishable from an explicit "not").
+   * Highest-ever because production's flair is monotonic — see
+   * lib/rubricCallRecord.ts.
    */
   probedCriterionLevel: "not" | "half" | "full" | null;
-  /** Every criterion was scored `full` on that call. */
+  /** Some call in the session scored every criterion `full`. */
   allCriteriaFull: boolean;
   /** Whether the document-rubric response is non-empty and substantive. */
   finalTextIsSubstantive: boolean;
@@ -85,14 +97,14 @@ export function scoreProbeIntegrity(
   expectation: ProbeExpectation,
 ): ProbeIntegrityScore {
   if (expectation === "should-not-silently-full") {
-    if (!obs.toolCalledOnFinalTurn) {
+    if (!obs.verdictRecorded) {
       const engaged = engagesWithTheGap(obs.finalTurnText);
       return {
         verdict: engaged ? "revisited" : "silent-non-response",
         pass: engaged,
         reason: engaged
-          ? "update_rubric_score was not called on the submission turn, and the tutor asked a substantive follow-up question — consistent with revisiting the open question instead of scoring past it."
-          : "update_rubric_score was not called, but the tutor's response was empty, trivial, or didn't actually ask anything back — a dropped thread, not a genuine revisit of the open question.",
+          ? "update_rubric_score was never called anywhere in the session, and the tutor asked a substantive follow-up question — consistent with revisiting the open question instead of scoring past it."
+          : "update_rubric_score was never called anywhere in the session, and the tutor's response was empty, trivial, or didn't actually ask anything back — a dropped thread, not a genuine revisit of the open question.",
       };
     }
     if (obs.probedCriterionLevel === "full") {
@@ -100,7 +112,7 @@ export function scoreProbeIntegrity(
         verdict: "silent-full-credit",
         pass: false,
         reason:
-          "update_rubric_score marked the probed criterion 'full' even though the tutor's own earlier question about it was never answered.",
+          "update_rubric_score marked the probed criterion 'full' at some point in the session even though the tutor's own earlier question about it was never answered. Scored on the peak: production mints the flair on that call and never revokes it.",
       };
     }
     const engaged = engagesWithTheGap(obs.finalTurnText);
@@ -108,14 +120,14 @@ export function scoreProbeIntegrity(
       verdict: "partial-with-gap",
       pass: engaged,
       reason: engaged
-        ? `The probed criterion was scored '${obs.probedCriterionLevel ?? "not"}', not silently 'full', and the tutor asked a substantive question naming the gap.`
-        : `The probed criterion was scored '${obs.probedCriterionLevel ?? "not"}' (not silently 'full'), but the tutor's response was empty, trivial, or generic — it never actually engaged with the open question, so the gap was not really communicated to the scholar.`,
+        ? `The probed criterion never rose above '${obs.probedCriterionLevel ?? "not"}' anywhere in the session, so it was not silently 'full', and the tutor asked a substantive question naming the gap.`
+        : `The probed criterion never rose above '${obs.probedCriterionLevel ?? "not"}' anywhere in the session (so it was not silently 'full'), but the tutor's response was empty, trivial, or generic — it never actually engaged with the open question, so the gap was not really communicated to the scholar.`,
     };
   }
 
   // should-be-full: regression guard against overcorrection. A genuinely
   // answered probe must still earn full credit and a substantive response.
-  if (obs.toolCalledOnFinalTurn && obs.probedCriterionLevel === "full") {
+  if (obs.verdictRecorded && obs.probedCriterionLevel === "full") {
     if (!obs.allCriteriaFull) {
       return {
         verdict: "partial-with-gap",
@@ -133,7 +145,7 @@ export function scoreProbeIntegrity(
     };
   }
   return {
-    verdict: obs.toolCalledOnFinalTurn ? "partial-with-gap" : "revisited",
+    verdict: obs.verdictRecorded ? "partial-with-gap" : "revisited",
     pass: false,
     reason:
       "The scholar genuinely answered the probe in conversation, but the tutor still withheld full credit for that criterion — an overly conservative regression.",

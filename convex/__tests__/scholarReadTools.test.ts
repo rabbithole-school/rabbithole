@@ -10,7 +10,11 @@ import {
   makeScholarReadTools,
   resolveScholarByName,
 } from "../lib/scholarReadTools";
-import { readScholarMastery, redactScholarPractice } from "../lib/scholarReads";
+import {
+  readScholarInterests,
+  readScholarMastery,
+  redactScholarPractice,
+} from "../lib/scholarReads";
 import type { ActionCtx, QueryCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
 import { internal } from "../_generated/api";
@@ -18,6 +22,7 @@ import { internal } from "../_generated/api";
 const EXPECTED_NAMES = [
   "list_scholars",
   "get_scholar_dossier",
+  "get_scholar_interests",
   "get_scholar_mastery",
   "get_scholar_signals",
   "get_scholar_seeds",
@@ -140,6 +145,7 @@ describe("makeScholarReadTools", () => {
       .fn()
       .mockResolvedValueOnce(SCHOLARS) // listScholarsInternal (via resolveScholar)
       .mockResolvedValueOnce("No dossier data available yet.")
+      .mockResolvedValueOnce({ legend: "Interests", interests: [], rendered: "" })
       .mockResolvedValueOnce(docs);
     const emit = vi.fn();
 
@@ -288,6 +294,7 @@ describe("makeScholarReadTools — role filtering (ACL-scoped aide)", () => {
   test("parent gets ONLY tier-1 tools (mastery/signals/seeds/practice + the public school calendar) — no roster, dossier, docs, observations, sessions", async () => {
     const tools = await makeScholarReadTools(stubCtx(vi.fn()), () => {}, "parent");
     expect(tools.map((t) => t.name)).toEqual([
+      "get_scholar_interests",
       "get_scholar_mastery",
       "get_scholar_signals",
       "get_scholar_seeds",
@@ -541,6 +548,15 @@ describe("readScholarMastery (misconception tier boundary)", () => {
     evidenceType: "misconception_signal",
     isSuperseded: false,
   };
+  const legacyInterest = {
+    scholarId,
+    domain: "science",
+    conceptLabel: "Tardigrades",
+    masteryLevel: 2,
+    evidenceSummary: "liked choosing tardigrades",
+    evidenceType: "interest_signal",
+    isSuperseded: false,
+  };
 
   test("teacher/admin see BOTH the normal and the misconception observation", async () => {
     const byDomain = await readScholarMastery(
@@ -584,6 +600,65 @@ describe("readScholarMastery (misconception tier boundary)", () => {
     expect(byDomain.math).toHaveLength(1);
     expect(byDomain.math[0].concept).toBe("Fractions");
     expect(JSON.stringify(byDomain)).not.toContain("SENSITIVE");
+  });
+
+  test("Tier-1 drops legacy interest_signal mastery rows", async () => {
+    const parent = await readScholarMastery(
+      masteryCtx([normal, legacyInterest]),
+      scholarId,
+      "parent",
+    );
+    expect(parent.science).toBeUndefined();
+    const teacher = await readScholarMastery(
+      masteryCtx([normal, legacyInterest]),
+      scholarId,
+      "teacher",
+    );
+    expect(teacher.science[0].concept).toBe("Tardigrades");
+  });
+});
+
+describe("readScholarInterests", () => {
+  test("parent projection drops menu rows and teacher-only provenance", async () => {
+    const scholarId = "u_kai" as unknown as Id<"users">;
+    const rows = [
+      {
+        label: "rainbows",
+        how: "said",
+        dates: [Date.UTC(2026, 8, 3)],
+        sessionIds: ["session-a"],
+        words: "I always see rainbows",
+        state: "active",
+        changedBy: "observer",
+      },
+      {
+        label: "tardigrades",
+        how: "menu",
+        dates: [Date.UTC(2026, 8, 3)],
+        sessionIds: ["session-a"],
+        state: "active",
+        changedBy: "observer",
+      },
+    ];
+    const ctx = {
+      db: {
+        query: () => ({
+          withIndex: () => ({ first: async () => ({ interests: rows }) }),
+        }),
+      },
+    } as unknown as QueryCtx;
+
+    const result = await readScholarInterests(ctx, scholarId, "parent");
+    expect(result.interests).toEqual([
+      {
+        label: "rainbows",
+        how: "said",
+        words: "I always see rainbows",
+      },
+    ]);
+    expect(JSON.stringify(result.interests)).not.toContain("dates");
+    expect(JSON.stringify(result.interests)).not.toContain("sessionIds");
+    expect(result.rendered).not.toContain("tardigrades");
   });
 });
 

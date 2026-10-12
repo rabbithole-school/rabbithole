@@ -255,7 +255,6 @@ export function ProgramSchedule() {
             ? {
                 groupId: selectedGroup.groupId,
                 groupName: selectedGroup.groupName,
-                institutionScope: scopeParam,
                 periodId: selectedPeriod._id,
                 subject: selectedGroup.groupName,
                 scheduleTarget: {

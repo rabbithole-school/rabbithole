@@ -147,7 +147,39 @@ a WebAssembly build of the Photon image library (Apache-2.0).
 
 
 --------------------------------------------------------------------------
-5. Everything else
+5. Custom-app library kit — public/app-kit/ (LGPL-2.1 for p5.js)
+--------------------------------------------------------------------------
+
+Custom apps load a fixed kit of third-party libraries from `public/app-kit/`
+(copied for the iPad app into `native/assets/app-kit/`). Each comes from the
+upstream npm package named in that version's `manifest.json`, which records
+the package, version, license, and integrity hash of every file.
+
+p5.js 2.3.3 — LGPL-2.1
+  Copyright the p5.js contributors and the Processing Foundation.
+  Licensed under the GNU Lesser General Public License, version 2.1 —
+  https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+  Source: https://github.com/processing/p5.js. The file is `lib/p5.min.js`
+  from the npm package p5@2.3.3, unmodified except that the package's own
+  license banner is prepended (that banner reads v2.3.1).
+
+p5.js ships as its own unmodified file, loaded by an app at runtime and never
+compiled into Rabbithole Foundation's source, so no copyleft obligation
+extends to that source. Anyone may replace `p5.min.js` with their own build
+of p5.js. If you redistribute it, keep this notice and the source link above.
+
+JSXGraph 1.13.3 is dual-licensed MIT or LGPL-3.0-or-later; it is used here
+under the MIT License. Copyright the JSXGraph authors —
+https://github.com/jsxgraph/jsxgraph
+
+The rest of the kit is MIT (Chart.js 4.5.1, Cytoscape.js 3.34.3, Konva
+10.5.0, Matter.js 0.20.0, Fraction.js 5.3.4, KaTeX 0.18.7, three.js 0.186.0)
+or Apache-2.0 (math.js 15.2.0).
+`rh-expression-editor` is Rabbithole Foundation's own code.
+
+
+--------------------------------------------------------------------------
+6. Everything else
 --------------------------------------------------------------------------
 
 The remaining dependencies are permissively licensed (MIT, ISC, BSD-2-Clause,

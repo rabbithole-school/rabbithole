@@ -29,6 +29,7 @@
  */
 import { v } from "convex/values";
 import { platformAdminMutation } from "./lib/customFunctions";
+import { writeAuditLog } from "./lib/auditLog";
 
 /**
  * Temporarily disable (suspend) a non-primary institution. Idempotent: a
@@ -68,7 +69,8 @@ export const disableInstitution = platformAdminMutation({
     });
 
     // Mirror into the global admin audit trail (delete's convention).
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: institution._id,
       actorUserId: ctx.user._id,
       action: "institution.disable",
       at: now,
@@ -104,7 +106,8 @@ export const enableInstitution = platformAdminMutation({
       disabledReason: undefined,
     });
 
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: institution._id,
       actorUserId: ctx.user._id,
       action: "institution.enable",
       at: Date.now(),

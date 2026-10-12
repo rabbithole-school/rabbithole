@@ -13,9 +13,11 @@
 // REACHES is inside your institution lens — or it reaches nobody and you created
 // it. See review/external-apps-launcher.html and the #2456 write-up.
 
-import type { MutationCtx } from "../_generated/server";
+import type { QueryCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
 import { ROLES } from "./roles";
+
+type ExternalAppReadCtx = { db: QueryCtx["db"] };
 
 /** Every scholar the app can currently reach, via live grants (never install
  *  intent — intent goes stale the moment another tool widens access via
@@ -24,7 +26,7 @@ import { ROLES } from "./roles";
  *  role-changed grantee contributes nothing (a stale id must not cause a
  *  permanent false not_found). */
 export async function liveReachOfExternalApp(
-  ctx: MutationCtx,
+  ctx: ExternalAppReadCtx,
   appId: Id<"externalApps">,
 ): Promise<Set<Id<"users">>> {
   const reach = new Set<Id<"users">>();
@@ -94,7 +96,7 @@ export async function liveReachOfExternalApp(
  * `appId === undefined` means a coded app with no catalog row yet: it has no
  * grants and reaches nobody, so it collapses to the zero-reach/creator clause. */
 export async function externalAppWithinLens(
-  ctx: MutationCtx,
+  ctx: ExternalAppReadCtx,
   appId: Id<"externalApps"> | undefined,
   createdBy: Id<"users"> | undefined,
   callerUserId: Id<"users">,

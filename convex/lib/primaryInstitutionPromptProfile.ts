@@ -1,3 +1,4 @@
+// Deployment configuration — see DEPLOYMENT.md (Institution prompt profile).
 import type { InstitutionPromptProfile } from "./institutionPromptProfile";
 
 /**

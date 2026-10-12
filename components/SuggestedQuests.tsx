@@ -1,12 +1,10 @@
 "use client";
 
 /**
- * "Suggested by your teacher" — the scholar-home section that surfaces the
- * teacher's STRUCTURED pushes (a built unit suggested at this scholar), above
- * the peer trails. Stronger than a star you might wander to on the map, softer
- * than an assigned task — a personal recommendation. See review/pr-258
- * SUGGESTED-QUEST. Reads api.seeds.suggestedQuestsForSelf; "Start the quest"
- * reuses the same seed-launch path as a star (createFromSeed via onStart).
+ * "Suggested by your teacher" card. The scholar's own Quests tab now renders
+ * teacher suggestions as rows of the ONE open-items list
+ * (components/QuestionQueue.tsx); this card remains for the teacher-side Home
+ * mirror (components/ScholarHomeMirrorCard).
  *
  * The card is a UnitGroupCard-family card: a quiet unit-path band along the top
  * (quest identity — emoji · title · teacher · "Guided path · N activities"),
@@ -15,68 +13,8 @@
  * (no progress yet); the whole card starts the quest.
  */
 
-import { useQuery } from "convex/react";
-import { Stack, HStack, Text } from "@chakra-ui/react";
-import { ShootingStar } from "@phosphor-icons/react";
-import { api } from "@/convex/_generated/api";
-import type { Id } from "@/convex/_generated/dataModel";
 import { UnitGroupBand } from "@/components/ui/UnitGroupCard";
-import { ActivityCardCta } from "@/components/ui/ActivityCard";
 import { InvitationCard } from "@/components/ui/InvitationCard";
-
-export function SuggestedQuests({
-  onStart,
-  startingSeedId,
-  pinAction,
-}: {
-  onStart: (seedId: Id<"seeds">) => void;
-  startingSeedId: string | null;
-  pinAction?: (quest: { seedId: Id<"seeds">; unitId: Id<"units">; title: string }) => React.ReactNode;
-}) {
-  const quests = useQuery(api.seeds.suggestedQuestsForSelf, {});
-
-  if (quests === undefined) return null; // stay quiet until loaded
-  if (quests.length === 0) return null;
-
-  return (
-    <Stack gap={2} pt={2}>
-      <HStack gap={1.5} color="yellow.700">
-        <ShootingStar size={14} weight="fill" />
-        <Text
-          fontFamily="heading"
-          fontWeight="700"
-          fontSize="xs"
-          textTransform="uppercase"
-          letterSpacing="0.05em"
-        >
-          Suggested by your teacher
-        </Text>
-      </HStack>
-
-      <Stack gap={2}>
-        {quests.map((q) => (
-          <SuggestedQuestCard
-            key={String(q.seedId)}
-            emoji={q.emoji}
-            title={q.title}
-            teacherName={q.teacherName}
-            teacherImage={q.teacherImage}
-            activityCount={q.activityCount}
-            body={q.description || q.rationale}
-            ariaLabel={`Start ${q.title}`}
-            onPress={() => onStart(q.seedId)}
-            bandAction={pinAction?.(q)}
-            primaryAction={
-              <ActivityCardCta loading={startingSeedId === String(q.seedId)}>
-                Start
-              </ActivityCardCta>
-            }
-          />
-        ))}
-      </Stack>
-    </Stack>
-  );
-}
 
 /**
  * The presentational "Suggested by your teacher" card — a member of the

@@ -5,7 +5,6 @@
  */
 import { describe, expect, test } from "vitest";
 import {
-  buildSystemPrompt,
   buildWebPracticeSection,
   type WebPracticeEntry,
 } from "../sessionHelpers";
@@ -53,23 +52,5 @@ describe("buildWebPracticeSection", () => {
       { activityTitle: "Typing practice", durationMs: 90_000, extracted: null },
     ])!;
     expect(s).toContain("Typing practice: 2 min");
-  });
-});
-
-describe("buildSystemPrompt integration", () => {
-  test("section appears when sessions passed, absent otherwise", () => {
-    const withSection = buildSystemPrompt(
-      null, null, "Kai", null, null, null,
-      null, null, null, null, null, null, null, null, null, null, null, null,
-      null, null, null, false, false, null,
-      [SESSION],
-    );
-    expect(withSection).toContain("EXTERNAL PRACTICE TODAY");
-    expect(withSection).toContain("Acme Practice");
-
-    const without = buildSystemPrompt(
-      null, null, "Kai", null, null, null,
-    );
-    expect(without).not.toContain("EXTERNAL PRACTICE TODAY");
   });
 });

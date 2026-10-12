@@ -18,7 +18,18 @@ import {
   type SpanStyle,
 } from "@/lib/markdownParse";
 import { splitMathSegments, hasInlineMath, latexToSpeech } from "../../vendor/shared/mathLatex";
+import { openYouTubeVideo } from "@/lib/externalAppHost";
 import { MathView } from "../../modules/expo-math-view";
+
+// A tapped link that resolves to a YouTube video opens the same sandboxed,
+// locked-down player that activity video resources use (the school iPads have no
+// browser, so a bare Linking.openURL does nothing). Every other link keeps its
+// existing outbound behaviour. Also the tap path for links in Messages bubbles
+// (components/messages/ThreadView.tsx).
+export function openMarkdownLink(href: string, title: string) {
+  if (openYouTubeVideo({ url: href, title })) return;
+  Linking.openURL(href).catch(() => {});
+}
 
 // Body prose typography. Shared between the plain-<Text> paragraph path and the
 // MathFlow row so a paragraph that contains inline math renders its words at the
@@ -263,7 +274,7 @@ function Inline({
             <Text
               key={i}
               style={[inlineStyle(n.style, color, mutedColor), { textDecorationLine: "underline", color: linkColor }]}
-              onPress={() => Linking.openURL(n.href).catch(() => {})}
+              onPress={() => openMarkdownLink(n.href, n.text)}
             >
               {n.text}
             </Text>
@@ -339,7 +350,7 @@ function MathFlow({
                 <Text
                   key={key}
                   style={[inlineStyle(sp.style, color, mutedColor, BODY_FONT_SIZE), { textDecorationLine: "underline", color: linkColor }]}
-                  onPress={() => Linking.openURL(sp.href).catch(() => {})}
+                  onPress={() => openMarkdownLink(sp.href, sp.text)}
                 >
                   {tok}
                 </Text>

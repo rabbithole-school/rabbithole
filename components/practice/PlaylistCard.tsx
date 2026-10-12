@@ -70,7 +70,6 @@ import { api } from "@/convex/_generated/api";
 import { CHECK_IN_HOME_TITLE } from "@/shared/checkInMapCopy";
 import { superscriptExponents } from "@/shared/mathNotation";
 import { practiceDomainLabel, strandHeadlineFor } from "@/shared/practiceDomainLabels";
-import { segmentBeatLabel, withLaunchpadRow } from "@/shared/practiceSegments";
 import { derivePlaylistDoneness, playlistMastheadDateline } from "@/shared/playlistDoneness";
 import {
   deriveStartCta,
@@ -222,11 +221,6 @@ export type PlaylistData = {
   mappingPreview?: boolean;
   /** Option D: the previewed run is 100% mapping (nothing else servable). */
   allMapping?: boolean;
-  /** The instructional doorway Start will actually open with, and the `set`
-   *  index it sits before (P1 follow-up). Resolved server-side by the SAME
-   *  `resolveRunLaunchpad` the run uses, so listing it here can't invent a beat
-   *  the run won't serve. Absent when there is none. */
-  launchpad?: { at: number; title: string; subtitle?: string; domain: string; strand: string };
   /** The server's Math-plan boundary flag (`practiceSkills.playlistForScholar`):
    *  the scholar's plan leaves NOTHING servable — a requested domain outside
    *  scope, or no in-scope domain to resolve at all. It arrives shaped exactly
@@ -461,6 +455,25 @@ function PlaylistOptionTile({
         {subtitle}
       </Text>
     </chakra.button>
+  );
+}
+
+/**
+ * What the Math tab shows in the playlist's place when the practice reads
+ * failed (a query error the page caught via `useContainedQuery`, or a throw
+ * from this card that its error boundary caught). Card-sized and quiet: the
+ * rest of Home is fine, so nothing here should read as the page failing.
+ * Native twin: `PracticePlaylistUnavailable`.
+ */
+export function PlaylistUnavailableCard() {
+  return (
+    <Surface p={0} overflow="hidden">
+      <Box px={3.5} py={3}>
+        <Text fontSize="sm" color="charcoal.500">
+          Math practice couldn’t load. Refresh the page or try again later.
+        </Text>
+      </Box>
+    </Surface>
   );
 }
 
@@ -822,7 +835,7 @@ export function PlaylistCard({
     (!!stretchSelected && stretchPreview === undefined);
 
   const { nextUp, set, practicedToday, firstPostPlacementBlock: activeFirstBlock } = active;
-  const launchpad = active.launchpad;
+
   const { caughtUp, blocked } = derivePlaylistDoneness({
     set,
     nextUp,
@@ -978,24 +991,11 @@ export function PlaylistCard({
       domain: row.domain,
     });
   });
-  // The instructional doorway is a real beat of the run, so it is a real row of
-  // the receipt. Before this, Start could open with a "First look" card the
-  // preview never mentioned — the card promised one thing and served another.
-  // Position comes from the server (`launchpad.at`, an index into `set`), offset
-  // by the next-up row this list prepends when that skill isn't in `set`.
-  const rowsWithLaunchpad = launchpad
-    ? withLaunchpadRow(rows, launchpad.at + (nextUp && !nextInSet ? 1 : 0), (kind) => ({
-        key: "launchpad",
-        label: launchpad.title,
-        kind,
-        tag: segmentBeatLabel("launchpad", true),
-        queuedTag: segmentBeatLabel("launchpad", true),
-        muted: false,
-        domain: undefined,
-      }))
-    : rows;
-  const visibleRows = expanded ? rowsWithLaunchpad : rowsWithLaunchpad.slice(0, DEFAULT_VISIBLE);
-  const hiddenCount = Math.max(0, rowsWithLaunchpad.length - DEFAULT_VISIBLE);
+  // No "First look" row: the run's `launchpad` entry is no longer a beat of its
+  // own — it frames the item already listed here ("Can you already do this?"),
+  // so a separate row would promise a card the run never serves.
+  const visibleRows = expanded ? rows : rows.slice(0, DEFAULT_VISIBLE);
+  const hiddenCount = Math.max(0, rows.length - DEFAULT_VISIBLE);
 
   return (
     <Surface p={0} overflow="hidden">

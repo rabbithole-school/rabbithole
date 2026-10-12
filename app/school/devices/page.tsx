@@ -3,12 +3,14 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
 import { useAction, useMutation, useQuery } from "convex/react";
+import { ConvexError } from "convex/values";
 import {
   Badge,
   Box,
@@ -22,10 +24,12 @@ import {
   Input,
   Popover,
   Portal,
+  Progress,
   Spinner,
   Table,
   Text,
   Textarea,
+  Tooltip,
   VStack,
 } from "@chakra-ui/react";
 import {
@@ -35,8 +39,11 @@ import {
   BatteryHigh,
   BatteryLow,
   BatteryMedium,
+  CalendarBlank,
   CaretDown,
   Check,
+  CheckCircle,
+  Clock,
   CloudArrowUp,
   Copy,
   DeviceTablet,
@@ -48,16 +55,29 @@ import {
   MagnifyingGlass,
   MinusCircle,
   PencilSimple,
+  Question,
   Plus,
+  Power,
   Prohibit,
   SignOut,
   Trash,
+  WarningCircle,
   X,
+  XCircle,
+  type Icon,
 } from "@phosphor-icons/react";
 import type { FunctionReturnType } from "convex/server";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { useNow } from "@/hooks/useNow";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
+import {
+  closesPhrase,
+  scheduleWindowsPhrase,
+  throughDayPhrase,
+} from "@/lib/appAccessCopy";
+import { shiftDayKey } from "@/shared/institutionDay";
 import { useAuthorizationGuard } from "@/hooks/useAuthorizationGuard";
 import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { toaster } from "@/lib/toaster";
@@ -79,6 +99,12 @@ import {
   deviceBatteryBand,
   type DeviceBatteryBand,
 } from "@/shared/deviceBattery";
+import {
+  etaLabel,
+  landingProgress,
+  PROJECTION_OPERATION_TIMEOUT_MS,
+  PROJECTION_SWEEP_MS,
+} from "@/shared/appAccessLanding";
 import { registrationFeedback } from "./importFeedback";
 import {
   getSimpleMdmActionPolicy,
@@ -87,6 +113,7 @@ import {
 import {
   DrawerSection,
   LostModeControl,
+  simpleMdmErrorMessage,
   RabbitholeLockControl,
   RoboticsCaptureStationModeControl,
 } from "./DeviceSecurityControls";
@@ -115,12 +142,14 @@ type RegistrationResult = FunctionReturnType<
 type PushResult = FunctionReturnType<
   typeof api.simplemdm.pushClaimToSimpleMdm
 >;
-type VerifyStatus = FunctionReturnType<
-  typeof api.simplemdm.verifySimpleMdmClaims
->["results"][number]["status"];
-type SimpleMdmInventory = FunctionReturnType<
-  typeof api.simplemdm.verifySimpleMdmClaims
->["inventory"][number];
+/**
+ * What SimpleMDM last told us about a device, as persisted by the backend
+ * (`simpleMdmDeviceSnapshots`) and delivered on the reactive device query.
+ * The console never asks SimpleMDM anything on its own: the snapshot is
+ * refreshed hourly and by the explicit "Check now" action.
+ */
+type SimpleMdmInventory = NonNullable<ManagedDevice["simpleMdm"]>;
+type VerifyStatus = NonNullable<SimpleMdmInventory["claimVerifyStatus"]>;
 
 type UnifiedDevice =
   | { key: string; kind: "managed"; device: ManagedDevice }
@@ -178,6 +207,17 @@ function relativeTime(timestamp: number) {
   return new Date(timestamp).toLocaleDateString();
 }
 
+/** "in 3m" / "3m ago" for ETA-style hovers; `relativeTime` is past-only. */
+function relativeClock(timestamp: number) {
+  const delta = Math.round((timestamp - Date.now()) / 1000);
+  if (delta <= 0) return relativeTime(timestamp);
+  if (delta < 60) return "in under a minute";
+  const minutes = Math.round(delta / 60);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  return `in ${hours}h`;
+}
+
 function normalizeSerial(raw: string) {
   return raw.trim().toUpperCase();
 }
@@ -199,13 +239,53 @@ function parseSerialLines(text: string): ParsedSerialRow[] {
     });
 }
 
-function simpleMdmActionError(error: unknown) {
+function simpleMdmActionError(error: unknown, fallback = "SimpleMDM push failed. Please try again.") {
+  // The SimpleMDM client throws a ConvexError whose data carries a message
+  // written for this console ("SimpleMDM is rate limiting…", "…unreachable…").
+  if (error instanceof ConvexError) {
+    const data: unknown = error.data;
+    if (typeof data === "string") return data;
+    if (data && typeof data === "object" && "message" in data) {
+      const message = (data as { message?: unknown }).message;
+      if (typeof message === "string" && message) return message;
+    }
+  }
   const message = error instanceof Error ? error.message : "";
   return (
     message.match(
       /SimpleMDM (?:API key not configured[^\n]*|provisioning isn't configured for your school)/,
-    )?.[0] ?? "SimpleMDM push failed. Please try again."
+    )?.[0] ?? fallback
   );
+}
+
+function snapshotOf(device: ManagedDevice): SimpleMdmInventory | undefined {
+  return device.simpleMdm ?? undefined;
+}
+
+function verifyStatusOf(device: ManagedDevice): VerifyStatus | undefined {
+  return device.simpleMdm?.claimVerifyStatus ?? undefined;
+}
+
+/**
+ * The push outcome to show for a row: this session's transient result if
+ * there is one, else the persisted outcome — but only when that outcome is
+ * about the CURRENT claim (issued before the push), so a failure recorded
+ * against an old token can't haunt a freshly minted one.
+ */
+function effectivePushResult(
+  device: ManagedDevice,
+  transient: PushResult | undefined,
+): PushResult | undefined {
+  if (transient) return transient;
+  const snapshot = device.simpleMdm;
+  if (!snapshot?.lastPushStatus || !snapshot.lastPushAt) return undefined;
+  if (snapshot.lastPushAt < device.claimIssuedAt) return undefined;
+  return {
+    managedDeviceId: device._id,
+    serial: device.serial,
+    status: snapshot.lastPushStatus,
+    message: snapshot.lastPushMessage ?? "",
+  };
 }
 
 function payloadJson(payload: MintResult["payload"]) {
@@ -285,6 +365,16 @@ function effectivePushedAt(device: ManagedDevice): number | null {
   );
 }
 
+/**
+ * A deleted scholar's iPad (TRA-434). Deleting a scholar leaves their claim on
+ * the roster for staff to reassign, so the row reads as unassigned but, unlike
+ * a spare, still needs someone to act. A disabled one is waiting on nobody: it
+ * keeps reading "Disabled".
+ */
+function awaitingReassignment(device: ManagedDevice): boolean {
+  return device.scholarDeleted && device.claimState !== "revoked";
+}
+
 function managedNeedsAttention(
   device: ManagedDevice,
   pushResult?: PushResult,
@@ -293,6 +383,7 @@ function managedNeedsAttention(
 ) {
   if (inventory?.lostModeEnabled === true) return true;
   if (device.claimState === "revoked") return false;
+  if (awaitingReassignment(device)) return true;
   const pushedAt = effectivePushedAt(device);
   // Computed at render like `relativeTime` above — the reactive device query
   // repaints the row the moment the iPad presents its claim, which is the
@@ -348,6 +439,12 @@ function managementSummary(
   inventory?: SimpleMdmInventory,
 ) {
   if (row.kind === "manual") {
+    // A deleted scholar's manually paired iPad (TRA-441, the twin of the
+    // managed "Needs reassignment" above): its binding outlives the scholar
+    // and is freed by unpairing it.
+    if (row.device.scholarDeleted) {
+      return { primary: "Needs unpairing", secondary: "Scholar deleted", attention: true };
+    }
     return {
       primary: "Manual pairing",
       secondary: `Paired ${relativeTime(row.device.pairedAt)}`,
@@ -360,11 +457,15 @@ function managementSummary(
     : device.lastClaimedAt
       ? `Claimed ${relativeTime(device.lastClaimedAt)}`
       : null;
-  if (!device.scholarId) {
-    return { primary: "—", secondary: null, attention: false };
-  }
+  // Ahead of the unassigned case: a disabled iPad whose scholar was then
+  // deleted is still disabled, and says so.
   if (device.claimState === "revoked") {
     return { primary: "Disabled", secondary, attention: false };
+  }
+  if (!device.scholarId) {
+    return awaitingReassignment(device)
+      ? { primary: "Needs reassignment", secondary: "Scholar deleted", attention: true }
+      : { primary: "—", secondary: null, attention: false };
   }
   if (pushResult && pushResult.status !== "pushed") {
     return { primary: "Push failed", secondary, attention: true };
@@ -392,13 +493,11 @@ function managementSummary(
   return { primary: "Up to date", secondary, attention: false };
 }
 
-function rowSearchText(
-  row: UnifiedDevice,
-  inventory?: SimpleMdmInventory,
-) {
+function rowSearchText(row: UnifiedDevice) {
+  const inventory = row.kind === "managed" ? snapshotOf(row.device) : undefined;
   return [
     row.kind === "managed" ? row.device.serial : row.device.deviceId,
-    row.kind === "managed" ? inventory?.simpleMdmName : row.device.deviceLabel,
+    row.kind === "managed" ? inventory?.name : row.device.deviceLabel,
     row.device.scholarName,
     row.device.scholarUsername,
   ]
@@ -407,12 +506,10 @@ function rowSearchText(
     .toLowerCase();
 }
 
-function rowDeviceName(
-  row: UnifiedDevice,
-  inventory?: SimpleMdmInventory,
-) {
+function rowDeviceName(row: UnifiedDevice) {
+  const inventory = row.kind === "managed" ? snapshotOf(row.device) : undefined;
   return row.kind === "managed"
-    ? inventory?.simpleMdmName ?? row.device.serial
+    ? inventory?.name ?? row.device.serial
     : row.device.deviceLabel ?? row.device.deviceId;
 }
 
@@ -427,23 +524,44 @@ export default function SchoolDevicesPage() {
     unauthorizedRedirect: "/school/directory/scholars",
   });
   const { scopeParam } = useActiveInstitution(!!user && allowed);
+  // Program guests are included here on purpose: an Extended Education scholar
+  // who attends in person needs a school iPad like anyone else, and this console
+  // is the only place a device gets assigned. The picker labels their standing.
   const scholars = useQuery(
     api.devicePairing.listPairableScholars,
-    allowed ? { institutionScope: scopeParam } : "skip",
+    allowed
+      ? { institutionScope: scopeParam, includeProgramGuests: true }
+      : "skip",
   );
   const pairedDevices = useQuery(
     api.devicePairing.listPairedDevices,
     allowed ? { institutionScope: scopeParam } : "skip",
   );
-  const managedDevices = useQuery(
+  // Re-arms across the institution day boundary — the reachable-apps column
+  // consults push liveness and when opened access ends. See
+  // `listManagedDevices`. Smoothed, because a bare useQuery drops to
+  // undefined on every minute's re-arm, which closed the open device drawer
+  // and wiped whatever a staffer was entering in it (TRA-364's shape).
+  const devicesMinuteNow = Math.floor(useNow(60_000) / 60_000) * 60_000;
+  const managedDevices = useSmoothedQuery(
     api.managedDeviceClaims.listManagedDevices,
-    allowed ? { institutionScope: scopeParam } : "skip",
+    allowed
+      ? { institutionScope: scopeParam, now: devicesMinuteNow }
+      : "skip",
   );
   const simpleMdmStatus = useQuery(
     api.simplemdm.integrationStatus,
     allowed ? {} : "skip",
   );
   const simpleMdmPolicy = getSimpleMdmActionPolicy(simpleMdmStatus?.configured);
+  // The MDM -> Rabbithole direction: serials SimpleMDM is managing that this
+  // roster has never heard of. Stored snapshots only (this page never calls
+  // SimpleMDM on load), and skipped unless the integration is usable here --
+  // the query refuses rather than showing another school the primary's fleet.
+  const unrostered = useQuery(
+    api.simplemdm.unrosteredSimpleMdmDevices,
+    allowed && simpleMdmPolicy.showPushActions ? {} : "skip",
+  );
   const assign = useMutation(api.managedDeviceClaims.assignScholarToManagedDevice);
   const autoAssign = useMutation(api.managedDeviceClaims.autoAssignManagedDevices);
   const pushClaim = useAction(api.simplemdm.pushClaimToSimpleMdm);
@@ -452,15 +570,13 @@ export default function SchoolDevicesPage() {
   const renameDevice = useAction(api.simplemdm.renameManagedDevice);
 
   const [addOpen, setAddOpen] = useState(false);
+  const [addPrefillSerials, setAddPrefillSerials] = useState<string[]>([]);
   const [autoAssignOpen, setAutoAssignOpen] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<DeviceFilter>("all");
   const [pushResults, setPushResults] = useState<Record<string, PushResult>>({});
-  const [verifyStatuses, setVerifyStatuses] = useState<Record<string, VerifyStatus>>({});
-  const [simpleMdmInventory, setSimpleMdmInventory] = useState<
-    Record<string, SimpleMdmInventory>
-  >({});
+  const [checkingSimpleMdm, setCheckingSimpleMdm] = useState(false);
   const [revealed, setRevealed] = useState<MintResult[]>([]);
   const [pushingAll, setPushingAll] = useState(false);
   const [bulkPushMessage, setBulkPushMessage] = useState<string | null>(null);
@@ -486,8 +602,13 @@ export default function SchoolDevicesPage() {
     () => (managedDevices ?? []).filter((device) => !device.scholarId),
     [managedDevices],
   );
+  // A deleted scholar's iPad reads as unassigned but still holds its old
+  // claim, which bulk assignment refuses; it is reassigned from its drawer.
   const autoAssignableDevices = useMemo(
-    () => unassignedDevices.filter((device) => !device.autoAssignExcluded),
+    () =>
+      unassignedDevices.filter(
+        (device) => !device.autoAssignExcluded && !device.scholarDeleted,
+      ),
     [unassignedDevices],
   );
   const availableScholars = useMemo(() => {
@@ -526,41 +647,37 @@ export default function SchoolDevicesPage() {
           : !device.simplemdmPushedAt ||
             device.simplemdmPushedAt < device.claimIssuedAt),
     ).length ?? 0;
-  const managedDeviceIds = managedDevices?.map((device) => device._id).join("|") ?? null;
+  const simpleMdmCheckedAt = useMemo(() => {
+    let latest: number | null = null;
+    for (const device of managedDevices ?? []) {
+      const checkedAt = device.simpleMdm?.checkedAt;
+      if (checkedAt && (latest === null || checkedAt > latest)) latest = checkedAt;
+    }
+    return latest;
+  }, [managedDevices]);
 
-  const verifySeqRef = useRef(0);
+  const unrosteredSerials = unrostered?.serials ?? [];
+
+  // The ONLY place this page talks to SimpleMDM: an explicit staff action.
+  // Results land in `simpleMdmDeviceSnapshots` and arrive through the
+  // reactive device query, so there is no local copy to keep in step.
   const runVerify = useCallback(async () => {
     if (!allowed || simpleMdmStatus?.configured !== true) return;
-    const sequence = ++verifySeqRef.current;
+    setCheckingSimpleMdm(true);
     try {
-      const { results, inventory } = await verifyClaims({});
-      if (sequence !== verifySeqRef.current) return;
-      setVerifyStatuses(Object.fromEntries(results.map((result) => [result.managedDeviceId, result.status])));
-      setSimpleMdmInventory(
-        Object.fromEntries(inventory.map((device) => [device.managedDeviceId, device])),
-      );
-    } catch {
-      if (sequence !== verifySeqRef.current) return;
-      setVerifyStatuses({});
-      setSimpleMdmInventory({});
+      await verifyClaims({});
+    } catch (error) {
+      toaster.error({
+        title: "Couldn't check SimpleMDM",
+        description: simpleMdmActionError(error, "Please try again in a moment."),
+      });
+    } finally {
+      setCheckingSimpleMdm(false);
     }
   }, [allowed, simpleMdmStatus?.configured, verifyClaims]);
 
-  useEffect(() => {
-    if (managedDeviceIds !== null) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- this is the silent external SimpleMDM reconciliation on mount.
-      void runVerify();
-    }
-  }, [managedDeviceIds, runVerify]);
-
   function clearPushResult(managedDeviceId: ManagedDevice["_id"]) {
     setPushResults((current) => {
-      if (!(managedDeviceId in current)) return current;
-      const next = { ...current };
-      delete next[managedDeviceId];
-      return next;
-    });
-    setVerifyStatuses((current) => {
       if (!(managedDeviceId in current)) return current;
       const next = { ...current };
       delete next[managedDeviceId];
@@ -575,7 +692,6 @@ export default function SchoolDevicesPage() {
     try {
       const result = await pushClaim({ managedDeviceId });
       setPushResults((current) => ({ ...current, [managedDeviceId]: result }));
-      if (result.status === "pushed") void runVerify();
       return result;
     } catch (error) {
       const result: PushResult = {
@@ -593,18 +709,9 @@ export default function SchoolDevicesPage() {
     managedDeviceId: ManagedDevice["_id"],
     name: string,
   ) {
+    // The backend records the new name on the device's snapshot; the reactive
+    // query repaints the row.
     const result = await renameDevice({ managedDeviceId, name });
-    setSimpleMdmInventory((current) => {
-      const inventory = current[managedDeviceId];
-      if (!inventory) return current;
-      return {
-        ...current,
-        [managedDeviceId]: {
-          ...inventory,
-          simpleMdmName: result.simpleMdmName,
-        },
-      };
-    });
     return result.simpleMdmName;
   }
 
@@ -693,9 +800,10 @@ export default function SchoolDevicesPage() {
         ...current,
         ...Object.fromEntries(results.map((result) => [result.managedDeviceId, result])),
       }));
-      if (results.some((result) => result.status === "pushed")) void runVerify();
       if (!results.length) {
-        const staleCount = Object.values(verifyStatuses).filter((status) => status === "stale").length;
+        const staleCount = (managedDevices ?? []).filter(
+          (device) => verifyStatusOf(device) === "stale",
+        ).length;
         setBulkPushMessage(
           staleCount
             ? `${staleCount} device${staleCount === 1 ? "" : "s"} still need a fresh push.`
@@ -726,17 +834,9 @@ export default function SchoolDevicesPage() {
       .filter((device) => device.managedDeviceClaimId == null)
       .map((device) => ({ key: `manual:${device._id}`, kind: "manual" as const, device }));
     return [...managed, ...manual].sort((a, b) =>
-      rowDeviceName(
-        a,
-        a.kind === "managed" ? simpleMdmInventory[a.device._id] : undefined,
-      ).localeCompare(
-        rowDeviceName(
-          b,
-          b.kind === "managed" ? simpleMdmInventory[b.device._id] : undefined,
-        ),
-      ),
+      rowDeviceName(a).localeCompare(rowDeviceName(b)),
     );
-  }, [managedDevices, pairedDevices, simpleMdmInventory]);
+  }, [managedDevices, pairedDevices]);
   const pairedDevicesById = useMemo(
     () =>
       new Map(
@@ -766,37 +866,21 @@ export default function SchoolDevicesPage() {
       }
       if (
         filter === "attention" &&
-        !(
-          row.kind === "managed" &&
-          managedNeedsAttention(
-            row.device,
-            pushResults[row.device._id],
-            verifyStatuses[row.device._id],
-            simpleMdmInventory[row.device._id],
-          )
-        )
+        !(row.kind === "managed"
+          ? managedNeedsAttention(
+              row.device,
+              effectivePushResult(row.device, pushResults[row.device._id]),
+              verifyStatusOf(row.device),
+              snapshotOf(row.device),
+            )
+          : row.device.scholarDeleted)
       ) {
         return false;
       }
       if (filter === "signed-in" && status !== "Signed in") return false;
-      return (
-        !query ||
-        rowSearchText(
-          row,
-          row.kind === "managed"
-            ? simpleMdmInventory[row.device._id]
-            : undefined,
-        ).includes(query)
-      );
+      return !query || rowSearchText(row).includes(query);
     });
-  }, [
-    filter,
-    pushResults,
-    search,
-    simpleMdmInventory,
-    unifiedDevices,
-    verifyStatuses,
-  ]);
+  }, [filter, pushResults, search, unifiedDevices]);
 
   if (authorization !== "allowed" || !user) return <AuthorizationPending />;
 
@@ -818,12 +902,50 @@ export default function SchoolDevicesPage() {
               Auto assign
             </Button>
             {simpleMdmPolicy.showPushActions && (
-              <Button size="sm" variant="outline" loading={pushingAll}
-                disabled={!pendingPushCount || managedDevices === undefined}
-                onClick={() => void handlePushAll()}>
-                <CloudArrowUp size={16} />
-                Push all pending
-              </Button>
+              <>
+                <Button size="sm" variant="outline" loading={pushingAll}
+                  disabled={!pendingPushCount || managedDevices === undefined}
+                  onClick={() => void handlePushAll()}>
+                  <CloudArrowUp size={16} />
+                  Push all pending
+                </Button>
+                <Button size="sm" variant="ghost" loading={checkingSimpleMdm}
+                  disabled={managedDevices === undefined || !managedDevices.length}
+                  onClick={() => void runVerify()}
+                  title="Ask SimpleMDM for each device's current state">
+                  <ArrowClockwise size={16} />
+                  Check now
+                </Button>
+                <Text fontSize="xs" color="charcoal.400" aria-live="polite">
+                  {simpleMdmCheckedAt
+                    ? `SimpleMDM checked ${relativeTime(simpleMdmCheckedAt)}`
+                    : "SimpleMDM not checked yet"}
+                </Text>
+                {/* Reads as of that same check -- the line above dates it, so
+                    this one states the fact and never claims to be live. */}
+                {unrosteredSerials.length > 0 && (
+                  <Button
+                    size="xs"
+                    variant="plain"
+                    height="auto"
+                    px={0}
+                    fontSize="xs"
+                    fontWeight="normal"
+                    color="charcoal.500"
+                    textDecoration="underline"
+                    textUnderlineOffset="2px"
+                    onClick={() => {
+                      setAddPrefillSerials(unrosteredSerials);
+                      setAddOpen(true);
+                    }}
+                    title="Register these serials"
+                  >
+                    {unrosteredSerials.length === 1
+                      ? "1 iPad in SimpleMDM isn't on this roster"
+                      : `${unrosteredSerials.length} iPads in SimpleMDM aren't on this roster`}
+                  </Button>
+                )}
+              </>
             )}
             <Button size="sm" colorPalette="violet" onClick={() => setAddOpen(true)}>
               <Plus size={16} weight="bold" />
@@ -881,9 +1003,9 @@ export default function SchoolDevicesPage() {
                   <Table.Body>
                     {filteredDevices.map((row) => (
                       <DeviceTableRow key={row.key} row={row}
-                        pushResult={row.kind === "managed" ? pushResults[row.device._id] : undefined}
-                        verifyStatus={row.kind === "managed" ? verifyStatuses[row.device._id] : undefined}
-                        inventory={row.kind === "managed" ? simpleMdmInventory[row.device._id] : undefined}
+                        pushResult={row.kind === "managed" ? effectivePushResult(row.device, pushResults[row.device._id]) : undefined}
+                        verifyStatus={row.kind === "managed" ? verifyStatusOf(row.device) : undefined}
+                        inventory={row.kind === "managed" ? snapshotOf(row.device) : undefined}
                         pairedDevice={row.kind === "manual" ? row.device : row.device.pairedDeviceId
                           ? pairedDevicesById.get(String(row.device.pairedDeviceId))
                           : undefined}
@@ -895,7 +1017,7 @@ export default function SchoolDevicesPage() {
               <VStack display={{ base: "flex", md: "none" }} align="stretch" gap={2}>
                 {filteredDevices.map((row) => (
                   <DeviceMobileRow key={row.key} row={row}
-                    inventory={row.kind === "managed" ? simpleMdmInventory[row.device._id] : undefined}
+                    inventory={row.kind === "managed" ? snapshotOf(row.device) : undefined}
                     pairedDevice={row.kind === "manual" ? row.device : row.device.pairedDeviceId
                       ? pairedDevicesById.get(String(row.device.pairedDeviceId))
                       : undefined}
@@ -911,7 +1033,16 @@ export default function SchoolDevicesPage() {
 
       <FallbackPayloads revealed={revealed} />
 
-      <AddDeviceDialog open={addOpen} onClose={() => setAddOpen(false)} scholars={scholars ?? []} />
+      <AddDeviceDialog
+        open={addOpen}
+        onClose={() => {
+          setAddOpen(false);
+          setAddPrefillSerials([]);
+        }}
+        scholars={scholars ?? []}
+        institutionScope={scopeParam}
+        prefillSerials={addPrefillSerials}
+      />
       <AutoAssignDialog open={autoAssignOpen} onClose={() => setAutoAssignOpen(false)}
         scholars={availableScholars} availableDeviceCount={autoAssignableDevices.length}
         onAssign={handleAutoAssign} />
@@ -922,13 +1053,15 @@ export default function SchoolDevicesPage() {
         onClose={() => setSelectedKey(null)} scholars={rosterScholarsSorted}
         assignedDeviceCounts={scholarDeviceCounts}
         simpleMdmPolicy={simpleMdmPolicy}
-        pushResult={selectedDevice?.kind === "managed" ? pushResults[selectedDevice.device._id] : undefined}
-        verifyStatus={selectedDevice?.kind === "managed" ? verifyStatuses[selectedDevice.device._id] : undefined}
-        inventory={selectedDevice?.kind === "managed" ? simpleMdmInventory[selectedDevice.device._id] : undefined}
+        pushResult={selectedDevice?.kind === "managed" ? effectivePushResult(selectedDevice.device, pushResults[selectedDevice.device._id]) : undefined}
+        verifyStatus={selectedDevice?.kind === "managed" ? verifyStatusOf(selectedDevice.device) : undefined}
+        inventory={selectedDevice?.kind === "managed" ? snapshotOf(selectedDevice.device) : undefined}
         pairedDevice={selectedPairedDevice}
         onAssign={handleAssign} onPush={pushDevice} onRename={renameManagedDevice}
         onClaimInvalidated={clearPushResult}
-        onReverify={() => void runVerify()} onRevealed={(result) => setRevealed((current) => [result, ...current])} />
+        onRevealed={(result) => setRevealed((current) => [result, ...current])}
+        onCheckNow={() => void runVerify()}
+        checkingSimpleMdm={checkingSimpleMdm} />
     </VStack>
   );
 }
@@ -952,7 +1085,7 @@ function DeviceTableRow({
   const manualDevice = row.kind === "manual" ? row.device : null;
   const device = row.device;
   const status = deviceStatus(row);
-  const managedName = inventory?.simpleMdmName;
+  const managedName = inventory?.name;
   const management = managementSummary(
     row,
     pushResult,
@@ -1040,6 +1173,8 @@ function DeviceMobileRow({
   const managedDevice = row.kind === "managed" ? row.device : null;
   const manualDevice = row.kind === "manual" ? row.device : null;
   const device = row.device;
+  const reassign = managedDevice !== null && awaitingReassignment(managedDevice);
+  const unpairNeeded = manualDevice?.scholarDeleted === true;
   return (
     <Box as="button" w="full" textAlign="left" borderWidth="1px" borderColor="gray.200" borderRadius="md"
       minH={DEVICE_ROW_MIN_H.mobile} display="flex" alignItems="center"
@@ -1050,8 +1185,8 @@ function DeviceMobileRow({
             <DeviceTablet size={20} weight="duotone" />
           </Box>
           <Box minW={0}>
-            <Text fontFamily={inventory?.simpleMdmName || row.kind === "manual" ? "heading" : "mono"} fontWeight="600" truncate>
-              {inventory?.simpleMdmName ?? (managedDevice ? managedDevice.serial : manualDevice?.deviceLabel ?? "iPad")}
+            <Text fontFamily={inventory?.name || row.kind === "manual" ? "heading" : "mono"} fontWeight="600" truncate>
+              {inventory?.name ?? (managedDevice ? managedDevice.serial : manualDevice?.deviceLabel ?? "iPad")}
             </Text>
             {device.scholarId ? (
               <Box mt={1}>
@@ -1062,8 +1197,12 @@ function DeviceMobileRow({
                 />
               </Box>
             ) : (
-              <Text fontSize="sm" color="charcoal.500">
-                No scholar assigned
+              <Text fontSize="sm" color={reassign || unpairNeeded ? "orange.700" : "charcoal.500"}>
+                {reassign
+                  ? "Needs reassignment"
+                  : unpairNeeded
+                    ? "Needs unpairing"
+                    : "No scholar assigned"}
               </Text>
             )}
             {(pairedDevice || inventory) && (
@@ -1076,7 +1215,7 @@ function DeviceMobileRow({
             )}
           </Box>
         </HStack>
-        <HStack gap={1}>
+        <HStack gap={1} wrap="wrap" justify="flex-end">
           <LostModeBadge inventory={inventory} />
           <StatusBadge status={deviceStatus(row)} />
         </HStack>
@@ -1131,12 +1270,16 @@ function AddDeviceDialog({
   open,
   onClose,
   scholars,
+  institutionScope,
+  prefillSerials = [],
 }: {
   open: boolean;
   onClose: () => void;
   scholars: PairableScholar[];
+  institutionScope: string;
+  /** Seeds the "Register serials" textarea (the unrostered-devices line). */
+  prefillSerials?: string[];
 }) {
-  const [pane, setPane] = useState<"register" | "pair">("register");
   return (
     <Dialog.Root open={open} onOpenChange={(event) => !event.open && onClose()} placement="center">
       <Portal>
@@ -1148,23 +1291,17 @@ function AddDeviceDialog({
                 Add device
               </Dialog.Title>
             </Dialog.Header>
+            {/* Mounted only while open, so both the pane choice and the
+                textarea re-seed from a fresh mount on every open -- without
+                ever remounting Dialog.Root, which leaks the body lock
+                (engineering-principles.md). */}
             {open && (
-              <>
-                <PaneTabs
-                  px={6}
-                  value={pane}
-                  onChange={setPane}
-                  items={[
-                    { value: "register", label: "Register serials" },
-                    { value: "pair", label: "Pair with a code" },
-                  ]}
-                />
-                {pane === "register" ? (
-                  <RegisterSerialsPane onClose={onClose} />
-                ) : (
-                  <PairWithCodePane scholars={scholars} />
-                )}
-              </>
+              <AddDeviceBody
+                onClose={onClose}
+                scholars={scholars}
+                institutionScope={institutionScope}
+                prefillSerials={prefillSerials}
+              />
             )}
           </Dialog.Content>
         </Dialog.Positioner>
@@ -1173,9 +1310,58 @@ function AddDeviceDialog({
   );
 }
 
-function RegisterSerialsPane({ onClose }: { onClose: () => void }) {
+function AddDeviceBody({
+  onClose,
+  scholars,
+  institutionScope,
+  prefillSerials,
+}: {
+  onClose: () => void;
+  scholars: PairableScholar[];
+  institutionScope: string;
+  prefillSerials: string[];
+}) {
+  const [pane, setPane] = useState<"register" | "pair">("register");
+  return (
+    <>
+      <PaneTabs
+        px={6}
+        value={pane}
+        onChange={setPane}
+        items={[
+          { value: "register", label: "Register serials" },
+          { value: "pair", label: "Pair with a code" },
+        ]}
+      />
+      {pane === "register" ? (
+        <RegisterSerialsPane
+          onClose={onClose}
+          institutionScope={institutionScope}
+          prefillSerials={prefillSerials}
+        />
+      ) : (
+        <PairWithCodePane scholars={scholars} />
+      )}
+    </>
+  );
+}
+
+function RegisterSerialsPane({
+  onClose,
+  institutionScope,
+  prefillSerials,
+}: {
+  onClose: () => void;
+  // The lens the roster is being READ at. Registering has to write into the
+  // same school the operator is looking at, or the new row lands in another
+  // institution and reads as a silent no-op.
+  institutionScope: string;
+  prefillSerials: string[];
+}) {
   const register = useMutation(api.managedDeviceClaims.registerManagedDeviceSerials);
-  const [pasteText, setPasteText] = useState("");
+  // Seeded once per open: the pane is mounted by `{open && ...}`, so a fresh
+  // open re-runs this initializer with whatever the opener supplied.
+  const [pasteText, setPasteText] = useState(() => prefillSerials.join("\n"));
   const [registering, setRegistering] = useState(false);
   const [results, setResults] = useState<RegistrationResult[]>([]);
   const parsed = useMemo(() => parseSerialLines(pasteText), [pasteText]);
@@ -1187,6 +1373,7 @@ function RegisterSerialsPane({ onClose }: { onClose: () => void }) {
     try {
       const response = await register({
         serials: parsed.map((row) => row.raw),
+        institutionScope,
       });
       setResults(response.results);
       const feedback = registrationFeedback(response.results);
@@ -1385,6 +1572,7 @@ function AutoAssignDialog({
             <Box borderWidth="1px" borderColor={tooMany || error ? "red.300" : "gray.200"} borderRadius="lg" p={2}>
               <ScholarPickerContent mode="multi" selected={selected} onChange={(next) => { setSelected(next); setError(null); }}
                 scholars={scholars} showGroups={false} showAffinityToggle={false} maxH="280px"
+                showEnrollmentStanding
                 emptyHint="Every scholar already has a managed device." />
             </Box>
             <Field.HelperText>{selected.size} selected · {availableDeviceCount} available</Field.HelperText>
@@ -1434,6 +1622,889 @@ function BatteryStatus({
         {inventory.batteryLevel}%
       </Text>
     </HStack>
+  );
+}
+
+type AppAccessRow = ManagedDevice["appAccess"][number];
+
+/** One visual vocabulary for every cell in the truth panel. Colour is
+ *  per-cell, never per-row: the whole point of the panel is to show *which*
+ *  fact disagrees, so a row-wide tint would erase the answer. `ok` is quiet
+ *  green; `off` is neutral (a fact being "no" is only a problem in context);
+ *  `problem` is the page's one existing attention colour; `pending` and
+ *  `unknown` are muted. */
+type AppAccessCell = {
+  icon: Icon;
+  tone: "ok" | "off" | "problem" | "pending" | "unknown";
+  label: string;
+  /** Extra hover lines: timestamps, the projector's ETA, the last error. */
+  detail?: string[];
+};
+
+type AppAccessProjection = ManagedDevice["appAccessProjection"];
+
+const APP_ACCESS_TONE_COLOR: Record<AppAccessCell["tone"], string> = {
+  ok: "green.700",
+  off: "charcoal.400",
+  problem: "orange.700",
+  // In flight is its own hue, distinct from both a plain "no" and a fault:
+  // a landing change is the ordinary shape of a fresh grant.
+  pending: "violet.500",
+  unknown: "charcoal.300",
+};
+
+/** Gentle opacity pulse for cells whose state is in flight. */
+const APP_ACCESS_PULSE = "app-access-pulse 1.6s ease-in-out infinite";
+const APP_ACCESS_PULSE_KEYFRAMES =
+  "@keyframes app-access-pulse{0%,100%{opacity:1}50%{opacity:.35}}";
+
+/** The PRODUCT of the four facts, rendered as the panel's primary answer.
+ *  Staff arrive asking "can she open it?", not "is it in the allowlist?" —
+ *  the four facts are the evidence, and this is the verdict they support. */
+const APP_ACCESS_VERDICT: Record<
+  AppAccessRow["onDevice"],
+  { icon: Icon; color: string; word: string }
+> = {
+  yes: { icon: CheckCircle, color: "green.700", word: "Yes" },
+  "launcher-only": { icon: WarningCircle, color: "orange.700", word: "Launcher only" },
+  landing: { icon: Clock, color: "violet.500", word: "Landing" },
+  no: { icon: XCircle, color: "charcoal.700", word: "No" },
+  unknown: { icon: Question, color: "charcoal.400", word: "Unknown" },
+};
+
+/** A block-scoped app outside its window (the 2026-09-15 ruling). The iPad's
+ *  answer is "no", and the Granted fact is "no", but the app is working as
+ *  scheduled; reading that as a missing grant is how Scratch went back to
+ *  24/7 on 2026-09-21 (TRA-444). So the verdict names the real state. */
+function appAccessOutsideSchedule(row: AppAccessRow): boolean {
+  return row.blocker === "grant" && row.schedule.length > 0;
+}
+
+const APP_ACCESS_NOT_NOW_VERDICT = {
+  icon: CalendarBlank,
+  color: "charcoal.700",
+  word: "Not now",
+};
+
+const APP_ACCESS_VERDICT_HELP =
+  "Can the scholar holding this iPad open this app right now? It is the product of the four facts to the right — click it for the reason and the fix.";
+
+/** Why the verdict is what it is, and what to do about it. One sentence each:
+ *  the reason names the blocking fact, the fix names the next action. */
+/** A projection is "stalled" only once it has recorded an error or blown its
+ *  own operation lease. An ordinary in-flight push is not stalled, and offering
+ *  to re-send it would invite staff to hammer SimpleMDM for nothing.
+ *  Reads only the projector's operation clock. `mdmAcceptedAt` and
+ *  `expectedAvailableAt` belong to the device's unlock lease, which the
+ *  projection never writes, so an old unlock would otherwise brand every new
+ *  change as failed the moment it was made.
+ *  `now` is passed in (not read from the clock) so the caller's ticking render
+ *  is what makes a projection go stale on screen, rather than the panel
+ *  silently keeping "nothing to do" until some unrelated update repaints it. */
+function appAccessProjectionStalled(projection: AppAccessProjection, now: number): boolean {
+  if (!projection) return false;
+  if (projection.lastError) return true;
+  return (
+    projection.operationKind === "projection" &&
+    !!projection.operationStartedAt &&
+    projection.operationStartedAt + PROJECTION_OPERATION_TIMEOUT_MS < now
+  );
+}
+
+function appAccessBlockerCopy(
+  row: AppAccessRow,
+  scholarName: string | null,
+  overdue: boolean,
+): { reason: string; fix: string } {
+  const who = scholarName ?? "The assigned scholar";
+  switch (row.blocker) {
+    case "scholar":
+      return {
+        reason: "This iPad has no scholar assigned, so nobody holds a grant for it.",
+        fix: "Assign a scholar first.",
+      };
+    case "binding":
+      return {
+        reason: "This iPad has no dedicated allowlist profile, so nothing can be allowed or blocked per app.",
+        fix: "Provision it with scripts/provision-device-app-unlock.mjs.",
+      };
+    case "grant":
+      // Say how the scholar does reach the app before offering more: a
+      // block-scoped app outside its window is the schedule working. Not
+      // "because it's outside those times" — a block its teacher wrapped up
+      // early, or a day the school is closed, lands here too.
+      return row.schedule.length > 0
+        ? {
+            reason: `${row.label} opens for ${who} during ${scheduleWindowsPhrase(row.schedule)}, and it isn't open right now.`,
+            fix: "Access follows the schedule. For extra time, open it for today or until a day you pick; it closes on its own.",
+          }
+        : {
+            reason: `${who} can't open ${row.label}: it isn't granted to them, and none of their classes' blocks opens it.`,
+            fix: "Open it for today or until a day you pick. It usually lands on the iPad within a few minutes and closes on its own.",
+          };
+    case "allowlist":
+      return row.allowed === "pending"
+        ? overdue
+          ? {
+              // Covers both a PATCH that blew its lease and a sweep that never
+              // ran. The progress block directly above names which, so this
+              // sentence does not have to guess.
+              reason: "A change to this iPad's allowlist has not landed when it should have.",
+              fix: "Re-sync to make the projector send it again.",
+            }
+          : {
+              reason: "A change to this iPad's allowlist is still being processed.",
+              fix: "Nothing to do — it should appear on its own.",
+            }
+        : {
+            reason: `${row.label} is granted, but the iPad's projected allowlist does not carry it — the shape of the 2026-08-31 incident.`,
+            fix: "Re-sync to make the projector re-apply this iPad's allowlist.",
+          };
+    case "inventory":
+      return {
+        reason: "SimpleMDM has never reported this iPad's installed apps, so we cannot say whether it is there.",
+        fix: "Use Check now above to ask SimpleMDM.",
+      };
+    case "install":
+      return {
+        reason: `${row.label} is allowed, but SimpleMDM's last inventory did not find it on this iPad.`,
+        fix: "An unlicensed managed install silently does nothing — check the app's licence in Apple School Manager.",
+      };
+    case "tile":
+      return row.tiled === null
+        ? {
+            reason: "No accepted home-screen projection for this iPad yet, so we cannot say whether the app has a tile.",
+            fix: "Re-sync to make the projector record this iPad's home layout.",
+          }
+        : {
+            reason: "This iPad's projected home layout has no tile for this app, so it is not on the home screen.",
+            fix: `${who} can still open it from the Rabbithole launcher.`,
+          };
+    default:
+      return {
+        reason: `${row.label} is allowed, installed, and on the home screen.`,
+        fix: "Nothing to do.",
+      };
+  }
+}
+
+const APP_ACCESS_COLUMNS: { header: string; help: string }[] = [
+  {
+    header: "Granted",
+    help: "Can the assigned scholar use this app right now, through a grant or a class block that is open? This is the one authority; everything to the right should agree with it. A calendar means their schedule opens it at other times.",
+  },
+  {
+    header: "Allowed",
+    help: "Is the app in this iPad's projected allowlist (the per-device profile SimpleMDM last accepted)? Clock = a change is still landing. Broken link = the iPad has no allowlist binding at all.",
+  },
+  {
+    header: "Installed",
+    help: "Did SimpleMDM's last inventory show the app on this iPad? Dash = apps have not been inventoried yet (use Check now).",
+  },
+  {
+    header: "Tiled",
+    help: "Is the app in this iPad's accepted projected Home Screen layout? Dash = no projection recorded yet, so the layout is unknown; Pilot uses its committed Pilot layout.",
+  },
+];
+
+function appAccessGrantedCell(row: AppAccessRow, todayDayKey: string): AppAccessCell {
+  if (row.granted === null) return { icon: MinusCircle, tone: "unknown", label: "No scholar assigned" };
+  if (row.granted) {
+    return row.grantThroughDay
+      ? {
+          icon: CheckCircle,
+          tone: "ok",
+          label: `Granted through ${throughDayPhrase(row.grantThroughDay, todayDayKey)}`,
+          detail: [closesPhrase(row.grantThroughDay, todayDayKey)],
+        }
+      : { icon: CheckCircle, tone: "ok", label: "Granted" };
+  }
+  // A fact about the grant alone, so not tied to the verdict's first blocker:
+  // while the app is still leaving the iPad (a change landing), the verdict
+  // says so, and this still says when the schedule opens it.
+  return row.schedule.length > 0
+    ? {
+        icon: CalendarBlank,
+        tone: "off",
+        label: "Not now",
+        detail: [`Opens during ${scheduleWindowsPhrase(row.schedule)}.`],
+      }
+    : { icon: XCircle, tone: "off", label: "Not granted" };
+}
+
+/** Downstream facts are a problem only when the grant says yes and they
+ *  disagree — the exact shape of the 2026-08-31 incident. */
+function appAccessAllowedCell(
+  row: AppAccessRow,
+  projection: AppAccessProjection,
+): AppAccessCell {
+  const expected = row.granted === true;
+  const applied = projection?.appliedAt ?? null;
+  // Projection clocks only. `mdmAcceptedAt` and `expectedAvailableAt` are the
+  // unlock lease's, and an old unlock would date this change wrongly. Whether
+  // a change is overdue has one home — the progress block in the verdict
+  // popover — so this hover states facts and leaves the judgement there.
+  const landing: string[] = [];
+  if (projection?.operationStartedAt && projection.operationKind === "projection") {
+    landing.push(`Sent to SimpleMDM ${relativeTime(projection.operationStartedAt)}`);
+  } else if (projection?.updatedAt) {
+    landing.push(`Requested ${relativeTime(projection.updatedAt)}`);
+  }
+  if (projection?.dueAt != null) {
+    if (projection.dueAt <= 0) {
+      landing.push("Projector retries immediately");
+    } else if (projection.dueAt > Date.now()) {
+      landing.push(`Projector retries ${relativeClock(projection.dueAt)}`);
+    }
+  }
+  if (projection?.lastError) landing.push(`Last error: ${projection.lastError}`);
+  switch (row.allowed) {
+    case "yes":
+      return {
+        icon: CheckCircle,
+        tone: "ok",
+        label: "Allowed",
+        detail: applied ? [`Allowlist applied ${relativeTime(applied)}`] : undefined,
+      };
+    case "no":
+      return {
+        icon: XCircle,
+        tone: expected ? "problem" : "off",
+        label: "Not allowed",
+        detail: expected ? ["Granted but not in the projected allowlist — Re-sync should fix this."] : undefined,
+      };
+    case "pending":
+      return {
+        icon: Clock,
+        tone: "pending",
+        label: "Allowlist change still landing",
+        detail: landing,
+      };
+    case "not-bound":
+      return {
+        icon: LinkBreak,
+        tone: expected ? "problem" : "unknown",
+        label: "No allowlist binding for this iPad",
+        detail: ["Provisioning has not given this iPad a dedicated profile yet (scripts/provision-device-app-unlock.mjs)."],
+      };
+  }
+}
+
+function appAccessInstalledCell(row: AppAccessRow): AppAccessCell {
+  const expected = row.granted === true;
+  if (row.installed === null) {
+    return { icon: MinusCircle, tone: "unknown", label: "Apps not inventoried yet", detail: ["Use Check now to ask SimpleMDM."] };
+  }
+  const at = row.installedCheckedAt ? [`Inventoried ${relativeTime(row.installedCheckedAt)}`] : undefined;
+  return row.installed
+    ? { icon: CheckCircle, tone: "ok", label: "Installed", detail: at }
+    : {
+        icon: XCircle,
+        tone: expected ? "problem" : "off",
+        label: "Not installed",
+        detail: expected
+          ? [...(at ?? []), "Granted and allowed but SimpleMDM has not seen it on the iPad — check the app's licence in ASM."]
+          : at,
+      };
+}
+
+function appAccessTiledCell(row: AppAccessRow): AppAccessCell {
+  const expected = row.granted === true;
+  if (row.tiled === null) {
+    return {
+      icon: MinusCircle,
+      tone: "unknown",
+      label: "Home screen not projected yet",
+      detail: ["No accepted home-screen projection for this iPad, so its tiles are unknown."],
+    };
+  }
+  return row.tiled
+    ? { icon: CheckCircle, tone: "ok", label: "On the home screen", detail: ["Per this iPad's projected home layout."] }
+    : {
+        icon: XCircle,
+        tone: expected ? "problem" : "off",
+        label: "Not on the home screen",
+        detail: expected
+          ? ["Granted, but this iPad's projected home layout has no tile for it — the scholar can open it only from the Rabbithole launcher."]
+          : undefined,
+      };
+}
+
+function AppAccessCellIcon({ cell }: { cell: AppAccessCell }) {
+  const Icon = cell.icon;
+  return (
+    <Tooltip.Root openDelay={300} closeDelay={0}>
+      <Tooltip.Trigger asChild>
+        <Box
+          as="span"
+          display="inline-flex"
+          color={APP_ACCESS_TONE_COLOR[cell.tone]}
+          aria-label={cell.label}
+          role="img"
+          css={cell.tone === "pending" ? {
+            animation: APP_ACCESS_PULSE,
+            "@media (prefers-reduced-motion: reduce)": { animation: "none" },
+          } : undefined}
+        >
+          <Icon size={16} weight={cell.tone === "problem" || cell.tone === "pending" ? "fill" : "regular"} />
+        </Box>
+      </Tooltip.Trigger>
+      <Portal>
+        <Tooltip.Positioner>
+          <Tooltip.Content fontFamily="heading" fontSize="xs" maxW="280px">
+            <Text fontWeight="600">{cell.label}</Text>
+            {cell.detail?.map((line) => (
+              <Text key={line} color="whiteAlpha.800">
+                {line}
+              </Text>
+            ))}
+          </Tooltip.Content>
+        </Tooltip.Positioner>
+      </Portal>
+    </Tooltip.Root>
+  );
+}
+
+/**
+ * The primary cell: the verdict, plus the actions that would change it.
+ * A popover rather than a tooltip because the fix belongs WITH the reason —
+ * staff should not have to read the reason here and then go hunting for the
+ * grant surface. Extra access goes through the ordinary scholar-app paths
+ * (`scholarApps.openForScholar`, which ends on its own, and, behind a
+ * warning, the standing `addToScholar`), so this adds a second door, not a
+ * second authority.
+ */
+/** A clock that ticks only while something is actually in flight. The landing
+ *  progress bar and the "has this missed its estimate?" test are both derived
+ *  from the current time, so without a tick the panel would keep rendering a
+ *  stale ETA — and keep saying "nothing to do" past the moment it stopped
+ *  being true — until some unrelated Convex update repainted it. */
+function useTick(active: boolean, intervalMs = 1_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [active, intervalMs]);
+  return now;
+}
+
+function AppAccessVerdictCell({
+  row,
+  device,
+  projection,
+  onResync,
+  resyncing,
+  onCheckNow,
+  checking,
+}: {
+  row: AppAccessRow;
+  device: ManagedDevice;
+  projection: AppAccessProjection;
+  onResync: () => void;
+  resyncing: boolean;
+  onCheckNow: (() => void) | null;
+  checking: boolean;
+}) {
+  const verdict = appAccessOutsideSchedule(row)
+    ? APP_ACCESS_NOT_NOW_VERDICT
+    : APP_ACCESS_VERDICT[row.onDevice];
+  const VerdictIcon = verdict.icon;
+  const landing = row.onDevice === "landing";
+  const now = useTick(landing);
+  const stalled = appAccessProjectionStalled(projection, now);
+  // Which of the three real clocks this change is on, and how far through it
+  // is. Only meaningful while landing; skipped entirely otherwise.
+  const progress = landing
+    ? landingProgress({
+        allowed: row.allowed === "pending" ? "pending" : "settled",
+        operationStartedAt: projection?.operationStartedAt ?? null,
+        operationKind: projection?.operationKind ?? null,
+        projectionAppliedAt: projection?.appliedAt ?? null,
+        projectionDueAt: projection?.dueAt ?? null,
+        installedCheckedAt: row.installedCheckedAt ?? null,
+        now,
+      })
+    : null;
+  // A push that has missed its own window, by either measure: an error or a
+  // spent lease, or a sweep that never came.
+  const overdue = stalled || progress?.overdue === true;
+  const { reason, fix } = appAccessBlockerCopy(
+    row,
+    device.scholarName,
+    overdue,
+  );
+  const openForScholar = useMutation(api.scholarApps.openForScholar);
+  const addToScholar = useMutation(api.scholarApps.addToScholar);
+  const resync = useMutation(api.managedDeviceClaims.resyncManagedDeviceProjection);
+  const firstName = device.scholarName?.split(" ")[0] ?? "the scholar";
+  const canGrant = row.blocker === "grant" && !!row.appId && !!device.scholarId;
+  // Extra access ends on its own by default (TRA-444; Andy, 2026-09-28): a
+  // grant that never ends sits behind its own step and warning, so a click
+  // made while misreading this panel cannot leave an app open all year.
+  const [extra, setExtra] = useState<"idle" | "until" | "standing">("idle");
+  // Opening a step unmounts the button that opened it, and closing one
+  // unmounts its controls. Focus goes with them, the drawer's focus trap moves
+  // it out of this popover, and the popover closes. So focus always moves to
+  // what replaced it: the date field, the warning's Cancel (a double Enter
+  // must not confirm the warning unread), or back to the step's button.
+  const [returnFocus, setReturnFocus] = useState<"until" | "standing" | null>(null);
+  // Cancel takes focus on the warning, so both its buttons carry the warning
+  // as their description: a screen reader says it before either is pressed.
+  const warningId = useId();
+  const openStep = (step: "until" | "standing") => {
+    setReturnFocus(null);
+    setExtra(step);
+  };
+  const closeStep = () => {
+    setReturnFocus(extra === "idle" ? null : extra);
+    setExtra("idle");
+  };
+  const [untilDay, setUntilDay] = useState(() => shiftDayKey(device.todayDayKey, 1));
+  const [granting, setGranting] = useState<"today" | "until" | "standing" | null>(null);
+  const grant = async (kind: "today" | "until" | "standing") => {
+    if (!row.appId || !device.scholarId) return;
+    const target = {
+      scholarId: device.scholarId as Id<"users">,
+      appId: row.appId as Id<"externalApps">,
+    };
+    setGranting(kind);
+    setReturnFocus(null);
+    try {
+      let title: string;
+      let description: string;
+      if (kind === "standing") {
+        await addToScholar(target);
+        title = `${row.label} allowed at all hours`;
+        description = `${firstName} should have it on this iPad within a few minutes. It stays until someone removes it.`;
+      } else {
+        // Opening never shortens access, so this can answer with a later day
+        // than the one asked for, or none when the add is already standing.
+        const { throughDay } = await openForScholar(
+          kind === "until" ? { ...target, throughDay: untilDay } : target,
+        );
+        if (throughDay) {
+          title = `${row.label} open for ${firstName} through ${throughDayPhrase(throughDay, device.todayDayKey)}`;
+          description = `It lands on this iPad within a few minutes. ${closesPhrase(throughDay, device.todayDayKey)}`;
+        } else {
+          title = `${row.label} is already allowed at all hours`;
+          description = `${firstName} has it until someone removes it.`;
+        }
+      }
+      // Grant, then pull the projector's next pass forward, so one click
+      // genuinely starts the app moving rather than waiting out a cron tick.
+      await resync({ managedDeviceId: device._id }).catch(() => undefined);
+      toaster.success({ title, description });
+      setExtra("idle");
+    } catch (error) {
+      toaster.error({
+        title: kind === "standing" ? "Couldn't allow it at all hours" : "Couldn't open it",
+        description: error instanceof Error ? error.message : undefined,
+      });
+    } finally {
+      setGranting(null);
+    }
+  };
+
+  return (
+    <Popover.Root positioning={{ placement: "bottom-start" }}>
+      <Popover.Trigger asChild>
+        <Button
+          size="xs"
+          variant="ghost"
+          px={1}
+          h="auto"
+          py={1}
+          color={verdict.color}
+          fontWeight="700"
+          aria-label={`On this iPad: ${verdict.word}`}
+        >
+          <HStack gap={1.5}>
+            <Box
+              as="span"
+              display="inline-flex"
+              css={row.onDevice === "landing" ? {
+                animation: APP_ACCESS_PULSE,
+                "@media (prefers-reduced-motion: reduce)": { animation: "none" },
+              } : undefined}
+            >
+              <VerdictIcon size={18} weight={row.onDevice === "yes" ? "regular" : "fill"} />
+            </Box>
+            <Text as="span" fontFamily="heading" fontSize="sm">
+              {verdict.word}
+            </Text>
+          </HStack>
+        </Button>
+      </Popover.Trigger>
+      {/* Not portalled: this cell lives in the device drawer, a modal Ark
+          dialog that hides everything outside it from assistive tech and
+          pulls focus back inside. Portalled to <body>, the "Open until…"
+          date field and the "Allow at all hours" confirmation lost focus to
+          that trap and closed the popover before they could be used. */}
+      <Popover.Positioner>
+        <Popover.Content w="320px">
+          <Popover.Body p={3}>
+            <VStack align="stretch" gap={2}>
+              <Text fontSize="sm" fontWeight="600" color={verdict.color}>
+                {row.label} — {verdict.word.toLowerCase()}
+              </Text>
+              <Text fontSize="xs" color="charcoal.600">
+                {reason}
+              </Text>
+              <Text fontSize="xs" color="charcoal.500">
+                {fix}
+              </Text>
+              {row.granted && row.grantThroughDay && (
+                <Text fontSize="xs" color="charcoal.500">
+                  Opened for {firstName} through{" "}
+                  {throughDayPhrase(row.grantThroughDay, device.todayDayKey)}.{" "}
+                  {closesPhrase(row.grantThroughDay, device.todayDayKey)}
+                </Text>
+              )}
+              {progress && (
+                <Box
+                  borderWidth="1px"
+                  borderColor="charcoal.100"
+                  borderRadius="md"
+                  p={2}
+                  bg="gray.50"
+                >
+                  <HStack justify="space-between" gap={2} mb={1.5}>
+                    <Text fontSize="xs" fontWeight="600" color="charcoal.700">
+                      {progress.label}
+                    </Text>
+                    <Text
+                      fontSize="xs"
+                      color={progress.overdue ? "orange.700" : "charcoal.500"}
+                      whiteSpace="nowrap"
+                    >
+                      {progress.overdue
+                        ? "overdue"
+                        : progress.phase === "sending"
+                          ? ""
+                          : etaLabel(progress.etaMs)}
+                    </Text>
+                  </HStack>
+                  <Progress.Root
+                    value={progress.pct}
+                    size="xs"
+                    colorPalette={progress.overdue ? "orange" : "violet"}
+                    aria-label={`${progress.label}, ${progress.pct}% of the expected wait`}
+                  >
+                    <Progress.Track borderRadius="full">
+                      <Progress.Range borderRadius="full" />
+                    </Progress.Track>
+                  </Progress.Root>
+                  <Text fontSize="xs" color="charcoal.500" mt={1.5}>
+                    {progress.typical}
+                  </Text>
+                  {progress.overdue && progress.phase !== "queued" && (
+                    <Text fontSize="xs" color="charcoal.500" mt={1}>
+                      The projector sweeps every{" "}
+                      {Math.round(PROJECTION_SWEEP_MS / 60_000)} minutes even if nobody
+                      touches it.
+                    </Text>
+                  )}
+                </Box>
+              )}
+              {progress?.phase === "confirming" && onCheckNow && (
+                <Button size="xs" variant="outline" loading={checking} onClick={onCheckNow}>
+                  <ArrowClockwise size={14} />
+                  Check now
+                </Button>
+              )}
+              {canGrant && (
+                <VStack align="stretch" gap={2} pt={1}>
+                  <Button
+                    size="sm"
+                    colorPalette="violet"
+                    loading={granting === "today"}
+                    disabled={granting !== null}
+                    onClick={() => void grant("today")}
+                  >
+                    <Plus size={14} />
+                    Open all day today
+                  </Button>
+                  {extra === "until" ? (
+                    <Box borderWidth="1px" borderColor="charcoal.100" borderRadius="md" p={2}>
+                      <Field.Root>
+                        <Field.Label fontSize="xs">Last day</Field.Label>
+                        <Input
+                          type="date"
+                          size="sm"
+                          autoFocus
+                          min={device.todayDayKey}
+                          value={untilDay}
+                          onChange={(event) => setUntilDay(event.target.value)}
+                        />
+                        <Field.HelperText fontSize="xs">
+                          It closes on its own at the end of that day.
+                        </Field.HelperText>
+                      </Field.Root>
+                      <HStack mt={2} gap={2}>
+                        <Button
+                          size="sm"
+                          colorPalette="violet"
+                          loading={granting === "until"}
+                          disabled={
+                            granting !== null ||
+                            !/^\d{4}-\d{2}-\d{2}$/.test(untilDay) ||
+                            untilDay < device.todayDayKey
+                          }
+                          onClick={() => void grant("until")}
+                        >
+                          {/^\d{4}-\d{2}-\d{2}$/.test(untilDay)
+                            ? `Open through ${throughDayPhrase(untilDay, device.todayDayKey)}`
+                            : "Open through…"}
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={closeStep}>
+                          Cancel
+                        </Button>
+                      </HStack>
+                    </Box>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      autoFocus={returnFocus === "until"}
+                      disabled={granting !== null}
+                      onClick={() => openStep("until")}
+                    >
+                      Open until…
+                    </Button>
+                  )}
+                  {extra === "standing" ? (
+                    <Box
+                      borderWidth="1px"
+                      borderColor="orange.200"
+                      bg="orange.50"
+                      borderRadius="md"
+                      p={2}
+                    >
+                      <HStack align="start" gap={2}>
+                        <Box color="orange.700" mt={0.5} flexShrink={0}>
+                          <WarningCircle size={16} weight="fill" />
+                        </Box>
+                        <Text id={warningId} fontSize="xs" color="orange.800">
+                          This makes {row.label} available at all hours, every
+                          day, until someone removes it.
+                        </Text>
+                      </HStack>
+                      <HStack mt={2} gap={2}>
+                        <Button
+                          size="sm"
+                          colorPalette="orange"
+                          aria-describedby={warningId}
+                          loading={granting === "standing"}
+                          disabled={granting !== null}
+                          onClick={() => void grant("standing")}
+                        >
+                          Allow at all hours
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          autoFocus
+                          aria-describedby={warningId}
+                          onClick={closeStep}
+                        >
+                          Cancel
+                        </Button>
+                      </HStack>
+                    </Box>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      color="charcoal.500"
+                      autoFocus={returnFocus === "standing"}
+                      disabled={granting !== null}
+                      onClick={() => openStep("standing")}
+                    >
+                      Allow at all hours…
+                    </Button>
+                  )}
+                </VStack>
+              )}
+              {/* No button while a push is doing its normal work; one the
+                  moment it is not. `stalled` catches a recorded error or a
+                  PATCH past its lease, but a sweep that simply never ran
+                  leaves the row pending with neither — which is exactly the
+                  failure a human needs to nudge. */}
+              {row.blocker === "allowlist" &&
+                (row.allowed !== "pending" || overdue) && (
+                <Button size="xs" variant="outline" loading={resyncing} onClick={onResync}>
+                  <ArrowClockwise size={14} />
+                  Re-sync
+                </Button>
+              )}
+            </VStack>
+          </Popover.Body>
+        </Popover.Content>
+      </Popover.Positioner>
+    </Popover.Root>
+  );
+}
+
+function AppAccessColumnHeader({
+  header,
+  help,
+  secondary,
+}: {
+  header: string;
+  help: string;
+  /** Evidence columns are supporting detail for the verdict, and are set
+   *  lighter so the answer reads first. */
+  secondary?: boolean;
+}) {
+  return (
+    <Table.ColumnHeader
+      fontSize={secondary ? "xs" : undefined}
+      color={secondary ? "charcoal.400" : undefined}
+      fontWeight={secondary ? "500" : undefined}
+    >
+      <Tooltip.Root openDelay={300} closeDelay={0}>
+        <Tooltip.Trigger asChild>
+          <Text
+            as="span"
+            cursor="help"
+            textDecoration="underline dotted"
+            textDecorationColor="charcoal.300"
+            textUnderlineOffset="3px"
+          >
+            {header}
+          </Text>
+        </Tooltip.Trigger>
+        <Portal>
+          <Tooltip.Positioner>
+            <Tooltip.Content fontFamily="heading" fontSize="xs" maxW="260px">
+              {help}
+            </Tooltip.Content>
+          </Tooltip.Positioner>
+        </Portal>
+      </Tooltip.Root>
+    </Table.ColumnHeader>
+  );
+}
+
+/**
+ * "App access" — the device truth panel (TRA-241 step 1). Four stored facts
+ * per managed app, side by side, so a disagreement between them (the shape of
+ * the 2026-08-31 incident) is visible at a glance instead of requiring staff
+ * to cross-reference three separate systems. Every cell is read from already-
+ * stored state; this component never calls SimpleMDM.
+ */
+function AppAccessSection({
+  device,
+  onCheckNow,
+  checking,
+}: {
+  device: ManagedDevice;
+  onCheckNow: (() => void) | null;
+  checking: boolean;
+}) {
+  const rows = device.appAccess;
+  const projection = device.appAccessProjection;
+  const checkedAt = rows.find((row) => row.installedCheckedAt !== null)
+    ?.installedCheckedAt;
+  const resync = useMutation(api.managedDeviceClaims.resyncManagedDeviceProjection);
+  const [resyncing, setResyncing] = useState(false);
+  const doResync = useCallback(async () => {
+    setResyncing(true);
+    try {
+      const result = await resync({ managedDeviceId: device._id });
+      if (result.nudged) {
+        toaster.success({ title: "Re-sync requested", description: "The projector will re-apply this iPad's allowlist within a minute." });
+      } else {
+        toaster.error({ title: "Nothing to re-sync", description: "This iPad has no allowlist binding yet." });
+      }
+    } catch (error) {
+      toaster.error({ title: "Couldn't re-sync", description: error instanceof Error ? error.message : undefined });
+    } finally {
+      setResyncing(false);
+    }
+  }, [resync, device._id]);
+  const clocks = [
+    checkedAt != null ? `Apps checked ${relativeTime(checkedAt)}` : "Apps not yet checked",
+    projection?.appliedAt ? `Allowlist applied ${relativeTime(projection.appliedAt)}` : null,
+  ].filter((line): line is string => line !== null);
+  // A removed registration of this iPad that never finished relocking its old
+  // profile. Nothing else on the console can show it: its roster row is gone.
+  const teardown = device.unfinishedTeardown;
+  // With no scholar, every app row's verdict stops at "no scholar", so its
+  // popover never shows the projector's error (the Allowed hover does only
+  // while a change is pending), yet the reset to baseline keeps retrying. A
+  // deleted scholar's iPad is the case that needs it (TRA-434).
+  const resetError = device.scholarId ? null : (projection?.lastError ?? null);
+  return (
+    <VStack align="stretch" gap={2}>
+      <style>{APP_ACCESS_PULSE_KEYFRAMES}</style>
+      {teardown && (
+        <Text fontSize="xs" color="orange.700">
+          {teardown.stopped
+            ? `An earlier registration of this iPad couldn't reset its old app-access profile (SimpleMDM ${teardown.simpleMdmProfileId}) to the locked baseline, and has stopped retrying. Don't re-assign that profile: it may still allow the previous scholar's apps. If it's installed on no iPad, delete it in SimpleMDM, then ask an engineer to clear this record.`
+            : `An earlier registration of this iPad is still resetting its old app-access profile (SimpleMDM ${teardown.simpleMdmProfileId}) to the locked baseline, and retries on its own. If that profile is installed on no iPad, deleting it in SimpleMDM lets the next retry finish.`}
+          {teardown.lastError ? ` Last error: ${teardown.lastError}` : ""}
+        </Text>
+      )}
+      {resetError && (
+        <Text fontSize="xs" color="orange.700">
+          This iPad is still resetting its app-access profile to the locked
+          baseline, and retries on its own. Last error: {resetError}
+        </Text>
+      )}
+      <Table.Root size="sm">
+        <Table.Header>
+          <Table.Row>
+            <AppAccessColumnHeader
+              header="App"
+              help="Which managed app is this row describing?"
+            />
+            <AppAccessColumnHeader header="On this iPad" help={APP_ACCESS_VERDICT_HELP} />
+            {APP_ACCESS_COLUMNS.map((col) => (
+              <AppAccessColumnHeader key={col.header} {...col} secondary />
+            ))}
+          </Table.Row>
+        </Table.Header>
+        <Table.Body>
+          {rows.map((row) => (
+            <Table.Row key={row.key}>
+              <Table.Cell>
+                <Text fontSize="sm" fontWeight="600">
+                  {row.label}
+                </Text>
+              </Table.Cell>
+              <Table.Cell borderRightWidth="1px" borderColor="charcoal.100">
+                <AppAccessVerdictCell
+                  row={row}
+                  device={device}
+                  projection={projection}
+                  onResync={() => void doResync()}
+                  resyncing={resyncing}
+                  onCheckNow={onCheckNow}
+                  checking={checking}
+                />
+              </Table.Cell>
+              <Table.Cell><AppAccessCellIcon cell={appAccessGrantedCell(row, device.todayDayKey)} /></Table.Cell>
+              <Table.Cell><AppAccessCellIcon cell={appAccessAllowedCell(row, projection)} /></Table.Cell>
+              <Table.Cell><AppAccessCellIcon cell={appAccessInstalledCell(row)} /></Table.Cell>
+              <Table.Cell><AppAccessCellIcon cell={appAccessTiledCell(row)} /></Table.Cell>
+            </Table.Row>
+          ))}
+        </Table.Body>
+      </Table.Root>
+      <HStack justify="space-between" align="center">
+        <Text fontSize="xs" color="charcoal.400">
+          {clocks.join(" · ")}
+        </Text>
+        {projection && (
+          <Button size="xs" variant="ghost" loading={resyncing} onClick={() => void doResync()}>
+            <ArrowClockwise size={14} />
+            Re-sync
+          </Button>
+        )}
+      </HStack>
+    </VStack>
   );
 }
 
@@ -1487,8 +2558,9 @@ function DeviceDetailsDrawer({
   onPush,
   onRename,
   onClaimInvalidated,
-  onReverify,
   onRevealed,
+  onCheckNow,
+  checkingSimpleMdm,
 }: {
   row: UnifiedDevice | null;
   open: boolean;
@@ -1504,8 +2576,9 @@ function DeviceDetailsDrawer({
   onPush: (id: ManagedDevice["_id"], serial: string) => Promise<PushResult>;
   onRename: (id: ManagedDevice["_id"], name: string) => Promise<string>;
   onClaimInvalidated: (id: ManagedDevice["_id"]) => void;
-  onReverify: () => void;
   onRevealed: (result: MintResult) => void;
+  onCheckNow: () => void;
+  checkingSimpleMdm: boolean;
 }) {
   const unpair = useMutation(api.devicePairing.unpairDevice);
   const revokeSession = useMutation(api.devicePairing.revokeDeviceSession);
@@ -1514,8 +2587,9 @@ function DeviceDetailsDrawer({
   const unassign = useMutation(api.managedDeviceClaims.unassignManagedDevice);
   const remove = useMutation(api.managedDeviceClaims.removeManagedDevice);
   const setAutoAssignExcluded = useMutation(api.managedDeviceClaims.setManagedDeviceAutoAssignExcluded);
+  const restartDevice = useAction(api.simplemdm.restartDevice);
   const [confirming, setConfirming] = useState<
-    "unpair" | "session" | "restore" | "rotate" | "unassign" | "revoke" | "remove" | null
+    "unpair" | "session" | "restart" | "restore" | "rotate" | "unassign" | "revoke" | "remove" | null
   >(null);
   const [busy, setBusy] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -1533,9 +2607,26 @@ function DeviceDetailsDrawer({
   const manualDevice = row.kind === "manual" ? row.device : null;
   const rowDevice = row.device;
   const managed = managedDevice !== null;
+  // Restart is an MDM command, so it needs a MANAGED device — `inventory` is
+  // undefined for a manual pairing, which reads as "unknown" but is really
+  // "impossible", and would have offered a button that always throws.
+  //
+  // Beyond that, offer it unless the last SimpleMDM read POSITIVELY rules it
+  // out. A managed device SimpleMDM has never been asked about still gets the
+  // button: `restartDevice` re-reads supervision live, so a stale
+  // `isSupervised: null` can still resolve to a working restart, and hiding an
+  // escape hatch behind an hourly snapshot strands staff in exactly the
+  // emergency it exists for. When the snapshot does rule it out we hide rather
+  // than disable-with-reason, which is this list's established idiom — every
+  // other action here conditionally renders; Lost Mode's explain-the-blocker
+  // block belongs to a section, not to a row of buttons.
+  const canRestart =
+    managed &&
+    inventory?.foundInSimpleMdm !== false &&
+    inventory?.isSupervised !== false;
   const device = managedDevice;
   const pairedDeviceId = managedDevice?.pairedDeviceId ?? manualDevice?._id ?? null;
-  const managedName = inventory?.simpleMdmName;
+  const managedName = inventory?.name;
   const displayName =
     managedName ??
     managedDevice?.serial ??
@@ -1559,8 +2650,29 @@ function DeviceDetailsDrawer({
     } else if (confirming === "session" && pairedDeviceId) {
       await withBusy(async () => {
         const result = await revokeSession({ pairedDeviceId });
-        toaster.success({ title: result.sessionRevoked ? "Device signed out" : "No active device session" });
+        toaster.success({
+          title: result.sessionRevoked
+            ? "Device signed out"
+            : "No active device session",
+        });
       });
+    } else if (confirming === "restart" && pairedDeviceId) {
+      // Not withBusy: a SimpleMDM failure arrives as a ConvexError whose raw
+      // `.message` is the transport blob plus a stack trace. Staff reading a
+      // toast while a kid's iPad is frozen get the sentence instead.
+      setBusy(true);
+      try {
+        const result = await restartDevice({ pairedDeviceId });
+        setConfirming(null);
+        toaster.success({ title: "Restart command sent", description: result.message });
+      } catch (error) {
+        toaster.error({
+          title: "Couldn't restart this iPad",
+          description: simpleMdmErrorMessage(error, "Please try again."),
+        });
+      } finally {
+        setBusy(false);
+      }
     } else if (device && confirming === "restore") {
       await restoreAutomaticSignIn();
     } else if (device && confirming === "rotate") {
@@ -1582,7 +2694,6 @@ function DeviceDetailsDrawer({
     await withBusy(async () => {
       const result = await rotate({ managedDeviceId: device._id });
       onClaimInvalidated(device._id);
-      onReverify();
       onRevealed(result);
       toaster.success({
         title: "Enrollment key replaced",
@@ -1642,10 +2753,11 @@ function DeviceDetailsDrawer({
   const confirmationText: Record<NonNullable<typeof confirming>, string> = {
     unpair: "Unpair this device? It can then be paired to someone else.",
     session: "Force sign out this device? The scholar's other sessions will stay signed in.",
+    restart: "Restart this iPad? It has to be online to receive the command — if nothing happens, hold volume up, then volume down, then the top button until the Apple logo appears. Anything the scholar hasn't sent is lost. The iPad comes back to the Home Screen; they tap Rabbithole and are still signed in.",
     restore: "Restore automatic sign-in? This sends a fresh enrollment key to this iPad. The current key remains valid until the iPad receives and exchanges the replacement.",
     rotate: "Issue a new enrollment key? The current key will stop working until the replacement is pushed.",
     unassign: "Unassign this iPad? It will be signed out of Rabbithole and no longer linked to the scholar. It will remain managed and on the device roster.",
-    revoke: "Disable this device? It will be signed out and cannot enroll again until a new key is issued.",
+    revoke: "Disable this iPad? Its enrollment key is invalidated and its pairing to this scholar is dropped \u2014 it cannot sign in again, by hand or otherwise, until you issue a new key. Use this for a lost iPad. The serial stays on the roster.",
     remove: "Remove this device from the roster? Its current session will also be signed out.",
   };
   return (
@@ -1763,6 +2875,11 @@ function DeviceDetailsDrawer({
                       </Text>
                     )}
                   </HStack>
+                  {pushResult && pushResult.status !== "pushed" && pushResult.message && (
+                    <Text fontSize="sm" color="charcoal.600" mt={2}>
+                      {pushResult.message}
+                    </Text>
+                  )}
                   {/* The iPad only re-reads its assignment when it next becomes
                       active, so a reassigned device that nobody has touched keeps
                       serving the previous scholar. Staff would otherwise have to
@@ -1789,6 +2906,11 @@ function DeviceDetailsDrawer({
                     ) : undefined
                   }
                 >
+                  {device?.scholarDeleted && (
+                    <Text fontSize="sm" color="charcoal.600" mb={3}>
+                      This iPad&apos;s scholar was deleted. Assign it to another scholar.
+                    </Text>
+                  )}
                   {rowDevice.scholarId ? (
                     <>
                       <PersonCell
@@ -1848,6 +2970,7 @@ function DeviceDetailsDrawer({
                                 scholars={scholars}
                                 showGroups={false}
                                 showAffinityToggle={false}
+                                showEnrollmentStanding
                                 autoFocusSearch
                                 maxH="260px"
                                 emptyHint="No scholars available."
@@ -1865,6 +2988,10 @@ function DeviceDetailsDrawer({
                         </Popover.Positioner>
                       </Portal>
                     </Popover.Root>
+                  ) : manualDevice?.scholarDeleted ? (
+                    <Text fontSize="sm" color="charcoal.600">
+                      This iPad&apos;s scholar was deleted. Unpair it to pair it to another scholar.
+                    </Text>
                   ) : (
                     <Text fontSize="sm" color="charcoal.400">No scholar assigned</Text>
                   )}
@@ -1891,8 +3018,18 @@ function DeviceDetailsDrawer({
                     <LostModeControl
                       key={`lost-mode:${pairedDevice._id}`}
                       pairedDeviceId={pairedDevice._id}
+                      snapshot={
+                        inventory && inventory.checkedAt !== null && inventory.foundInSimpleMdm !== null
+                          ? {
+                              checkedAt: inventory.checkedAt,
+                              foundInSimpleMdm: inventory.foundInSimpleMdm,
+                              isSupervised: inventory.isSupervised,
+                              lostModeEnabled: inventory.lostModeEnabled,
+                            }
+                          : null
+                      }
+                      simpleMdmConfigured={simpleMdmPolicy.status !== "unconfigured"}
                       variant="drawer"
-                      onCommandApplied={onReverify}
                     />
                   </>
                 )}
@@ -1928,6 +3065,15 @@ function DeviceDetailsDrawer({
                     )}
                   </VStack>
                 </DrawerSection>
+                {device && (
+                  <DrawerSection title="App access">
+                    <AppAccessSection
+                      device={device}
+                      onCheckNow={simpleMdmPolicy.showPushActions ? onCheckNow : null}
+                      checking={checkingSimpleMdm}
+                    />
+                  </DrawerSection>
+                )}
                 <DrawerSection title="Actions">
                   {confirming && confirming !== "unassign" ? (
                     <VStack align="stretch" gap={3}>
@@ -1956,7 +3102,9 @@ function DeviceDetailsDrawer({
                         />
                       </Button>
                     )}
-                    {device && !device.scholarId && (
+                    {/* Auto assign never takes a deleted scholar's iPad (see
+                        autoAssignableDevices), so there is nothing to skip. */}
+                    {device && !device.scholarId && !device.scholarDeleted && (
                       <Button h="auto" py={3} px={4} variant="outline" justifyContent="flex-start" textAlign="left" loading={busy} onClick={() => void toggleAutoAssign()}>
                         <DeviceActionContent
                           icon={device.autoAssignExcluded ? <ArrowCounterClockwise size={18} /> : <MinusCircle size={18} />}
@@ -1967,7 +3115,16 @@ function DeviceDetailsDrawer({
                         />
                       </Button>
                     )}
-                    {pairedDeviceId && (
+                    {pairedDeviceId && simpleMdmPolicy.status === "configured" && canRestart && (
+                      <Button h="auto" py={3} px={4} variant="outline" justifyContent="flex-start" textAlign="left" onClick={() => setConfirming("restart")}>
+                        <DeviceActionContent
+                          icon={<Power size={18} />}
+                          title="Restart iPad"
+                          description="Reboot this iPad over MDM when Rabbithole is stuck. The scholar stays signed in."
+                        />
+                      </Button>
+                    )}
+                    {pairedDeviceId && !managed && (
                       <Button h="auto" py={3} px={4} variant="outline" justifyContent="flex-start" textAlign="left" onClick={() => setConfirming("session")}>
                         <DeviceActionContent
                           icon={<SignOut size={18} />}
@@ -1990,7 +3147,7 @@ function DeviceDetailsDrawer({
                         <DeviceActionContent
                           icon={<Prohibit size={18} />}
                           title="Disable device"
-                          description="Sign out this iPad and invalidate its enrollment key. It stays in the roster."
+                          description="Invalidate this iPad's enrollment key and drop its pairing to this scholar. It signs out and cannot sign in again until you issue a new key. The serial stays on the roster."
                         />
                       </Button>
                     )}

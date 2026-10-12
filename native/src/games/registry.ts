@@ -35,9 +35,9 @@
  *
  * ## Fail fast where it's safe to fail
  *
- * Lazy in a fleet build; EAGER in dev and in the `rhtest` variant, where a
- * broken module should explode loudly at boot in front of the person who broke
- * it. CI is the real gate — see `__tests__/registry.test.ts`.
+ * Lazy in a release build; EAGER in dev, where a broken module should explode
+ * loudly at boot in front of the person who broke it. CI is the real gate —
+ * see `__tests__/registry.test.ts`.
  */
 import type { ComponentType } from "react";
 
@@ -195,9 +195,9 @@ const STALE_METRO_HINT =
 
 /**
  * Require every registered game NOW and throw on the first failure. Called at
- * app boot in dev and the rhtest variant only — a fleet build stays lazy, per
- * the blast-radius argument above. This exists so a broken module is discovered
- * by a developer or a tester, not by a classroom.
+ * app boot in dev only — a release build stays lazy, per the blast-radius
+ * argument above. This exists so a broken module is discovered by a developer,
+ * not by a classroom.
  */
 export async function eagerLoadAllGames(): Promise<void> {
   const failures: string[] = [];
@@ -213,29 +213,13 @@ export async function eagerLoadAllGames(): Promise<void> {
 }
 
 /**
- * True in the builds where a broken game should be discovered at boot. `__DEV__`
- * covers a developer's Metro session; the env flag is how the rhtest variant
- * opts in without shipping the behavior to the fleet.
+ * True in the build where a broken game should be discovered at boot.
  */
 export function shouldEagerLoadGames(): boolean {
-  return isDevBuild() || process.env.EXPO_PUBLIC_EAGER_LOAD_GAMES === "1";
+  return isDevBuild();
 }
 
-/**
- * May an eager-load failure be rethrown as an unhandled exception? DEV ONLY.
- *
- * `shouldEagerLoadGames()` is deliberately broader than this: the rhtest variant
- * opts INTO the boot-time check via `EXPO_PUBLIC_EAGER_LOAD_GAMES=1`, but rhtest
- * is a RELEASE build, where an unhandled JS exception is not a dismissible
- * RedBox — it is process death, on a kiosk iPad in Single App Mode with no app
- * switcher and no USB recovery. Rethrowing unconditionally would re-create, one
- * file below the registry, the exact event the lazy loaders exist to prevent:
- * "the game is broken" and "the iPad is a brick" as the same event. So the
- * *check* runs everywhere it is asked to; only the *fatality* is dev-only. In
- * rhtest the failure is logged, and a tester who opens that game gets the host's
- * "This game didn't start. Tell your teacher." chrome — which is the signal that
- * was always meant to reach them anyway.
- */
+/** May an eager-load failure be rethrown as an unhandled exception? DEV ONLY. */
 export function eagerLoadFailureIsFatal(): boolean {
   return isDevBuild();
 }

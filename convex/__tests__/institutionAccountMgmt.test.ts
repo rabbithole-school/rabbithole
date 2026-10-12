@@ -35,6 +35,14 @@ async function seedInstitutions(t: ReturnType<typeof convexTest>) {
       kind: "school",
       isPrimary: true,
     }),
+    // A second, non-primary school. Membership management is only
+    // interesting across a boundary — "give this existing account standing
+    // at the OTHER school" is the case that had no UI.
+    kona: await ctx.db.insert("institutions", {
+      name: "Kona Tutoring",
+      slug: "kona",
+      kind: "school",
+    }),
   }));
 }
 
@@ -106,6 +114,21 @@ async function seedOperationsStaff(
   return userId;
 }
 
+async function linkParentToScholar(
+  t: ReturnType<typeof convexTest>,
+  parentUserId: Id<"users">,
+  scholarUserId: Id<"users">,
+  createdBy: Id<"users">,
+) {
+  await t.run(async (ctx) =>
+    ctx.db.insert("guardianships", {
+      parentUserId,
+      scholarUserId,
+      createdBy,
+    }),
+  );
+}
+
 // ── createInstitutionStaff ─────────────────────────────────────────────
 
 describe("createInstitutionStaff — school_admin only, institution-stamped", () => {
@@ -165,11 +188,111 @@ describe("enrollment links honor the grant matrix", () => {
     const { moli } = await seedInstitutions(t);
     const reg = await seedOperationsStaff(t, "reg", moli);
     const parent = await seedUser(t, "parent", "p1");
+    const scholar = await seedUser(t, "scholar", "s1", moli);
+    await linkParentToScholar(t, parent, scholar, reg);
     const asReg = await withUser(t, reg);
     const res = await asReg.mutation(api.enrollment.issueParentEnrollLink, {
       parentId: parent,
     });
     expect(res.path).toContain("/enroll?token=");
+  });
+
+  test("operations staff CANNOT issue a parent link across institutions", async () => {
+    const t = convexTest(schema, modules);
+    const { moli } = await seedInstitutions(t);
+    const nuni = await t.run(async (ctx) =>
+      ctx.db.insert("institutions", { name: "Nuni", slug: "nuni", kind: "school" }),
+    );
+    const reg = await seedOperationsStaff(t, "reg", nuni);
+    const parent = await seedUser(t, "parent", "p1");
+    const scholar = await seedUser(t, "scholar", "s1", moli);
+    await linkParentToScholar(t, parent, scholar, reg);
+    const asReg = await withUser(t, reg);
+
+    await expect(
+      asReg.mutation(api.enrollment.issueParentEnrollLink, {
+        parentId: parent,
+      }),
+    ).rejects.toThrow("Parent not found");
+    const tokens = await t.run(async (ctx) =>
+      ctx.db.query("enrollmentTokens").collect(),
+    );
+    expect(tokens).toHaveLength(0);
+  });
+
+  test("platform admins CAN issue parent links across institutions", async () => {
+    const t = convexTest(schema, modules);
+    const { moli } = await seedInstitutions(t);
+    const platformAdmin = await seedUser(t, "platform_admin", "platform");
+    const parent = await seedUser(t, "parent", "p1");
+    const scholar = await seedUser(t, "scholar", "s1", moli);
+    await linkParentToScholar(t, parent, scholar, platformAdmin);
+    const asPlatformAdmin = await withUser(t, platformAdmin);
+
+    const res = await asPlatformAdmin.mutation(
+      api.enrollment.issueParentEnrollLink,
+      { parentId: parent },
+    );
+    expect(res.path).toContain("/enroll?token=");
+  });
+
+  test("claim invite: operations staff CAN email a same-institution parent", async () => {
+    const t = convexTest(schema, modules);
+    const { moli } = await seedInstitutions(t);
+    const reg = await seedOperationsStaff(t, "reg", moli);
+    const parent = await seedUser(t, "parent", "p1");
+    await t.run(async (ctx) =>
+      ctx.db.patch(parent, { email: "p1@example.com" }),
+    );
+    const scholar = await seedUser(t, "scholar", "s1", moli);
+    await linkParentToScholar(t, parent, scholar, reg);
+    const asReg = await withUser(t, reg);
+    const res = await asReg.mutation(api.parents.sendClaimInvite, {
+      parentId: parent,
+    });
+    expect(res).toEqual({ sent: true, email: "p1@example.com" });
+  });
+
+  test("claim invite: operations staff CANNOT email a parent across institutions", async () => {
+    const t = convexTest(schema, modules);
+    const { moli } = await seedInstitutions(t);
+    const nuni = await t.run(async (ctx) =>
+      ctx.db.insert("institutions", { name: "Nuni", slug: "nuni", kind: "school" }),
+    );
+    const reg = await seedOperationsStaff(t, "reg", nuni);
+    const parent = await seedUser(t, "parent", "p1");
+    await t.run(async (ctx) =>
+      ctx.db.patch(parent, { email: "p1@example.com" }),
+    );
+    const scholar = await seedUser(t, "scholar", "s1", moli);
+    await linkParentToScholar(t, parent, scholar, reg);
+    const asReg = await withUser(t, reg);
+
+    await expect(
+      asReg.mutation(api.parents.sendClaimInvite, { parentId: parent }),
+    ).rejects.toThrow("Parent not found");
+    expect(
+      await t.run((ctx) =>
+        ctx.db.system.query("_scheduled_functions").collect(),
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("claim invite: platform admins CAN email parents across institutions", async () => {
+    const t = convexTest(schema, modules);
+    const { moli } = await seedInstitutions(t);
+    const platformAdmin = await seedUser(t, "platform_admin", "platform");
+    const parent = await seedUser(t, "parent", "p1");
+    await t.run(async (ctx) =>
+      ctx.db.patch(parent, { email: "p1@example.com" }),
+    );
+    const scholar = await seedUser(t, "scholar", "s1", moli);
+    await linkParentToScholar(t, parent, scholar, platformAdmin);
+    const asPlatformAdmin = await withUser(t, platformAdmin);
+    const res = await asPlatformAdmin.mutation(api.parents.sendClaimInvite, {
+      parentId: parent,
+    });
+    expect(res.sent).toBe(true);
   });
 
   test("operations staff CANNOT issue a staff enroll link", async () => {
@@ -291,6 +414,34 @@ describe("listInstitutionStaff — scholar-admin read gate", () => {
     ).rejects.toThrow("Forbidden");
   });
 
+  // The directory carries its OWN staff-role set (teacher / staff /
+  // curriculum_designer / school_admin) — deliberately NOT `STAFF_ROLES`,
+  // which also includes `platform_admin`. The read is now indexed per staff
+  // role (`by_institution_role`) instead of collecting a school's whole
+  // membership table and filtering, so this pins the set the roles are read
+  // from: scholars stay out (they are the bulk of the rows), and an
+  // institution-scoped platform admin stays out (they are the operator, not
+  // school staff).
+  test("excludes scholars and an institution-scoped platform admin", async () => {
+    const t = convexTest(schema, modules);
+    const { moli } = await seedInstitutions(t);
+    const teacher = await seedUser(t, "teacher", "teach", moli);
+    await seedUser(t, "school_admin", "hoku", moli);
+    await seedUser(t, "platform_admin", "operator", moli);
+    // Scholars hold membership rows too — the bulk of them, in a real school.
+    const kid = await seedUser(t, "scholar", "kid", moli);
+    await t.run(async (ctx) =>
+      ctx.db.insert("memberships", {
+        userId: kid,
+        role: "scholar",
+        institutionId: moli,
+      }),
+    );
+    const asTeacher = await withUser(t, teacher);
+    const staff = await asTeacher.query(api.users.listInstitutionStaff, {});
+    expect(staff.map((s) => s.username).sort()).toEqual(["hoku", "teach"]);
+  });
+
   test("operations staff can view but CANNOT remove staff (read-only)", async () => {
     const t = convexTest(schema, modules);
     const { moli } = await seedInstitutions(t);
@@ -304,5 +455,334 @@ describe("listInstitutionStaff — scholar-admin read gate", () => {
     await expect(
       asReg.mutation(api.users.removeStaffFromInstitution, { userId: teacher }),
     ).rejects.toThrow("Forbidden");
+  });
+});
+
+// ── Attaching a staff membership to an EXISTING account (TRA-349) ──────
+//
+// Before this, `/admin/accounts` could create a new staff member or set a
+// LEARNER's institution, but nothing could give an existing account
+// institution-scoped STAFF standing — the only paths were the Convex
+// dashboard and `convex import`. The backend mutation already existed; these
+// pin the semantics the surface has to honor, and the trap it must not fall
+// into.
+
+describe("addMembership — staff standing for an existing account", () => {
+  test("grants standing at a second school and the directory reflects it", async () => {
+    const t = convexTest(schema, modules);
+    const { moli, kona } = await seedInstitutions(t);
+    const admin = await seedUser(t, "platform_admin", "operator");
+    const teacher = await seedUser(t, "teacher", "teach", moli);
+
+    // Not in Kona's directory yet.
+    const konaAdmin = await seedUser(t, "school_admin", "kai", kona);
+    const asKonaAdmin = await withUser(t, konaAdmin);
+    expect(
+      (await asKonaAdmin.query(api.users.listInstitutionStaff, { scope: "kona" }))
+        .map((s) => s.username),
+    ).not.toContain("teach");
+
+    const asAdmin = await withUser(t, admin);
+    await asAdmin.mutation(api.memberships.addMembership, {
+      userId: teacher,
+      role: "teacher",
+      institutionId: kona,
+    });
+
+    expect(
+      (await asKonaAdmin.query(api.users.listInstitutionStaff, { scope: "kona" }))
+        .map((s) => s.username)
+        .sort(),
+    ).toEqual(["kai", "teach"]);
+    // The original standing is untouched — this adds a context, never moves one.
+    const asMoliTeacher = await withUser(t, teacher);
+    expect(
+      (await asMoliTeacher.query(api.users.listInstitutionStaff, { scope: "moli" }))
+        .map((s) => s.username),
+    ).toContain("teach");
+  });
+
+  test("adding the same (user, role, school) twice leaves ONE row", async () => {
+    const t = convexTest(schema, modules);
+    const { moli, kona } = await seedInstitutions(t);
+    const admin = await seedUser(t, "platform_admin", "operator");
+    const staffer = await seedUser(t, "staff", "ops", moli);
+    const asAdmin = await withUser(t, admin);
+
+    const first = await asAdmin.mutation(api.memberships.addMembership, {
+      userId: staffer,
+      role: "staff",
+      institutionId: kona,
+    });
+    const second = await asAdmin.mutation(api.memberships.addMembership, {
+      userId: staffer,
+      role: "staff",
+      institutionId: kona,
+    });
+    // `ensureMembership` dedupes on the triple, so the surface needs no
+    // guard of its own — it returns the row that already exists.
+    expect(second.membershipId).toEqual(first.membershipId);
+    const rows = await asAdmin.query(api.memberships.listForUser, {
+      userId: staffer,
+    });
+    expect(rows.filter((r) => r.institutionId === kona)).toHaveLength(1);
+  });
+
+  test("an institution-scoped role without a school is refused, readably", async () => {
+    const t = convexTest(schema, modules);
+    const { moli } = await seedInstitutions(t);
+    const admin = await seedUser(t, "platform_admin", "operator");
+    const designer = await seedUser(t, "curriculum_designer", "des");
+    const asAdmin = await withUser(t, admin);
+
+    await expect(
+      asAdmin.mutation(api.memberships.addMembership, {
+        userId: designer,
+        role: "school_admin",
+      }),
+    ).rejects.toThrow('Role "school_admin" requires an institution');
+    // The surface renders the thrown message inline, so it has to name the
+    // problem rather than fail generically.
+    await expect(
+      asAdmin.mutation(api.memberships.addMembership, {
+        userId: designer,
+        role: "teacher",
+        institutionId: moli,
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  test("a SCOPED platform_admin row grants authority but no directory standing", async () => {
+    // The trap: `platform_admin` looks like the "max permissions" choice, but
+    // `listInstitutionStaff` deliberately excludes it, so the person would
+    // have full authority while being invisible to — and un-DMable from — the
+    // school. `school_admin` is the row that means "everything, at ONE
+    // school". This is why the admin UI does not offer platform_admin.
+    const t = convexTest(schema, modules);
+    const { moli, kona } = await seedInstitutions(t);
+    const admin = await seedUser(t, "platform_admin", "operator");
+    const konaAdmin = await seedUser(t, "school_admin", "kai", kona);
+    const asAdmin = await withUser(t, admin);
+    const asKonaAdmin = await withUser(t, konaAdmin);
+
+    await asAdmin.mutation(api.memberships.addMembership, {
+      userId: admin,
+      role: "platform_admin",
+      institutionId: kona,
+    });
+    expect(
+      (await asKonaAdmin.query(api.users.listInstitutionStaff, { scope: "kona" }))
+        .map((s) => s.username),
+    ).not.toContain("operator");
+
+    await asAdmin.mutation(api.memberships.addMembership, {
+      userId: admin,
+      role: "school_admin",
+      institutionId: kona,
+    });
+    expect(
+      (await asKonaAdmin.query(api.users.listInstitutionStaff, { scope: "kona" }))
+        .map((s) => s.username),
+    ).toContain("operator");
+    expect(moli).toBeDefined();
+  });
+
+  test("removeMembership revokes standing without touching the account", async () => {
+    const t = convexTest(schema, modules);
+    const { moli, kona } = await seedInstitutions(t);
+    const admin = await seedUser(t, "platform_admin", "operator");
+    const teacher = await seedUser(t, "teacher", "teach", moli);
+    const asAdmin = await withUser(t, admin);
+
+    const { membershipId } = await asAdmin.mutation(
+      api.memberships.addMembership,
+      { userId: teacher, role: "teacher", institutionId: kona },
+    );
+    await asAdmin.mutation(api.memberships.removeMembership, { membershipId });
+
+    const rows = await asAdmin.query(api.memberships.listForUser, {
+      userId: teacher,
+    });
+    expect(rows.map((r) => r.institutionId)).toEqual([moli]);
+    // The user itself survives — revoking standing is not a deletion.
+    const users = await asAdmin.query(api.users.listAllUsers, {});
+    expect(users.map((u) => u.username)).toContain("teach");
+  });
+
+  test("only a platform admin may grant standing", async () => {
+    const t = convexTest(schema, modules);
+    const { moli, kona } = await seedInstitutions(t);
+    const hoku = await seedUser(t, "school_admin", "hoku", moli);
+    const teacher = await seedUser(t, "teacher", "teach", moli);
+    const asHoku = await withUser(t, hoku);
+    // A school_admin adds staff through `createInstitutionStaff` (which
+    // stamps THEIR school); cross-school grants stay platform-only.
+    await expect(
+      asHoku.mutation(api.memberships.addMembership, {
+        userId: teacher,
+        role: "teacher",
+        institutionId: kona,
+      }),
+    ).rejects.toThrow("Forbidden");
+  });
+});
+
+describe("listAllUsers — the standing the admin row renders", () => {
+  test("hydrates staff rows and excludes scholar / parent / platform_admin", async () => {
+    const t = convexTest(schema, modules);
+    const { moli, kona } = await seedInstitutions(t);
+    const admin = await seedUser(t, "platform_admin", "operator");
+    const teacher = await seedUser(t, "teacher", "teach", moli);
+    const asAdmin = await withUser(t, admin);
+
+    await asAdmin.mutation(api.memberships.addMembership, {
+      userId: teacher,
+      role: "staff",
+      institutionId: kona,
+    });
+    // Two rows that must NOT be mistaken for school standing: the operator's
+    // own scoped platform_admin row, and a learner context.
+    await asAdmin.mutation(api.memberships.addMembership, {
+      userId: admin,
+      role: "platform_admin",
+      institutionId: moli,
+    });
+    await asAdmin.mutation(api.memberships.addMembership, {
+      userId: teacher,
+      role: "scholar",
+      institutionId: moli,
+    });
+
+    const users = await asAdmin.query(api.users.listAllUsers, {});
+    const row = users.find((u) => u.username === "teach")!;
+    expect(
+      row.staffMemberships.map((m) => `${m.role}@${m.institutionName}`).sort(),
+    ).toEqual(["staff@Kona Tutoring", "teacher@Moli School"]);
+    // The learner context lives in its own column, not this one.
+    expect(row.learnerInstitutionId).toEqual(moli);
+
+    const operatorRow = users.find((u) => u.username === "operator")!;
+    expect(operatorRow.staffMemberships).toEqual([]);
+  });
+
+  test("a staff-role account with no membership reports EMPTY standing", async () => {
+    // The state behind TRA-349: `platform_admin` short-circuits every
+    // capability resolver, so the operator had full authority while holding
+    // standing at no school — and nothing surfaced it until a school-scoped
+    // directory silently dropped them. An empty list is what the row renders
+    // as "No school standing".
+    const t = convexTest(schema, modules);
+    const { kona } = await seedInstitutions(t);
+    const admin = await seedUser(t, "platform_admin", "operator");
+    // Standing at a NON-primary school only — authority everywhere, standing
+    // nowhere that matters.
+    await seedUser(t, "teacher", "stranded", kona);
+    const asAdmin = await withUser(t, admin);
+
+    const users = await asAdmin.query(api.users.listAllUsers, {});
+    expect(users.find((u) => u.username === "operator")!.staffMemberships).toEqual(
+      [],
+    );
+    expect(
+      users
+        .find((u) => u.username === "stranded")!
+        .staffMemberships.map((m) => m.institutionName),
+    ).toEqual(["Kona Tutoring"]);
+  });
+
+  test("a paused school is flagged on the chip, not hidden", async () => {
+    const t = convexTest(schema, modules);
+    const { moli, kona } = await seedInstitutions(t);
+    const admin = await seedUser(t, "platform_admin", "operator");
+    await seedUser(t, "teacher", "teach", kona);
+    await t.run(async (ctx) => ctx.db.patch(kona, { disabledAt: Date.now() }));
+    const asAdmin = await withUser(t, admin);
+
+    const users = await asAdmin.query(api.users.listAllUsers, {});
+    const row = users.find((u) => u.username === "teach")!;
+    expect(row.staffMemberships).toHaveLength(1);
+    expect(row.staffMemberships[0].institutionDisabled).toBe(true);
+    expect(moli).toBeDefined();
+  });
+
+  // Standing is the MEMBERSHIP, never `users.role` —
+  // `hasActiveStaffMembershipAtInstitution` says so explicitly. So the row
+  // data has to carry a staff membership held by an account whose coarse
+  // role is something else, or the surface would hide real access it cannot
+  // then revoke. Caught in review; the cell now draws these rows for every
+  // role and only withholds the ADD control.
+  test("surfaces a staff membership held by a parent- or scholar-role account", async () => {
+    const t = convexTest(schema, modules);
+    const { moli, kona } = await seedInstitutions(t);
+    const admin = await seedUser(t, "platform_admin", "operator");
+    const parent = await seedUser(t, "parent", "guardian");
+    const kid = await seedUser(t, "scholar", "kid", moli);
+    const asAdmin = await withUser(t, admin);
+
+    await asAdmin.mutation(api.memberships.addMembership, {
+      userId: parent,
+      role: "teacher",
+      institutionId: kona,
+    });
+    await asAdmin.mutation(api.memberships.addMembership, {
+      userId: kid,
+      role: "staff",
+      institutionId: kona,
+    });
+
+    const users = await asAdmin.query(api.users.listAllUsers, {});
+    expect(
+      users.find((u) => u.username === "guardian")!.staffMemberships.map(
+        (m) => `${m.role}@${m.institutionName}`,
+      ),
+    ).toEqual(["teacher@Kona Tutoring"]);
+    expect(
+      users.find((u) => u.username === "kid")!.staffMemberships.map(
+        (m) => `${m.role}@${m.institutionName}`,
+      ),
+    ).toEqual(["staff@Kona Tutoring"]);
+  });
+
+  // An UNSCOPED curriculum_designer row is deployment-wide standing
+  // (`isGloballyPrivilegedMembership`) and standing at NO school. It has to
+  // arrive with a null institution so the cell can label it "all schools"
+  // and still fire the "No school standing" warning — otherwise the one row
+  // that confers nothing locally would silence the one signal this feature
+  // exists to raise.
+  test("an unscoped curriculum_designer row carries a null institution", async () => {
+    const t = convexTest(schema, modules);
+    const { moli } = await seedInstitutions(t);
+    const admin = await seedUser(t, "platform_admin", "operator");
+    const designer = await seedUser(t, "curriculum_designer", "des");
+    const asAdmin = await withUser(t, admin);
+
+    await asAdmin.mutation(api.memberships.addMembership, {
+      userId: designer,
+      role: "curriculum_designer",
+    });
+
+    const rows = (await asAdmin.query(api.users.listAllUsers, {})).find(
+      (u) => u.username === "des",
+    )!.staffMemberships;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].institutionId).toBeNull();
+    expect(rows[0].institutionName).toBeNull();
+    // …and it is genuinely standing at no school: nobody at Moli sees them.
+    const hoku = await seedUser(t, "school_admin", "hoku", moli);
+    const asHoku = await withUser(t, hoku);
+    expect(
+      (await asHoku.query(api.users.listInstitutionStaff, { scope: "moli" }))
+        .map((u) => u.username),
+    ).not.toContain("des");
+  });
+
+  test("a non-admin cannot read the directory at all", async () => {
+    const t = convexTest(schema, modules);
+    const { moli } = await seedInstitutions(t);
+    const hoku = await seedUser(t, "school_admin", "hoku", moli);
+    const asHoku = await withUser(t, hoku);
+    await expect(asHoku.query(api.users.listAllUsers, {})).rejects.toThrow(
+      "Forbidden",
+    );
   });
 });

@@ -46,8 +46,38 @@ import { KID_SAFE_PRINCIPLES } from "../kidSafePrinciples";
 // Re-baselined 2026-08-20 (PR #2555): Guidelines now use singular-they pronouns
 // consistently. This pronoun-only change leaves the kid-safe gloss/principles
 // unchanged after review.
+//
+// Re-baselined 2026-09-22 (PR #3930): two Guidelines bullets were added — a
+// fragment answer gets "say the whole thing" instead of the tutor writing the
+// full causal sentence for the scholar, and a one-time invitation to dictate
+// when typing is the bottleneck. The first STRENGTHENS "No doing your work for
+// you" and "Notice what you figured out"; the second is a modality nudge that no
+// principle covers. No gloss change needed.
+//
+// Re-baselined 2026-09-27 (TRA-407, PR #4011): one sentence after the
+// tool-frame paragraph says the app may end a scholar message with a bracketed
+// turn-context note (clock, pacing) that the tutor uses silently. It moved the
+// clock out of the cached system prompt; it changes no Socratic or tool-frame
+// guidance, so no principle is affected. No gloss change needed.
+//
+// Re-baselined 2026-09-27 (TRA-363): the standalone dictation-invitation bullet
+// never fired in prod, so the mic offer now rides the fragment ask (first typed
+// fragment of a session), and the bullet shrank to dictated-turn handling. Same
+// principles as #3930. No gloss change needed.
+//
+// Re-baselined 2026-10-11 (TRA-413, PR #4151): the fragment bullet now treats a
+// one-word pick on an either/or reasoning question as a half-thought — affirm
+// it and ask for the scholar's why instead of explaining the reasoning — with
+// picks about the scholar's own creation exempt. Re-reviewed against the gloss:
+// it strengthens "Ask before answering" and "No doing your work for you".
+// No gloss change needed.
+// Re-baselined 2026-10-11 (TRA-501): a new bullet makes dictation first-class
+// input for every scholar (never ask a child to type what they said; point to
+// the writing-box mic; the tutor still never writes in the box). Re-reviewed
+// against the gloss: it supports "No doing your work for you" (the words stay
+// the scholar's). No gloss change needed.
 const EXPECTED_TUTOR_GUIDELINES_HASH =
-  "392c4471f0ca03b6ae36191f0f11f6ab50cb103d08bd877b6b996c2f139c8815";
+  "84eece60c98c0f11745319cb0372e2ce324ae0c6a3d68d6f4919dd73477cb7d8";
 
 const FORBIDDEN_TOKENS = [
   /\bwhisper\b/i,

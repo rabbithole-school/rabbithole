@@ -80,6 +80,34 @@ function methodForStory(
   return provenance === "generated" ? "generated" : "curated";
 }
 
+/**
+ * Throws unless `visualEmoji` is one rendered emoji: a keycap, a flag, a
+ * single pictograph, or a ZWJ sequence. Exported so the story registry can be
+ * checked in a fast unit test instead of failing deep inside a seed run.
+ * `\p{Extended_Pictographic}` follows the runtime's Unicode data, so a
+ * non-emoji symbol (e.g. a U+1F06B domino tile) can pass on one Node version
+ * and fail on another: registry entries must be real emoji.
+ */
+export function assertSingleVisualEmoji(visualEmoji: string): void {
+  const isKeycap = /^[#*0-9]\uFE0F?\u20E3$/u.test(visualEmoji);
+  const isFlag = /^[\p{Regional_Indicator}]{2}$/u.test(visualEmoji);
+  const pictographs = visualEmoji.match(/\p{Extended_Pictographic}/gu) ?? [];
+  const isSinglePictograph =
+    pictographs.length === 1 && !/[\p{L}\p{N}]/u.test(visualEmoji);
+  // A ZWJ sequence is one rendered emoji even when it contains several
+  // pictographs (for example, a profession or family emoji).
+  const isJoinedPictograph =
+    pictographs.length > 1 &&
+    visualEmoji.includes("\u200D") &&
+    !/[\p{L}\p{N}]/u.test(visualEmoji);
+  if (!isKeycap && !isFlag && !isSinglePictograph && !isJoinedPictograph) {
+    throw new Error("Visual emoji must be a single emoji.");
+  }
+  if (!isKeycap && !isFlag && pictographs.length === 0) {
+    throw new Error("Visual emoji must include an emoji character.");
+  }
+}
+
 function validateStory(entry: StoryInput, provenance: "authored" | "registry" | "generated"): StoredEdgeStory {
   const kind = entry.kind.trim();
   if (!(STORY_KINDS as readonly string[]).includes(kind)) {
@@ -116,23 +144,7 @@ function validateStory(entry: StoryInput, provenance: "authored" | "registry" | 
     if (visualEmoji.length > VISUAL_EMOJI_MAX) {
       throw new Error(`Visual emoji must be ${VISUAL_EMOJI_MAX} characters or fewer.`);
     }
-    const isKeycap = /^[#*0-9]\uFE0F?\u20E3$/u.test(visualEmoji);
-    const isFlag = /^[\p{Regional_Indicator}]{2}$/u.test(visualEmoji);
-    const pictographs = visualEmoji.match(/\p{Extended_Pictographic}/gu) ?? [];
-    const isSinglePictograph =
-      pictographs.length === 1 && !/[\p{L}\p{N}]/u.test(visualEmoji);
-    // A ZWJ sequence is one rendered emoji even when it contains several
-    // pictographs (for example, a profession or family emoji).
-    const isJoinedPictograph =
-      pictographs.length > 1 &&
-      visualEmoji.includes("\u200D") &&
-      !/[\p{L}\p{N}]/u.test(visualEmoji);
-    if (!isKeycap && !isFlag && !isSinglePictograph && !isJoinedPictograph) {
-      throw new Error("Visual emoji must be a single emoji.");
-    }
-    if (!isKeycap && !isFlag && pictographs.length === 0) {
-      throw new Error("Visual emoji must include an emoji character.");
-    }
+    assertSingleVisualEmoji(visualEmoji);
   }
 
   let probe: string | undefined;

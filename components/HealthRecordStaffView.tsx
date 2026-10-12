@@ -6,6 +6,7 @@ import {
   Badge,
   Box,
   Button,
+  Checkbox,
   Heading,
   HStack,
   IconButton,
@@ -23,6 +24,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { toaster } from "@/lib/toaster";
 import { PRIMARY_INSTITUTION_BRAND } from "@/lib/primaryInstitutionBrand";
+import { medicationReplacementNoteTemplate } from "@/lib/medicationReviewTemplate";
 import { guardianRelationshipLabel } from "@/shared/guardianRelationships";
 import {
   developmentalConditionOptions,
@@ -58,6 +60,7 @@ type ReviewableDocument = {
   reviewedAt: number | null;
   reviewNote: string | null;
   medicationExpirations: { name: string; expiresAt: number }[];
+  reviewEmailSentAt?: number | null;
 };
 
 const REVIEW_BADGE: Record<
@@ -115,9 +118,24 @@ function DocumentReview({
   const [saving, setSaving] = useState<
     "accepted" | "needs_replacement" | "pending" | null
   >(null);
+  // Needs-replacement is a two-step flow on the medication authorization: the
+  // first click "arms" it — pre-filling the guardian reminder template
+  // (never overwriting text the reviewer already typed) and revealing the
+  // email checkbox — and only the second click actually saves. Accept has no
+  // such step; it saves immediately, per the proposal.
+  const [needsReplacementArmed, setNeedsReplacementArmed] = useState(
+    document.reviewStatus === "needs_replacement",
+  );
+  // Checked by default for a fresh verdict; unchecked once this review has
+  // already reached guardians, so a re-save (fixing an expiry date, say)
+  // doesn't send them the note twice unless the reviewer asks for it.
+  const [emailGuardians, setEmailGuardians] = useState(
+    !document.reviewEmailSentAt,
+  );
 
   const current = document.reviewStatus ?? "pending";
   const badge = REVIEW_BADGE[current];
+  const showEmailCheckbox = isMedication && needsReplacementArmed;
 
   async function submit(
     reviewStatus: "accepted" | "needs_replacement" | "pending",
@@ -141,7 +159,12 @@ function DocumentReview({
         reviewStatus,
         reviewNote: note.trim() || undefined,
         medicationExpirations,
+        emailGuardians:
+          isMedication && reviewStatus === "needs_replacement"
+            ? emailGuardians
+            : undefined,
       });
+      setNeedsReplacementArmed(reviewStatus === "needs_replacement");
       toaster.success({ title: "Review saved" });
     } catch (error) {
       toaster.error({
@@ -151,6 +174,17 @@ function DocumentReview({
     } finally {
       setSaving(null);
     }
+  }
+
+  function handleNeedsReplacementClick() {
+    if (isMedication && !needsReplacementArmed) {
+      setNeedsReplacementArmed(true);
+      if (!note.trim()) {
+        setNote(medicationReplacementNoteTemplate(expirations));
+      }
+      return;
+    }
+    void submit("needs_replacement");
   }
 
   return (
@@ -177,6 +211,13 @@ function DocumentReview({
           </Text>
         )}
       </HStack>
+
+      {isMedication && document.reviewEmailSentAt && (
+        <Text fontSize="2xs" color="green.700" mb={2}>
+          Guardians emailed{" "}
+          {new Date(document.reviewEmailSentAt).toLocaleString()}
+        </Text>
+      )}
 
       {isMedication && (
         <Box mb={2}>
@@ -245,8 +286,24 @@ function DocumentReview({
         value={note}
         onChange={(e) => setNote(e.target.value)}
         mb={2}
-        rows={2}
+        rows={showEmailCheckbox ? 6 : 2}
       />
+      {showEmailCheckbox && (
+        <Checkbox.Root
+          size="sm"
+          checked={emailGuardians}
+          onCheckedChange={(details) =>
+            setEmailGuardians(details.checked === true)
+          }
+          mb={2}
+        >
+          <Checkbox.HiddenInput />
+          <Checkbox.Control />
+          <Checkbox.Label>
+            Email this note to guardians from Rabbithole
+          </Checkbox.Label>
+        </Checkbox.Root>
+      )}
       <HStack gap={2} wrap="wrap">
         <Button
           size="xs"
@@ -263,9 +320,11 @@ function DocumentReview({
           variant="outline"
           loading={saving === "needs_replacement"}
           disabled={saving !== null}
-          onClick={() => submit("needs_replacement")}
+          onClick={handleNeedsReplacementClick}
         >
-          Needs replacement
+          {showEmailCheckbox && current !== "needs_replacement"
+            ? "Confirm needs replacement"
+            : "Needs replacement"}
         </Button>
         {current !== "pending" && (
           <Button

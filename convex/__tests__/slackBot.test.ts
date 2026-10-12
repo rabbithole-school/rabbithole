@@ -1,4 +1,4 @@
-import { deflateRawSync } from "node:zlib";
+import { crc32, deflateRawSync } from "node:zlib";
 import { convexTest } from "convex-test";
 import { describe, expect, test, beforeAll, afterAll, vi } from "vitest";
 import schema from "../schema";
@@ -17,14 +17,19 @@ import {
   UNREPORTED_TOOL_RESULT,
   messageSurface,
   mentionSurface,
+  mentionConversation,
+  messageChannelPrivacy,
+  channelPrivacyContextLine,
   resolveSlackBotUserId,
   slackTurnNeedsErrorNotice,
   reconcileSlackThreadForTrigger,
   MAX_TOTAL_ATTACHMENT_BYTES,
+  dmAttachmentMirrorKey,
 } from "../slackBot";
+import { ensureMembership } from "../memberships";
 import type { SlackMessage } from "../lib/slackApi";
 import type { ToolActivity } from "../lib/toolActivityGroups";
-import { fetchConversationKind } from "../lib/slackApi";
+import { fetchConversationKind, fetchConversationShape } from "../lib/slackApi";
 import { checkinDayKey } from "../lib/eodCheckin";
 import {
   buildSlackTranscript,
@@ -47,6 +52,10 @@ const modules = (
     glob: (pattern: string) => Record<string, () => Promise<unknown>>;
   }
 ).glob("../**/*.ts");
+
+// Schema-typed client for helpers that read through an index.
+const _makeTypedTestConvex = () => convexTest(schema, modules);
+type TypedTestConvex = ReturnType<typeof _makeTypedTestConvex>;
 
 async function seedUser(
   t: ReturnType<typeof convexTest>,
@@ -147,6 +156,27 @@ async function signedSlackPost(
     },
     body: raw,
   });
+}
+
+
+/**
+ * A real, decodable 2x2 PNG padded to exactly `n` bytes with a CRC-valid
+ * ancillary chunk, so byte-budget tests keep their sizes and still pass the
+ * collector's integrity check (a signature over zeros is a corrupt PNG).
+ */
+function pngBytes(n: number): Uint8Array {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGM8EaDBwMDAxAAGAA/KAUR0s/I7AAAAAElFTkSuQmCC",
+    "base64",
+  );
+  const iend = png.length - 12;
+  const filler = Buffer.alloc(n - png.length);
+  filler.writeUInt32BE(filler.length - 12, 0);
+  filler.write("paDd", 4, "latin1");
+  filler.writeUInt32BE(crc32(filler.subarray(4, filler.length - 4)), filler.length - 4);
+  return new Uint8Array(
+    Buffer.concat([png.subarray(0, iend), filler, png.subarray(iend)]),
+  );
 }
 
 describe("/slack/events endpoint", () => {
@@ -1369,22 +1399,155 @@ describe("group DM (mpim) routing", () => {
       }
     });
   });
+
+  // A private channel used to read, to the model, only as "an open
+  // conversation anyone with access can read", and the admissions link tool's
+  // wording led with "PRIVATE". Linking a private channel then drew a false
+  // "this may be open" warning. Slack's own privacy now reaches the prompt.
+  describe("channel privacy", () => {
+    function stubInfo(body: Record<string, unknown>) {
+      const realFetch = globalThis.fetch;
+      let calls = 0;
+      globalThis.fetch = (async () => {
+        calls++;
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as typeof fetch;
+      return {
+        count: () => calls,
+        restore: () => {
+          globalThis.fetch = realFetch;
+        },
+      };
+    }
+    let prevToken: string | undefined;
+    beforeAll(() => {
+      prevToken = process.env.SLACK_BOT_TOKEN;
+      process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    });
+    afterAll(() => {
+      if (prevToken === undefined) delete process.env.SLACK_BOT_TOKEN;
+      else process.env.SLACK_BOT_TOKEN = prevToken;
+    });
+
+    test("a message event's channel_type: group is private, channel is public", () => {
+      expect(messageChannelPrivacy("group")).toBe("private");
+      expect(messageChannelPrivacy("channel")).toBe("public");
+      expect(messageChannelPrivacy("im")).toBeUndefined();
+      expect(messageChannelPrivacy("mpim")).toBeUndefined();
+      expect(messageChannelPrivacy(undefined)).toBeUndefined();
+    });
+
+    test("conversations.info: is_private decides, a missing flag is not read as public", async () => {
+      for (const [channel, expected] of [
+        [{ is_im: false, is_mpim: false, is_channel: true, is_private: true }, "private"],
+        [{ is_im: false, is_mpim: false, is_channel: true, is_private: false }, "public"],
+        [{ is_im: false, is_mpim: false, is_channel: true }, null],
+      ] as const) {
+        const stub = stubInfo({ ok: true, channel: { id: "C1", ...channel } });
+        try {
+          expect(await fetchConversationShape("xoxb-test", "C1")).toEqual({
+            kind: "channel",
+            privacy: expected,
+          });
+        } finally {
+          stub.restore();
+        }
+      }
+      const mpim = stubInfo({
+        ok: true,
+        channel: { id: "C_GROUP_DM", is_mpim: true, is_channel: true, is_private: true },
+      });
+      try {
+        expect(await fetchConversationShape("xoxb-test", "C_GROUP_DM")).toEqual({
+          kind: "mpim",
+          privacy: null,
+        });
+      } finally {
+        mpim.restore();
+      }
+    });
+
+    test("a mention reads surface and privacy from ONE conversations.info call", async () => {
+      const stub = stubInfo({
+        ok: true,
+        channel: { id: "C_PRIV", is_im: false, is_mpim: false, is_channel: true, is_private: true },
+      });
+      try {
+        expect(await mentionConversation("C_PRIV")).toEqual({
+          surface: "channel",
+          channelPrivacy: "private",
+        });
+        expect(stub.count()).toBe(1);
+      } finally {
+        stub.restore();
+      }
+    });
+
+    test("a mention whose lookup fails states no privacy", async () => {
+      const stub = stubInfo({ ok: false, error: "ratelimited" });
+      try {
+        expect(await mentionConversation("C_PRIV")).toEqual({ surface: "channel" });
+      } finally {
+        stub.restore();
+      }
+    });
+
+    test("the context line names a private channel as private, and says nothing when unknown", () => {
+      expect(channelPrivacyContextLine("channel", "private")).toMatch(/PRIVATE channel/);
+      expect(channelPrivacyContextLine("channel", "private")).not.toMatch(/public|open/i);
+      expect(channelPrivacyContextLine("channel", "public")).toMatch(/PUBLIC channel/);
+      expect(channelPrivacyContextLine("channel", undefined)).toBeNull();
+      expect(channelPrivacyContextLine("dm", "private")).toBeNull();
+      expect(channelPrivacyContextLine("mpim", "private")).toBeNull();
+    });
+
+  });
 });
 
 describe("slackAdminOps", () => {
   test("issueParentEnrollLink: scholar-admin only, resolves parents, rejects ambiguity", async () => {
     const t = convexTest(schema, modules);
+    const institutionA = await seedInstitution(t, "parent-school-a");
+    const institutionB = await seedInstitution(t, "parent-school-b");
     const teacherId = await seedUser(t, "teacher");
+    await grantMembership(t, teacherId, "teacher", institutionA);
+    const otherTeacherId = await seedUser(t, "teacher", {
+      username: "other-teacher",
+    });
+    await grantMembership(t, otherTeacherId, "teacher", institutionB);
+    const platformAdminId = await seedUser(t, "platform_admin", {
+      username: "platform-admin",
+    });
     const designerId = await seedUser(t, "curriculum_designer");
-    await seedUser(t, "parent", {
+    const rowanId = await seedUser(t, "parent", {
       name: "Rowan Example",
       email: "rowan@example.com",
       username: "re",
     });
-    await seedUser(t, "parent", {
+    const morganId = await seedUser(t, "parent", {
       name: "Morgan Example",
       email: "morgan@example.com",
       username: "me",
+    });
+    const scholarA = await seedUser(t, "scholar", {
+      name: "Scholar A",
+      username: "scholar-a",
+      institutionId: institutionA,
+    });
+    await t.run(async (ctx) => {
+      await ctx.db.insert("guardianships", {
+        parentUserId: rowanId,
+        scholarUserId: scholarA,
+        createdBy: teacherId,
+      });
+      await ctx.db.insert("guardianships", {
+        parentUserId: morganId,
+        scholarUserId: scholarA,
+        createdBy: teacherId,
+      });
     });
 
     // Role gate: designer refused.
@@ -1406,7 +1569,7 @@ describe("slackAdminOps", () => {
     expect(ambiguous.ok).toBe(false);
     if (!ambiguous.ok) expect(ambiguous.message).toContain("Multiple parents");
 
-    // Unique match → link issued.
+    // Same-institution unique match → link issued.
     const issued = await t.run(async (ctx) =>
       ctx.runMutation(internal.slackAdminOps.issueParentEnrollLink, {
         callerUserId: teacherId,
@@ -1418,6 +1581,28 @@ describe("slackAdminOps", () => {
       expect(issued.url).toContain("/enroll?token=");
       expect(issued.parentName).toBe("Rowan Example");
     }
+
+    // Another institution cannot find or mint for this parent.
+    const foreign = await t.run(async (ctx) =>
+      ctx.runMutation(internal.slackAdminOps.issueParentEnrollLink, {
+        callerUserId: otherTeacherId,
+        parentName: "Rowan",
+      }),
+    );
+    expect(foreign).toMatchObject({
+      ok: false,
+      message: 'No parent account found matching "Rowan".',
+    });
+
+    // Platform admins retain global parent enrollment authority.
+    const platformIssued = await t.run(async (ctx) =>
+      ctx.runMutation(internal.slackAdminOps.issueParentEnrollLink, {
+        callerUserId: platformAdminId,
+        parentName: "Rowan",
+      }),
+    );
+    expect(platformIssued.ok).toBe(true);
+
     const tokens = await t.run(async (ctx) =>
       ctx.db.query("enrollmentTokens").collect(),
     );
@@ -1578,6 +1763,7 @@ describe("slackNotifications", () => {
     overrides: {
       name?: string;
       type?: string;
+      institutionId?: Id<"institutions">;
       slackChannelId?: string;
       slackNotifyMode?: "digest" | "immediate";
     } = {},
@@ -1585,6 +1771,7 @@ describe("slackNotifications", () => {
     return await t.run(async (ctx) =>
       ctx.db.insert("scholarGroups", {
         teacherId,
+        institutionId: overrides.institutionId,
         name: overrides.name ?? "Geckos",
         scholarIds,
         type: overrides.type,
@@ -1596,10 +1783,14 @@ describe("slackNotifications", () => {
 
   test("linkChannelToGroup: teacher links + unlinks; designer refused", async () => {
     const t = convexTest(schema, modules);
-    const teacherId = await seedUser(t, "teacher");
+    const institutionId = await seedInstitution(t, "link-group-school");
+    const teacherId = await seedUser(t, "teacher", { institutionId });
     const designerId = await seedUser(t, "curriculum_designer");
-    const scholarId = await seedUser(t, "scholar");
-    const groupId = await seedGroup(t, teacherId, [scholarId]);
+    await grantMembership(t, teacherId, "teacher", institutionId);
+    const scholarId = await seedUser(t, "scholar", { institutionId });
+    const groupId = await seedGroup(t, teacherId, [scholarId], {
+      institutionId,
+    });
 
     const refused = await t.run(async (ctx) =>
       ctx.runMutation(internal.slackNotifications.linkChannelToGroup, {
@@ -1646,6 +1837,196 @@ describe("slackNotifications", () => {
     expect(group?.slackChannelId).toBeUndefined();
   });
 
+  test("linkChannelToGroup only matches groups in the caller's institution lens", async () => {
+    const t = convexTest(schema, modules);
+    const institutionA = await seedInstitution(t, "link-lens-school-a");
+    const institutionB = await seedInstitution(t, "link-lens-school-b");
+    const teacherA = await seedUser(t, "teacher", {
+      username: "link-lens-teacher-a",
+      institutionId: institutionA,
+    });
+    const teacherB = await seedUser(t, "teacher", {
+      username: "link-lens-teacher-b",
+      institutionId: institutionB,
+    });
+    await grantMembership(t, teacherA, "teacher", institutionA);
+    await grantMembership(t, teacherB, "teacher", institutionB);
+    const localGroupId = await seedGroup(t, teacherA, [], {
+      name: "Geckos",
+      institutionId: institutionA,
+    });
+    const foreignGroupId = await seedGroup(t, teacherB, [], {
+      name: "Geckos",
+      institutionId: institutionB,
+    });
+
+    const result = await t.run((ctx) =>
+      ctx.runMutation(internal.slackNotifications.linkChannelToGroup, {
+        callerUserId: teacherA,
+        groupName: "Geckos",
+        slackChannelId: "C-LENS",
+        unlink: false,
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(
+      (await t.run((ctx) => ctx.db.get(localGroupId)))?.slackChannelId,
+    ).toBe("C-LENS");
+    expect(
+      (await t.run((ctx) => ctx.db.get(foreignGroupId)))?.slackChannelId,
+    ).toBeUndefined();
+  });
+
+  test("linkChannelToGroup displaces any prior same-lens channel link", async () => {
+    const t = convexTest(schema, modules);
+    const institutionA = await seedInstitution(t, "unique-channel-school-a");
+    const institutionB = await seedInstitution(t, "unique-channel-school-b");
+    const teacherA = await seedUser(t, "teacher", {
+      username: "unique-channel-teacher-a",
+      institutionId: institutionA,
+    });
+    const teacherB = await seedUser(t, "teacher", {
+      username: "unique-channel-teacher-b",
+      institutionId: institutionB,
+    });
+    await grantMembership(t, teacherA, "teacher", institutionA);
+    await grantMembership(t, teacherB, "teacher", institutionB);
+    const oldGroupId = await seedGroup(t, teacherA, [], {
+      name: "Geckos",
+      institutionId: institutionA,
+      slackChannelId: "C-UNIQUE",
+      slackNotifyMode: "immediate",
+    });
+    const newGroupId = await seedGroup(t, teacherA, [], {
+      name: "Honu",
+      institutionId: institutionA,
+    });
+    const foreignGroupId = await seedGroup(t, teacherB, [], {
+      name: "Foreign Geckos",
+      institutionId: institutionB,
+      slackChannelId: "C-UNIQUE",
+    });
+
+    const result = await t.run((ctx) =>
+      ctx.runMutation(internal.slackNotifications.linkChannelToGroup, {
+        callerUserId: teacherA,
+        groupName: "Honu",
+        slackChannelId: "C-UNIQUE",
+        unlink: false,
+      }),
+    );
+
+    expect(result).toMatchObject({ ok: true });
+    expect(result.message).toContain('Unlinked "Geckos"');
+    const displacedGroup = await t.run((ctx) => ctx.db.get(oldGroupId));
+    expect(displacedGroup?.slackChannelId).toBeUndefined();
+    expect(displacedGroup?.slackNotifyMode).toBeUndefined();
+    expect(
+      (await t.run((ctx) => ctx.db.get(newGroupId)))?.slackChannelId,
+    ).toBe("C-UNIQUE");
+    expect(
+      (await t.run((ctx) => ctx.db.get(foreignGroupId)))?.slackChannelId,
+    ).toBe("C-UNIQUE");
+  });
+
+  test("linkedGroupForChannel returns the same-institution group and current member count", async () => {
+    const t = convexTest(schema, modules);
+    const institutionA = await seedInstitution(t, "linked-group-school-a");
+    const institutionB = await seedInstitution(t, "linked-group-school-b");
+    const teacherA = await seedUser(t, "teacher", {
+      institutionId: institutionA,
+    });
+    const teacherB = await seedUser(t, "teacher", {
+      username: "teacher-b",
+      institutionId: institutionB,
+    });
+    await grantMembership(t, teacherA, "teacher", institutionA);
+    await grantMembership(t, teacherB, "teacher", institutionB);
+    const scholarA1 = await seedUser(t, "scholar", {
+      username: "scholar-a-1",
+      institutionId: institutionA,
+    });
+    const scholarA2 = await seedUser(t, "scholar", {
+      username: "scholar-a-2",
+      institutionId: institutionA,
+    });
+    const scholarB = await seedUser(t, "scholar", {
+      username: "scholar-b",
+      institutionId: institutionB,
+    });
+
+    await seedGroup(t, teacherB, [scholarB], {
+      name: "Foreign Geckos",
+      institutionId: institutionB,
+      slackChannelId: "C-SHARED",
+    });
+    const localGroupId = await seedGroup(t, teacherA, [scholarA1, scholarA2], {
+      name: "Local Geckos",
+      institutionId: institutionA,
+      slackChannelId: "C-SHARED",
+    });
+
+    await expect(
+      t.query(internal.slackNotifications.linkedGroupForChannel, {
+        callerUserId: teacherA,
+        slackChannelId: "C-SHARED",
+      }),
+    ).resolves.toEqual({
+      id: localGroupId,
+      name: "Local Geckos",
+      memberCount: 2,
+    });
+  });
+
+  test("linkedGroupForChannel returns null when the channel is unlinked", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedInstitution(t, "unlinked-group-school");
+    const teacherId = await seedUser(t, "teacher", { institutionId });
+    await grantMembership(t, teacherId, "teacher", institutionId);
+    await seedGroup(t, teacherId, [], {
+      institutionId,
+      name: "Geckos",
+    });
+
+    await expect(
+      t.query(internal.slackNotifications.linkedGroupForChannel, {
+        callerUserId: teacherId,
+        slackChannelId: "C-NOT-LINKED",
+      }),
+    ).resolves.toBeNull();
+  });
+
+  test("linkedGroupForChannel never returns another institution's group", async () => {
+    const t = convexTest(schema, modules);
+    const institutionA = await seedInstitution(t, "isolated-group-school-a");
+    const institutionB = await seedInstitution(t, "isolated-group-school-b");
+    const teacherA = await seedUser(t, "teacher", {
+      institutionId: institutionA,
+    });
+    const teacherB = await seedUser(t, "teacher", {
+      username: "isolated-teacher-b",
+      institutionId: institutionB,
+    });
+    await grantMembership(t, teacherA, "teacher", institutionA);
+    await grantMembership(t, teacherB, "teacher", institutionB);
+    const scholarB = await seedUser(t, "scholar", {
+      username: "isolated-scholar-b",
+      institutionId: institutionB,
+    });
+    await seedGroup(t, teacherB, [scholarB], {
+      institutionId: institutionB,
+      slackChannelId: "C-FOREIGN",
+    });
+
+    await expect(
+      t.query(internal.slackNotifications.linkedGroupForChannel, {
+        callerUserId: teacherA,
+        slackChannelId: "C-FOREIGN",
+      }),
+    ).resolves.toBeNull();
+  });
+
   test("notifyScholarEvent queues for digest groups, skips unlinked, schedules immediate", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
@@ -1659,7 +2040,7 @@ describe("slackNotifications", () => {
     await t.run(async (ctx) =>
       ctx.runMutation(internal.slackNotifications.notifyScholarEvent, {
         scholarId: kai,
-        text: "Kai finished *Weekend News*",
+        text: "Kai finished **Weekend News**",
       }),
     );
 
@@ -2136,13 +2517,13 @@ describe("notification producers (Phase 3)", () => {
       await ctx.db.insert("slackNotificationQueue", {
         groupId,
         channelId: "C-G",
-        text: "*Kai* completed *A*",
+        text: "**Kai** completed **A**",
         sent: false,
       });
       await ctx.db.insert("slackNotificationQueue", {
         groupId,
         channelId: "C-G",
-        text: "*Kai* submitted *B*",
+        text: "**Kai** submitted **B**",
         sent: false,
       });
       await ctx.db.insert("eodCheckins", {
@@ -2193,8 +2574,8 @@ describe("notification producers (Phase 3)", () => {
     expect(body.thread_ts).toBe("100.1");
     expect(body.metadata.event_type).toBe("rabbithole_activity_update");
     expect(body.markdown_text).toContain("Activity since the last update");
-    expect(body.markdown_text).toContain("• *Kai* completed *A*");
-    expect(body.markdown_text).toContain("• *Kai* submitted *B*");
+    expect(body.markdown_text).toContain("• **Kai** completed **A**");
+    expect(body.markdown_text).toContain("• **Kai** submitted **B**");
 
     const rows = await t.run(async (ctx) =>
       ctx.db.query("slackNotificationQueue").collect(),
@@ -2232,7 +2613,7 @@ describe("notification producers (Phase 3)", () => {
       await ctx.db.insert("slackNotificationQueue", {
         groupId,
         channelId: "C-NO-THREAD",
-        text: "*Queued Scholar* completed *A*",
+        text: "**Queued Scholar** completed **A**",
         sent: false,
       });
     });
@@ -2279,7 +2660,7 @@ describe("notification producers (Phase 3)", () => {
       await ctx.db.insert("slackNotificationQueue", {
         groupId: staleGroupId,
         channelId: "C-RECONCILE",
-        text: "*Reconcile Scholar* submitted *A*",
+        text: "**Reconcile Scholar** submitted **A**",
         sent: false,
       });
       const activeGroupId = await ctx.db.insert("scholarGroups", {
@@ -2292,7 +2673,7 @@ describe("notification producers (Phase 3)", () => {
       await ctx.db.insert("slackNotificationQueue", {
         groupId: activeGroupId,
         channelId: "C-RECONCILE",
-        text: "*Active Reconcile Scholar* completed *B*",
+        text: "**Active Reconcile Scholar** completed **B**",
         sent: false,
       });
       await ctx.db.insert("eodCheckins", {
@@ -2610,13 +2991,7 @@ describe("Slack attachment byte budget (#909)", () => {
     b[3] = 0x46; // F
     return b;
   }
-  /** Bytes that detectImageMime reads as PNG (0x89 0x50), padded to `n`. */
-  function pngBytes(n: number): Uint8Array {
-    const b = new Uint8Array(n);
-    b[0] = 0x89;
-    b[1] = 0x50;
-    return b;
-  }
+
 
   /** Stub downloadSlackFile's fetch: map url_private_download → raw bytes. */
   function stubDownloads(payloads: Map<string, Uint8Array>) {
@@ -2816,13 +3191,7 @@ describe("Slack oversized-image downscaling", () => {
   const MB = 1024 * 1024;
   const SHRUNK = "A".repeat(400_000); // stand-in for a downscaled JPEG's base64
 
-  /** Bytes detectImageMime reads as PNG (0x89 0x50), padded to `n`. */
-  function pngBytes(n: number): Uint8Array {
-    const b = new Uint8Array(n);
-    b[0] = 0x89;
-    b[1] = 0x50;
-    return b;
-  }
+
   function stubDownloads(payloads: Map<string, Uint8Array>) {
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async (url: RequestInfo | URL) => {
@@ -2872,6 +3241,68 @@ describe("Slack oversized-image downscaling", () => {
       dataBase64: SHRUNK,
     });
     expect(res.bytesUsed).toBe(Math.floor((SHRUNK.length * 3) / 4));
+  });
+
+  test("an under-cap JPEG with an EXIF rotation tag is uprighted through the normalizer", async () => {
+    // SOI + APP1 Exif (big-endian, Orientation = 6) + EOI: a phone photo's
+    // metadata shape, which is all the routing decision reads.
+    const tiff = [0x4d, 0x4d, 0, 0x2a, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0];
+    const body = [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiff];
+    const tagged = new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0, body.length + 2, ...body, 0xff, 0xd9]);
+    const untagged = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+    const restore = stubDownloads(
+      new Map([
+        ["https://files.slack/tagged", tagged],
+        ["https://files.slack/untagged", untagged],
+      ]),
+    );
+    const normalize = vi.fn(async () => ({
+      mediaType: "image/jpeg" as const,
+      dataBase64: SHRUNK,
+    }));
+    try {
+      const file = (id: string, url: string) => ({
+        id,
+        name: `${id}.jpg`,
+        mimetype: "image/jpeg",
+        size: 1 * MB,
+        url_private_download: url,
+      });
+      const thread: SlackMessage[] = [
+        {
+          ts: "1",
+          user: "U1",
+          subtype: "file_share",
+          files: [
+            file("T1", "https://files.slack/tagged"),
+            file("U1", "https://files.slack/untagged"),
+          ],
+        },
+      ];
+      const res = await collectThreadImages(
+        TOKEN,
+        thread,
+        MAX_TOTAL_ATTACHMENT_BYTES,
+        normalize,
+      );
+      expect(normalize).toHaveBeenCalledTimes(1);
+      expect(normalize).toHaveBeenCalledWith({ url: "https://files.slack/tagged" });
+      expect(res.images.get("T1")?.dataBase64).toBe(SHRUNK);
+      // Already upright: passed through raw.
+      expect(res.images.get("U1")?.dataBase64).toBe(Buffer.from(untagged).toString("base64"));
+
+      // If uprighting fails, the raw tagged photo is still seen.
+      normalize.mockResolvedValueOnce(null as never);
+      const fallback = await collectThreadImages(
+        TOKEN,
+        [{ ...thread[0], files: [file("T1", "https://files.slack/tagged")] }],
+        MAX_TOTAL_ATTACHMENT_BYTES,
+        normalize,
+      );
+      expect(fallback.images.get("T1")?.dataBase64).toBe(Buffer.from(tagged).toString("base64"));
+    } finally {
+      restore();
+    }
   });
 
   test("an oversized image with no normalizer wired is left out (descriptor fallback)", async () => {
@@ -2999,6 +3430,231 @@ describe("Slack oversized-image downscaling", () => {
       const res = await collectThreadImages(TOKEN, thread);
       expect(res.images.has("S1")).toBe(true);
       expect(res.images.size).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  // ── Which images win the slots when there are more than fit ───────────────
+  // Regression: a 174-message Marketing Studio thread let its EARLIEST 8 images
+  // hold every slot for two weeks, so each freshly-posted screenshot was the
+  // one image guaranteed to be dropped. The aide read the resulting "could not
+  // load it" descriptor as an outage and escalated it to a human as
+  // "image mirroring is still down". Both halves are covered here: newest wins,
+  // and the leftovers are reported as capacity, not failure.
+  test("when a thread has more images than fit, the NEWEST win the slots", async () => {
+    const urls = new Map<string, Uint8Array>();
+    const messages: SlackMessage[] = [];
+    // 12 small images across 12 messages, oldest (I0) to newest (I11).
+    for (let i = 0; i < 12; i++) {
+      const url = `https://files.slack/i${i}`;
+      urls.set(url, pngBytes(64 * 1024));
+      messages.push({
+        ts: String(i + 1),
+        user: "U1",
+        subtype: "file_share",
+        files: [
+          {
+            id: `I${i}`,
+            name: `img${i}.png`,
+            mimetype: "image/png",
+            size: 64 * 1024,
+            url_private_download: url,
+          },
+        ],
+      });
+    }
+    const restore = stubDownloads(urls);
+    try {
+      const res = await collectThreadImages(TOKEN, messages);
+      expect(res.images.size).toBe(8);
+      // The 8 newest (I4…I11) are shown; the 4 oldest are not.
+      expect([...res.images.keys()].sort()).toEqual([
+        "I10",
+        "I11",
+        "I4",
+        "I5",
+        "I6",
+        "I7",
+        "I8",
+        "I9",
+      ]);
+      // The just-posted image is the one that must never be dropped.
+      expect(res.images.has("I11")).toBe(true);
+      expect([...res.skippedForCapacity].sort()).toEqual([
+        "I0",
+        "I1",
+        "I2",
+        "I3",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("re-sharing an old file makes it newest — it is not stuck at its first position", async () => {
+    // Slack's "share this file" action keeps the SAME file id, so ordering by
+    // first occurrence would leave a just-re-shared image at its original spot
+    // and still drop it — while the transcript descriptor tells the person that
+    // re-posting is the remedy. Dedupe must not pin an id to its first sighting.
+    const urls = new Map<string, Uint8Array>();
+    const messages: SlackMessage[] = [];
+    for (let i = 0; i < 10; i++) {
+      const url = `https://files.slack/r${i}`;
+      urls.set(url, pngBytes(48 * 1024));
+      messages.push({
+        ts: String(i + 1),
+        user: "U1",
+        subtype: "file_share",
+        files: [
+          {
+            id: `R${i}`,
+            name: `r${i}.png`,
+            mimetype: "image/png",
+            size: 48 * 1024,
+            url_private_download: url,
+          },
+        ],
+      });
+    }
+    // The oldest file, R0, re-shared into the newest message (same id + url).
+    messages.push({
+      ts: "11",
+      user: "U1",
+      subtype: "file_share",
+      files: [
+        {
+          id: "R0",
+          name: "r0.png",
+          mimetype: "image/png",
+          size: 48 * 1024,
+          url_private_download: "https://files.slack/r0",
+        },
+      ],
+    });
+    // Count fetches directly: a duplicate id must not be downloaded twice.
+    const fetched: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      fetched.push(String(url));
+      const bytes = urls.get(String(url));
+      if (!bytes) return new Response(null, { status: 404 });
+      return new Response(bytes.buffer as ArrayBuffer, { status: 200 });
+    }) as typeof fetch;
+    try {
+      const res = await collectThreadImages(TOKEN, messages);
+      expect(res.images.size).toBe(8);
+      expect(res.images.has("R0")).toBe(true); // re-shared ⇒ newest ⇒ shown
+      expect(res.skippedForCapacity.has("R0")).toBe(false);
+      // It displaces what is now the oldest.
+      expect([...res.skippedForCapacity].sort()).toEqual(["R1", "R2"]);
+      // …and the duplicate id costs exactly one download, not two.
+      expect(fetched.filter((u) => u === "https://files.slack/r0")).toHaveLength(
+        1,
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("several images in ONE message are ordered together, newest message first", async () => {
+    const urls = new Map<string, Uint8Array>();
+    const mk = (id: string) => {
+      const url = `https://files.slack/${id}`;
+      urls.set(url, pngBytes(48 * 1024));
+      return {
+        id,
+        name: `${id}.png`,
+        mimetype: "image/png",
+        size: 48 * 1024,
+        url_private_download: url,
+      };
+    };
+    const messages: SlackMessage[] = [
+      { ts: "1", user: "U1", subtype: "file_share", files: ["O1", "O2", "O3", "O4", "O5"].map(mk) },
+      { ts: "2", user: "U1", subtype: "file_share", files: ["N1", "N2", "N3", "N4", "N5"].map(mk) },
+    ];
+    const restore = stubDownloads(urls);
+    try {
+      const res = await collectThreadImages(TOKEN, messages);
+      // All five of the newest message win slots; the older message loses two.
+      for (const id of ["N1", "N2", "N3", "N4", "N5"]) {
+        expect(res.images.has(id)).toBe(true);
+      }
+      expect(res.images.size).toBe(8);
+      expect(res.skippedForCapacity.size).toBe(2);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a capacity skip is reported as capacity; a load failure is not", async () => {
+    const good = new Map<string, Uint8Array>();
+    const messages: SlackMessage[] = [];
+    for (let i = 0; i < 9; i++) {
+      const url = `https://files.slack/g${i}`;
+      // g0 404s (see stubDownloads) — a genuine load failure, not capacity.
+      if (i > 0) good.set(url, pngBytes(32 * 1024));
+      messages.push({
+        ts: String(i + 1),
+        user: "U1",
+        subtype: "file_share",
+        files: [
+          {
+            id: `G${i}`,
+            name: `g${i}.png`,
+            mimetype: "image/png",
+            size: 32 * 1024,
+            url_private_download: url,
+          },
+        ],
+      });
+    }
+    const restore = stubDownloads(good);
+    try {
+      const res = await collectThreadImages(TOKEN, messages);
+      // G1…G8 are the 8 newest and all download: the slots fill before G0 is
+      // ever attempted, so G0 is a CAPACITY skip here, not a failure.
+      expect(res.images.size).toBe(8);
+      expect(res.images.has("G0")).toBe(false);
+      expect(res.skippedForCapacity.has("G0")).toBe(true);
+      // A file that WAS attempted and failed is never labelled capacity.
+      const onlyBroken = await collectThreadImages(TOKEN, [messages[0]]);
+      expect(onlyBroken.images.size).toBe(0);
+      expect(onlyBroken.skippedForCapacity.has("G0")).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a corrupt image is not inlined, so it cannot 400 every later reply", async () => {
+    // Every turn replays the whole thread: one image Claude cannot decode
+    // would fail every reply after it. A flipped byte inside IDAT breaks the
+    // chunk CRC, which the API rejects ("Could not process image").
+    const corrupt = pngBytes(32 * 1024);
+    corrupt[40] ^= 0xff;
+    const url = "https://files.slack/broken";
+    const restore = stubDownloads(new Map([[url, corrupt]]));
+    try {
+      const res = await collectThreadImages(TOKEN, [
+        {
+          ts: "1",
+          user: "U1",
+          subtype: "file_share",
+          files: [
+            {
+              id: "B1",
+              name: "broken.png",
+              mimetype: "image/png",
+              size: corrupt.byteLength,
+              url_private_download: url,
+            },
+          ],
+        },
+      ]);
+      expect(res.images.size).toBe(0);
+      // A damaged file is a failure, never a capacity skip.
+      expect(res.skippedForCapacity.has("B1")).toBe(false);
     } finally {
       restore();
     }
@@ -3463,6 +4119,19 @@ describe("buildToolContext live progress", () => {
     expect(text).toContain("2");
   });
 
+  test("preserves a full plain Google Docs URL in a completed tool row", () => {
+    const url =
+      "https://docs.google.com/document/d/1pmWxLw3gMjopx98lPeS-PTTOX5yTlVv7nFrOhceJtn4/edit";
+    const text = buildToolContext([
+      {
+        name: "create_shared_doc",
+        status: "complete",
+        result: `Created "Unit plan" — ${url}`,
+      },
+    ]);
+    expect(text).toContain(url);
+  });
+
   test("a still-running group stays ⋯ while earlier finished groups show ✓", () => {
     const lines = buildToolContext([
       { name: "list_events", status: "complete", result: "ok" },
@@ -3597,6 +4266,23 @@ describe("settleRunningToolActivity", () => {
 describe("workshop idea thread replies", () => {
   const WORKSHOP_CHANNEL = "C_WORKSHOP";
 
+  /** Staff messages in the idea's Workshop thread (the reply's new home). */
+  async function staffReplies(
+    t: TypedTestConvex,
+    suggestionId: Id<"scholarSuggestions">,
+  ) {
+    return await t.run(async (ctx) => {
+      const row = await ctx.db.get(suggestionId);
+      if (!row?.threadId) return [];
+      return (
+        await ctx.db
+          .query("parentMessages")
+          .withIndex("by_thread", (q) => q.eq("threadId", row.threadId!))
+          .collect()
+      ).filter((message) => message.authorType === "teacher");
+    });
+  }
+
   async function seedWorkshopIdea(t: ReturnType<typeof convexTest>) {
     return await t.run(async (ctx) => {
       const institutionId = await ctx.db.insert("institutions", {
@@ -3655,7 +4341,7 @@ describe("workshop idea thread replies", () => {
               {
                 ts: "900.111",
                 bot_id: "B_BOT",
-                text: "💡 *Lily S.* filed a Workshop idea: \"…\"",
+                text: "💡 **Lily S.** filed a Workshop idea: \"…\"",
                 metadata: {
                   event_type: "rabbithole_workshop_idea",
                   event_payload: { delivery_id: `workshop-idea:${suggestionId}` },
@@ -3740,10 +4426,13 @@ describe("workshop idea thread replies", () => {
     const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
     // Slack sends `:rabbit2:`; a child reads this outside Slack, so the stored
     // body must carry the actual emoji.
-    expect(row?.staffResponse?.body).toBe(
-      "thanks for letting us know! \u{1F407} Mr Andy",
-    );
-    expect(row?.staffResponse?.authorId).toBe(teacher);
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({
+      body: "thanks for letting us know! \u{1F407} Mr Andy",
+      authorUserId: teacher,
+      source: "slack",
+    });
     // A reply changes no state — the idea stays on the kid's board until THEY
     // archive it.
     expect(row?.archivedAt).toBeUndefined();
@@ -3781,8 +4470,7 @@ describe("workshop idea thread replies", () => {
       delete process.env.SLACK_WORKSHOP_CHANNEL_ID;
     }
 
-    const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
-    expect(row?.staffResponse).toBeUndefined();
+    expect(await staffReplies(t, suggestionId)).toEqual([]);
     const notice = calls.find((c) => c.method === "chat.postMessage");
     expect(String(notice?.body.text)).toContain("didn't send that to the scholar");
     expect(calls.some((c) => c.method === "reactions.add")).toBe(false);
@@ -3829,8 +4517,7 @@ describe("workshop idea thread replies", () => {
       else process.env.ANTHROPIC_API_KEY = previousApiKey;
     }
 
-    const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
-    expect(row?.staffResponse).toBeUndefined();
+    expect(await staffReplies(t, suggestionId)).toEqual([]);
     // No ✅ — that ack belongs to the direct recorder. The aide's own 👀 is
     // expected here and is what tells the staffer the bot took the message.
     expect(
@@ -3896,8 +4583,81 @@ describe("workshop idea thread replies", () => {
       delete process.env.SLACK_WORKSHOP_CHANNEL_ID;
     }
 
-    const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
-    expect(row?.staffResponse?.body).toBe("working on it! \u{1F407} mr andy");
+    expect((await staffReplies(t, suggestionId)).map((m) => m.body)).toEqual([
+      "working on it! \u{1F407} mr andy",
+    ]);
+  });
+
+  test("the bot's own post of a scholar's in-app reply is never re-ingested (no echo loop)", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId } = await seedWorkshopIdea(t);
+    // The #workshop root is ALSO bound durably now (parentSlackThreads).
+    await t.mutation(internal.scholarSuggestions.recordWorkshopSlackRoot, {
+      suggestionId,
+      channelId: WORKSHOP_CHANNEL,
+      threadTs: "900.111",
+    });
+
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.SLACK_WORKSHOP_CHANNEL_ID = WORKSHOP_CHANNEL;
+    const realFetch = globalThis.fetch;
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+    globalThis.fetch = stubSlack(suggestionId, calls);
+    try {
+      await t.action(internal.slackBot.handleEvent, {
+        payload: {
+          team_id: "T1",
+          event_id: "EvBotEcho",
+          authorizations: [{ user_id: "B_BOT", is_bot: true }],
+          event: {
+            type: "message",
+            bot_id: "B_BOT",
+            user: "B_BOT",
+            text: "↩ **Lily S.** replied in the app:\n> it still does it",
+            channel: WORKSHOP_CHANNEL,
+            channel_type: "channel",
+            ts: "900.333",
+            thread_ts: "900.111",
+          },
+        },
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.SLACK_BOT_TOKEN;
+      delete process.env.SLACK_WORKSHOP_CHANNEL_ID;
+    }
+    expect(await staffReplies(t, suggestionId)).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  test("a staff reply under a durably-bound root still reaches the Workshop, not the family bridge", async () => {
+    const t = convexTest(schema, modules);
+    const { suggestionId, teacher } = await seedWorkshopIdea(t);
+    await t.mutation(internal.scholarSuggestions.recordWorkshopSlackRoot, {
+      suggestionId,
+      channelId: WORKSHOP_CHANNEL,
+      threadTs: "900.111",
+    });
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.SLACK_WORKSHOP_CHANNEL_ID = WORKSHOP_CHANNEL;
+    const realFetch = globalThis.fetch;
+    const calls: Array<{ method: string; body: Record<string, string> }> = [];
+    globalThis.fetch = stubSlack(suggestionId, calls);
+    try {
+      await replyInThread(t, {
+        eventId: "EvBoundReply",
+        user: "U_ANDY",
+        text: "thanks for letting us know! :rabbit2: Mr Andy",
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.SLACK_BOT_TOKEN;
+      delete process.env.SLACK_WORKSHOP_CHANNEL_ID;
+    }
+    const replies = await staffReplies(t, suggestionId);
+    expect(replies.map((m) => m.authorUserId)).toEqual([teacher]);
+    // No family-bridge failure notice was posted into the thread.
+    expect(calls.some((c) => c.method === "chat.postMessage")).toBe(false);
   });
 
   test("a reply in a DIFFERENT channel is left to the normal routing", async () => {
@@ -3933,8 +4693,151 @@ describe("workshop idea thread replies", () => {
       delete process.env.SLACK_WORKSHOP_CHANNEL_ID;
     }
 
-    const row = await t.run(async (ctx) => ctx.db.get(suggestionId));
-    expect(row?.staffResponse).toBeUndefined();
+    expect(await staffReplies(t, suggestionId)).toEqual([]);
     expect(calls.some((c) => c.method === "reactions.add")).toBe(false);
+  });
+});
+
+describe("a platform admin's Slack turn acts in the primary institution", () => {
+  // A platform admin's memberships, built as the dev seed builds Avery
+  // Stone's, carry no staff institution: platform admin and parent unscoped,
+  // plus a scholar membership at a community for adult learning. So the turn
+  // used to act in no school at all: their DM attachments were never mirrored,
+  // and upload_scholar_document found no file (TRA-454). It must act in the
+  // primary, not the community. Usage attribution stays with the speaker,
+  // which leaves a platform admin's spend unattributed.
+  test("mirrors their DM attachment under the primary and leaves usage unattributed", async () => {
+    const t = convexTest(schema, modules);
+    const primaryId = await t.run(async (ctx) => {
+      const primaryId = await ctx.db.insert("institutions", {
+        name: "Moli School",
+        slug: "moli",
+        kind: "school",
+        isPrimary: true,
+      });
+      const communityId = await ctx.db.insert("institutions", {
+        name: "Albatross Society",
+        slug: "albatross",
+        kind: "community",
+      });
+      const userId = await ctx.db.insert("users", {
+        name: "Avery Stone",
+        username: "avery",
+        role: "platform_admin",
+        slackUserId: "U_AVERY",
+        email: "avery@moli.school",
+      });
+      await ensureMembership(ctx, { userId, role: "platform_admin" });
+      await ensureMembership(ctx, { userId, role: "parent" });
+      await ensureMembership(ctx, {
+        userId,
+        role: "scholar",
+        institutionId: communityId,
+      });
+      return primaryId;
+    });
+
+    let transcript = "";
+    let calendarSchema = "";
+    slackToolRunner.mockImplementationOnce(
+      (config: {
+        messages?: unknown;
+        tools: Array<{ name: string; input_schema?: unknown }>;
+      }) => {
+        transcript = JSON.stringify(config.messages ?? "");
+        calendarSchema = JSON.stringify(
+          config.tools.find((tool) => tool.name === "get_school_calendar")
+            ?.input_schema ?? null,
+        );
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield (async function* () {
+              yield {
+                type: "message_start",
+                message: {
+                  model: "claude-test",
+                  usage: { input_tokens: 1, output_tokens: 0 },
+                },
+              };
+              yield {
+                type: "content_block_delta",
+                delta: { type: "text_delta", text: "Which scholar is this for?" },
+              };
+            })();
+          },
+        };
+      },
+    );
+
+    const scanUrl = "https://files.slack.com/files-pri/reading-log.png";
+    const scan = pngBytes(2 * 1024);
+    const dm = {
+      ts: "300.1",
+      user: "U_AVERY",
+      text: "please add this reading log to the scholar's documents",
+      files: [
+        {
+          id: "F_SCAN",
+          name: "reading-log.png",
+          mimetype: "image/png",
+          size: scan.byteLength,
+          url_private_download: scanUrl,
+        },
+      ],
+    };
+
+    const previousToken = process.env.SLACK_BOT_TOKEN;
+    const previousApiKey = process.env.ANTHROPIC_API_KEY;
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url) === scanUrl) {
+        return new Response(scan.slice().buffer as ArrayBuffer, { status: 200 });
+      }
+      const method = String(url).split("/api/")[1] ?? String(url);
+      if (method === "conversations.replies") {
+        return Response.json({ ok: true, messages: [dm] });
+      }
+      if (method === "users.info") {
+        return Response.json({
+          ok: true,
+          user: { id: "U_AVERY", real_name: "Avery Stone" },
+        });
+      }
+      return Response.json({ ok: true, ts: "400.1" });
+    }) as typeof fetch;
+    try {
+      await t.action(internal.slackBot.handleEvent, {
+        payload: {
+          team_id: "T1",
+          event_id: "EvPlatformAdminDmAttachment",
+          authorizations: [{ user_id: "B_BOT", is_bot: true }],
+          event: { type: "message", channel_type: "im", channel: "D_AVERY", ...dm },
+        },
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+      if (previousToken === undefined) delete process.env.SLACK_BOT_TOKEN;
+      else process.env.SLACK_BOT_TOKEN = previousToken;
+      if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousApiKey;
+    }
+
+    const mirrored = await t.run((ctx) =>
+      ctx.runQuery(internal.slackBot.getSlackFile, {
+        slackFileId: dmAttachmentMirrorKey(primaryId, "D_AVERY", "300.1", "F_SCAN"),
+      }),
+    );
+    expect(mirrored).not.toBeNull();
+    expect(transcript).toContain(`storageRef=${mirrored!.storageId}`);
+    // The tools are scoped to that school too: the calendar needs no scholar.
+    expect(calendarSchema).not.toBe("null");
+    expect(calendarSchema).not.toContain("scholarName");
+
+    const usage = await t.run((ctx) => ctx.db.query("usageEvents").collect());
+    const turn = usage.filter((row) => row.source === "slack-aide");
+    expect(turn).toHaveLength(1);
+    expect(turn[0].institutionId).toBeUndefined();
   });
 });

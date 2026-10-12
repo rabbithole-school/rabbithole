@@ -101,3 +101,29 @@ export async function mintIndependentStudyUnit(
     },
   });
 }
+
+/**
+ * Stamp the planning session whose tutor just added structure to the
+ * scholar's own IS unit (TRA-464; see `sessions.unitBuiltInChatAt`). Only a
+ * session of that scholar anchored to that unit, and only the first time.
+ */
+export async function markUnitBuiltInSession(
+  ctx: MutationCtx,
+  args: {
+    sessionId: Id<"sessions"> | undefined;
+    scholarId: Id<"users">;
+    unitId: Id<"units">;
+  },
+): Promise<void> {
+  if (!args.sessionId) return;
+  const session = await ctx.db.get(args.sessionId);
+  if (
+    !session ||
+    session.userId !== args.scholarId ||
+    session.unitId !== args.unitId ||
+    session.unitBuiltInChatAt
+  ) {
+    return;
+  }
+  await ctx.db.patch(args.sessionId, { unitBuiltInChatAt: Date.now() });
+}

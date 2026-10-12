@@ -16,7 +16,7 @@
  * N transports.
  */
 import { v } from "convex/values";
-import { getAuthUserId } from "@convex-dev/auth/server";
+import { getAuthUserId, getAuthSessionId } from "@convex-dev/auth/server";
 import { action, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { authedQuery } from "./lib/customFunctions";
@@ -43,6 +43,7 @@ import {
   readScholarSeeds,
   readScholarObservations,
   readScholarDossier,
+  readScholarInterests,
   readScholarSessions,
   readSessionTranscript,
   readScholarWebActivity,
@@ -53,12 +54,14 @@ import {
   redactScholarPractice,
 } from "./lib/scholarReads";
 import { assembleCurriculumTools } from "./lib/aideTools";
+import type { WriteSurface } from "./lib/scholarWriteTools";
 import { assembleUnitDesignerTools } from "./lib/unitDesignerTools";
+import { makeDeviceOpsTools } from "./lib/deviceOpsTools";
 import { siteUrl, withBase } from "./lib/channels";
 import type { AideEmit } from "./lib/aideStream";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { QueryCtx, ActionCtx } from "./_generated/server";
-import { requireUnitEditAccessForUser } from "./lib/auth";
+import { requireUnitEditAccessForUser, assertWritableAction } from "./lib/auth";
 import { schoolOperationsInstitutionIds } from "./lib/staffCapabilities";
 
 /** Server-side mirror of the route's tool filtering. Throws on off-role calls. */
@@ -193,8 +196,20 @@ async function resolveScholarForUser(
  * which children/self it covers without a roster tool.
  */
 export const whoami = authedQuery({
-  args: {},
-  handler: async (ctx) => {
+  args: { probeSession: v.optional(v.boolean()) },
+  handler: async (ctx, args) => {
+    // Revocation must bite NOW, not at JWT expiry: Convex Auth validates the
+    // JWT signature only, so a deleted authSessions row (Account details →
+    // revoke, or a revoked service token) would keep working for up to an
+    // hour. The /api/mcp route passes `probeSession` once per request so a
+    // dead session 401s there; the consent page (a browser whose own session
+    // may be stale) does not, and keeps rendering.
+    if (args.probeSession) {
+      const sessionId = await getAuthSessionId(ctx);
+      if (!sessionId || !(await ctx.db.get(sessionId))) {
+        throw new Error("Session revoked");
+      }
+    }
     const role = (ctx.user.role ?? ROLES.SCHOLAR) as Role;
     let scholarNames: string[] | null = null;
     if (role === ROLES.PARENT || role === ROLES.SCHOLAR) {
@@ -217,6 +232,9 @@ export const whoami = authedQuery({
       role,
       scholarNames,
       schoolOperations,
+      // A per-institution MCP service account (convex/mcpServiceAccounts.ts)
+      // — a machine identity, not a person; clients may say so.
+      isServiceAccount: ctx.user.isSystem === true,
     };
   },
 });
@@ -267,14 +285,32 @@ export const getScholarDossier = authedQuery({
     await requireTool(ctx, ctx.user, "get_scholar_dossier");
     const scholar = await resolveScholarForUser(ctx, ctx.user, args.scholarName);
     if (!scholar) return null;
-    const [dossier, sourceDocuments] = await Promise.all([
+    const [dossier, interests, sourceDocuments] = await Promise.all([
       readScholarDossier(ctx, scholar._id),
+      readScholarInterests(ctx, scholar._id, "teacher"),
       readScholarDocuments(ctx, scholar._id),
     ]);
     return {
       scholar: scholar.name ?? "Scholar",
       dossier,
+      interests,
       sourceDocuments,
+    };
+  },
+});
+
+export const getScholarInterests = authedQuery({
+  args: { scholarName: v.string() },
+  handler: async (ctx, args) => {
+    await requireTool(ctx, ctx.user, "get_scholar_interests");
+    const scholar = await resolveScholarForUser(ctx, ctx.user, args.scholarName);
+    if (!scholar) return null;
+    const audience = isTeacherRole(ctx.user.role as Role | undefined)
+      ? "teacher"
+      : "parent";
+    return {
+      scholar: scholar.name ?? "Scholar",
+      ...(await readScholarInterests(ctx, scholar._id, audience)),
     };
   },
 });
@@ -589,12 +625,23 @@ function withUnitId(
  *  whoami probe does. Throws "Not authenticated" on a missing/expired JWT. */
 async function resolveMcpCaller(
   ctx: ActionCtx,
-): Promise<{ userId: Id<"users">; role: Role }> {
+): Promise<{ userId: Id<"users">; role: Role; surface: WriteSurface }> {
   const userId = await getAuthUserId(ctx);
   if (!userId) throw new Error("Not authenticated");
   const user = await ctx.runQuery(internal.users.getByIdInternal, { id: userId });
   if (!user) throw new Error("Not authenticated");
-  return { userId, role: (user.role ?? ROLES.SCHOLAR) as Role };
+  return {
+    userId,
+    role: (user.role ?? ROLES.SCHOLAR) as Role,
+    // Per-teacher OAuth is that one person, so it is a private surface. A
+    // service account (convex/mcpServiceAccounts.ts) is ONE identity a whole
+    // Claude-in-Slack channel acts as — the same audience as a Slack channel,
+    // so it gets the channel toolset: no credential-bearing, destructive, or
+    // file-upload scholar writes. Until 2026-09 every MCP caller inherited
+    // assembleCurriculumTools' private default, which offered those tools to
+    // the shared identity.
+    surface: user.isSystem === true ? "channel" : "private",
+  };
 }
 
 /**
@@ -632,6 +679,7 @@ async function mcpCurriculumTools(
   ctx: ActionCtx,
   role: Role,
   callerUserId: Id<"users">,
+  surface: WriteSurface,
 ): Promise<RunnableTool[]> {
   // The curriculum/design surface is STAFF territory. assembleCurriculumTools
   // is built for the staff aide and only walls operations staff OFF the unit reads —
@@ -685,6 +733,7 @@ async function mcpCurriculumTools(
     callerUserId,
     // No chat thread in the MCP context, so tag_session is naturally out.
     sessionId: null,
+    surface,
     guardianFormAnswersSurface: "private",
     // Absolute deep links (like Slack) — the connector is an external client.
     linkBase: siteUrl(),
@@ -757,6 +806,87 @@ async function mcpUnitDesignerTools(
 }
 
 /**
+ * The managed-iPad operations toolset for a caller — the SAME definitions the
+ * Slack bot gets (lib/deviceOpsTools.ts), so "which iPad is scholar X on?" and
+ * "disarm Rabbithole Lock on it" are one message from Claude just as they are
+ * from Slack, instead of a hand-written script plus a trip to the web console.
+ *
+ * Gating, in order: the factory refuses any caller without school operations
+ * (teacher / school_admin / platform_admin by role, base staff only with an
+ * active institution-scoped `school:operations` grant), and each underlying
+ * internal function then re-resolves the caller and intersects the target
+ * institutions with their grants. A parent or scholar authenticating here gets
+ * an empty list AND a "Forbidden" on any guessed tool name.
+ *
+ * `listDeviceTools` and `callDeviceTool` share this, so what is listed is
+ * exactly what is callable.
+ */
+async function mcpDeviceTools(
+  ctx: ActionCtx,
+  role: Role,
+  callerUserId: Id<"users">,
+): Promise<RunnableTool[]> {
+  const schoolOperations =
+    role === ROLES.STAFF
+      ? await ctx.runQuery(
+          internal.curriculumAssistant.schoolOperationsScopeForUser,
+          { callerUserId },
+        )
+      : null;
+  const noopEmit: AideEmit = () => {};
+  const tools = await makeDeviceOpsTools(ctx, noopEmit, {
+    role,
+    callerUserId,
+    hasSchoolOperationsAccess: schoolOperations
+      ? schoolOperations.institutionIds.length > 0
+      : false,
+    source: "mcp",
+  });
+  return (
+    tools as {
+      name?: unknown;
+      input_schema?: unknown;
+      run?: unknown;
+    }[]
+  ).filter(isMcpRunnableTool);
+}
+
+/** tools/list for the managed-iPad surface. Empty for every caller without
+ *  school operations, so the connector never advertises a device control a
+ *  parent or a scholar could try. */
+export const listDeviceTools = action({
+  args: {},
+  handler: async (
+    ctx,
+  ): Promise<
+    { name: string; description: string; inputSchema: Record<string, unknown> }[]
+  > => {
+    const { userId, role } = await resolveMcpCaller(ctx);
+    const tools = await mcpDeviceTools(ctx, role, userId);
+    return tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description ?? "",
+      inputSchema: tool.input_schema,
+    }));
+  },
+});
+
+/** tools/call for the managed-iPad surface. Re-resolves the caller and
+ *  re-asserts the gate: a name outside the caller's set throws
+ *  "Forbidden: <name>", indistinguishable from a tool that does not exist. */
+export const callDeviceTool = action({
+  args: { name: v.string(), input: v.optional(v.any()) },
+  handler: async (ctx, { name, input }): Promise<string> => {
+    const { userId, role } = await resolveMcpCaller(ctx);
+    await assertWritableAction(ctx);
+    const tools = await mcpDeviceTools(ctx, role, userId);
+    const tool = tools.find((candidate) => candidate.name === name);
+    if (!tool) throw new Error(`Forbidden: ${name}`);
+    return await tool.run(input ?? {});
+  },
+});
+
+/**
  * tools/list for the curriculum surface — the role-gated set of tool
  * descriptors (name + description + JSON-Schema input) the route registers
  * generically. The JSON Schema passes through verbatim (the route uses a
@@ -770,8 +900,8 @@ export const listCurriculumTools = action({
   ): Promise<
     { name: string; description: string; inputSchema: Record<string, unknown> }[]
   > => {
-    const { userId, role } = await resolveMcpCaller(ctx);
-    const tools = await mcpCurriculumTools(ctx, role, userId);
+    const { userId, role, surface } = await resolveMcpCaller(ctx);
+    const tools = await mcpCurriculumTools(ctx, role, userId, surface);
     return tools.map((t) => ({
       name: t.name,
       description: t.description ?? "",
@@ -791,8 +921,9 @@ export const listCurriculumTools = action({
 export const callCurriculumTool = action({
   args: { name: v.string(), input: v.optional(v.any()) },
   handler: async (ctx, { name, input }): Promise<string> => {
-    const { userId, role } = await resolveMcpCaller(ctx);
-    const tools = await mcpCurriculumTools(ctx, role, userId);
+    const { userId, role, surface } = await resolveMcpCaller(ctx);
+    await assertWritableAction(ctx);
+    const tools = await mcpCurriculumTools(ctx, role, userId, surface);
     const tool = tools.find((t) => t.name === name);
     if (!tool) throw new Error(`Forbidden: ${name}`);
     return await tool.run(input ?? {});
@@ -834,6 +965,7 @@ export const callUnitDesignerTool = action({
   },
   handler: async (ctx, { name, unitId, input }): Promise<string> => {
     const { userId, role } = await resolveMcpCaller(ctx);
+    await assertWritableAction(ctx);
     const tools = await mcpUnitDesignerTools(ctx, role, userId, unitId);
     if (!name.startsWith("unit_")) throw new Error(`Forbidden: ${name}`);
     const toolName = name.slice("unit_".length);

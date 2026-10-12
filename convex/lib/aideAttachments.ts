@@ -1,10 +1,11 @@
 import type { Anthropic } from "@anthropic-ai/sdk";
 import type { GenericActionCtx } from "convex/server";
 import type { DataModel, Id } from "../_generated/dataModel";
+import { formatCaptureDuration } from "../../shared/captureMedia";
 import { classifyAideUpload } from "./aideUploadMimes";
 import { extractDirectText } from "./fileTextExtraction";
 import { getValidAccessToken } from "./googleTokens";
-import { bytesToBase64, sniffImageMime } from "./imageBytes";
+import { bytesToBase64, isIntactImage, sniffImageMime } from "./imageBytes";
 
 const MAX_EXTRACTED_TEXT_CHARS = 100_000;
 
@@ -35,6 +36,10 @@ export type AideContextAttachment = {
   mimeType: string | null;
   sizeBytes: number | null;
   url: string | null;
+  transcript?: string | null;
+  posterStorageId?: Id<"_storage"> | null;
+  posterUrl?: string | null;
+  durationMs?: number | null;
 };
 
 export type AideDriveAttachment = {
@@ -84,8 +89,30 @@ export async function buildAideUserContent(
     const title = attachment.fileName || "attachment";
     const kind = classifyAideUpload(attachment.mimeType, title);
 
+    if (kind === "audio" || kind === "video") {
+      noteParts.push(mediaTranscriptText(attachment, kind, title));
+      if (
+        kind === "video" &&
+        attachment.posterStorageId &&
+        attachment.posterUrl &&
+        (await isModelReadableImageUrl(attachment.posterUrl))
+      ) {
+        fileBlocks.push(
+          {
+            type: "text",
+            text: `Contact sheet of evenly spaced frames from ${title} (read left→right, top→bottom)`,
+          },
+          {
+            type: "image",
+            source: { type: "url", url: attachment.posterUrl },
+          },
+        );
+      }
+      continue;
+    }
+
     if (kind === "image") {
-      if (attachment.url) {
+      if (attachment.url && (await isModelReadableImageUrl(attachment.url))) {
         fileBlocks.push({
           type: "image",
           source: { type: "url", url: attachment.url },
@@ -169,6 +196,23 @@ export async function buildAideUserContent(
   return blocks;
 }
 
+/**
+ * Whether the model can read the uploaded image at `url`. Uploads go to
+ * Anthropic as URL blocks, so it fetches the bytes and we never see them — and
+ * every aide turn rebuilds every earlier user turn's attachments, so an image
+ * Anthropic cannot decode (a non-raster type, or a corrupt file — see
+ * `isIntactImage`) would 400 every later turn of the thread, not just one.
+ * Check the bytes ourselves and leave the URL block as it is when they pass.
+ */
+async function isModelReadableImageUrl(url: string): Promise<boolean> {
+  try {
+    const bytes = await fetchBytes(url);
+    return sniffImageMime(bytes) !== null && isIntactImage(bytes);
+  } catch {
+    return false;
+  }
+}
+
 async function fetchBytes(url: string): Promise<Uint8Array> {
   const response = await fetch(url);
   if (!response.ok) {
@@ -176,6 +220,25 @@ async function fetchBytes(url: string): Promise<Uint8Array> {
   }
   return new Uint8Array(await response.arrayBuffer());
 }
+
+function mediaTranscriptText(
+  attachment: AideContextAttachment,
+  kind: "audio" | "video",
+  title: string,
+): string {
+  const duration =
+    typeof attachment.durationMs === "number" &&
+    Number.isFinite(attachment.durationMs) &&
+    attachment.durationMs >= 0
+      ? formatCaptureDuration(attachment.durationMs)
+      : "";
+  const description = duration ? `${kind}, ${duration}` : kind;
+  const transcript =
+    attachment.transcript?.trim() ||
+    "[No speech detected or transcript unavailable]";
+  return `Transcript of ${title} (${description}):\n${transcript}`;
+}
+
 
 async function exportDriveFileText(
   driveFileId: string,
@@ -265,7 +328,7 @@ async function driveAttachmentToBlock(
   const maxBytes =
     kind === "image" ? MAX_DRIVE_IMAGE_BYTES : MAX_DRIVE_DOWNLOAD_BYTES;
 
-  if (kind === "other") {
+  if (kind === "other" || kind === "audio" || kind === "video") {
     return {
       note: `[Linked Google Drive file "${title}" can't be shown inline]`,
     };
@@ -291,6 +354,11 @@ async function driveAttachmentToBlock(
     if (!mediaType) {
       return {
         note: `[Linked Google Drive file "${title}" is an image format that can't be shown inline]`,
+      };
+    }
+    if (!isIntactImage(bytes)) {
+      return {
+        note: `[Linked Google Drive file "${title}" is a damaged image that can't be shown inline]`,
       };
     }
     return {

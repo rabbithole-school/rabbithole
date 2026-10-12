@@ -41,6 +41,7 @@ describe("makeScholarReadTools role gating", () => {
     const got = await names(ROLES.PARENT);
     expect(got).toEqual(
       [
+        "get_scholar_interests",
         "get_scholar_mastery",
         "get_scholar_signals",
         "get_scholar_seeds",

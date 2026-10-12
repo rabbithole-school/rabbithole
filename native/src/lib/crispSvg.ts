@@ -50,7 +50,7 @@ export const STAR_RASTER = 2.25;
  * (sky.tsx FeatureStar/HubGlyph: drawn at bucket-top size, worklet-pinned,
  * only ever minified — the SkyLabel pattern). The full fix for uncapped layers
  * (lattice, territory, tree edges/dials at deep zoom) is the Skia endgame —
- * TODO.html#sky-map-vector-render. */
+ * Linear TRA-54. */
 
 export type CrispRect = {
   /** Content-space origin + size of the layer (clamped to the content bounds). */

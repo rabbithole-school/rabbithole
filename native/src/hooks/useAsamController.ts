@@ -7,12 +7,18 @@ import { AppState, type AppStateStatus } from "react-native";
 import { useOfflineRecovery } from "@/hooks/useOfflineRecovery";
 import {
   applyAsamAction,
+  asamTransitionReason,
   decideAsamAction,
   decideOneTimeDisarmAction,
   isAppReentry,
   shouldUseOfflineRecoveryBypass,
+  type AsamReasonInputs,
 } from "@/lib/asam/asamDecision";
 import { api } from "@/lib/convex";
+import {
+  recordAsamTransition,
+  type AsamTransitionReason,
+} from "@/lib/deviceActivityQueue";
 import { getStableDeviceId } from "@/lib/deviceIdentity";
 import {
   enterSingleAppMode,
@@ -49,6 +55,21 @@ export type AsamController = {
   restoreAfterSystemUI: () => void;
 };
 
+/** Call iOS, then record the lock change it was asked for (TRA-331). */
+async function recordedSamCall(
+  call: () => Promise<boolean>,
+  kind: "asam_enter" | "asam_exit",
+  reason: AsamTransitionReason,
+): Promise<boolean> {
+  let ok = false;
+  try {
+    ok = await call();
+    return ok;
+  } finally {
+    recordAsamTransition(kind, reason, ok);
+  }
+}
+
 function parseCachedState(raw: string | null): CachedLockState | null {
   if (!raw) return null;
   try {
@@ -81,6 +102,8 @@ export function useAsamController(): AsamController {
   } | null>(null);
   const consumedOneTimeRef = useRef<number | null>(null);
   const acknowledgementRef = useRef<string | null>(null);
+  // The inputs of the previous reconcile pass, so an entry can say what changed.
+  const lastReasonInputsRef = useRef<AsamReasonInputs | null>(null);
 
   const remoteState = useQuery(
     api.deviceLock.stateForDevice,
@@ -196,19 +219,43 @@ export function useAsamController(): AsamController {
       try {
         do {
           rerun = false;
-          const action = decideAsamAction({
+          const reasonInputs: AsamReasonInputs = {
             isOnline: !isOffline,
             paired:
               remoteState === undefined ? "unknown" : remoteState !== null,
-            armed:
-              remoteState?.desiredState === "armed" &&
-              !releasedForSystemUI,
+            armed: remoteState?.desiredState === "armed",
+            releasedForSystemUI,
+          };
+          const action = decideAsamAction({
+            isOnline: reasonInputs.isOnline,
+            paired: reasonInputs.paired,
+            armed: reasonInputs.armed && !releasedForSystemUI,
             inSam: isSingleAppModeActive(),
           });
+          const previousReasonInputs = lastReasonInputsRef.current;
+          const exitReason = asamTransitionReason(
+            "exit",
+            reasonInputs,
+            previousReasonInputs,
+          );
           await applyAsamAction(action, {
-            enter: enterSingleAppMode,
-            exit: exitSingleAppMode,
+            enter: () =>
+              recordedSamCall(
+                enterSingleAppMode,
+                "asam_enter",
+                asamTransitionReason("enter", reasonInputs, previousReasonInputs),
+              ),
+            // releaseForSystemUI already recorded this release's exit; this
+            // pass usually races it mid-transition and would log a spurious
+            // failed second exit on every launch or slideshow.
+            exit: () =>
+              exitReason === "system_ui_release"
+                ? exitSingleAppMode()
+                : recordedSamCall(exitSingleAppMode, "asam_exit", exitReason),
           });
+          // Only a pass that settled moves the baseline, so a failed enter is
+          // not later reported as iOS dropping the lock by itself.
+          lastReasonInputsRef.current = reasonInputs;
           if (mounted) setInSam(isSingleAppModeActive());
         } while (rerun);
       } catch (nextError) {
@@ -281,7 +328,13 @@ export function useAsamController(): AsamController {
 
   const releaseForSystemUI = useCallback(() => {
     setReleasedForSystemUI(true);
-    void exitSingleAppMode();
+    // Recorded only when there was a lock to release: on an unlocked iPad this
+    // call is a no-op, and every slideshow would otherwise log a failed exit.
+    if (isSingleAppModeActive()) {
+      void recordedSamCall(exitSingleAppMode, "asam_exit", "system_ui_release");
+    } else {
+      void exitSingleAppMode();
+    }
   }, []);
 
   const restoreAfterSystemUI = useCallback(

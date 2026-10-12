@@ -220,12 +220,15 @@ export default function UnitProgressScreen() {
   );
   const progressPct =
     activityTotal > 0 ? Math.round((completedCount / activityTotal) * 100) : 0;
+  // Same reasoning as `useUnitProgress` (native/src/hooks/useUnitProgress.ts):
+  // this outline is built from `activities.listByUnitPublic`, which returns only
+  // the activities the current assignment made live, so the count can reach its
+  // own total while most of the unit is untouched. The label states the count
+  // and claims nothing about the unit.
   const progressLabel =
     activityTotal === 0
       ? "No activities yet"
-      : completedCount === activityTotal
-        ? "Unit complete"
-        : `${completedCount} of ${activityTotal} done`;
+      : `${completedCount} of ${activityTotal} done`;
   const nextLaunchable = outline
     .flatMap((section) => section.activities)
     .find(
@@ -293,6 +296,7 @@ export default function UnitProgressScreen() {
     }
     const existing = (activeSessions ?? []).find(
       (s) =>
+        !s.freePlay &&
         s.activityId &&
         String(s.activityId) === String(nextLaunchable.activity._id) &&
         (assignmentId
@@ -422,9 +426,12 @@ export default function UnitProgressScreen() {
             </Pressable>
           </View>
         ) : activityTotal > 0 && completedCount >= activityTotal ? (
-          <Text style={styles.unitCompleteText}>
-            Unit complete — every activity is done.
-          </Text>
+          // Scoped to the list, not the unit: this comparison runs over the
+          // activities the assignment made live, so it can only say that
+          // nothing shown HERE is left. The unit-level claim it used to make
+          // ("Unit complete — every activity is done.") was false for any
+          // homework assignment carrying part of a unit.
+          <Text style={styles.allDoneText}>All done here.</Text>
         ) : null}
       </View>
 
@@ -685,7 +692,7 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     color: c.white,
   },
   buttonPressed: { opacity: 0.78 },
-  unitCompleteText: {
+  allDoneText: {
     marginTop: 14,
     fontSize: 14.5,
     lineHeight: 21,

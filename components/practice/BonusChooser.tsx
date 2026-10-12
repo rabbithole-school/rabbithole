@@ -16,14 +16,16 @@
  * ABOVE this chooser (see PracticeSession.tsx / practice.tsx).
  *
  * No scores, no streak framing, no pressure copy — matches the scholar-facing
- * lexicon in review/practice/completion-messaging-plan.html and TuneupOffer /
+ * lexicon in review/practice/completion-messaging-plan.html and
  * ReprobeOffer's existing tone. Even borders on every card (visual-design.md —
  * no edge-only accent stripes); each card gets its own soft, distinct tint so
  * they read as different offers without a left-border stripe trick.
  */
 
+import { useEffect } from "react";
 import { Box, Button, Text, VStack } from "@chakra-ui/react";
 import { ArrowRight } from "@phosphor-icons/react";
+import { useOfferLedger, type OfferLedgerKind } from "@/hooks/useOfferLedger";
 
 export type BonusCardSpec = {
   /** Stable React key AND the a11y-visible identity of the card. */
@@ -31,6 +33,8 @@ export type BonusCardSpec = {
   title: string;
   body: string;
   onAccept: () => void;
+  /** Offer-ledger identity (`practiceOfferEvents.kind`). */
+  kind: OfferLedgerKind;
   acceptLabel?: string;
   disabled?: boolean;
   /** Soft background/border/text triple — each bonus kind gets its own quiet
@@ -39,7 +43,21 @@ export type BonusCardSpec = {
   tone: { bg: string; border: string; text: string };
 };
 
-export function BonusChooser({ cards }: { cards: BonusCardSpec[] }) {
+export function BonusChooser({
+  cards,
+  ledgerEnabled,
+}: {
+  cards: BonusCardSpec[];
+  /** False in teacher remote / rehearsal — no offer-ledger writes. */
+  ledgerEnabled: boolean;
+}) {
+  const ledger = useOfferLedger(ledgerEnabled);
+  const kindsShown = cards.map((c) => c.kind).join(",");
+  useEffect(() => {
+    for (const kind of kindsShown ? (kindsShown.split(",") as OfferLedgerKind[]) : []) {
+      ledger.shown(kind);
+    }
+  }, [kindsShown, ledger]);
   if (cards.length === 0) return null;
   return (
     <Box w="100%" bg="#fffdfa" border="1px solid #ded8cb" borderRadius="14px" p={4}>
@@ -56,7 +74,10 @@ export function BonusChooser({ cards }: { cards: BonusCardSpec[] }) {
         {cards.map((card, i) => (
           <Button
             key={card.key}
-            onClick={card.onAccept}
+            onClick={() => {
+              ledger.settle(card.kind, "accepted");
+              card.onAccept();
+            }}
             disabled={card.disabled}
             variant="plain"
             h="auto"

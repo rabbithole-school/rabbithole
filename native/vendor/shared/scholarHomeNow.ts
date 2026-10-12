@@ -265,10 +265,11 @@ export function matchRowsToFocusOrder<
     usedRowIndexes.add(rowIndex);
   }
 
-  return [
-    ...matches.filter((row): row is Row => row !== undefined),
-    ...rows.filter((_, rowIndex) => !usedRowIndexes.has(rowIndex)),
-  ];
+  return matches.filter((row): row is Row => row !== undefined);
+}
+
+export function focusSectionLabel(isWithinSchoolHours: boolean): string {
+  return isWithinSchoolHours ? "Right now" : "From today";
 }
 
 export function buildNowDigest<
@@ -292,13 +293,10 @@ export function buildNowDigest<
   sections: Array<NowDigestSection<Focus, Planned, Homework, Playlist>>;
   isQuiet: boolean;
 } {
-  // Showing, not blocking. `endsAt` deliberately isn't consulted: an overrun
-  // focus that nobody has wrapped is still what the class is on, and the
-  // upstream query has already dropped anything actually ended. Filtering it
-  // again here is what made the ladder call the day quiet — and render its
-  // "Open work" fallback — while the plate below still printed "Class focus"
-  // for that very row. The wall is handled separately, by dropping the
-  // entry's `soloStartableByMe` once its window closes.
+  // Showing, not blocking. The upstream institution-clock query has already
+  // removed a focus from a prior day unless it carries an explicit future
+  // `endsAt`. Within the day it was set, an overrun focus still shows while its
+  // wall drops separately through `soloStartableByMe`.
   // `setAt` stamped = a human made it live; a planned entry (startsAt set,
   // setAt null) must NOT surface as the class focus (see the pushes table
   // comment in convex/schema.ts — planned != live is the safety model).

@@ -53,6 +53,7 @@ import { RoomCueControl } from "@/components/RoomCueControl";
 import { useInstitutionDay } from "@/hooks/useInstitutionDay";
 import { useNow } from "@/hooks/useNow";
 import { scheduleWeekStartMs } from "@/shared/scheduleWeek";
+import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 
 type GridData = NonNullable<ReturnType<typeof useQuery<typeof api.masterSchedule.grid>>>;
 type GridBlock = GridData["blocks"][number];
@@ -84,8 +85,9 @@ function fmt12h(hhmm: string): string {
 
 export function HappeningNow() {
   // Active term — the "now" period. Fall back to the most recent one.
-  const currentTerm = useQuery(api.reportingPeriods.current, {});
-  const terms = useQuery(api.reportingPeriods.list, {});
+  const { scopeParam } = useActiveInstitution();
+  const currentTerm = useQuery(api.reportingPeriods.current, { scope: scopeParam });
+  const terms = useQuery(api.reportingPeriods.list, { scope: scopeParam });
   const termId = (currentTerm ?? terms?.[0])?._id ?? null;
 
   // The period clock supplies its authoritative timezone once; useInstitutionDay

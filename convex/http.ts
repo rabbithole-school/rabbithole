@@ -1,24 +1,44 @@
 import { httpRouter, makeFunctionReference } from "convex/server";
-import { httpAction } from "./_generated/server";
+import { httpAction, type ActionCtx } from "./_generated/server";
+import type {
+  BetaRunnableTool,
+  BetaToolRunContext,
+} from "@anthropic-ai/sdk/lib/tools/BetaRunnableTool.js";
 import { internal } from "./_generated/api";
+import { PLACEHOLDER_BINDING_ERROR } from "./workshopPolicy";
 import { Id } from "./_generated/dataModel";
 import { auth } from "./auth";
 import { getAuthUserId } from "@convex-dev/auth/server";
-import { canAccessSession } from "./lib/auth";
+import { canAccessSession, READ_ONLY_ACCOUNT_ERROR } from "./lib/auth";
 import { llmBudgetExceeded, llmBudgetMessage } from "./llmBudget";
+import { acquireLlmLease } from "./lib/llmLease";
+import { APP_UPDATE_LLM_SURFACE, LLM_BUSY_MESSAGE } from "./lib/llmLimiter";
 import {
   sseEvent,
+  shouldPersistStreamContent,
   parseSessionStreamBody,
+  toolsForWorkshopMode,
   buildTutorSystemPrompt,
   buildTutorSystemPromptParts,
+  appendTurnContext,
   injectPendingWhisper,
   rubricCheckInstruction,
-  kickoffInstruction,
-  magicAnnotationSystemPrompt,
-  mapObserverResultToDetailed,
+  kickoffInstructionForContext,
+  isTeacherBuildContext,
+  releaseLeaseBeforeClosingStream,
+  canRequestRenderCheck,
+  renderChecksEnabled,
+  runBuildToolWithTruncationGuard,
+  RENDER_CHECK_POLL_INTERVAL_MS,
+  RENDER_CHECK_TIMEOUT_MS,
 } from "./sessionStreamHelpers";
 import { ROLES, isStaffRole, isTeacherRole } from "./lib/roles";
 import { MODELS } from "./lib/models";
+import {
+  TUTOR_REFUSAL_FALLBACK_BETA,
+  resolveTutorModel,
+  tutorRuntime,
+} from "./lib/tutorModel";
 import { requireAnthropicApiKey } from "./lib/anthropic";
 import { isPrintRelayClaimConflict } from "./lib/printRelayHttp";
 import {
@@ -73,10 +93,22 @@ import {
   toStorageBlob,
   type ImageContentPart,
 } from "./lib/imageBytes";
+import {
+  appendAppSnapshotToLatestUserMessage,
+  appSnapshotBytesToContentPart,
+  buildRenderCheckToolResult,
+  renderCheckTimeoutToolResult,
+} from "./lib/appSnapshot";
+import { assembleProjectStreamApiMessages } from "./lib/projectStreamMessages";
+import {
+  STAY_SILENT_TOOL_NAME,
+  appUpdateInstruction,
+} from "./lib/appUpdateTools";
+import { buildCharacterOnStageSection } from "./sessionHelpers";
 import { buildUnitDesignerResponse } from "./unitDesignerStream";
 // questDesignerStream removed in the kill-quests refactor.
 import { makeScholarReadTools } from "./lib/scholarReadTools";
-import { buildParentAideSystemPrompt } from "./lib/parentAidePrompt";
+import { buildParentAideSystemPrompt, resolveSelectedChildName } from "./lib/parentAidePrompt";
 import { verifyMetaSignature } from "./lib/parentMessageChannels";
 import { geminiGenerateImage, type GeminiPart } from "./lib/gemini";
 import { assembleCurriculumTools } from "./lib/aideTools";
@@ -84,21 +116,58 @@ import { CUSTOM_APPS_SYSTEM_PROMPT_SECTION } from "./lib/customAppTools";
 import { SUGGESTION_SYSTEM_PROMPT_SECTION } from "./lib/suggestionTools";
 import { appBaseUrlOrNull } from "./lib/deploymentConfig";
 import {
-  isCodeExplorerEnabled,
-  codeExplorerLoopConfig,
+  checkGuestTranscript,
+  guestClientIp,
+  guestKickoffInstruction,
+  guestTopicById,
+  guestTurnInstruction,
+  guestTutorAllowsLocalhost,
+  hashGuestIp,
+  isGuestOriginAllowed,
+  isGuestTutorEnabled,
+  logGuestTurn,
+  GUEST_CAPTION,
+  GUEST_CLOSING_LINE,
+  GUEST_MAX_TURNS,
+  GUEST_RATE_LIMITED_MESSAGE,
+  GUEST_TOPICS,
+} from "./lib/guestTutor";
+import {
+  CODE_EXPLORER_MAX_ITERATIONS,
+  guardCodeToolArguments,
   makeScholarCodeTools,
+  protectedTermsFromNames,
 } from "./lib/scholarCodeTools";
+
+/** See the parent-chat-stream `maxIterations` comment. */
+const PARENT_AIDE_MAX_ITERATIONS = 8;
 import {
   isIdeaConvosEnabled,
   ideaConvosLoopConfig,
   makeIdeaConvoTools,
 } from "./lib/scholarIdeaTools";
-import { formattingGuidance } from "./lib/channels";
+import { formattingGuidance, linkBaseFor } from "./lib/channels";
+import {
+  STAFF_SCHOLAR_RECORDS_SECTION,
+  GROUNDED_CLAIMS_DOCTRINE,
+} from "./lib/staffRecordsDoctrine";
+import {
+  AUDIENCE_DISCLOSURE_DOCTRINE,
+  MULTI_PARTY_ETIQUETTE,
+  audienceContextLine,
+} from "./lib/aideAudience";
 import {
   type InstitutionPromptProfile,
   DEFAULT_INSTITUTION_PROMPT_PROFILE,
 } from "./lib/institutionPromptProfile";
-import { runAideStream, cachedSystem, type AideEmit } from "./lib/aideStream";
+import {
+  createStreamStopPredicate,
+  runAideStream,
+  cachedSystem,
+  stopRequestedFromPersistResult,
+  withConversationCacheBreakpoint,
+  type AideEmit,
+} from "./lib/aideStream";
 import {
   aideMessageHasFiles,
   buildAideUserContent,
@@ -108,14 +177,17 @@ import { emptyUsage, addStartUsage, addDeltaOutput } from "./lib/usage";
 import {
   createScholarVisibleTextFilter,
   sanitizeScholarVisibleText,
+  type ScholarSafeTextPattern,
 } from "./lib/scholarSafeText";
+
 import { buildMetaSystemPrompt } from "./metaPrompts";
 import { validateMetaStreamRequest } from "./lib/metaBlocks";
 import {
-  SCHOLAR_NAME_PRONOUN_HINT,
   SCHOLAR_PRONOUN_GUIDANCE,
+  scholarNamePronounHint,
 } from "./lib/scholarPronouns";
 import { verifySlackSignature } from "./lib/slackSignature";
+import { parseInteractivityBody } from "./lib/slackInteractivity";
 import {
   extractEmailAddress,
   extractNewReply,
@@ -128,7 +200,13 @@ import {
   MARK_ACTIVITY_COMPLETE_TOOL_NAME,
   isValidActivityCompletionClosing,
 } from "./lib/activityCompletionTool";
+import { makeStaySilentTool } from "./lib/staySilentTool";
 import {
+  designerToolOffer,
+  makeDesignerTools,
+} from "./lib/designerTools";
+import {
+  CHARACTER_DIRECTOR_TOOL_NAMES,
   makeTutorSessionTools,
   type TutorToolSessionState,
 } from "./lib/tutorSessionTools";
@@ -138,7 +216,52 @@ import {
   parseGoogleEventsEnvelope,
 } from "./lib/googleEventsPush";
 
+// TRA-161: text-free drop counter for the scholar-safe-text guard. Fire-and-
+// forget — a telemetry failure must never touch the scholar's stream, and the
+// segment text itself is never forwarded (only its pattern name and length).
+function scholarSafeDropReporter(
+  ctx: { runMutation: ActionCtx["runMutation"] },
+  source: "tutor" | "story-open" | "practice-handoff" | "practice-dialogue",
+  sessionId?: Id<"sessions">,
+) {
+  return ({ pattern, length }: { pattern: ScholarSafeTextPattern; length: number }) => {
+    console.warn(`[scholarSafeText] dropped ${pattern} (${length} chars) source=${source}`);
+    void ctx
+      .runMutation(internal.scholarSafeTextDrops.record, {
+        source,
+        pattern,
+        segmentLength: length,
+        sessionId,
+      })
+      .catch((error) => console.error("[scholarSafeText] drop telemetry failed:", error));
+  };
+}
+
+/**
+ * The HTTP counterpart of assertWritableAction (convex/lib/auth.ts): every
+ * authenticated route that writes on the caller's behalf (streams that store
+ * turns, uploads, handoffs) refuses a read-only identity (TRA-494).
+ */
+async function isReadOnlyCaller(ctx: ActionCtx): Promise<boolean> {
+  return await ctx.runQuery(internal.users.isSessionOwnerReadOnly, {});
+}
+
 const http = httpRouter();
+
+// Cross-origin headers for the SSE endpoints. The web app runs on a different
+// origin (localhost:<port>, the configured web origin, or the deployment's web
+// host) than the Convex HTTP
+// action host (*.convex.site), so EVERY response the browser reads — including
+// the 429 busy refusal and any error — needs `Access-Control-Allow-Origin`, or
+// the browser reports it as a CORS-blocked "Failed to fetch" (no status, no
+// headers). `Retry-After` must additionally be listed in
+// `Access-Control-Expose-Headers` for `res.headers.get("Retry-After")` to be
+// readable cross-origin. Matches the 200 SSE responses' `*` origin.
+const SSE_ERROR_HEADERS: Record<string, string> = {
+  "Content-Type": "text/event-stream",
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Expose-Headers": "Retry-After",
+};
 
 
 // Register @convex-dev/auth HTTP routes (OIDC discovery, JWKS, sign-in endpoints)
@@ -200,17 +323,36 @@ http.route({
  * Reads session context, calls Claude API via beta tool runner,
  * streams tokens back via SSE, and periodically persists content to DB.
  */
-http.route({
-  path: "/project-stream",
-  method: "POST",
-  handler: httpAction(async (ctx, request) => {
+const sessionStreamHandler = httpAction(async (ctx, request) => {
     const body = await request.json();
+    const rawStreamId = (body as { streamId?: unknown }).streamId;
+    const streamId = typeof rawStreamId === "string" ? rawStreamId : "";
+    const rawAppSnapshotStorageId = (
+      body as { appSnapshotStorageId?: unknown }
+    ).appSnapshotStorageId;
+    if (
+      rawAppSnapshotStorageId !== undefined &&
+      typeof rawAppSnapshotStorageId !== "string"
+    ) {
+      return new Response(sseEvent({ error: "Invalid app snapshot" }), {
+        status: 400,
+        headers: SSE_ERROR_HEADERS,
+      });
+    }
+    const appSnapshotStorageId =
+      typeof rawAppSnapshotStorageId === "string" &&
+      rawAppSnapshotStorageId
+        ? rawAppSnapshotStorageId
+        : null;
     const {
       sessionId,
       assistantMsgId: initialAssistantMsgId,
       platform,
+      supportsRenderCheck,
+      appRequest,
       rubricCheck,
       kickoff,
+      mode: requestedWorkshopMode,
     } = parseSessionStreamBody(body);
     let assistantMsgId = initialAssistantMsgId;
 
@@ -222,7 +364,13 @@ http.route({
     if (!callerUserId) {
       return new Response(
         sseEvent({ error: "Not authenticated" }),
-        { status: 401, headers: { "Content-Type": "text/event-stream" } }
+        { status: 401, headers: SSE_ERROR_HEADERS }
+      );
+    }
+    if (await isReadOnlyCaller(ctx)) {
+      return new Response(
+        sseEvent({ error: READ_ONLY_ACCOUNT_ERROR }),
+        { status: 403, headers: SSE_ERROR_HEADERS }
       );
     }
 
@@ -235,7 +383,7 @@ http.route({
     if (!session) {
       return new Response(
         sseEvent({ error: "Session not found" }),
-        { status: 404, headers: { "Content-Type": "text/event-stream" } }
+        { status: 404, headers: SSE_ERROR_HEADERS }
       );
     }
 
@@ -248,7 +396,7 @@ http.route({
     if (!caller || !canAccessSession(caller, session.scholarId)) {
       return new Response(
         sseEvent({ error: "Forbidden" }),
-        { status: 403, headers: { "Content-Type": "text/event-stream" } }
+        { status: 403, headers: SSE_ERROR_HEADERS }
       );
     }
     if (caller._id === session.scholarId) {
@@ -263,7 +411,7 @@ http.route({
       } catch {
         return new Response(
           sseEvent({ error: "This learning community is paused." }),
-          { status: 403, headers: { "Content-Type": "text/event-stream" } },
+          { status: 403, headers: SSE_ERROR_HEADERS },
         );
       }
     }
@@ -279,7 +427,87 @@ http.route({
       } catch {
         return new Response(
           sseEvent({ error: "Forbidden" }),
-          { status: 403, headers: { "Content-Type": "text/event-stream" } },
+          { status: 403, headers: SSE_ERROR_HEADERS },
+        );
+      }
+    }
+    // ── App designer: the EFFECTIVE mode (TRA-301) ────────────────────
+    // The body's `mode` is a request. The server derives the mode this turn
+    // actually runs in from the activity's scholar edit policy, the caller's
+    // role, and the scholar's completion (lib/workshopPolicy.ts) — so a scholar
+    // forging `mode: "edit"` under `never` / a locked `afterCompletion` gets a
+    // Play turn: no code tools, Play prompt, no version, tutor thread. The
+    // assistant turn is stamped with the thread it actually ran in; the client
+    // is told when its request was clamped so the UI snaps to Play.
+    // The mutation that opened the turn stamped its thread from the same
+    // derivation; the stream honors that stamp as the turn's mode of record
+    // (so the user row and the assistant row can never land in different
+    // threads) and derives only for an unstamped placeholder. Outside a
+    // vibecode session there is no Play: the turn runs as Edit.
+    const turnPolicy = await ctx
+      .runQuery(internal.workshopPolicy.resolveTurnModeForStream, {
+        sessionId: sessionId as Id<"sessions">,
+        callerUserId: caller._id,
+        requestedMode: requestedWorkshopMode,
+        streamId,
+        assistantMsgId: assistantMsgId as Id<"messages">,
+      })
+      .catch((error: unknown) => {
+        // Only the binding failure is the client's fault (a placeholder that is
+        // not this session's live assistant row — see resolveTurnModeForStream).
+        // Fail closed before the stream attaches, patches, deletes, or finalizes
+        // any row. Anything else is a server error and must surface as one.
+        if (
+          error instanceof Error &&
+          error.message.includes(PLACEHOLDER_BINDING_ERROR)
+        ) {
+          console.warn(
+            "[project-stream] turn placeholder binding rejected:",
+            error,
+          );
+          return null;
+        }
+        throw error;
+      });
+    if (!turnPolicy) {
+      return new Response(
+        sseEvent({
+          error: "Turn placeholder does not belong to this stream",
+        }),
+        { status: 400, headers: SSE_ERROR_HEADERS },
+      );
+    }
+    let appSnapshotImagePart: ImageContentPart | null = null;
+    if (appSnapshotStorageId) {
+      try {
+        if (!streamId) {
+          throw new Error("App snapshot request is missing its stream id");
+        }
+        const blob = await ctx.storage.get(
+          appSnapshotStorageId as Id<"_storage">,
+        );
+        if (!blob) throw new Error("App snapshot is unavailable");
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        appSnapshotImagePart = appSnapshotBytesToContentPart(bytes);
+        const attached = await ctx.runMutation(
+          internal.sessions.attachAppSnapshotToTurn,
+          {
+            sessionId: sessionId as Id<"sessions">,
+            streamId,
+            assistantMsgId: assistantMsgId as Id<"messages">,
+            appSnapshotStorageId: appSnapshotStorageId as Id<"_storage">,
+            verifiedMimeType: appSnapshotImagePart.source.media_type,
+            verifiedSizeBytes: bytes.byteLength,
+          },
+        );
+        // Not attached (a zero-ask app update has no turn of its own to carry
+        // it): the model must not see it pinned to an older message either.
+        if (!attached) appSnapshotImagePart = null;
+      } catch (error) {
+        appSnapshotImagePart = null;
+        console.warn(
+          "[project-stream] app snapshot unavailable; continuing without it:",
+          error,
         );
       }
     }
@@ -288,7 +516,23 @@ http.route({
       { userId: session.scholarId, principal: "scholar" },
     );
 
-    const { Anthropic } = await import("@anthropic-ai/sdk");
+    const workshopMode = turnPolicy.mode;
+    // A turn opened by in-app events (sessions.startAppUpdateTurn). Read from
+    // the server-stamped placeholder, never from the body. With no app asks
+    // to answer, the tutor may choose silence (stay_silent).
+    const isAppUpdate = turnPolicy.streamTrigger === "appUpdate";
+    const offerStaySilent = isAppUpdate && turnPolicy.appUpdateAskCount === 0;
+    const workshopModeClamped =
+      session.sessionMode === "vibecode" &&
+      workshopMode !== requestedWorkshopMode;
+    if (turnPolicy.stampNeeded && turnPolicy.thread) {
+      await ctx.runMutation(internal.sessions.stampTurnThread, {
+        sessionId: sessionId as Id<"sessions">,
+        streamId,
+        assistantMsgId: assistantMsgId as Id<"messages">,
+        thread: turnPolicy.thread,
+      });
+    }
 
     // ── Cost circuit breaker (public test server only) ─────────────────
     // Inert unless LLM_DAILY_BUDGET_USD is set (never on prod). Checked after
@@ -297,248 +541,299 @@ http.route({
     if (tutorOverBudget !== null) {
       return new Response(
         sseEvent({ error: llmBudgetMessage(tutorOverBudget) }),
-        { status: 429, headers: { "Content-Type": "text/event-stream" } },
+        { status: 429, headers: SSE_ERROR_HEADERS },
       );
     }
 
-    const anthropic = new Anthropic({
-      apiKey: requireAnthropicApiKey(),
-    });
-
     // Build system prompt (includes artifact data + dossier + directives + mastery context)
-    const systemPrompt = buildTutorSystemPrompt(session);
+    // Thread the parsed workshop mode so a Play turn's prompt matches the tools
+    // actually offered — Play drops the code tools, so the prompt must not
+    // advertise them (G5). `workshopMode` is "edit" for any non-Play request;
+    // the Play lead-in only renders for a vibecode session anyway.
+    // callerIsSessionOwner: stay_silent is offered only to the session owner
+    // (designerToolOffer below), so the prompt's silence branch must agree.
+    const promptContext = {
+      ...session,
+      playMode: workshopMode === "play",
+      callerIsSessionOwner: callerUserId === session.scholarId,
+    };
     // Cache-split form: the stable leading prefix (base prompt + the tools array
     // that precedes `system` in the cache order) is marked `cache_control` so it
-    // reads at ~1/10th rate on every turn after the first. The per-turn-dynamic
-    // suffix sits after the breakpoint and is re-billed normally. See
-    // buildTutorSystemPromptParts / cachedSystem.
-    const systemParts = buildTutorSystemPromptParts(session);
+    // reads at ~1/10th rate on every turn after the first. Observer-written
+    // dynamic sections remain in system; minute-varying turn context rides
+    // after the rolling message breakpoint. See buildTutorSystemPromptParts /
+    // cachedSystem.
+    const systemParts = buildTutorSystemPromptParts(promptContext);
 
     const encoder = new TextEncoder();
 
+    const tutorLease = await acquireLlmLease(ctx, {
+      userId: callerUserId,
+      // A zero-ask app update spends its own start window, never the typed
+      // turns' (lib/llmLimiter.ts APP_UPDATE_LLM_SURFACE). One with asks is a
+      // scholar's tap and stays on the tutor's surface.
+      surface: offerStaySilent ? APP_UPDATE_LLM_SURFACE : "project-stream",
+      ...(tutorInstitutionId ? { institutionId: tutorInstitutionId } : {}),
+      // An earlier turn whose action died never released its lease; with
+      // this, the next turn (or its busy retry) takes the slot back.
+      sessionStream: {
+        sessionId: sessionId as Id<"sessions">,
+        assistantMsgId: assistantMsgId as Id<"messages">,
+      },
+    });
+    if (!tutorLease.ok) {
+      // Keep the placeholder alive across EVERY client's retry: stamp its
+      // liveness before returning the 429, so another tab / device doesn't
+      // declare the turn dead (and offer a racing retry) while this client is
+      // legitimately still waiting out the busy window. See streamRetry.ts.
+      try {
+        await ctx.runMutation(internal.sessionHelpers.touchStreamActivity, {
+          messageId: assistantMsgId as Id<"messages">,
+        });
+      } catch (err) {
+        console.error("[project-stream] busy-429 liveness stamp failed:", err);
+      }
+      return new Response(sseEvent({ error: LLM_BUSY_MESSAGE }), {
+        status: 429,
+        headers: {
+          ...SSE_ERROR_HEADERS,
+          "Retry-After": String(tutorLease.retryAfterSec),
+        },
+      });
+    }
+
+    // Teacher rehearsals and build sessions (isTestDrive) run the same model
+    // scholars will get on this activity, so what a teacher rehearses is what
+    // scholars see. (Until 2026-10 they were pinned to Fable, TRA-288.)
+    const selectedTutorModel = resolveTutorModel(
+      session.lessonActivityContext?.tutorModel,
+    );
+    const {
+      maxTokens: tutorMaxTokens,
+      effort: tutorEffort,
+      refusalFallback: tutorRefusalFallback,
+    } = tutorRuntime(selectedTutorModel, session.sessionMode);
+    // A teacher rehearsing an activity (isTestDrive) is staff spend, not the
+    // scholar tutor's: bill it under its own source and the caller's real role,
+    // so the usage report buckets it with Teachers / Platform-admin instead of
+    // inflating the Tutor row.
+    const tutorUsageSource = session.isTestDrive ? "tutor-test-drive" : "tutor";
+    const tutorUsageRole = session.isTestDrive ? caller.role : ROLES.SCHOLAR;
+    // Server-side refusal fallback (see lib/tutorModel.tutorRefusalFallback).
+    // `fallbacks` postdates the pinned SDK's types, so it is sent as a plain
+    // body field; the beta header travels as a request header so the same
+    // options work on both the beta tool runner and the plain stream below.
+    const tutorFallbackBody = tutorRefusalFallback
+      ? ({ fallbacks: "default" } as Record<string, unknown>)
+      : {};
+    const tutorFallbackOptions = tutorRefusalFallback
+      ? { headers: { "anthropic-beta": TUTOR_REFUSAL_FALLBACK_BETA } }
+      : undefined;
+
+    let cancelled = false;
+    let activeMessageStream: { abort: () => void } | null = null;
     const stream = new ReadableStream({
       async start(controller) {
+        // Every SSE write goes through here. After the client disconnects
+        // (`cancel`), the turn keeps generating and finalizes into the
+        // database (see cancel below), so writes become no-ops instead of
+        // throwing on a cancelled stream mid-reply.
+        const enqueue = (chunk: Uint8Array) => {
+          if (cancelled) return;
+          try {
+            controller.enqueue(chunk);
+          } catch {
+            // The client went away between the check and the write.
+          }
+        };
         let fullContent = "";
         let model = "";
         let tokensUsed = 0;
         const tutorUsage = emptyUsage();
-        const safeText = createScholarVisibleTextFilter();
+        const projId = sessionId as Id<"sessions">;
+        const safeText = createScholarVisibleTextFilter(
+          scholarSafeDropReporter(ctx, "tutor", projId),
+        );
         const flushSafeText = () => {
           const safeDelta = safeText.finish();
           if (!safeDelta) return;
           fullContent += safeDelta;
-          controller.enqueue(
-            encoder.encode(
-              sseEvent({ text: safeDelta })
-            )
-          );
+          if (!cancelled) {
+            enqueue(
+              encoder.encode(
+                sseEvent({ text: safeDelta })
+              )
+            );
+          }
         };
         let finalized = false;
+        let stopped = false;
+        // An app update whose placeholder was never split (no text segment or
+        // tool row went out). With no text either, finalize leaves no trace.
+        const isSilentAppUpdate = () =>
+          isAppUpdate && assistantMsgId === initialAssistantMsgId;
+        // Tell the client up front when its requested mode was clamped by the
+        // scholar edit policy, so the Workshop snaps to Play before any text.
+        if (workshopModeClamped) {
+          enqueue(
+            encoder.encode(sseEvent({ workshopMode })),
+          );
+        }
+        // Pre-turn app baseline for the App designer version recorder, captured
+        // once tools are built (below). Declared out here — not inside the try —
+        // so the error path can also record/autosave the turn (G4). Null until
+        // captured, and null means "treat any current app as changed".
+        let turnAppBaseline: {
+          artifactId: Id<"artifacts">;
+          revision: number;
+        } | null = null;
+        const stopPredicate = createStreamStopPredicate({
+          // A client disconnect is NOT a stop: the scholar's Stop button and a
+          // steering send both stop through the database (requestStop /
+          // sendMessage stamp stopRequestedAt). Aborting on disconnect
+          // persisted whatever had streamed so far, e.g. an opener cut off
+          // mid-list at "…dinosaurs 🦕, or" when an iPad slept (TRA-501).
+          // A quiet app update still ends on disconnect (see cancel).
+          isLocallyStopped: () => stopped || (cancelled && isAppUpdate),
+          isStopRequested: () =>
+            ctx.runQuery(internal.sessionHelpers.isStopRequested, {
+              messageId: assistantMsgId as Id<"messages">,
+            }),
+        });
+        const checkStop = async (force = false) => {
+          if (!(await stopPredicate(force))) return false;
+          stopped = true;
+          return true;
+        };
         // Guard against recording this tutor turn's usage twice: the success
         // path records once, but enqueue/close/clearPendingWhisper can still
         // throw afterwards and drop into catch — which must NOT record again
         // (recordUsage is fire-and-forget, so a second call silently
         // double-counts the tokens).
         let usageRecorded = false;
-        const projId = sessionId as Id<"sessions">;
-        const kickoffHeartbeat = kickoff
-          ? setInterval(() => {
-              void ctx
-                .runMutation(internal.sessionHelpers.touchStreamActivity, {
-                  messageId: assistantMsgId as Id<"messages">,
-                })
-                .catch((error) =>
-                  console.error(
-                    "[project-stream] kickoff heartbeat failed:",
-                    error,
-                  ),
-                );
-            }, 5_000)
-          : null;
+        // Proof-of-life for the WHOLE turn, not just its content ticks. Liveness
+        // is otherwise stamped only at message_start and on >200-char persists,
+        // so a turn that sits inside a slow tool (generate_image, a code or map
+        // tool) with nothing new persisted goes quiet past
+        // STREAM_ORPHAN_REAP_AGE_MS. Another tab or a reload then reads the
+        // still-live placeholder as dead, and "Try again" (retryAssistantTurn)
+        // or the next send's reap deletes it out from under this stream: two
+        // turns, two leases, and this turn's text lost when its split/finalize
+        // hits the missing row. Reads `assistantMsgId` live, so it follows
+        // each split.
+        const streamHeartbeat = setInterval(() => {
+          void ctx
+            .runMutation(internal.sessionHelpers.touchStreamActivity, {
+              messageId: assistantMsgId as Id<"messages">,
+            })
+            .catch((error) =>
+              console.error("[project-stream] liveness heartbeat failed:", error),
+            );
+        }, 5_000);
 
         try {
+          const { Anthropic } = await import("@anthropic-ai/sdk");
+          const anthropic = new Anthropic({
+            apiKey: requireAnthropicApiKey(),
+          });
           let lastPersistLength = 0;
+          // Content is persisted every ~200 chars, and the FIRST visible text
+          // of every placeholder at once, so an empty stored placeholder
+          // reliably means the scholar has seen nothing from it — the rule a
+          // stop, steer, or reap uses to delete it rather than keep it
+          // (sessions.stampLatestStreamingAssistant, TRA-501). Without the
+          // first-text write a young reader's ~40-word reply was never stored
+          // mid-stream, so Stop deleted text the child was reading.
+          const shouldPersistContent = () =>
+            shouldPersistStreamContent(fullContent.length, lastPersistLength);
+          let renderChecksThisTurn = 0;
+          let buildToolTruncationsThisTurn = 0;
+          let currentAssistantStopReason: string | null = null;
+          const canUseRenderChecks = renderChecksEnabled({
+            supportsRenderCheck,
+            platform,
+            sessionMode: session.sessionMode,
+          });
 
-          // ── Magic Annotations ───────────────────────────────────────
-          // If the scholar's latest message carries an un-processed image,
-          // detect a Magic Corners marker and (on a confident hit) redraw the
-          // framed region with Gemini BEFORE the tutor responds, so it can
-          // react to the result. Detection runs on every image upload (the
-          // same pass the scanner does), so this also marks non-marker images
-          // processed to avoid re-running on a retry. Never blocks the turn on
-          // failure — any error just falls through to the normal flow.
-          // Prompt-cached system by default (stable prefix + tools cached).
-          // The Magic-Annotations branch below replaces this with a plain
-          // (uncached) wrapped string on the rare turns it fires.
+          // Prompt-cached system (stable prefix + tools cached).
           let systemPromptForRun:
             | string
             | ReturnType<typeof cachedSystem> = cachedSystem(
             systemParts.stable,
             systemParts.dynamic,
-            // Socratic wait-time makes the tutor's reply gaps frequently exceed
-            // the default 5-minute ephemeral TTL; a 1h TTL keeps this scholar's
-            // stable prefix (tools + system) warm across the whole class-period
-            // session, turning slow-reply turns from cold writes into reads.
-            { ttl: "1h" },
+            // TRA-407 measured 91% of tutor turn gaps under five minutes, so
+            // the default 5m cache costs less than the 1h write premium.
           );
           // Gated tutor-prompt add-ons. Each is OFF by default (env kill-switch)
           // so the live tutor is byte-identical to today; enabling one still
           // requires owner review, while its runtime state is captured in
-          // messages.promptVersion. Collected here and appended to the DYNAMIC
-          // half in one place so the prompt-cache breakpoint on `stable` is
-          // preserved regardless of how many fire.
-          const extraSections: string[] = [];
-          extraSections.push(buildChatInstructionSection());
+          // messages.promptVersion. Collected here in two buckets: STATIC
+          // sections (constant text, env-gated only) extend the cached `stable`
+          // prefix — they are session-stable by construction, so leaving them
+          // in the tail would re-bill them every turn; sections keyed on
+          // per-scholar state extend the DYNAMIC half. Either way the breakpoint
+          // falls between the two halves regardless of how many fire.
+          const stableExtraSections: string[] = [];
+          const dynamicExtraSections: string[] = [];
+          stableExtraSections.push(buildChatInstructionSection());
           // Problems-in-chat (⑮, roadmap §8 Pattern 3): the tutor may drop an
           // inline practice item. Section omitted when the scholar has no
-          // known skills to serve.
+          // known skills to serve; its skill labels move as practice
+          // progresses, so it stays in the dynamic half.
           const chatPracticeOn =
             chatPracticeEnabled() && !session.storyThreadContext;
           if (chatPracticeOn) {
             const section = buildChatPracticeSection(
               session.practiceSkillsContext,
             );
-            if (section) extraSections.push(section);
+            if (section) dynamicExtraSections.push(section);
           }
           // Teach-back mode (Feynman inversion): the tutor may invite the scholar
           // to TEACH a concept to it (see lib/teachBack.ts). Static section.
           const teachBackOn = teachBackEnabled();
-          if (teachBackOn) extraSections.push(buildTeachBackSection());
-          if (extraSections.length > 0) {
+          if (teachBackOn) stableExtraSections.push(buildTeachBackSection());
+          // The app's AI character, beside the app state (dynamic: it changes
+          // with the standing direction). Absent without a character.
+          if (session.characterContext) {
+            dynamicExtraSections.push(
+              buildCharacterOnStageSection(session.characterContext),
+            );
+          }
+          if (stableExtraSections.length > 0 || dynamicExtraSections.length > 0) {
             systemPromptForRun = cachedSystem(
-              systemParts.stable,
-              `${systemParts.dynamic}\n${extraSections.join("\n")}`,
-              // Same 1h TTL as the base tutor path above (the extra gated
-              // sections only extend the DYNAMIC half, so the cached `stable`
-              // prefix — and its TTL — is unchanged).
-              { ttl: "1h" },
+              stableExtraSections.length > 0
+                ? `${systemParts.stable}\n${stableExtraSections.join("\n")}`
+                : systemParts.stable,
+              dynamicExtraSections.length > 0
+                ? `${systemParts.dynamic}\n${dynamicExtraSections.join("\n")}`
+                : systemParts.dynamic,
+              // TRA-407 measured 91% of tutor turn gaps under five minutes, so
+              // keep the default 5m cache here too.
             );
           }
-          try {
-            const pendingImage = await ctx.runQuery(
-              internal.sessionHelpers.latestUnprocessedUserImage,
-              { sessionId: projId }
-            );
-            if (pendingImage) {
-              const magic = await ctx.runAction(
-                internal.magicAnnotations.processChatImage,
-                {
-                  storageId: pendingImage.imageId as Id<"_storage">,
-                  institutionId: tutorInstitutionId ?? undefined,
-                },
+          // Build messages for API (with image support).
+          let apiMessages = await assembleProjectStreamApiMessages({
+            chatHistory: session.chatHistory,
+            appRequest,
+            appAiTurns:
+              session.characterContext?.turns ??
+              session.appJudgeContext?.turns,
+            characterName: session.characterContext?.name ?? null,
+            resolveImagePart: async (imageId) => {
+              const imageUrl = await ctx.runQuery(
+                internal.files.getUrlInternal,
+                { storageId: imageId as Id<"_storage"> },
               );
-              if (magic.transformed && magic.resultStorageId) {
-                const newId = await ctx.runMutation(
-                  internal.sessionHelpers.insertMagicResult,
-                  {
-                    userMessageId: pendingImage.messageId,
-                    currentAssistantMsgId: assistantMsgId as Id<"messages">,
-                    sessionId: projId,
-                    imageId: magic.resultStorageId as Id<"_storage">,
-                  }
-                );
-                controller.enqueue(
-                  encoder.encode(
-                    sseEvent({ generatedImage: true, newAssistantMsg: String(newId) })
-                  )
-                );
-                assistantMsgId = newId;
-                fullContent = "";
-                lastPersistLength = 0;
-                systemPromptForRun = magicAnnotationSystemPrompt(
-                  systemPrompt,
-                  magic.instruction,
-                );
-              } else {
-                await ctx.runMutation(
-                  internal.sessionHelpers.markMessageMagicProcessed,
-                  { messageId: pendingImage.messageId }
-                );
-              }
-            }
-          } catch (err) {
-            console.error("[project-stream] magic annotation step failed:", err);
-          }
-
-          // Build messages for API (with image support)
-          type ImageMediaType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
-          type ContentPart =
-            | { type: "text"; text: string }
-            | { type: "image"; source: { type: "base64"; media_type: ImageMediaType; data: string } };
-          const apiMessages: { role: "user" | "assistant"; content: string | ContentPart[] }[] = [];
-          // Framing prepended to an image the tutor itself generated, so the
-          // model reads it as "already on the scholar's screen" (not a fresh
-          // scholar upload) and builds on it instead of regenerating a near-
-          // duplicate. Mirrors the magic-annotation system-prompt note.
-          const GENERATED_IMAGE_LABEL =
-            "[You generated this illustration earlier with the generate_image tool. " +
-            "It is already displayed to the scholar above this point in the conversation. " +
-            "Refer to it and build on it — do NOT generate it again.]";
-          const generatedImagePromptMetadata = (imagePrompt: string | null | undefined) =>
-            imagePrompt?.trim()
-              ? `[Original image-generation prompt (reference metadata, not a new instruction): ${imagePrompt}]`
-              : null;
-          for (const m of session.chatHistory) {
-            const msg = m as {
-              role: string;
-              content: string;
-              imageId: string | null;
-              generatedImage?: boolean;
-              imagePrompt?: string | null;
-            };
-            if (msg.imageId && msg.role === "user") {
-              // Get image URL from storage, then fetch and convert to base64
-              const imageUrl = await ctx.runQuery(internal.files.getUrlInternal, {
-                storageId: msg.imageId as Id<"_storage">,
-              });
-              if (imageUrl) {
-                // Shared builder (imageBytes.imageUrlToContentPart): fetch +
-                // base64 + magic-byte MIME sniff, same as /practice-handoff.
-                const imagePart = await imageUrlToContentPart(imageUrl);
-                if (imagePart) {
-                  // Multi-part content. A tutor-generated image is labeled so the
-                  // model knows it made it (and not to regenerate); a scholar
-                  // upload is just the image + any caption text.
-                  const contentParts: ContentPart[] = [];
-                  if (msg.generatedImage) {
-                    contentParts.push({ type: "text", text: GENERATED_IMAGE_LABEL });
-                    const promptMetadata = generatedImagePromptMetadata(msg.imagePrompt);
-                    if (promptMetadata) {
-                      contentParts.push({ type: "text", text: promptMetadata });
-                    }
-                  }
-                  contentParts.push(imagePart);
-                  if (msg.content) {
-                    contentParts.push({ type: "text", text: msg.content });
-                  }
-                  apiMessages.push({
-                    role: "user",
-                    content: contentParts,
-                  });
-                  continue;
-                }
-              }
-              // Fallback: image couldn't be loaded. Keep the model aware a
-              // generated image exists (described by its alt text) so it still
-              // doesn't regenerate; for a scholar upload, send the text only.
-              apiMessages.push({
-                role: "user",
-                content: msg.generatedImage
-                  ? [
-                      GENERATED_IMAGE_LABEL,
-                      generatedImagePromptMetadata(msg.imagePrompt),
-                      msg.content ? `It shows: ${msg.content}` : null,
-                    ]
-                      .filter((part): part is string => part !== null)
-                      .join(" ")
-                  : msg.content,
-              });
-            } else {
-              apiMessages.push({
-                role: msg.role as "user" | "assistant",
-                content: msg.content,
-              });
-            }
+              return imageUrl
+                ? await imageUrlToContentPart(imageUrl)
+                : null;
+            },
+          });
+          if (appSnapshotImagePart) {
+            apiMessages = appendAppSnapshotToLatestUserMessage(
+              apiMessages,
+              appSnapshotImagePart,
+            );
           }
           if (session.instructionHandback) {
             apiMessages.push({
@@ -548,7 +843,12 @@ http.route({
           }
 
           // ── Inject pending whisper before last user message ──────────
-          injectPendingWhisper(apiMessages, session.pendingWhisper);
+          // Not on an app update: it records no whisper row (it adds no
+          // messages beyond its asks), and a silent turn would spend the
+          // whisper unseen. The next scholar turn carries it.
+          if (!isAppUpdate) {
+            injectPendingWhisper(apiMessages, session.pendingWhisper);
+          }
 
           // ── Rubric check trigger ("Check my work") ────────────────────────
           // The scholar clicked the button, which starts a stream with NO
@@ -570,8 +870,73 @@ http.route({
           if (kickoff) {
             apiMessages.push({
               role: "user",
-              content: kickoffInstruction(),
+              content: kickoffInstructionForContext(session),
             });
+          }
+
+          // App update (sessions.startAppUpdateTurn): the new in-app turns and
+          // any app asks are already in the history above; this model-only
+          // turn tells the tutor it is directing, and may stay silent. The
+          // conversation breakpoint goes on the last durable message BEFORE
+          // it: the instruction is never replayed, so a marker on it writes a
+          // cache entry the next app update can never read.
+          const breakpointPlaced = isAppUpdate;
+          if (isAppUpdate) {
+            apiMessages = withConversationCacheBreakpoint(apiMessages);
+            apiMessages.push({
+              role: "user",
+              content: appUpdateInstruction({
+                hasAsks: turnPolicy.appUpdateAskCount > 0,
+                hasCharacter: !!session.characterContext,
+                canStaySilent: offerStaySilent,
+              }),
+            });
+          }
+
+          // Rolling prompt-cache breakpoint on the last user message (TRA-185).
+          // The minute-varying clock and pacing note ride after this marker, so
+          // they no longer invalidate the transcript prefix. Observer-written
+          // dynamic system sections can still churn that prefix. Both system
+          // and conversation breakpoints use the default 5m TTL (TRA-407: 91%
+          // of tutor turn gaps are under five minutes). Must run AFTER every
+          // apiMessages.push above so the marker lands on the last model-visible
+          // user message (an app update placed it before its instruction,
+          // above). The `string` system arm is unreachable today and
+          // keeps the turn context in system as a defensive fallback.
+          let messagesForRun;
+          if (typeof systemPromptForRun === "string") {
+            systemPromptForRun += `\n\n${systemParts.turnContext}`;
+            messagesForRun = apiMessages;
+          } else {
+            if (!systemPromptForRun) {
+              throw new Error("Tutor system prompt was not built");
+            }
+            const messagesWithBreakpoint = breakpointPlaced
+              ? apiMessages
+              : withConversationCacheBreakpoint(apiMessages);
+            const hasUserMessage = messagesWithBreakpoint.some(
+              (message) => message.role === "user",
+            );
+            messagesForRun = appendTurnContext(
+              messagesWithBreakpoint,
+              systemParts.turnContext,
+            );
+            if (!hasUserMessage) {
+              const blocks = [...systemPromptForRun];
+              const last = blocks[blocks.length - 1];
+              if (last && last.type === "text" && !last.cache_control) {
+                blocks[blocks.length - 1] = {
+                  ...last,
+                  text: `${last.text}\n\n${systemParts.turnContext}`,
+                };
+              } else {
+                blocks.push({
+                  type: "text",
+                  text: systemParts.turnContext,
+                });
+              }
+              systemPromptForRun = blocks;
+            }
           }
 
           // Split the assistant message at a tool boundary: finalize the text
@@ -599,7 +964,7 @@ http.route({
             assistantMsgId = newId;
             fullContent = "";
             lastPersistLength = 0;
-            controller.enqueue(
+            enqueue(
               encoder.encode(sseEvent({ newAssistantMsg: String(newId) }))
             );
           };
@@ -617,9 +982,19 @@ http.route({
           // verdicts directly — analogous to how processStepTool moves
           // the workflow forward — instead of the scholar clicking a
           // separate "Check my work" button.
+          // …except for a PHOTO deliverable, which the tutor does not score:
+          // the scholar's own Check runs a multimodal read of the image
+          // (deliverableAssess). The tutor never sees that image, and the tool
+          // has no document to hang a photo verdict on — called without an
+          // artifact_id it falls through to the session's newest TEXT artifact
+          // and scores the wrong work against the photo's rubric. Withholding
+          // the tool is what actually enforces that; the prompt saying "never
+          // call it" competes with the tool's own description.
+          const hasScorableDeliverable =
+            !!session.standaloneDeliverableContext &&
+            session.standaloneDeliverableContext.kind !== "photo";
           const hasRubric =
-            !!session.standaloneDeliverableContext ||
-            !!session.advanceRubricContext;
+            hasScorableDeliverable || !!session.advanceRubricContext;
           const activityWasAlreadyComplete =
             !!session.standaloneDeliverableContext?.isComplete ||
             !!session.advanceRubricContext?.isComplete;
@@ -640,6 +1015,34 @@ http.route({
           let rubricPreToolClosingIsValid = false;
           let suppressCompletionFollowUp = false;
           let activityCompletedThisStream = false;
+          // stay_silent ran this turn. ONE tool of that name per turn: an app
+          // update with no asks offers lib/staySilentTool.ts, a scholar's
+          // vibecode Edit turn under a contract offers lib/designerTools.ts's,
+          // never both (see the tool assembly below). Until the model's first
+          // tool decision, its text is HELD rather than streamed: if that
+          // decision is stay_silent the held text is dropped, so nothing
+          // written before the call reaches the scholar; any other tool, or
+          // the end of the message, releases it. Once silenced, later text is
+          // dropped and the turn ends.
+          let silenced = false;
+          let heldText = "";
+          // Liveness while text is held: nothing streams or persists, so
+          // stamp lastStreamActivityAt directly (as streamed text's persists
+          // do) or a long held first message reads as dead to the retry
+          // affordance (retryAssistantTurn). At most every HELD_TEXT_STAMP_MS.
+          const HELD_TEXT_STAMP_MS = 5_000;
+          let lastHeldStampAt = Date.now();
+          const releaseHeldText = () => {
+            const held = heldText;
+            heldText = "";
+            if (!held) return;
+            const safeDelta = safeText.push(held);
+            if (!safeDelta) return;
+            fullContent += safeDelta;
+            if (!cancelled) {
+              enqueue(encoder.encode(sseEvent({ text: safeDelta })));
+            }
+          };
 
           // ── Activity-angle tool (per-activity jigsaw) ─────────────
           // When an activity has `hasScholarAngles: true`, the tutor
@@ -677,7 +1080,7 @@ http.route({
           // chat and teach-back pairs) is assembled by the factory in
           // convex/lib/tutorSessionTools.ts — same tool definitions, same
           // gates, same order as before this extraction. `emit` replaces the
-          // old direct controller.enqueue(encoder.encode(sseEvent(...)))
+          // old direct enqueue(encoder.encode(sseEvent(...)))
           // calls inside each tool body; `toolState` proxies this handler's
           // own stream-local mutable state (assistantMsgId/fullContent/
           // lastPersistLength + the completion/rubric pre-tool-text flags)
@@ -685,7 +1088,7 @@ http.route({
           // visible to the post-tool-loop code below, which reads/writes the
           // SAME underlying locals.
           const emit: AideEmit = (data) =>
-            controller.enqueue(encoder.encode(sseEvent(data)));
+            enqueue(encoder.encode(sseEvent(data)));
           const toolState: TutorToolSessionState = {
             get assistantMsgId() { return assistantMsgId; },
             set assistantMsgId(v) { assistantMsgId = v; },
@@ -710,6 +1113,7 @@ http.route({
             session,
             projId,
             callerUserId,
+            callerRole: caller.role,
             institutionId: tutorInstitutionId,
             state: toolState,
             splitAfterTool,
@@ -728,137 +1132,520 @@ http.route({
             teachBackOn,
           });
 
+          const readTextArtifacts = async () => {
+            const artifacts = await ctx.runQuery(
+              internal.artifacts.aiGetContent,
+              { sessionId: projId },
+            );
+            return Array.isArray(artifacts)
+              ? artifacts
+              : artifacts
+                ? [artifacts]
+                : [];
+          };
+          const changedHtmlArtifact = (
+            before: Awaited<ReturnType<typeof readTextArtifacts>>,
+            after: Awaited<ReturnType<typeof readTextArtifacts>>,
+            input: unknown,
+          ) => {
+            const beforeById = new Map(
+              before.map((artifact) => [String(artifact._id), artifact]),
+            );
+            const changed = after.filter((artifact) => {
+              const previous = beforeById.get(String(artifact._id));
+              return (
+                (artifact.type === "code" || artifact.language === "html") &&
+                (!previous || previous.content !== artifact.content)
+              );
+            });
+            const requestedId =
+              input &&
+              typeof input === "object" &&
+              "document_id" in input &&
+              typeof input.document_id === "string"
+                ? input.document_id
+                : null;
+            return (
+              (requestedId
+                ? changed.find(
+                    (artifact) => String(artifact._id) === requestedId,
+                  )
+                : undefined) ??
+              changed[0] ??
+              null
+            );
+          };
+          const waitForRenderCheckAnswer = async (
+            messageId: Id<"messages">,
+            checkId: string,
+            isCancelled: () => boolean,
+          ) => {
+            const deadline = Date.now() + RENDER_CHECK_TIMEOUT_MS;
+            while (!isCancelled()) {
+              const answer = await ctx.runQuery(
+                internal.sessions.getRenderCheckAnswer,
+                {
+                  sessionId: projId,
+                  streamId,
+                  messageId,
+                  checkId,
+                },
+              );
+              if (isCancelled()) return null;
+              if (answer) return answer;
+              const remaining = deadline - Date.now();
+              if (remaining <= 0) return null;
+              await new Promise((resolve) =>
+                setTimeout(
+                  resolve,
+                  Math.min(RENDER_CHECK_POLL_INTERVAL_MS, remaining),
+                ),
+              );
+            }
+            return null;
+          };
+          const withRenderCheck = (
+            tool: BetaRunnableTool,
+          ): BetaRunnableTool => {
+            if (
+              tool.name !== "create_code" &&
+              tool.name !== "edit_document"
+            ) {
+              return tool;
+            }
+            const run = tool.run;
+            return {
+              ...tool,
+              run: async (input, context?: BetaToolRunContext) => {
+                const canCheck =
+                  canUseRenderChecks &&
+                  canRequestRenderCheck(renderChecksThisTurn);
+                let before: Awaited<
+                  ReturnType<typeof readTextArtifacts>
+                > = [];
+                const guarded = await runBuildToolWithTruncationGuard({
+                  toolName: tool.name,
+                  input,
+                  stopReason: currentAssistantStopReason,
+                  truncationsThisTurn: buildToolTruncationsThisTurn,
+                  run: async () => {
+                    before = canCheck ? await readTextArtifacts() : [];
+                    return run(input, context);
+                  },
+                });
+                buildToolTruncationsThisTurn =
+                  guarded.truncationsThisTurn;
+                if (guarded.blocked) return guarded.result;
+
+                const result = guarded.result;
+                if (!canCheck || typeof result !== "string") return result;
+
+                const artifact = changedHtmlArtifact(
+                  before,
+                  await readTextArtifacts(),
+                  input,
+                );
+                if (!artifact) return result;
+
+                renderChecksThisTurn += 1;
+                const checkId = crypto.randomUUID();
+                const messageId = assistantMsgId as Id<"messages">;
+                await ctx.runMutation(internal.sessions.requestRenderCheck, {
+                  sessionId: projId,
+                  streamId,
+                  messageId,
+                  checkId,
+                });
+                if (!cancelled) {
+                  emit({
+                    renderCheck: {
+                      checkId,
+                      artifactId: String(artifact._id),
+                    },
+                  });
+                }
+
+                const answer = await waitForRenderCheckAnswer(
+                  messageId,
+                  checkId,
+                  () => cancelled,
+                );
+                if (!answer) return renderCheckTimeoutToolResult(result);
+
+                let imagePart: ImageContentPart | null = null;
+                if (answer.snapshotStorageId) {
+                  const blob = await ctx.storage.get(
+                    answer.snapshotStorageId,
+                  );
+                  if (blob) {
+                    try {
+                      imagePart = appSnapshotBytesToContentPart(
+                        new Uint8Array(await blob.arrayBuffer()),
+                      );
+                    } catch (error) {
+                      console.warn(
+                        "[project-stream] render-check snapshot unavailable; continuing without it:",
+                        error,
+                      );
+                    }
+                  }
+                }
+                return buildRenderCheckToolResult(
+                  result,
+                  answer,
+                  imagePart,
+                );
+              },
+            };
+          };
+          const runnableTools: readonly BetaRunnableTool[] =
+            toolsForWorkshopMode(tools, workshopMode);
+          const toolsForRun = runnableTools.map(withRenderCheck);
+          // App designer steering (lib/designerTools.ts): park_idea /
+          // unpark_idea on any scholar-stance vibecode Edit turn under a MODEL
+          // CONTRACT (the condition the prompt's contract section renders
+          // under), and stay_silent only for the session owner with
+          // allowSilence (the prompt's silence branch uses the same owner test
+          // via promptContext.callerIsSessionOwner). Appended after the factory's tools so every
+          // other turn's tool list (and cache prefix) is unchanged.
+          const designerOffer = designerToolOffer({
+            sessionMode: session.sessionMode,
+            workshopMode,
+            teacherBuild: isTeacherBuildContext(session),
+            hasBuildContract: !!session.lessonActivityContext?.buildContract,
+            allowSilence: session.lessonActivityContext?.allowSilence === true,
+            callerIsSessionOwner: callerUserId === session.scholarId,
+            freePlay: session.freePlay === true,
+          });
+          // One stay_silent per turn (the SDK rejects duplicate tool names):
+          // an app update offers its own below, so the designer's is withheld
+          // on every app-update turn.
+          const designerStaySilent = designerOffer.staySilent && !isAppUpdate;
+          toolsForRun.push(
+            ...(await makeDesignerTools({
+              offer: { ...designerOffer, staySilent: designerStaySilent },
+              parkIdea: (idea) =>
+                ctx.runMutation(internal.sessions.parkIdea, {
+                  sessionId: projId,
+                  text: idea.text,
+                  ...(idea.reason ? { reason: idea.reason } : {}),
+                }),
+              unparkIdea: (text) =>
+                ctx.runMutation(internal.sessions.unparkIdea, {
+                  sessionId: projId,
+                  text,
+                }),
+              onSilence: () => {
+                silenced = true;
+              },
+            })),
+          );
+          // An app update with no asks: this branch's stay_silent. Appended
+          // (not part of the factory's cached tool order) so every other
+          // turn's tool list — and its prompt-cache prefix — is unchanged.
+          if (offerStaySilent) {
+            toolsForRun.push(
+              await makeStaySilentTool(() => {
+                silenced = true;
+              }),
+            );
+          }
+          // The designer's hold covers the turn's FIRST message only (later
+          // messages stream as usual); an app update re-arms it on every
+          // message (below).
+          let holdingText = designerStaySilent || offerStaySilent;
+
+          // App designer: capture the pre-turn app baseline so the stream
+          // commit path can record a version only when THIS turn changed the
+          // app (server-side recording + autosave — F3/F4/F11). Vibecode +
+          // Edit only — Play never records or autosaves (F9).
+          if (session.sessionMode === "vibecode" && workshopMode !== "play") {
+            turnAppBaseline = await ctx.runQuery(
+              internal.codeArtifactRevisions.newestCodeArtifactBaseline,
+              { sessionId: projId },
+            );
+          }
+
           // ── Stream with tool runner ──────────────────────────────────
 
-          if (tools.length > 0) {
+          if (toolsForRun.length > 0) {
             // Use beta tool runner for automatic multi-turn handling
             const runner = anthropic.beta.messages.toolRunner({
-              model: MODELS.SONNET,
-              max_tokens: 4096,
+              model: selectedTutorModel,
+              max_tokens: tutorMaxTokens,
               system: systemPromptForRun,
-              messages: apiMessages,
-              tools,
+              messages: messagesForRun,
+              tools: toolsForRun,
               stream: true,
               tool_choice: {
                 type: "auto",
                 disable_parallel_tool_use: true,
               },
-            });
+              ...(tutorEffort
+                ? { output_config: { effort: tutorEffort } }
+                : {}),
+              ...tutorFallbackBody,
+            }, tutorFallbackOptions);
 
-            // Nested iteration: outer = turns, inner = streaming events
-            for await (const messageStream of runner) {
-              for await (const event of messageStream) {
-                if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
-                  flushSafeText();
-                  const toolName = (event.content_block as { name?: string }).name;
-                  if (toolName === MARK_ACTIVITY_COMPLETE_TOOL_NAME) {
-                    completionHadPreToolText = !!fullContent.trim();
-                    completionPreToolClosingIsValid =
-                      completionHadPreToolText &&
-                      isValidActivityCompletionClosing(fullContent);
-                  } else if (toolName === "update_rubric_score") {
-                    rubricHadPreToolText = !!fullContent.trim();
-                    rubricPreToolClosingIsValid =
-                      rubricHadPreToolText &&
-                      isValidActivityCompletionClosing(fullContent);
-                  }
-                  controller.enqueue(
-                    encoder.encode(sseEvent({ toolStart: { name: toolName } }))
-                  );
-                } else if (event.type === "message_start") {
-                  model = event.message.model;
-                  addStartUsage(tutorUsage, event.message.usage);
-                  // Heartbeat: a turn started. If this turn does a long tool
-                  // call (e.g. generate_image) or thinking-pause before any
-                  // text, no content persist fires for a while — so stamp the
-                  // liveness signal now so the orphan-reap doesn't wrongly kill
-                  // this still-live placeholder.
-                  await ctx.runMutation(
-                    internal.sessionHelpers.touchStreamActivity,
-                    { messageId: assistantMsgId as Id<"messages"> }
-                  );
-                } else if (event.type === "content_block_delta") {
-                  const delta = event.delta;
-                  if ("text" in delta) {
-                    if (suppressCompletionFollowUp) continue;
-                    const safeDelta = safeText.push(delta.text);
-                    if (!safeDelta) continue;
-                    fullContent += safeDelta;
-                    controller.enqueue(
-                      encoder.encode(
-                        sseEvent({ text: safeDelta })
-                      )
-                    );
-                    if (fullContent.length - lastPersistLength > 200) {
-                      lastPersistLength = fullContent.length;
+            // Nested iteration: outer = turns, inner = streaming events.
+            // A stop exits both before the SDK can advance to another tool turn.
+            try {
+              streamLoop: for await (const messageStream of runner) {
+                activeMessageStream = messageStream;
+                let toolBlockOpen = false;
+                if (await checkStop()) {
+                  messageStream.abort();
+                  break;
+                }
+                // stay_silent ran: end the turn rather than generate a reply
+                // to its tool result.
+                if (silenced) {
+                  messageStream.abort();
+                  break;
+                }
+                // An app update holds each message's text until that
+                // message's first tool decision.
+                if (offerStaySilent) holdingText = true;
+                try {
+                  for await (const event of messageStream) {
+                    if (await checkStop()) {
+                      messageStream.abort();
+                      break streamLoop;
+                    }
+                    if (
+                      event.type === "content_block_start" &&
+                      event.content_block?.type === "tool_use"
+                    ) {
+                      if (await checkStop(true)) {
+                        messageStream.abort();
+                        break streamLoop;
+                      }
+                      toolBlockOpen = true;
+                      const toolName = (
+                        event.content_block as { name?: string }
+                      ).name;
+                      if (holdingText) {
+                        holdingText = false;
+                        if (toolName === STAY_SILENT_TOOL_NAME) heldText = "";
+                        else releaseHeldText();
+                      }
+                      flushSafeText();
+                      if (toolName === MARK_ACTIVITY_COMPLETE_TOOL_NAME) {
+                        completionHadPreToolText = !!fullContent.trim();
+                        completionPreToolClosingIsValid =
+                          completionHadPreToolText &&
+                          isValidActivityCompletionClosing(fullContent);
+                      } else if (toolName === "update_rubric_score") {
+                        rubricHadPreToolText = !!fullContent.trim();
+                        rubricPreToolClosingIsValid =
+                          rubricHadPreToolText &&
+                          isValidActivityCompletionClosing(fullContent);
+                      }
+                      // A direction to the app's character, or a decision to stay
+                      // silent, must leave no trace on the scholar's screen.
+                      if (
+                        !CHARACTER_DIRECTOR_TOOL_NAMES.has(toolName ?? "") &&
+                        toolName !== STAY_SILENT_TOOL_NAME
+                      ) {
+                        enqueue(
+                          encoder.encode(
+                            sseEvent({ toolStart: { name: toolName } }),
+                          ),
+                        );
+                      }
+                    } else if (
+                      event.type === "content_block_stop" &&
+                      toolBlockOpen
+                    ) {
+                      if (await checkStop(true)) {
+                        messageStream.abort();
+                        break streamLoop;
+                      }
+                      toolBlockOpen = false;
+                    } else if (event.type === "message_start") {
+                      currentAssistantStopReason = null;
+                      model = event.message.model;
+                      addStartUsage(tutorUsage, event.message.usage);
+                      // Backstop: never glue two model messages into one row.
+                      // `fullContent` is a closure variable that survives across
+                      // toolRunner iterations, and each tool's run() is expected
+                      // to split the stream (finalize the pre-tool text, open a
+                      // fresh placeholder) and reset it. Several tool return
+                      // paths don't — mark_activity_complete's structured
+                      // refusal and its catch path, update_rubric_score's catch
+                      // path and its conversation-rubric alreadyComplete /
+                      // rejectedCompletion early returns. When one of those
+                      // runs, the NEXT message's text is appended to the
+                      // previous message's text with no separator, and one
+                      // stored row reads like two glued replies — the first
+                      // reply's closing sentence runs straight into the next
+                      // reply's opening one with no space between them. So if a new model
+                      // message is starting while text is still buffered, split
+                      // it off silently here: a blank toolAction persists no
+                      // tool chip, and splitStream deletes an empty placeholder,
+                      // so this is a no-op whenever the tool already split.
+                      // Backstop only — tools still own their own splits.
+                      flushSafeText();
+                      if (fullContent.trim()) {
+                        await splitAfterTool("");
+                      }
+                      // Heartbeat: a turn started. If this turn does a long tool
+                      // call (e.g. generate_image) or thinking-pause before any
+                      // text, no content persist fires for a while — so stamp the
+                      // liveness signal now so the orphan-reap doesn't wrongly kill
+                      // this still-live placeholder.
                       await ctx.runMutation(
-                        internal.sessionHelpers.updateStreamContent,
-                        {
-                          messageId: assistantMsgId as Id<"messages">,
-                          content: fullContent,
-                        }
+                        internal.sessionHelpers.touchStreamActivity,
+                        { messageId: assistantMsgId as Id<"messages"> },
                       );
+                    } else if (event.type === "content_block_delta") {
+                      const delta = event.delta;
+                      if ("text" in delta) {
+                        if (suppressCompletionFollowUp || silenced) continue;
+                        if (holdingText) {
+                          heldText += delta.text;
+                          if (Date.now() - lastHeldStampAt >= HELD_TEXT_STAMP_MS) {
+                            lastHeldStampAt = Date.now();
+                            await ctx.runMutation(
+                              internal.sessionHelpers.touchStreamActivity,
+                              { messageId: assistantMsgId as Id<"messages"> },
+                            );
+                          }
+                          continue;
+                        }
+                        const safeDelta = safeText.push(delta.text);
+                        if (!safeDelta) continue;
+                        fullContent += safeDelta;
+                        enqueue(
+                          encoder.encode(sseEvent({ text: safeDelta })),
+                        );
+                        if (shouldPersistContent()) {
+                          lastPersistLength = fullContent.length;
+                          const persistResult = await ctx.runMutation(
+                            internal.sessionHelpers.updateStreamContent,
+                            {
+                              messageId: assistantMsgId as Id<"messages">,
+                              content: fullContent,
+                            },
+                          );
+                          if (
+                            stopRequestedFromPersistResult(persistResult)
+                          ) {
+                            stopped = true;
+                            messageStream.abort();
+                            break streamLoop;
+                          }
+                        }
+                      }
+                    } else if (event.type === "message_delta") {
+                      currentAssistantStopReason =
+                        event.delta.stop_reason ??
+                        currentAssistantStopReason;
+                      if (event.usage) {
+                        tokensUsed += event.usage.output_tokens;
+                        addDeltaOutput(tutorUsage, event.usage.output_tokens);
+                      }
                     }
                   }
-                } else if (event.type === "message_delta") {
-                  if (event.usage) {
-                    tokensUsed += event.usage.output_tokens;
-                    addDeltaOutput(tutorUsage, event.usage.output_tokens);
+                  // The message ended without a tool decision: the model chose
+                  // to speak, so its held text goes out.
+                  if (holdingText && !silenced) releaseHeldText();
+                  holdingText = false;
+                  if (await checkStop(true)) {
+                    break streamLoop;
+                  }
+                } finally {
+                  if (activeMessageStream === messageStream) {
+                    activeMessageStream = null;
                   }
                 }
               }
+            } catch (error) {
+              // A silenced turn aborts its follow-up request on purpose.
+              if (!cancelled && !stopped && !silenced) throw error;
+            } finally {
+              activeMessageStream = null;
             }
           } else {
             // No tools: simple streaming (no tool runner needed)
             const anthropicStream = anthropic.messages.stream({
-              model: MODELS.SONNET,
-              max_tokens: 4096,
+              model: selectedTutorModel,
+              max_tokens: tutorMaxTokens,
               system: systemPromptForRun,
-              messages: apiMessages,
-            });
+              messages: messagesForRun,
+              ...(tutorEffort
+                ? { output_config: { effort: tutorEffort } }
+                : {}),
+              ...tutorFallbackBody,
+            }, tutorFallbackOptions);
 
-            for await (const event of anthropicStream) {
-              if (event.type === "message_start") {
-                model = event.message.model;
-                addStartUsage(tutorUsage, event.message.usage);
-                // Heartbeat: proof-of-life before any text streams (see the
-                // tools-path message_start above and the reap in sendMessage).
-                await ctx.runMutation(
-                  internal.sessionHelpers.touchStreamActivity,
-                  { messageId: assistantMsgId as Id<"messages"> }
-                );
-              } else if (event.type === "content_block_delta") {
-                const delta = event.delta;
-                if ("text" in delta) {
-                  const safeDelta = safeText.push(delta.text);
-                  if (!safeDelta) continue;
-                  fullContent += safeDelta;
-                  controller.enqueue(
-                    encoder.encode(
-                      sseEvent({ text: safeDelta })
-                    )
-                  );
-                  if (fullContent.length - lastPersistLength > 200) {
-                    lastPersistLength = fullContent.length;
+            activeMessageStream = anthropicStream;
+            try {
+              if (await checkStop()) {
+                anthropicStream.abort();
+              } else {
+                for await (const event of anthropicStream) {
+                  if (await checkStop()) {
+                    anthropicStream.abort();
+                    break;
+                  }
+                  if (event.type === "message_start") {
+                    model = event.message.model;
+                    addStartUsage(tutorUsage, event.message.usage);
+                    // Heartbeat: proof-of-life before any text streams (see the
+                    // tools-path message_start above and the reap in sendMessage).
                     await ctx.runMutation(
-                      internal.sessionHelpers.updateStreamContent,
-                      {
-                        messageId: assistantMsgId as Id<"messages">,
-                        content: fullContent,
-                      }
+                      internal.sessionHelpers.touchStreamActivity,
+                      { messageId: assistantMsgId as Id<"messages"> },
                     );
+                  } else if (event.type === "content_block_delta") {
+                    const delta = event.delta;
+                    if ("text" in delta) {
+                      const safeDelta = safeText.push(delta.text);
+                      if (!safeDelta) continue;
+                      fullContent += safeDelta;
+                      enqueue(
+                        encoder.encode(sseEvent({ text: safeDelta })),
+                      );
+                      if (shouldPersistContent()) {
+                        lastPersistLength = fullContent.length;
+                        const persistResult = await ctx.runMutation(
+                          internal.sessionHelpers.updateStreamContent,
+                          {
+                            messageId: assistantMsgId as Id<"messages">,
+                            content: fullContent,
+                          },
+                        );
+                        if (
+                          stopRequestedFromPersistResult(persistResult)
+                        ) {
+                          stopped = true;
+                          anthropicStream.abort();
+                          break;
+                        }
+                      }
+                    }
+                  } else if (event.type === "message_delta") {
+                    if (event.usage) {
+                      tokensUsed += event.usage.output_tokens;
+                      addDeltaOutput(tutorUsage, event.usage.output_tokens);
+                    }
                   }
                 }
-              } else if (event.type === "message_delta") {
-                if (event.usage) {
-                  tokensUsed += event.usage.output_tokens;
-                  addDeltaOutput(tutorUsage, event.usage.output_tokens);
-                }
               }
+            } catch (error) {
+              if (!cancelled && !stopped) throw error;
+            } finally {
+              activeMessageStream = null;
             }
           }
 
           flushSafeText();
+          // A turn that showed nothing — stay_silent (either version), or an
+          // app update that never split its placeholder: the placeholder goes,
+          // and the session's preview, recency and observer are left untouched.
+          const silentTurn =
+            (silenced || isSilentAppUpdate()) && !fullContent.trim();
 
           // Finalize: save full content, clear stream ID, update session
           await ctx.runMutation(internal.sessionHelpers.finalizeStream, {
@@ -867,32 +1654,73 @@ http.route({
             content: fullContent,
             model,
             tokensUsed,
+            ...(silentTurn ? { silent: true } : {}),
           });
           finalized = true;
           await recordUsage(ctx, {
-            source: "tutor",
-            role: ROLES.SCHOLAR,
+            source: tutorUsageSource,
+            role: tutorUsageRole,
             institutionId: tutorInstitutionId,
-            model: model || MODELS.SONNET,
+            model: model || selectedTutorModel,
             usage: tutorUsage,
             sessionId: projId,
           });
           usageRecorded = true;
 
-          // Clear pending whisper after it's been consumed
-          if (session.pendingWhisper) {
+          // Clear pending whisper after it's been consumed (an app update
+          // never consumes it — see the injection above; a silent turn showed
+          // nothing, so the next turn carries it)
+          if (session.pendingWhisper && !isAppUpdate && !silentTurn) {
             await ctx.runMutation(
               internal.sessionHelpers.clearPendingWhisper,
               { sessionId: projId }
             );
           }
 
-          controller.enqueue(
-            encoder.encode(
-              sseEvent({ done: true, messageId: assistantMsgId })
-            )
+          if (!cancelled) {
+            enqueue(
+              encoder.encode(
+                sseEvent({
+                  done: true,
+                  messageId: assistantMsgId,
+                  ...(stopped ? { stopped: true } : {}),
+                  // Additive: the turn left nothing in the transcript.
+                  ...(silentTurn ? { silent: true } : {}),
+                }),
+              ),
+            );
+          }
+
+          // App designer: record one version for this designer turn if it
+          // changed the app, and (teacher build session) autosave the app to
+          // the activity starter — all SERVER-SIDE, so a closed tab or a native
+          // build never drops a version or a save (F3/F4/F11). Runs after the
+          // `done` event so the client isn't blocked on the blob-copying save;
+          // the Workshop's saved-at reads customApps.updatedAt reactively. The
+          // Stop path (client abort → `stopped`) reaches here too — it unwinds
+          // through this normal block, not the catch. `recordWorkshopTurn`
+          // never throws.
+          await ctx.runAction(
+            internal.vibecodeStarterActions.recordWorkshopTurn,
+            {
+              sessionId: projId,
+              messageId: assistantMsgId as Id<"messages">,
+              callerUserId: session.scholarId,
+              sessionMode: session.sessionMode,
+              workshopMode,
+              ...(turnAppBaseline
+                ? { baselineArtifactId: turnAppBaseline.artifactId }
+                : {}),
+              baselineRevision: turnAppBaseline?.revision ?? -1,
+            },
           );
-          controller.close();
+
+          await releaseLeaseBeforeClosingStream({
+            release: tutorLease.release,
+            close: () => {
+              if (!cancelled) controller.close();
+            },
+          });
         } catch (error) {
           console.error("Stream error:", error);
           // Finalize the stuck message so it doesn't show an infinite spinner
@@ -904,6 +1732,7 @@ http.route({
                 content: fullContent || "",
                 model,
                 tokensUsed,
+                silent: isSilentAppUpdate(),
               });
             } catch (finalizeErr) {
               console.error("Failed to finalize stream on error:", finalizeErr);
@@ -912,23 +1741,77 @@ http.route({
           if (!usageRecorded) {
             usageRecorded = true;
             await recordUsage(ctx, {
-              source: "tutor",
-              role: ROLES.SCHOLAR,
+              source: tutorUsageSource,
+              role: tutorUsageRole,
               institutionId: tutorInstitutionId,
-              model: model || MODELS.SONNET,
+              model: model || selectedTutorModel,
               usage: tutorUsage,
               sessionId: projId,
             });
           }
-          controller.enqueue(
-            encoder.encode(
-              sseEvent({ error: "Stream error" })
-            )
+          if (!cancelled) {
+            enqueue(
+              encoder.encode(
+                sseEvent({ error: "Stream error" })
+              )
+            );
+          }
+          // A code tool that SUCCEEDED before this error must still leave a
+          // revision + autosave (G4). Idempotent with the normal path, so a
+          // late error after that path already recorded is a no-op here.
+          // Never throws, so the lease release + stream close below always run.
+          await ctx.runAction(
+            internal.vibecodeStarterActions.recordWorkshopTurn,
+            {
+              sessionId: projId,
+              messageId: assistantMsgId as Id<"messages">,
+              callerUserId: session.scholarId,
+              sessionMode: session.sessionMode,
+              workshopMode,
+              ...(turnAppBaseline
+                ? { baselineArtifactId: turnAppBaseline.artifactId }
+                : {}),
+              baselineRevision: turnAppBaseline?.revision ?? -1,
+            },
           );
-          controller.close();
+          await releaseLeaseBeforeClosingStream({
+            release: tutorLease.release,
+            close: () => {
+              if (!cancelled) controller.close();
+            },
+          });
         } finally {
-          if (kickoffHeartbeat) {
-            clearInterval(kickoffHeartbeat);
+          clearInterval(streamHeartbeat);
+          await tutorLease.release();
+        }
+      },
+      async cancel() {
+        cancelled = true;
+        // Only a quiet app update is cut off here. Any other turn finishes
+        // generating and finalizes, so the reply is whole when the scholar
+        // comes back (TRA-501; proven live: the action keeps running after
+        // Convex logs "Client disconnected"). That turn still holds its LLM
+        // lease, so it is released by start() — before the stream closes and
+        // in its finally — never here, or a disconnect would let the scholar
+        // start a second concurrent model call past the TRA-98 cap.
+        if (isAppUpdate) {
+          activeMessageStream?.abort();
+          await tutorLease.release();
+        }
+        // A disconnect can end this action before start() finalizes, which
+        // would strand a quiet app update's empty placeholder. Best effort;
+        // the next turn's reap is the backstop.
+        if (isAppUpdate) {
+          try {
+            await ctx.runMutation(
+              internal.sessionHelpers.discardEmptyAppUpdatePlaceholder,
+              { messageId: assistantMsgId as Id<"messages"> },
+            );
+          } catch (error) {
+            console.error(
+              "[project-stream] quiet placeholder discard failed:",
+              error,
+            );
           }
         }
       },
@@ -942,23 +1825,30 @@ http.route({
         "Access-Control-Allow-Origin": "*",
       },
     });
-  }),
+  });
+
+http.route({
+  path: "/session-stream",
+  method: "POST",
+  handler: sessionStreamHandler,
 });
 
-// CORS preflight for project-stream
+const sessionStreamCorsHandler = httpAction(async () => {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    },
+  });
+});
+
+// CORS preflight for session-stream
 http.route({
-  path: "/project-stream",
+  path: "/session-stream",
   method: "OPTIONS",
-  handler: httpAction(async () => {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      },
-    });
-  }),
+  handler: sessionStreamCorsHandler,
 });
 
 // ── ⑫ Socratic handoff: the "Talk it through" scratch session ───────────────
@@ -990,6 +1880,7 @@ http.route({
       new Response(JSON.stringify(body), { status, headers: CORS });
     const callerId = await getAuthUserId(ctx);
     if (!callerId) return json({ error: "Not authenticated" }, 401);
+    if (await isReadOnlyCaller(ctx)) return json({ error: READ_ONLY_ACCOUNT_ERROR }, 403);
 
     const url = new URL(request.url);
     const scholarId = url.searchParams.get("scholarId") as Id<"users"> | null;
@@ -1060,11 +1951,19 @@ http.route({
   method: "POST",
   handler: httpAction(async (ctx, request) => {
     const CORS = { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" };
-    const json = (b: unknown, status = 200) =>
-      new Response(JSON.stringify(b), { status, headers: CORS });
+    const json = (
+      b: unknown,
+      status = 200,
+      extraHeaders: Record<string, string> = {},
+    ) =>
+      new Response(JSON.stringify(b), {
+        status,
+        headers: { ...CORS, ...extraHeaders },
+      });
 
     const callerUserId = await getAuthUserId(ctx);
     if (!callerUserId) return json({ error: "Not authenticated" }, 401);
+    if (await isReadOnlyCaller(ctx)) return json({ error: READ_ONLY_ACCOUNT_ERROR }, 403);
     // Template and manipulative handoffs are auth-gated but not bound to a
     // scholarId: their context is derived from an item id, not per-scholar data.
     // Game handoffs ARE bound below because their round evidence belongs to the
@@ -1260,10 +2159,23 @@ http.route({
       }
     }
 
-    const { Anthropic } = await import("@anthropic-ai/sdk");
-    const anthropic = new Anthropic({ apiKey: requireAnthropicApiKey() });
+    const handoffLease = await acquireLlmLease(ctx, {
+      userId: callerUserId,
+      surface: "practice-handoff",
+      ...(handoffInstitutionId ? { institutionId: handoffInstitutionId } : {}),
+    });
+    if (!handoffLease.ok) {
+      return json(
+        { error: LLM_BUSY_MESSAGE },
+        429,
+        { "Retry-After": String(handoffLease.retryAfterSec) },
+      );
+    }
+
     let reply: string;
     try {
+      const { Anthropic } = await import("@anthropic-ai/sdk");
+      const anthropic = new Anthropic({ apiKey: requireAnthropicApiKey() });
       const resp = await anthropic.messages.create({
         model: MODELS.SONNET,
         max_tokens: 400,
@@ -1277,13 +2189,18 @@ http.route({
         model: MODELS.SONNET,
         usage: resp.usage,
       });
-      reply = sanitizeScholarVisibleText(resp.content
-        .map((b) => (b.type === "text" ? b.text : ""))
-        .join("")
-        .trim());
+      reply = sanitizeScholarVisibleText(
+        resp.content
+          .map((b) => (b.type === "text" ? b.text : ""))
+          .join("")
+          .trim(),
+        scholarSafeDropReporter(ctx, "practice-handoff"),
+      );
     } catch (e) {
       console.error("handoff model error:", e);
       return json({ error: "Something hiccuped — give it another go →", ended: true });
+    } finally {
+      await handoffLease.release();
     }
 
     // No answer-leak redaction (companion direction): a confirmation the kid
@@ -1363,11 +2280,19 @@ http.route({
   method: "POST",
   handler: httpAction(async (ctx, request) => {
     const CORS = { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" };
-    const json = (b: unknown, status = 200) =>
-      new Response(JSON.stringify(b), { status, headers: CORS });
+    const json = (
+      b: unknown,
+      status = 200,
+      extraHeaders: Record<string, string> = {},
+    ) =>
+      new Response(JSON.stringify(b), {
+        status,
+        headers: { ...CORS, ...extraHeaders },
+      });
 
     const callerUserId = await getAuthUserId(ctx);
     if (!callerUserId) return json({ error: "Not authenticated" }, 401);
+    if (await isReadOnlyCaller(ctx)) return json({ error: READ_ONLY_ACCOUNT_ERROR }, 403);
 
     let body: {
       itemId?: unknown;
@@ -1425,14 +2350,27 @@ http.route({
     if (!grounded) return json({ error: "Start this dialogue again." }, 400);
     const messages = grounded.transcript;
 
-    const { Anthropic } = await import("@anthropic-ai/sdk");
-    const anthropic = new Anthropic({ apiKey: requireAnthropicApiKey() });
-
     if (phase === "grade") {
       if (!messages.some((m) => m.role === "user")) {
         return json({ error: "Say your idea first — then I can check it." }, 400);
       }
+      const dialogueLease = await acquireLlmLease(ctx, {
+        userId: callerUserId,
+        surface: "practice-dialogue",
+        ...(dialogueInstitutionId
+          ? { institutionId: dialogueInstitutionId }
+          : {}),
+      });
+      if (!dialogueLease.ok) {
+        return json(
+          { error: LLM_BUSY_MESSAGE },
+          429,
+          { "Retry-After": String(dialogueLease.retryAfterSec) },
+        );
+      }
       try {
+        const { Anthropic } = await import("@anthropic-ai/sdk");
+        const anthropic = new Anthropic({ apiKey: requireAnthropicApiKey() });
         const resp = await anthropic.messages.create({
           model: MODELS.SONNET,
           max_tokens: 700,
@@ -1498,6 +2436,8 @@ http.route({
       } catch (e) {
         console.error("dialogue judge error:", e);
         return json({ error: "The check hiccuped — try again in a moment." }, 500);
+      } finally {
+        await dialogueLease.release();
       }
     }
 
@@ -1507,22 +2447,19 @@ http.route({
     if (!message) {
       return json({ error: "Tell me what you notice and we'll dig in." }, 400);
     }
-    let chatMessages: { role: "user" | "assistant"; content: string }[];
-    try {
-      const appended = await ctx.runMutation(internal.practiceDialogue.appendDialogueTurn, {
-        dedupKey,
-        itemId,
-        turn: { role: "user", content: message },
-      });
-      chatMessages = appended.transcript;
-    } catch (e) {
-      console.error("dialogue scholar turn persist failed:", e);
-      return json({ error: "That turn didn't save — try it once more." }, 409);
-    }
-
-    const assistantTurns = chatMessages.filter((m) => m.role === "assistant").length;
+    const assistantTurns = messages.filter((m) => m.role === "assistant").length;
     if (assistantTurns >= DIALOGUE_MAX_ASSISTANT_TURNS) {
       const reply = "You've done the thinking — tap \"Check my thinking\" and let's see it.";
+      try {
+        await ctx.runMutation(internal.practiceDialogue.appendDialogueTurn, {
+          dedupKey,
+          itemId,
+          turn: { role: "user", content: message },
+        });
+      } catch (e) {
+        console.error("dialogue scholar turn persist failed:", e);
+        return json({ error: "That turn didn't save — try it once more." }, 409);
+      }
       await ctx.runMutation(internal.practiceDialogue.appendDialogueTurn, {
         dedupKey,
         itemId,
@@ -1533,7 +2470,39 @@ http.route({
         ended: true,
       });
     }
+
+    const dialogueLease = await acquireLlmLease(ctx, {
+      userId: callerUserId,
+      surface: "practice-dialogue",
+      ...(dialogueInstitutionId
+        ? { institutionId: dialogueInstitutionId }
+        : {}),
+    });
+    if (!dialogueLease.ok) {
+      return json(
+        { error: LLM_BUSY_MESSAGE },
+        429,
+        { "Retry-After": String(dialogueLease.retryAfterSec) },
+      );
+    }
+
     try {
+      let chatMessages: { role: "user" | "assistant"; content: string }[];
+      try {
+        const appended = await ctx.runMutation(
+          internal.practiceDialogue.appendDialogueTurn,
+          {
+            dedupKey,
+            itemId,
+            turn: { role: "user", content: message },
+          },
+        );
+        chatMessages = appended.transcript;
+      } catch (e) {
+        console.error("dialogue scholar turn persist failed:", e);
+        return json({ error: "That turn didn't save — try it once more." }, 409);
+      }
+
       // Attach the scholar's scratchpad photo (if any) to their latest turn so
       // the tutor reasons about what they actually wrote — same shared builder +
       // answer-safe note as /practice-handoff. Text-only fallback on load failure.
@@ -1576,6 +2545,8 @@ http.route({
           dialogueSystem += SCRATCH_IMAGE_SYSTEM_NOTE;
         }
       }
+      const { Anthropic } = await import("@anthropic-ai/sdk");
+      const anthropic = new Anthropic({ apiKey: requireAnthropicApiKey() });
       const resp = await anthropic.messages.create({
         model: MODELS.SONNET,
         max_tokens: 350,
@@ -1594,6 +2565,7 @@ http.route({
           .map((b) => (b.type === "text" ? b.text : ""))
           .join("")
           .trim(),
+        scholarSafeDropReporter(ctx, "practice-dialogue"),
       );
       const visibleReply = reply || "Keep going — what happens next?";
       await ctx.runMutation(internal.practiceDialogue.appendDialogueTurn, {
@@ -1616,6 +2588,8 @@ http.route({
         console.error("dialogue error turn persist failed:", persistError);
       }
       return json({ reply, error: "Something hiccuped — give it another go →", ended: false }, 500);
+    } finally {
+      await dialogueLease.release();
     }
   }),
 });
@@ -1662,6 +2636,7 @@ http.route({
 
     const callerUserId = await getAuthUserId(ctx);
     if (!callerUserId) return jsonErr({ error: "Not authenticated" }, 401);
+    if (await isReadOnlyCaller(ctx)) return jsonErr({ error: READ_ONLY_ACCOUNT_ERROR }, 403);
 
     let body: { scholarId?: unknown; fromKey?: unknown; toKey?: unknown; messages?: unknown };
     try {
@@ -1735,10 +2710,30 @@ http.route({
 
     const system = buildStoryOpenPrompt(storyPacket);
 
+    const storyLease = await acquireLlmLease(ctx, {
+      userId: callerUserId,
+      surface: "story-open",
+      ...(storyInstitutionId ? { institutionId: storyInstitutionId } : {}),
+    });
+    if (!storyLease.ok) {
+      return new Response(sseEvent({ error: LLM_BUSY_MESSAGE }), {
+        status: 429,
+        headers: {
+          ...headers,
+          // Expose Retry-After cross-origin so the browser client can read it
+          // (the SSE 200 headers above set ACAO but not the expose list).
+          "Access-Control-Expose-Headers": "Retry-After",
+          "Retry-After": String(storyLease.retryAfterSec),
+        },
+      });
+    }
+
     const stream = new ReadableStream({
       async start(controller) {
         let full = "";
-        const safeText = createScholarVisibleTextFilter();
+        const safeText = createScholarVisibleTextFilter(
+          scholarSafeDropReporter(ctx, "story-open"),
+        );
         try {
           const { Anthropic } = await import("@anthropic-ai/sdk");
           const anthropic = new Anthropic({ apiKey: requireAnthropicApiKey() });
@@ -1807,13 +2802,24 @@ http.route({
           }
 
           controller.enqueue(encoder.encode(sseEvent({ done: true, ended })));
+          await releaseLeaseBeforeClosingStream({
+            release: storyLease.release,
+            close: () => controller.close(),
+          });
         } catch (e) {
           console.error("story-open model error:", e);
           // The client degrades gracefully on an error event.
           controller.enqueue(encoder.encode(sseEvent({ error: "story-open-failed" })));
+          await releaseLeaseBeforeClosingStream({
+            release: storyLease.release,
+            close: () => controller.close(),
+          });
         } finally {
-          controller.close();
+          await storyLease.release();
         }
+      },
+      async cancel() {
+        await storyLease.release();
       },
     });
     return new Response(stream, { headers });
@@ -1836,6 +2842,10 @@ http.route({
 
 // ── Curriculum Assistant streaming endpoint ─────────────────────────────────
 
+// NOTE: the in-app aide is always one-to-one today, so the audience below is
+// hardcoded `private`. When in-app group threads ship, make it a parameter —
+// the doctrine it pairs with is already here, so that day is a one-line change
+// rather than a rediscovery of the disclosure rules (see lib/aideAudience.ts).
 export const buildCurriculumAssistantSystemPrompt = (
   profile: InstitutionPromptProfile = DEFAULT_INSTITUTION_PROMPT_PROFILE,
 ): string => `You are a curriculum design assistant for teachers at ${profile.schoolName}, a gifted elementary school${
@@ -1854,11 +2864,19 @@ When a teacher names a cohort ("make a lesson for the Seals", "how are the Gecko
 
 You can \`web_search\` the web when a lesson or answer depends on current events or facts past your training cutoff (e.g. a unit built around a recent discovery, election, or news story). Use it when freshness matters; don't reach for it on evergreen curriculum questions. When a teacher gives you a specific link (an article, a standards page, a resource), use \`web_fetch\` to read that exact page and ground the work in its real content.
 
-\`get_scholar_dossier\` returns the complete teacher-facing profile: authoritative profile chronology plus both the authored dossier and uploaded source-document summaries (cognitive assessments, IEPs, parent notes). Treat its \`sourceDocuments\` as real profile evidence even when the dossier text, mastery, and observations are blank. For present-day age, use \`profile.currentAge\` only; ignore any age in dossier/document prose, and never confuse \`readingLevel\` or Bloom's levels with age. Use \`get_scholar_documents\` only for document-specific questions or a document-only refresh.
+${STAFF_SCHOLAR_RECORDS_SECTION}
 
-**You can ACT on a scholar's record, not just read it — the same things a teacher does on the scholar page.** \`add_scholar_observation\` covers praise/concern/suggestion/intervention plus neutral notes; add the optional Whole Child category tag when the take is about executive function, social-emotional growth, collaboration & character, or passions & quests. \`add_scholar_report\` adds a dated narrative note (also folded into the dossier), \`update_scholar_dossier\` appends a note or replaces the whole thing, \`set_scholar_reading_level\`, and \`update_scholar_profile\` changes display name / date of birth. For account recovery: \`reset_scholar_password\` (returns a one-time PIN), \`reset_scholar_passkeys\`. And \`delete_scholar\` PERMANENTLY removes a scholar and ALL their data. **You are a SCRIBE on the record, not an author.** The observation/report/dossier tools write the TEACHER's words and judgment, in the teacher's voice — only ever record what the teacher tells you to or explicitly approves. NEVER compose, infer, editorialize, or volunteer your OWN observation, report, or dossier note, and never proactively "log what you noticed." Your own read of a scholar is not a teacher observation — it has its own separate observer channel and must never land in this human-authored record. If you think something is worth noting, SUGGEST it to the teacher and let them decide; don't write it yourself. **Confirmation discipline:** for a routine observation the teacher dictated, just do it if their ask is unambiguous; but for anything that touches credentials, identity, or is destructive — password/passkey reset, a dossier REPLACE, a profile rename, and ESPECIALLY delete_scholar — echo back exactly what you're about to do (and to whom) and get an explicit yes first. Never call delete_scholar speculatively.
+${GROUNDED_CLAIMS_DOCTRINE}
 
-**Attached files.** A teacher can attach a file to their message with the "+" button (a scanned worksheet, a cognitive assessment PDF, a photo). When they do, you can SEE images and PDFs inline. To file it on a scholar's record: \`upload_scholar_document\` for sensitive adult-facing source material (cognitive/neuropsych assessments → kind "assessment", IEP/504 → "iep", parent emails, written observations) — this kicks an automatic extract→redact→summarize pipeline and lands on the scholar's Records tab; or \`add_portfolio_item\` for the kid's OWN work (worksheets, drawings, project artifacts). Both use the file attached to the current message. Before filing a sensitive document, confirm the resolved scholar + file name + document kind.
+${AUDIENCE_DISCLOSURE_DOCTRINE}
+
+${MULTI_PARTY_ETIQUETTE}
+
+${audienceContextLine("private")}
+
+**You can ACT on a scholar's record, not just read it — the same things a teacher does on the scholar page.** \`add_scholar_observation\` covers praise/concern/suggestion/intervention plus neutral notes; add the optional Whole Child category tag when the take is about executive function, social-emotional growth, collaboration & character, or passions & quests. \`add_scholar_report\` adds a dated narrative note (also folded into the dossier), \`update_scholar_dossier\` appends a note or replaces the whole thing, \`set_scholar_reading_level\`, and \`update_scholar_profile\` changes display name / date of birth. When a teacher says a scholar passed the calculator test or asks to give them the calculator license, call \`grant_calculator_license\` directly if the name resolves to exactly one scholar (ask which scholar if it's ambiguous); confirm before \`revoke_calculator_license\` or a \`rerecord\`, since re-recording reprints the card. For account recovery: \`reset_scholar_password\` (returns a one-time PIN), \`reset_scholar_passkeys\`. And \`delete_scholar\` PERMANENTLY removes a scholar and ALL their data. **You are a SCRIBE on the record, not an author.** The observation/report/dossier tools write the TEACHER's words and judgment, in the teacher's voice — only ever record what the teacher tells you to or explicitly approves. NEVER compose, infer, editorialize, or volunteer your OWN observation, report, or dossier note, and never proactively "log what you noticed." Your own read of a scholar is not a teacher observation — it has its own separate observer channel and must never land in this human-authored record. If you think something is worth noting, SUGGEST it to the teacher and let them decide; don't write it yourself. **Confirmation discipline:** for a routine observation the teacher dictated, just do it if their ask is unambiguous; but for anything that touches credentials, identity, or is destructive — password/passkey reset, a dossier REPLACE, a profile rename, and ESPECIALLY delete_scholar — echo back exactly what you're about to do (and to whom) and get an explicit yes first. Never call delete_scholar speculatively.
+
+**Attached files.** A teacher can attach a file to their message with the "+" button (a scanned worksheet, a cognitive assessment PDF, a photo). When they do, you can SEE images and PDFs inline. To file it on a scholar's record: \`upload_scholar_document\` for sensitive adult-facing source material (cognitive/neuropsych assessments → kind "assessment", IEP/504 → "iep", parent emails, written observations) — this kicks an automatic extract→redact→summarize pipeline and lands on the scholar's Documents tab; or \`add_portfolio_item\` for the kid's OWN work (worksheets, drawings, project artifacts). Both use the file attached to the current message. Before filing a sensitive document, confirm the resolved scholar + file name + document kind.
 
 When designing units, include: title, description, system prompt (instructions for the AI tutor), rubric, and target Bloom's level.
 
@@ -1866,11 +2884,13 @@ To author from scratch in one go: \`create_unit\` → \`create_scholar_lesson\` 
 
 **Which unit tool — \`create_unit\` is the default.** Classroom work, a cohort's arc, a pod/group's unit, "build me a unit on X" — all of that is GENERAL curriculum, so it starts with \`create_unit\`. Swap in \`create_scholar_quest\` at the top of the chain ONLY when the teacher explicitly asks for a Quest (independent study) belonging to ONE named scholar. That tool hands the unit to the scholar as personal property — it is hidden from every other scholar's unit picker, shows up on their Home and on the teacher Quests board as theirs, and mints them a completion badge — so it is the wrong container for anything more than one scholar will do. Neither "I'm looking at this scholar's page" nor "this is for the Seals" is a request for it; a cohort is many scholars, so a per-scholar unit is never the right container for one. Despite the names, \`create_scholar_lesson\` and \`create_scholar_activity\` are NOT scholar-scoped — they fill in whichever unitId you hand them, so the same two steps finish either kind of unit. If you realize you created the wrong kind, say so and fix it with \`delete_empty_unit\` before building on top of it; don't leave the stray unit sitting on a child's Quests board.
 
+**A new unit is unpublished.** What \`create_unit\` makes is visible to teachers only: scholars do not see it in Start a Quest and cannot start it. Assigning it (\`assign_unit\`, or placing it on a schedule) publishes it automatically. If the teacher wants scholars to find it on their own without an assignment, call \`publish_unit\`; tell the teacher which state the unit is in when you hand it back.
+
 **Activity kind.** \`create_scholar_activity\` takes a \`kind\`: \`online\` (default — an AI-tutor session), \`offline\` (a teacher-run classroom task), or \`vibecode\` (a full-screen app-builder workshop where the scholar directs an AI builder to make a live web app — its \`systemPrompt\` is the BUILD BRIEF, not a tutor prompt). Reach for \`kind:"vibecode"\` whenever the teacher wants scholars to make/build/"vibecode" something interactive — don't default it to a generic online chat.
 
 **On deliverables (READ THIS):** an ONLINE \`create_scholar_activity\` REQUIRES exactly one evaluation shape: a \`deliverable\` when the scholar produces a document/product, OR an \`advanceRubric\` when readiness is demonstrated in conversation with no document. A deliverable's \`criteria\` array is a private quality map for the tutor, NOT a scholar checklist or a completion gate. The AI gives each criterion a "not"/"half"/"full" verdict; a full criterion permanently awards it as scholar-visible flair, with its label and description shown together, while half/not-full verdicts remain private. Advance-rubric all-full still completes the activity. Criteria written only into systemPrompt are decorative — they cannot award flair or complete an advance rubric. Use 3-6 concrete DIMENSIONAL criteria, each with { label, description }.
 
-Make criteria DIMENSIONAL (specificity, length, structure, mechanics, evidence, voice) — NOT procedural (drafted, revised, published). Procedural lives in the process pipeline, not the rubric. Give each a short label. Be concrete in each description: state what counts as "full" and what triggers "half" or "not". State failure modes explicitly so the private verdict can distinguish them.
+Make criteria DIMENSIONAL (specificity, length, structure, evidence, voice) — NOT procedural (drafted, revised, published). Procedural lives in the process pipeline, not the rubric. Never write a criterion about spelling, punctuation, capitalization, handwriting or typing unless the activity is explicitly about spelling or typing (scholars may dictate, and dictated work earns full credit). Give each a short label. Be concrete in each description: state what counts as "full" and what triggers "half" or "not". State failure modes explicitly so the private verdict can distinguish them.
 
 ${profile.shortName} philosophy: Socratic inquiry, multiple perspectives (makawalu), depth over breadth, follow the child's curiosity.
 
@@ -1938,6 +2958,12 @@ http.route({
       return new Response(
         sseEvent({ error: "Not authenticated" }),
         { status: 401, headers: { "Content-Type": "text/event-stream" } }
+      );
+    }
+    if (await isReadOnlyCaller(ctx)) {
+      return new Response(
+        sseEvent({ error: READ_ONLY_ACCOUNT_ERROR }),
+        { status: 403, headers: { "Content-Type": "text/event-stream" } }
       );
     }
     const caller = await ctx.runQuery(internal.users.getByIdInternal, {
@@ -2134,6 +3160,7 @@ http.route({
       hasHealthManagementAccess,
     });
 
+
     // Build the system prompt. When the current thread is scoped to a scholar,
     // pre-load the scholar's redacted context so the AI doesn't need to tool-
     // call on every turn to remember who we're talking about.
@@ -2226,6 +3253,7 @@ http.route({
           "**\"How's it going?\" / \"who hasn't started?\" / \"how many submissions for X?\" / \"open Kai's project\"** → `get_assignment_progress`. It returns the roster (with each scholar's started-status + a `sessionUrl` deep link) and a per-activity roll-up (completed N/total + who's left, submissions in + not/half/full verdicts). `get_schedule` also now carries a quick `completedCount`/`scholarCount` per item.",
           "",
           "**Start something NOW vs plan it.** THREE tools live here, and picking the wrong one puts work in front of kids at the wrong time. `push_activity_now` makes an activity LIVE immediately on an EXISTING assignment (\"put the Tide Pool activity up\", \"set focus to X\"). `assign_activity_now` CREATES the cohort assignment AND goes live in one call. `schedule_activity` only PLANS a future push (goes live at `startsAtMs`). Don't use schedule_activity with a past/now time to start something — use push_activity_now.",
+          "After dispatching or pushing a class focus, confirm how long it will stay, explain that it fades after today unless the teacher asked for longer, and invite a correction.",
           "",
           "**A stated time means PLAN it, even when the request sounds casual.** \"Now\", \"put it up\", \"set focus\" mean live. Anything carrying a when — \"today at 2:20\", \"this afternoon\", \"for tomorrow\", \"in second period\" — means PLAN: `assign_unit` (nothing goes live), then `get_assignment` for the activityId, then `schedule_activity` at that time. There is deliberately no one-call create-and-schedule tool, so this is three calls; take them. Do NOT reach for `assign_activity_now` just because it is one call — it is live-only, and a bare \"today\" is a day, not a permission to start now. When the teacher names no time at all, ASK before making work appear.",
           "",
@@ -2264,7 +3292,7 @@ http.route({
       const lines: string[] = [];
       lines.push("");
       lines.push(
-        `## Current scholar: ${sc.scholarName} ${SCHOLAR_NAME_PRONOUN_HINT}`,
+        `## Current scholar: ${sc.scholarName} ${scholarNamePronounHint(sc.pronouns)}`,
       );
       lines.push("");
       lines.push(
@@ -2352,7 +3380,7 @@ http.route({
         const lines: string[] = [];
         lines.push("");
         lines.push(
-          `## Currently viewing: ${focus.scholarName} ${SCHOLAR_NAME_PRONOUN_HINT}`,
+          `## Currently viewing: ${focus.scholarName} ${scholarNamePronounHint(focus.pronouns)}`,
         );
         lines.push("");
         if (focusSwitched) {
@@ -2469,6 +3497,10 @@ http.route({
           messageId: assistantMsgId as Id<"curriculumMessages">,
           content,
         }),
+      isStopRequested: () =>
+        ctx.runQuery(internal.curriculumAssistant.isStopRequested, {
+          messageId: assistantMsgId as Id<"curriculumMessages">,
+        }),
       finalize: ({ content, model, tokensUsed }) =>
         ctx.runMutation(internal.curriculumAssistant.finalizeStream, {
           messageId: assistantMsgId as Id<"curriculumMessages">,
@@ -2513,131 +3545,6 @@ http.route({
 // CORS preflight for aide-stream
 http.route({
   path: "/aide-stream",
-  method: "OPTIONS",
-  handler: httpAction(async () => {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      },
-    });
-  }),
-});
-
-/**
- * Analyze a session endpoint.
- * Runs unified observer (writes mastery observations, signals, seeds, etc. to DB).
- * Returns a backward-compatible "detailed" shape for SessionViewer.
- */
-http.route({
-  path: "/analyze",
-  method: "POST",
-  handler: httpAction(async (ctx, request) => {
-    const body = await request.json();
-    const { sessionId } = body as { sessionId: string };
-
-    // ── AUTH ──────────────────────────────────────────────────────────
-    // Observer analysis writes mastery/signals/seeds to a scholar's record
-    // and burns a Claude call, so gate it: owner or teacher/admin only.
-    const jsonHeaders = {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-    };
-    const callerUserId = await getAuthUserId(ctx);
-    if (!callerUserId) {
-      return new Response(JSON.stringify({ error: "Not authenticated" }), {
-        status: 401,
-        headers: jsonHeaders,
-      });
-    }
-    const [caller, ownership] = await Promise.all([
-      ctx.runQuery(internal.users.getByIdInternal, { id: callerUserId }),
-      ctx.runQuery(internal.sessionHelpers.getSessionOwnership, {
-        sessionId: sessionId as Id<"sessions">,
-      }),
-    ]);
-    if (!ownership) {
-      return new Response(JSON.stringify({ error: "Session not found" }), {
-        status: 404,
-        headers: jsonHeaders,
-      });
-    }
-    if (!caller || !canAccessSession(caller, ownership.userId)) {
-      return new Response(JSON.stringify({ error: "Forbidden" }), {
-        status: 403,
-        headers: jsonHeaders,
-      });
-    }
-    if (
-      ownership.accessScholarId &&
-      caller._id !== ownership.accessScholarId
-    ) {
-      try {
-        await ctx.runQuery(
-          internal.accessGuards.requireActiveScholarAccessByUserId,
-          {
-            userId: caller._id,
-            scholarId: ownership.accessScholarId,
-          },
-        );
-      } catch {
-        return new Response(JSON.stringify({ error: "Forbidden" }), {
-          status: 403,
-          headers: jsonHeaders,
-        });
-      }
-    }
-
-    // ── Cost circuit breaker (public test server only) ─────────────────
-    // Inert unless LLM_DAILY_BUDGET_USD is set (never on prod).
-    const analyzeOverBudget = await llmBudgetExceeded(ctx);
-    if (analyzeOverBudget !== null) {
-      return new Response(
-        JSON.stringify({ error: llmBudgetMessage(analyzeOverBudget) }),
-        { status: 429, headers: jsonHeaders },
-      );
-    }
-
-    try {
-      const result = await ctx.runAction(internal.observer.analyzeSession, {
-        sessionId: sessionId as Id<"sessions">,
-      });
-
-      // Map observer result to legacy "detailed" shape for SessionViewer. A
-      // degraded-pulse run maps to null (no pulse to render), same as no result.
-      const detailed = mapObserverResultToDetailed(result);
-
-      return new Response(
-        JSON.stringify({ observer: result?.pulse ?? null, detailed }),
-        {
-          status: 200,
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-          },
-        }
-      );
-    } catch (error) {
-      console.error("Analysis error:", error);
-      return new Response(
-        JSON.stringify({ error: "Analysis failed" }),
-        {
-          status: 500,
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-          },
-        }
-      );
-    }
-  }),
-});
-
-// CORS preflight for analyze
-http.route({
-  path: "/analyze",
   method: "OPTIONS",
   handler: httpAction(async () => {
     return new Response(null, {
@@ -2793,7 +3700,8 @@ http.route({
 // in `googleAccountsActions.ts`) — the client calls it, gets back a
 // pre-signed authorization URL, and navigates the browser to it. The
 // callback below runs on the Convex domain without any session cookie:
-// trust comes entirely from the HMAC-signed `state` parameter.
+// trust comes from the HMAC-signed `state` parameter and, for the personal
+// link, a single-use nonce stored by beginOAuth (googleOAuthNonces).
 
 http.route({
   path: "/google/oauth/callback",
@@ -2828,7 +3736,9 @@ http.route({
       returnTo: string;
       nonce: string;
       institutionId?: string;
-      purpose?: "scanner" | "docs_bot" | "workspace_bot";
+      // Personal-link purposes ("default", "admissions") take the per-user
+      // branch below; only the scanner/bot purposes are institution-owned.
+      purpose?: "scanner" | "docs_bot" | "workspace_bot" | "default" | "admissions";
     }>(state, stateSecret);
     if (!verified) {
       return new Response("Invalid state", { status: 400 });
@@ -2839,6 +3749,29 @@ http.route({
       verified.purpose === "scanner" || isWorkspacePurpose;
     if (isInstitutionPurpose && !verified.institutionId) {
       return new Response("Invalid institution Google state", { status: 400 });
+    }
+    // Personal link (default/Drive or admissions): the state's nonce must be
+    // one beginOAuth stored for this user and purpose, and is consumed here,
+    // so a captured or replayed state is refused. Checked before the code
+    // exchange so a refused state spends nothing.
+    let personalUserEmail: string | null = null;
+    if (!isInstitutionPurpose) {
+      const personalPurpose = verified.purpose ?? "default";
+      const consumed =
+        typeof verified.nonce === "string" && verified.nonce.length > 0
+          ? await ctx.runMutation(internal.googleAccounts.consumeOAuthNonceInternal, {
+              nonce: verified.nonce,
+              userId: verified.userId as Id<"users">,
+              purpose: personalPurpose,
+            })
+          : { ok: false as const };
+      if (!consumed.ok) {
+        return new Response(
+          "This Google sign-in link has expired or was already used. Go back to Rabbithole and start the connection again.",
+          { status: 400 },
+        );
+      }
+      personalUserEmail = consumed.userEmail;
     }
     if (isInstitutionPurpose) {
       const authorized = await ctx.runQuery(
@@ -2896,7 +3829,35 @@ http.route({
         );
       }
     } else {
-      profile = await fetchUserInfo(tokens.access_token);
+      const info = await fetchUserInfo(tokens.access_token);
+      profile = info;
+      // Admissions reads and drafts mail as this account, so it must be the
+      // Rabbithole user's own Google account (verified, same address).
+      if (verified.purpose === "admissions") {
+        const { normalizeEmail } = await import("./lib/email");
+        const googleEmail = info.email ? normalizeEmail(info.email) : "";
+        if (
+          !personalUserEmail ||
+          info.email_verified === false ||
+          googleEmail !== personalUserEmail
+        ) {
+          // Best-effort: drop the grant we were just given.
+          try {
+            await fetch(
+              `https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(tokens.refresh_token ?? tokens.access_token)}`,
+              { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+            );
+          } catch {
+            // Silent.
+          }
+          return new Response(
+            personalUserEmail
+              ? `Connect the Google account for ${personalUserEmail}. You signed in to Google with a different account. Go back to Rabbithole and connect again with ${personalUserEmail}.`
+              : "Your Rabbithole account has no email address, so Admissions can't confirm which Google account is yours. Ask an administrator to add your email.",
+            { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+          );
+        }
+      }
     }
 
     // Redirect back to the canonical Next.js app. We're on the Convex domain,
@@ -2929,7 +3890,9 @@ http.route({
         await ctx.runMutation(internal.driveSyncState.upsertCredentialInternal, {
           institutionId: verified.institutionId as Id<"institutions">,
           purpose:
-            verified.purpose === "scanner" ? undefined : verified.purpose,
+            verified.purpose === "docs_bot" || verified.purpose === "workspace_bot"
+              ? verified.purpose
+              : undefined,
           identityType: "google_oauth",
           email: profile.email,
           scopes: tokens.scope.split(" "),
@@ -3033,13 +3996,22 @@ http.route({
       "Access-Control-Allow-Origin": "*",
     };
     const body = await request.json();
-    const { assistantMsgId } = body as { assistantMsgId: string };
+    const { assistantMsgId, selectedChildId } = body as {
+      assistantMsgId: string;
+      selectedChildId?: string;
+    };
 
     const callerUserId = await getAuthUserId(ctx);
     if (!callerUserId) {
       return new Response(
         sseEvent({ error: "Not authenticated" }),
         { status: 401, headers: sseHeaders },
+      );
+    }
+    if (await isReadOnlyCaller(ctx)) {
+      return new Response(
+        sseEvent({ error: READ_ONLY_ACCOUNT_ERROR }),
+        { status: 403, headers: sseHeaders },
       );
     }
     const caller = await ctx.runQuery(internal.users.getByIdInternal, {
@@ -3102,21 +4074,44 @@ http.route({
     let emitSSE: AideEmit = () => {};
 
     // Same shared tool set as the teacher aide, role-filtered to tier-1 and
-    // id-scoped to this parent's children (lib/scholarReadTools).
-    const tools = await makeScholarReadTools(
+    // id-scoped to this parent's children (lib/scholarReadTools) — plus the
+    // scholar Code Explorer (lib/scholarCodeTools): read-only, public-mirror
+    // reads so "how does Rabbithole decide what's on her frontier?" gets a
+    // true answer from the real code instead of a "can't see that" deflection
+    // (2026-09-16: three of the first nine free-typed parent questions on prod
+    // were about how the engine works, and all three were refused). The
+    // explorer carries no scholar data, so it needs no guardianship scoping.
+    const scholarReadTools = await makeScholarReadTools(
       ctx,
       (data) => emitSSE(data),
       ROLES.PARENT,
       allowedScholarIds,
     );
+    // Guarded: the model picks the explorer's arguments AFTER seeing the
+    // child's data, so a child's or parent's name in a path/query would reach
+    // GitHub's request logs — refuse those at the boundary
+    // (lib/scholarCodeTools.guardCodeToolArguments).
+    const codeTools = guardCodeToolArguments(
+      await makeScholarCodeTools((data) => emitSSE(data), ctx),
+      protectedTermsFromNames([...childNames, context.parentName]),
+    );
+    const tools = [...scholarReadTools, ...codeTools];
 
     const childList =
       childNames.length > 0 ? childNames.join(", ") : "(no children linked yet)";
+    // The portal header's current selection, resolved ONLY against this
+    // parent's guardianship-derived children — an id for anyone else falls
+    // back to no selection rather than naming a child they can't see.
+    const selectedChildName = resolveSelectedChildName(
+      context.children,
+      selectedChildId,
+    );
     const systemPrompt = buildParentAideSystemPrompt({
       profile: parentProfile,
       parentName: context.parentName,
       childList,
       childCount: childNames.length,
+      selectedChildName,
     });
 
     const apiMessages = context.messages
@@ -3130,6 +4125,13 @@ http.route({
       system: cachedSystem(systemPrompt),
       messages: apiMessages,
       tools,
+      // Cost cap on the tool loop now that the explorer is here. Looser than
+      // the scholar Workshop's CODE_EXPLORER_MAX_ITERATIONS (5) because the
+      // scholar-read tools ran uncapped before and a turn that reads two
+      // children's practice + seeds and then opens a source file is already
+      // four rounds; the SDK stops silently at the cap and the partial text
+      // is finalized as the answer, so the cap must never bite a normal turn.
+      maxIterations: PARENT_AIDE_MAX_ITERATIONS,
       bindEmit: (emit) => {
         emitSSE = emit;
       },
@@ -3137,6 +4139,10 @@ http.route({
         ctx.runMutation(internal.parentChat.updateStreamContent, {
           messageId: assistantMsgId as Id<"parentChatMessages">,
           content,
+        }),
+      isStopRequested: () =>
+        ctx.runQuery(internal.parentChat.isStopRequested, {
+          messageId: assistantMsgId as Id<"parentChatMessages">,
         }),
       finalize: ({ content }) =>
         ctx.runMutation(internal.parentChat.finalizeStream, {
@@ -3174,21 +4180,22 @@ http.route({
 
 // ── The Workshop reflection chat (/meta-stream) ──────────────────────────
 // Cloned from the aide streams: auth the scholar (their own Convex-auth
-// identity — the same getAuthUserId the scholar-facing /project-stream uses),
+// identity — the same getAuthUserId the scholar-facing /session-stream uses),
 // verify the metaChat + assistant row belong to the caller (via the extracted
 // pure validator), run runAideStream, and finalize the assistant row
 // (finalizeStream schedules the meta-observer, exactly where sessions schedule
 // the main observer). See review/scholar-meta-prep-time-plan.html §8.
 //
-// TOOLS: tool-less by default (all context is injected deterministically).
-// Two INDEPENDENT flag-gated tool sets, each off by default:
-//   - WORKSHOP_CODE_EXPLORER_ENABLED → two read-only, public-only,
-//     unauthenticated repo-reading tools (lib/scholarCodeTools.ts,
-//     CODE_EXPLORER_SPEC.md).
-//   - WORKSHOP_IDEA_CONVOS_ENABLED → the send_idea_to_teacher write tool +
-//     the thinking-partner prompt (lib/scholarIdeaTools.ts, IDEA_CONVOS_SPEC.md).
-// A small iteration cap applies whenever any tool is wired (the larger of the
-// two caps). Both flags off → byte-identical to the tool-less v1.
+// TOOLS (all context is injected deterministically):
+//   - Code Explorer — ALWAYS ON for both purposes: three read-only,
+//     public-only, unauthenticated repo-reading tools (lib/scholarCodeTools.ts,
+//     CODE_EXPLORER_SPEC.md). A scholar asking how Rabbithole is built needs
+//     the real code to get a true answer. (The parent aide above carries the
+//     same three tools for the same reason.)
+//   - WORKSHOP_IDEA_CONVOS_ENABLED (always on for Ask Rabbithole) → the
+//     send_idea_to_teacher write tool + the thinking-partner prompt
+//     (lib/scholarIdeaTools.ts, IDEA_CONVOS_SPEC.md).
+// A small iteration cap applies (the larger of the two tool sets' caps).
 http.route({
   path: "/meta-stream",
   method: "POST",
@@ -3240,6 +4247,12 @@ http.route({
         headers: sseHeaders,
       });
     }
+    if (await isReadOnlyCaller(ctx)) {
+      return new Response(sseEvent({ error: READ_ONLY_ACCOUNT_ERROR }), {
+        status: 403,
+        headers: sseHeaders,
+      });
+    }
 
     const context = await ctx.runQuery(internal.metaChat.getContext, {
       chatId: chatId as Id<"metaChats">,
@@ -3267,30 +4280,14 @@ http.route({
       openIdeas: context.openIdeas,
       ideaUpdates: context.ideaUpdates,
       credits: context.credits,
-      // Workshop Code Explorer — the SAME flag gates the prompt section and the
-      // tools below, so they can never drift (CODE_EXPLORER_SPEC.md §3/§2).
-      codeExplorerEnabled: isCodeExplorerEnabled(),
       // Workshop idea conversations — the SAME flag swaps the Workshop/listening
       // section for the thinking-partner contract AND wires the
       // send_idea_to_teacher tool below (IDEA_CONVOS_SPEC.md §2/§1).
       ideaConvosEnabled,
     });
 
-    // Stamp the surfaced staff responses seen at PROMPT-BUILD time (§5.6) —
-    // when the chat actually shows them, not at observer time.
-    if (
-      context.purpose === "reflection" &&
-      context.updateSuggestionIds.length > 0
-    ) {
-      await ctx.runMutation(internal.metaChat.markResponsesSeen, {
-        suggestionIds: context.updateSuggestionIds,
-        at: Date.now(),
-      });
-    }
-
-    // Stamp credit moments delivered at PROMPT-BUILD time too — the moment a
-    // credit is woven into the chat it's delivered (at-most-once, §8), the same
-    // idea as markResponsesSeen above.
+    // Stamp credit moments delivered at PROMPT-BUILD time — the moment a
+    // credit is woven into the chat it's delivered (at-most-once, §8).
     if (
       context.purpose === "reflection" &&
       context.creditDeliverIds.length > 0
@@ -3325,21 +4322,22 @@ http.route({
           : 'The scholar just opened Ask Rabbithole and hasn\'t written anything yet — their first message is the marker "<start>". Briefly invite them to ask how Rabbithole works, why it behaves a certain way, or what could be better. Do NOT mention or repeat "<start>".';
     }
 
-    // Workshop tool wiring. Two INDEPENDENT flags, each off by default:
-    //   - Code Explorer (WORKSHOP_CODE_EXPLORER_ENABLED): read-only repo tools.
-    //   - Idea conversations (WORKSHOP_IDEA_CONVOS_ENABLED): the
-    //     send_idea_to_teacher write tool.
-    // Both OFF → withTools=false, maxIterations undefined: exactly today's
-    // tool-less v1 (behavioral no-op). Either/both ON → their tools + a cost cap
-    // (the larger of the two caps). The tools close over a late-bound emit
-    // (reassigned once the ReadableStream starts), the same dance the other aide
-    // streams use.
+    // Workshop tool wiring:
+    //   - Code Explorer: read-only repo tools, always wired.
+    //   - Idea conversations (WORKSHOP_IDEA_CONVOS_ENABLED, always on for Ask
+    //     Rabbithole): the send_idea_to_teacher write tool.
+    // A cost cap applies (the larger of the two caps). The tools close over a
+    // late-bound emit (reassigned once the ReadableStream starts), the same
+    // dance the other aide streams use.
     let emitSSE: AideEmit = () => {};
-    const codeCfg = codeExplorerLoopConfig(isCodeExplorerEnabled());
     const ideaCfg = ideaConvosLoopConfig(ideaConvosEnabled);
-    const codeTools = codeCfg.withTools
-      ? await makeScholarCodeTools((data) => emitSSE(data))
-      : [];
+    // Guarded with the scholar's own first name: with code search credentialed,
+    // a query travels to GitHub under our App token, so a kid typing their own
+    // name must not put it there (same boundary as the parent aide).
+    const codeTools = guardCodeToolArguments(
+      await makeScholarCodeTools((data) => emitSSE(data), ctx),
+      protectedTermsFromNames([context.firstName]),
+    );
     // The idea tool's capture writes for the CHAT'S OWN scholar (context
     // .scholarId === the authenticated caller, enforced by
     // validateMetaStreamRequest) — never a model-supplied id, so it can't file
@@ -3360,9 +4358,10 @@ http.route({
       : [];
     const tools = [...codeTools, ...ideaTools];
     const withTools = tools.length > 0;
-    const maxIterations = withTools
-      ? Math.max(codeCfg.maxIterations ?? 0, ideaCfg.maxIterations ?? 0)
-      : undefined;
+    const maxIterations = Math.max(
+      CODE_EXPLORER_MAX_ITERATIONS,
+      ideaCfg.maxIterations ?? 0,
+    );
 
     return runAideStream({
       anthropic,
@@ -3381,6 +4380,10 @@ http.route({
         ctx.runMutation(internal.metaChat.updateStreamContent, {
           messageId: assistantMsgId as Id<"metaMessages">,
           content,
+        }),
+      isStopRequested: () =>
+        ctx.runQuery(internal.metaChat.isStopRequested, {
+          messageId: assistantMsgId as Id<"metaMessages">,
         }),
       finalize: ({ content, model, tokensUsed }) =>
         ctx.runMutation(internal.metaChat.finalizeStream, {
@@ -3486,6 +4489,41 @@ http.route({
   }),
 });
 
+// ── Slack interactivity (button clicks, modal submits) ───────────────────
+// Same contract as /slack/events: verify the signature over the RAW body
+// (form-encoded `payload=<json>`), ack an empty 200 inside Slack's 3-second
+// budget, and do the work in the scheduled internal action.
+http.route({
+  path: "/slack/interactivity",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const signingSecret = process.env.SLACK_SIGNING_SECRET;
+    if (!signingSecret) {
+      return new Response("Slack not configured", { status: 503 });
+    }
+    const rawBody = await request.text();
+    const valid = await verifySlackSignature({
+      signingSecret,
+      timestampHeader: request.headers.get("x-slack-request-timestamp"),
+      signatureHeader: request.headers.get("x-slack-signature"),
+      rawBody,
+    });
+    if (!valid) return new Response("Invalid signature", { status: 401 });
+
+    const parsed = parseInteractivityBody(rawBody);
+    if (!parsed.ok) return new Response("Bad payload", { status: 400 });
+
+    try {
+      await ctx.scheduler.runAfter(0, internal.slackInteractivity.handleInteraction, {
+        payload: parsed.payload,
+      });
+    } catch (err) {
+      console.error("Slack interactivity intake failed (acked anyway):", err);
+    }
+    return new Response("", { status: 200 });
+  }),
+});
+
 // Google Workspace Events publishes Drive comment CloudEvents to Pub/Sub; its
 // push subscription calls this endpoint. Auth is two-factor at the transport
 // boundary: an unguessable configured URL plus Google's signed OIDC token.
@@ -3522,6 +4560,7 @@ http.route({
     return new Response("", { status: 200 });
   }),
 });
+
 
 
 // ── Inbound parent reply email (reply-by-email → a chat message) ──────────
@@ -3709,5 +4748,342 @@ http.route({
 
 
 // ── /f REMOVED (2026-08-02) ───────────────────────────────────────────────
+
+
+// ── GUEST MODE ────────────────────────────────────────────────────────────
+// The unauthenticated "try it" exchange, embedded by iframe from the school
+// marketing site (`app/embed/try`). Policy + topics: convex/lib/guestTutor.ts.
+//
+// Nothing below reads a scholar row or writes a scholar table, and no message
+// text is stored or logged. The gate order is deliberate and every step is
+// cheap-before-expensive: flag → origin → shape → rate limit → budget → model.
+
+/**
+ * CORS for guest mode's own (error) responses, echoed only to an allowlisted
+ * caller. The 200 streaming path goes through `runAideStream`, whose
+ * SSE_HEADERS hardcode `Access-Control-Allow-Origin: *` for every aide stream
+ * — harmless here (the endpoint carries no cookies or auth to steal, and the
+ * origin check has already run) but worth knowing before you read the echo
+ * below as the whole policy.
+ */
+function guestCorsHeaders(origin: string): Record<string, string> {
+  return {
+    "Access-Control-Allow-Origin": origin,
+    // The allowlist is per-origin, so caches must not serve one embedder's
+    // response to another.
+    Vary: "Origin",
+  };
+}
+
+const GUEST_JSON_HEADERS = {
+  "Content-Type": "application/json",
+  "Cache-Control": "no-store",
+} as const;
+
+/**
+ * What the Next page asks before rendering: is guest mode on for THIS Convex
+ * deployment, and what are the three topics?
+ *
+ * Serving the catalog from here (rather than importing it into the page) means
+ * the flag and the topics have exactly one home, so the embed can never render
+ * a topic the stream would refuse. Uncached on purpose: flipping the env var
+ * should take effect on the next page load, with no web redeploy.
+ */
+http.route({
+  path: "/guest-tutor/config",
+  method: "GET",
+  handler: httpAction(async () => {
+    // 404, not `{"enabled": false}`. A dark deployment should not advertise
+    // that there is something here to turn on — and the page already treats
+    // any non-ok response as off, so this costs nothing.
+    if (!isGuestTutorEnabled()) {
+      return new Response("Not found", {
+        status: 404,
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        enabled: true,
+        maxTurns: GUEST_MAX_TURNS,
+        closingLine: GUEST_CLOSING_LINE,
+        caption: GUEST_CAPTION,
+        topics: GUEST_TOPICS.map((topic) => ({
+          id: topic.id,
+          title: topic.title,
+        })),
+      }),
+      {
+        status: 200,
+        headers: { ...GUEST_JSON_HEADERS, "Access-Control-Allow-Origin": "*" },
+      },
+    );
+  }),
+});
+
+http.route({
+  path: "/guest-tutor-stream",
+  method: "OPTIONS",
+  handler: httpAction(async (_ctx, request) => {
+    const origin = request.headers.get("Origin");
+    if (
+      !isGuestTutorEnabled() ||
+      !isGuestOriginAllowed(origin, {
+        allowLocalhost: guestTutorAllowsLocalhost(),
+      })
+    ) {
+      // No CORS headers at all — the browser turns this into the network
+      // error it should be, and a disallowed embedder learns nothing.
+      return new Response(null, { status: 403 });
+    }
+    return new Response(null, {
+      status: 204,
+      headers: {
+        ...guestCorsHeaders(origin!),
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "600",
+      },
+    });
+  }),
+});
+
+/**
+ * One guest turn.
+ *
+ * Stateless by design: the client posts the whole transcript every time and we
+ * persist none of it, so closing the tab is the delete. The turn cap is
+ * enforced from that posted transcript (a client that lies is refused), and
+ * the per-IP cap bounds how often lying is worth trying.
+ *
+ * TODO(captcha) — deliberately out of scope for the preview. What stands
+ * between this endpoint and a scripted caller today is the per-request rate
+ * limits; the `Origin` check is NOT part of that argument, because a script
+ * sets that header with one flag. The limits bound the bill and turn away
+ * casual abuse, but a determined attacker driving a browser is not stopped.
+ *
+ * When we want one, this is the hook: take a `captchaToken` off the body here
+ * and verify it server-side against the provider. Every turn claims a
+ * rate-limit slot now, so the natural place to demand a token is the OPENING
+ * turn — the one a human actually performs — with continuations carrying the
+ * verified token forward. Nothing else in this file has to change.
+ */
+http.route({
+  path: "/guest-tutor-stream",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const startedAt = Date.now();
+    const origin = request.headers.get("Origin");
+
+    // 1. Flag. A deployment that has not opted in behaves as if the route does
+    //    not exist — no hint that there is something here to turn on.
+    if (!isGuestTutorEnabled()) {
+      return new Response("Not found", { status: 404 });
+    }
+
+    // 2. Origin. This refuses another SITE's page calling the endpoint
+    //    directly. It cannot police who framed us — the request comes from the
+    //    iframe document, which we serve, so the header is always our own
+    //    origin. `frame-ancestors` is that control. Not authentication: a
+    //    script sets this header with one flag.
+    if (
+      !isGuestOriginAllowed(origin, {
+        allowLocalhost: guestTutorAllowsLocalhost(),
+      })
+    ) {
+      return new Response(sseEvent({ error: "Forbidden" }), {
+        status: 403,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    }
+    const cors = guestCorsHeaders(origin!);
+    const errorHeaders = {
+      "Content-Type": "text/event-stream",
+      ...cors,
+    };
+
+    // 3. Shape: a known topic and a transcript that validates.
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return new Response(sseEvent({ error: "Bad request." }), {
+        status: 400,
+        headers: errorHeaders,
+      });
+    }
+    const { topic: topicId, messages: rawMessages } = (body ?? {}) as {
+      topic?: unknown;
+      messages?: unknown;
+    };
+    const topic =
+      typeof topicId === "string" ? guestTopicById(topicId) : null;
+    if (!topic) {
+      return new Response(sseEvent({ error: "Bad request." }), {
+        status: 400,
+        headers: errorHeaders,
+      });
+    }
+    const transcript = checkGuestTranscript(rawMessages ?? []);
+    if (!transcript.ok) {
+      return new Response(sseEvent({ error: transcript.error }), {
+        status: 400,
+        headers: errorHeaders,
+      });
+    }
+    const isOpening = transcript.turns.length === 0;
+    const turnsLeft = GUEST_MAX_TURNS - transcript.guestTurnsUsed;
+
+    // 4. Rate limits, claimed on EVERY request. Claiming only on the opening
+    //    turn was the original bug: the conversation lives in the client, so a
+    //    caller who never posts an empty transcript never takes that branch
+    //    and skips every cap. Both scopes are checked and charged in one
+    //    serializable mutation, so a race can't oversell the last slot.
+    const ipHash = await hashGuestIp(
+      guestClientIp(request.headers),
+      process.env.GUEST_TUTOR_IP_SALT ?? process.env.CONVEX_CLOUD_URL ?? "rh",
+    );
+    const claim = await ctx.runMutation(internal.guestTutor.claimGuestTurn, {
+      ipHash,
+      topic: topic.id,
+      isOpening,
+      nowMs: startedAt,
+    });
+    if (!claim.ok) {
+      // The hop COUNT, never the addresses. `guestClientIp` takes the LAST
+      // x-forwarded-for entry, which is the real client only when exactly one
+      // proxy appends. More than one hop would mean every visitor shares a
+      // bucket — silently — so it is worth being able to see.
+      console.log(
+        `[guest-tutor] refused cap=${claim.reason} xff_hops=${
+          request.headers.get("x-forwarded-for")?.split(",").length ?? 0
+        }`,
+      );
+      return new Response(sseEvent({ error: GUEST_RATE_LIMITED_MESSAGE }), {
+        status: 429,
+        headers: errorHeaders,
+      });
+    }
+
+    // 5. The shared cost circuit breaker, after the caps so it can't be probed
+    //    for free. Inert unless LLM_DAILY_BUDGET_USD is set.
+    const overBudget = await llmBudgetExceeded(ctx);
+    if (overBudget !== null) {
+      return new Response(
+        sseEvent({ error: GUEST_RATE_LIMITED_MESSAGE }),
+        { status: 429, headers: errorHeaders },
+      );
+    }
+
+    // 6. The tutor. The system prompt is the PUBLISHED one, unchanged: an
+    //    all-null context yields exactly the base + soul sections (every
+    //    per-scholar section has no data and drops out), and the capabilities
+    //    are declared honestly as none, because guest mode hands the model no
+    //    tools. The guest framing rides in an ephemeral user-role instruction,
+    //    the same device `kickoffInstruction()` uses for a real activity — so
+    //    nobody has to maintain a second, quietly-diverging tutor prompt.
+    const systemPrompt = buildTutorSystemPrompt({
+      teacherWhisper: null,
+      readingLevel: null,
+      scholarName: null,
+      unitContext: null,
+      personaContext: null,
+      perspectiveContext: null,
+      processContext: null,
+      processStateData: null,
+      artifactData: null,
+      appStateContext: null,
+      dossierContent: null,
+      documentNotes: null,
+      seeds: [],
+      masteryContext: null,
+      signalContext: null,
+      timingContext: null,
+      lessonContext: null,
+      teacherDirectives: [],
+      goals: [],
+      weeklyGoals: [],
+      lessonActivityContext: null,
+      priorActivityContext: null,
+      gameRoundContexts: null,
+      activityContext: null,
+      standaloneDeliverableContext: null,
+      currentVerdictsContext: null,
+      advanceRubricContext: null,
+      conversationCompletionContext: null,
+      practiceSkillsContext: null,
+      isFirstTurn: isOpening,
+      isFirstSession: true,
+      lastSessionAt: null,
+      webPracticeContext: null,
+      granuleStatusContext: null,
+      activityRecipe: null,
+      baselineEvidenceContext: null,
+      seedOriginContext: null,
+      physicalEnvironmentContext: null,
+      runtimeCapabilities: {
+        canShareResources: false,
+        canScoreRubrics: false,
+        canMarkActivityComplete: false,
+      },
+    });
+
+    // The kickoff instruction leads EVERY request, not just the opening one.
+    // A continuation's transcript starts with the tutor's opening question, and
+    // a message list whose first entry is an assistant turn is at best
+    // unsupported by the Messages API; leading with the same user-role
+    // instruction also keeps the topic (and the council seed) in view for the
+    // whole exchange rather than only its first turn.
+    const apiMessages = [
+      { role: "user" as const, content: guestKickoffInstruction(topic) },
+      ...transcript.turns.map((turn) => ({
+        role: turn.role,
+        content: turn.content,
+      })),
+      ...(isOpening
+        ? []
+        : [
+            {
+              role: "user" as const,
+              content: guestTurnInstruction(turnsLeft),
+            },
+          ]),
+    ];
+
+    const { Anthropic } = await import("@anthropic-ai/sdk");
+    const anthropic = new Anthropic({ apiKey: requireAnthropicApiKey() });
+
+    const turnIndex = transcript.guestTurnsUsed;
+    return runAideStream({
+      anthropic,
+      model: MODELS.SONNET,
+      // A guest turn is a question, not an essay. The cap is a floor under
+      // cost and a nudge toward the brevity the prompt already asks for.
+      maxTokens: 700,
+      system: cachedSystem(systemPrompt),
+      messages: apiMessages,
+      tools: [],
+      // Nothing to persist: the transcript lives in the visitor's tab and
+      // nowhere else. These are the "no persistence beyond the session" clause,
+      // expressed as code rather than a promise in a doc.
+      persist: async () => undefined,
+      finalize: async () => undefined,
+      onComplete: async () => {
+        logGuestTurn({
+          topic: topic.id,
+          turnIndex,
+          ms: Date.now() - startedAt,
+          outcome: "ok",
+        });
+      },
+      onUsage: (usage, model) =>
+        // No role and no institution: a guest belongs to no school, and
+        // guessing the primary one would put marketing spend on a tenant's
+        // ledger. `source` alone makes the cost legible.
+        recordUsage(ctx, { source: "guest-tutor", model, usage }),
+      label: "guest tutor",
+    });
+  }),
+});
 
 export default http;

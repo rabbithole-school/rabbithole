@@ -51,6 +51,7 @@ import { RoundsRowContent } from "@/components/rounds/RoundsRowContent";
 import { ScholarWorkRow } from "../ScholarWorkTable";
 import { HomeworkContent } from "../HomeworkContent";
 import type { Scholar } from "../types";
+import { SortableColumnHeader } from "@/components/ui/SortableColumnHeader";
 
 type El = { type: unknown; props: Record<string, unknown> };
 
@@ -159,18 +160,24 @@ describe("ScholarWorkTable grade column + sort", () => {
     expect(rowGrades(tree).at(-1)).toBeNull();
   });
 
+  // The header is the shared SortableColumnHeader; expand it (it is a plain
+  // function component) so the DOM-level contract is asserted, not its props.
+  const header = (tree: unknown) => {
+    const [el] = findAll(tree, (node) => node.type === SortableColumnHeader);
+    return (SortableColumnHeader as (p: unknown) => unknown)(el.props);
+  };
+
   it("the Grade header cycles the sort via the lifted onToggleSort", () => {
-    const tree = render();
-    const header = findAll(tree, (el) => el.props["data-testid"] === "rounds-sort-grade");
-    expect(header).toHaveLength(1);
-    (header[0].props.onClick as () => void)();
+    const button = findAll(header(render()), (el) => el.props["data-testid"] === "rounds-sort-grade");
+    expect(button).toHaveLength(1);
+    (button[0].props.onClick as () => void)();
     expect(onToggleSort).toHaveBeenCalledTimes(1);
   });
 
   it("marks the header aria-sort to match the direction", () => {
-    const asc = findAll(render({ sortDir: "asc" }), (el) => el.props["aria-sort"] !== undefined);
+    const asc = findAll(header(render({ sortDir: "asc" })), (el) => el.props["aria-sort"] !== undefined);
     expect(asc[0].props["aria-sort"]).toBe("ascending");
-    const desc = findAll(render({ sortDir: "desc" }), (el) => el.props["aria-sort"] !== undefined);
+    const desc = findAll(header(render({ sortDir: "desc" })), (el) => el.props["aria-sort"] !== undefined);
     expect(desc[0].props["aria-sort"]).toBe("descending");
   });
 });

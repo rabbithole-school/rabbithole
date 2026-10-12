@@ -18,7 +18,8 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { Box, Flex, HStack, Text } from "@chakra-ui/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -40,13 +41,15 @@ import {
 const TICK_MS = 15_000;
 
 export function FocusStrip() {
-  const pushes = useQuery(api.pushes.livePushesForMe, {});
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), TICK_MS);
     return () => clearInterval(id);
   }, []);
+  const minuteNow = Math.floor(now / 60_000) * 60_000;
+  // Smoothed so the minute re-arm doesn't blank the strip for a round-trip.
+  const pushes = useSmoothedQuery(api.pushes.livePushesForMe, { now: minuteNow });
 
   // Loading or empty: render nothing, matching AppLauncher's no-layout-shift
   // convention for a section that may legitimately be absent.

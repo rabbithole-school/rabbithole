@@ -10,8 +10,9 @@
  * (visual-design.md's charm exception): a field of small twinkling stars, ONE
  * of them brightening into the story's authored emoji, then the words. It runs
  * ONCE per mount, never loops, and collapses to its settled end state instantly
- * under reduced motion. The emoji is the story's real referent (the cicada test
- * holds — the art comes from the registry), so the charm asserts no false count.
+ * under reduced motion. The emoji is the story's (or seed's) real referent (the
+ * cicada test holds — the art is authored in the registry), so the charm asserts
+ * no false count.
  */
 
 /**
@@ -27,6 +28,8 @@
  *   4. ~420–600ms   eyebrow + hook + teaser fade+rise as one group.
  *   5. settle       the field fades DOWN to faint + the shine dies away.
  */
+import type { CardQuestion } from "./questionCard";
+
 export const STORY_REVEAL_MS = {
   /** Night surface + star field fade in (step 1). */
   fieldIn: 150,
@@ -55,6 +58,44 @@ export const STORY_FIELD_SETTLED_OPACITY = 0.35;
 
 /** How long the transient tap hint dwells before it fades back out (ms). */
 export const STORY_HINT_MS = 2000;
+
+export type StoryMoment<SeedId extends string = string> =
+  | {
+      kind: "story";
+      fromKey: string;
+      toKey: string;
+      skillLabel: string;
+      hook: string;
+      teaser?: string;
+      visualEmoji?: string;
+      artUrl?: string;
+      narrative: string;
+      probe?: string;
+      kindLabel: string;
+      hasApplication: boolean;
+      /** The answerable question the card asks (shared/questionCard.ts). */
+      question?: CardQuestion;
+    }
+  | {
+      kind: "seed";
+      seedId: SeedId;
+      hook: string;
+      teaser: string;
+      /** The seed's authored hero emoji (crossDomainSeeds.ts), rendered in
+       *  the same hero slot a story's emoji uses. */
+      visualEmoji?: string;
+      hasApplication: boolean;
+      /** The answerable question the card asks (shared/questionCard.ts). */
+      question?: CardQuestion;
+    };
+
+export function storyMomentKey<SeedId extends string>(
+  moment: StoryMoment<SeedId>,
+): string {
+  return moment.kind === "story"
+    ? `story:${moment.fromKey}:${moment.toKey}`
+    : `seed:${moment.seedId}`;
+}
 
 /**
  * Locked card copy — byte-identical on both surfaces (visual-design.md sentence

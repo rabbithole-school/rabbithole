@@ -1,8 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  REHEARSE_TRY_FIRST_TERMINAL_COPY,
-  launchpadTryFirstMode,
-} from "@/components/practice/LaunchpadCard";
+import { launchpadTryFirstMode } from "@/components/practice/LaunchpadCard";
 import {
   WORKED_NEXT_STEP_LABEL,
   WORKED_SEE_IT_WORK_LABEL,
@@ -23,12 +20,6 @@ describe("F1 · Rehearse 'Try it myself' no longer silently closes the dialog", 
 
   it("POSITIVE CONTROL: a live scholar still proceeds to their first item", () => {
     expect(launchpadTryFirstMode(false)).toBe("proceed");
-  });
-
-  it("the terminal copy is sentence case and points at the 'See an example' shelf", () => {
-    // First word capitalised, no Title Case, mentions the always-available shelf.
-    expect(REHEARSE_TRY_FIRST_TERMINAL_COPY.startsWith("The scholar")).toBe(true);
-    expect(REHEARSE_TRY_FIRST_TERMINAL_COPY).toContain("See an example");
   });
 });
 

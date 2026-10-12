@@ -5,6 +5,8 @@ node_modules/
 .next/
 out/
 dist/
+# The published vendored image-size build is source, not output.
+!/vendor/image-size/dist/
 
 # Local environment
 .env*

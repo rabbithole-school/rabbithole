@@ -150,6 +150,84 @@ test("collectChannelDay keeps same-day signals tenant-scoped, ranked, deduped, a
   );
 });
 
+test("collectChannelDay counts every practice attempt in the day, not a page of them", async () => {
+  const t = convexTest(schema, modules);
+  const dayStartMs = Date.parse("2026-09-01T10:00:00.000Z"); // midnight HST
+  const nowMs = Date.parse("2026-09-02T00:05:00.000Z"); // 2:05 PM HST
+
+  const setup = await t.run(async (ctx) => {
+    const institutionId = await ctx.db.insert("institutions", {
+      name: "Kestrel Academy",
+      slug: "kestrel",
+      kind: "school",
+      timeZone: "Pacific/Honolulu",
+    });
+    const teacherId = await ctx.db.insert("users", {
+      name: "Fictional Teacher",
+      username: "fictional-teacher",
+      role: "teacher",
+    });
+    const scholarId = await ctx.db.insert("users", {
+      name: "Fictional Scholar",
+      username: "fictional-scholar",
+      role: "scholar",
+      institutionId,
+    });
+    const groupId = await ctx.db.insert("scholarGroups", {
+      teacherId,
+      institutionId,
+      name: "Fireflies",
+      scholarIds: [scholarId],
+      slackChannelId: "CFICTIONAL",
+    });
+
+    // 45 graded attempts across 30 distinct skills — comfortably past the
+    // LIST_LIMIT page that used to decide both numbers.
+    for (let i = 0; i < 45; i += 1) {
+      await ctx.db.insert("practiceAttempts", {
+        scholarId,
+        nodeKey: `skill-${i % 30}`,
+        correct: true,
+        createdAt: dayStartMs + i * 60_000,
+      });
+    }
+    // Retry rows are diagnostics, never graded attempts.
+    await ctx.db.insert("practiceAttempts", {
+      scholarId,
+      nodeKey: "skill-retry-only",
+      correct: false,
+      retry: true,
+      createdAt: dayStartMs + 60_000,
+    });
+    // Outside the window on either side.
+    await ctx.db.insert("practiceAttempts", {
+      scholarId,
+      nodeKey: "skill-yesterday",
+      correct: true,
+      createdAt: dayStartMs - 60_000,
+    });
+    await ctx.db.insert("practiceAttempts", {
+      scholarId,
+      nodeKey: "skill-after-cutoff",
+      correct: true,
+      createdAt: nowMs + 60_000,
+    });
+    return { groupId };
+  });
+
+  const collected = await t.run(async (ctx) =>
+    ctx.runQuery(internal.eodCheckin.collectChannelDay, {
+      groupIds: [setup.groupId],
+      dayStartMs,
+      nowMs,
+    }),
+  );
+
+  const scholar = collected.scholars[0];
+  expect(scholar.practiceAttempts).toBe(45);
+  expect(scholar.practiceDistinctSkills).toBe(30);
+});
+
 test("collectChannelDay excludes staff-only Whole Child and neutral notes", async () => {
   const t = convexTest(schema, modules);
   const setup = await t.run(async (ctx) => {
@@ -1171,6 +1249,219 @@ describe("end-of-day Slack check-in", () => {
       doneScholarNames: [],
       missingScholarNames: ["Kai"],
     });
+  });
+
+  test("past-due homework: dated, live, targeted, tenant-scoped, grouped across one-scholar copies", async () => {
+    const t = convexTest(schema, modules);
+    const { institutionId, teacherId, scholarId: kaiId, groupId } =
+      await seedLinkedGroup(t);
+    const DAY = 86_400_000;
+    const ids = await t.run(async (ctx) => {
+      const mia = await ctx.db.insert("users", {
+        name: "Mia", username: "mia", role: "scholar", institutionId,
+      });
+      const noa = await ctx.db.insert("users", {
+        name: "Noa", username: "noa", role: "scholar", institutionId,
+      });
+      // On an assignment roster, but not in this channel's group: never named.
+      const otherInstitution = await ctx.db.insert("institutions", {
+        name: "Kestrel Academy", slug: "kestrel", kind: "school",
+      });
+      const outsider = await ctx.db.insert("users", {
+        name: "Outsider", username: "outsider", role: "scholar",
+        institutionId: otherInstitution,
+      });
+      await ctx.db.patch(groupId, { scholarIds: [kaiId, mia, noa] });
+
+      const unitId = await ctx.db.insert("units", {
+        teacherId, title: "Ocean Stories", isActive: true,
+      });
+      const lessonId = await ctx.db.insert("lessons", {
+        unitId, title: "Reading at home", order: 0,
+      });
+      const offline = (title: string, readable = true) =>
+        ctx.db.insert("activities", {
+          title, kind: "offline", order: 0, lessonId,
+          ...(readable ? { scholarDescription: "Do this at home." } : {}),
+        });
+      const readAloud = await offline("Read-aloud");
+      const tideChart = await offline("Tide Chart");
+      const undated = await offline("Undated Journal");
+      const notYetDue = await offline("Due Tomorrow");
+      const dueEarlierToday = await offline("Due Earlier Today");
+      const ended = await offline("Ended Homework");
+      const archivedAct = await offline("Archived Homework");
+      // The Home hides offline homework with nothing to read at home …
+      const unreadable = await offline("Unreadable Homework", false);
+      // … and share-backs, which the teacher runs in the room.
+      const shareBack = await ctx.db.insert("activities", {
+        title: "Share Back", kind: "shareBack", order: 0, lessonId,
+      });
+      const liveAt = Date.now() - 10 * DAY;
+      const cohort = await ctx.db.insert("assignments", {
+        teacherId,
+        unitId,
+        scholarIds: [kaiId, mia, noa, outsider],
+        startedAt: liveAt,
+        activitySchedule: [
+          { activityId: readAloud, mode: "homework", setAt: liveAt, dueAt: Date.now() - 5 * DAY },
+          // Targeted at Noa alone → only Noa can be incomplete.
+          { activityId: tideChart, mode: "homework", setAt: liveAt, dueAt: Date.now() - 2 * DAY, scholarIds: [noa] },
+          // Undated homework is open-ended by design → never asked about.
+          { activityId: undated, mode: "homework", setAt: liveAt },
+          { activityId: notYetDue, mode: "homework", setAt: liveAt, dueAt: Date.now() + DAY },
+          // The Home's chip still says "due today" → not past due yet.
+          { activityId: dueEarlierToday, mode: "homework", setAt: liveAt, dueAt: Date.now() - 3_600_000 },
+          // Ended → already gone from Home.
+          { activityId: ended, mode: "homework", setAt: liveAt, dueAt: Date.now() - 3 * DAY, endsAt: Date.now() - DAY },
+          { activityId: unreadable, mode: "homework", setAt: liveAt, dueAt: Date.now() - 3 * DAY },
+          { activityId: shareBack, mode: "homework", setAt: liveAt, dueAt: Date.now() - 3 * DAY },
+        ],
+      });
+      // Lesson-less ONLINE ad-hoc homework: the group mark-done path refuses
+      // it, so asking would promise an action the aide cannot take.
+      const onlineCopy = await ctx.db.insert("activities", {
+        title: "Online Copy", kind: "online", order: 0, systemPrompt: "Explore.",
+      });
+      await ctx.db.insert("assignments", {
+        teacherId,
+        kind: "adHocDispatch",
+        scholarIds: [noa],
+        startedAt: liveAt,
+        activitySchedule: [
+          { activityId: onlineCopy, mode: "homework", setAt: liveAt, dueAt: Date.now() - 6 * DAY },
+        ],
+      });
+      await ctx.db.insert("assignments", {
+        teacherId,
+        scholarIds: [kaiId],
+        startedAt: liveAt,
+        archivedAt: Date.now() - DAY,
+        activitySchedule: [
+          { activityId: archivedAct, mode: "homework", setAt: liveAt, dueAt: Date.now() - 4 * DAY },
+        ],
+      });
+      // Kai finished the read-aloud under THIS assignment; Mia's completion is
+      // under a different run, so it does not close her copy here.
+      await ctx.db.insert("activityCompletions", {
+        scholarId: kaiId, activityId: readAloud, assignmentId: cohort,
+        completedAt: Date.now() - 6 * DAY,
+      });
+      const otherRun = await ctx.db.insert("assignments", {
+        teacherId, scholarIds: [mia], startedAt: liveAt, archivedAt: liveAt,
+      });
+      await ctx.db.insert("activityCompletions", {
+        scholarId: mia, activityId: readAloud, assignmentId: otherRun,
+        completedAt: Date.now() - 6 * DAY,
+      });
+
+      // The same web homework sent as one-scholar ad-hoc copies.
+      const copies: Record<string, Id<"assignments">> = {};
+      for (const [name, scholar, daysAgo] of [
+        ["Kai", kaiId, 3],
+        ["Mia", mia, 4],
+      ] as const) {
+        const activityId = await ctx.db.insert("activities", {
+          title: "Bird Count Video", kind: "web", order: 0,
+          webUrl: "https://example.test/birds",
+        });
+        copies[name] = await ctx.db.insert("assignments", {
+          teacherId,
+          kind: "adHocDispatch",
+          scholarIds: [scholar],
+          startedAt: liveAt,
+          activitySchedule: [
+            { activityId, mode: "homework", setAt: liveAt, dueAt: Date.now() - daysAgo * DAY },
+          ],
+        });
+      }
+      return { cohort, copies };
+    });
+
+    const collected = await t.run(async (ctx) =>
+      ctx.runQuery(internal.eodCheckin.collectChannelDay, {
+        groupIds: [groupId],
+        dayStartMs: checkinDayStartMs(Date.now()),
+        nowMs: Date.now(),
+      }),
+    );
+    const byTitle = new Map(
+      collected.overdueHomework.map((row) => [row.activityTitle, row]),
+    );
+    expect(collected.overdueHomework.map((row) => row.activityTitle)).toEqual([
+      "Read-aloud", // 5 days
+      "Bird Count Video", // 4 days (oldest copy)
+      "Tide Chart", // 2 days
+    ]);
+    const urlFor = (id: Id<"assignments">) =>
+      expect.stringContaining(`/teacher/schedule/${id}`);
+    expect(byTitle.get("Read-aloud")).toMatchObject({
+      earliestDueAt: Date.now() - 5 * DAY,
+      duePhrase: expect.stringMatching(/^was due /),
+      teacherName: "Test Teacher",
+      incompleteScholars: [
+        { name: "Mia", assignmentUrl: urlFor(ids.cohort) },
+        { name: "Noa", assignmentUrl: urlFor(ids.cohort) },
+      ],
+    });
+    expect(byTitle.get("Tide Chart")?.incompleteScholars.map((s) => s.name))
+      .toEqual(["Noa"]);
+    expect(byTitle.get("Bird Count Video")).toMatchObject({
+      earliestDueAt: Date.now() - 4 * DAY,
+      incompleteScholars: [
+        { name: "Kai", assignmentUrl: urlFor(ids.copies.Kai) },
+        { name: "Mia", assignmentUrl: urlFor(ids.copies.Mia) },
+      ],
+    });
+    expect(JSON.stringify(collected.overdueHomework)).not.toContain("Outsider");
+  });
+
+  test("a quiet day with only past-due homework still posts the question with its link", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, scholarId } = await seedLinkedGroup(t);
+    const assignmentId = await t.run(async (ctx) => {
+      const unitId = await ctx.db.insert("units", { teacherId, title: "Stories", isActive: true });
+      const lessonId = await ctx.db.insert("lessons", {
+        unitId, title: "At home", order: 0,
+      });
+      const activityId = await ctx.db.insert("activities", {
+        title: "Read-aloud", kind: "offline", order: 0, lessonId,
+        scholarDescription: "Read the story aloud at home.",
+      });
+      return ctx.db.insert("assignments", {
+        teacherId,
+        unitId,
+        scholarIds: [scholarId],
+        startedAt: Date.now() - 10 * 86_400_000,
+        activitySchedule: [
+          {
+            activityId,
+            mode: "homework",
+            setAt: Date.now() - 10 * 86_400_000,
+            dueAt: Date.now() - 5 * 86_400_000,
+          },
+        ],
+      });
+    });
+
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    const slack = stubSlackPosts();
+    try {
+      expect(await t.action(internal.eodCheckin.runDaily, {})).toEqual({
+        postedChannels: 1,
+        skippedChannels: 0,
+      });
+      const reply = String(slack.posts[1].markdown_text);
+      const questions = reply.slice(reply.indexOf("Questions for you"));
+      expect(questions).toContain(`/teacher/schedule/${assignmentId}|Read-aloud>`);
+      expect(questions).toContain("Kai");
+      // Asked in the questions, never narrated in the wrap-up above them.
+      expect(reply.slice(0, reply.indexOf("Questions for you"))).not.toContain(
+        "Read-aloud",
+      );
+    } finally {
+      slack.restore();
+    }
   });
 
   test("skips weekends without claiming a day", async () => {

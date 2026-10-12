@@ -1,11 +1,11 @@
 "use client";
 
-import { useQuery } from "convex/react";
+import { useState } from "react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
   Box,
-  Button,
   Flex,
   Heading,
   HStack,
@@ -16,14 +16,18 @@ import {
   IconButton,
   Stack,
   VStack,
+  Button,
 } from "@chakra-ui/react";
-import { ArrowLeft, ArrowSquareOut, CheckCircle, FileText, Sparkle } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowSquareOut, CheckCircle, FileText } from "@phosphor-icons/react";
 import { DeliverableGradeControl } from "@/components/DeliverableGradeControl";
 import { AssessScanButton } from "@/components/AssessScanButton";
 import {
   offlineHomeworkContext,
   offlineHomeworkDueText,
+  offlineHomeworkFinishCopy,
+  offlineHomeworkMarkedText,
 } from "@/shared/offlineHomework";
+import { toaster } from "@/lib/toaster";
 import { ResourceShareCard } from "@/components/ResourceShareCard";
 
 /**
@@ -64,6 +68,12 @@ export function OfflineSessionView({
 
   const context = offlineHomeworkContext(data);
   const dueText = offlineHomeworkDueText(data.dueAt, data.timeZone);
+  // The finish block replaces the big paper cue with one quiet line: some
+  // offline homework is a worksheet, but most of it (a read-aloud) has no
+  // paper at all, and the old cue was the only thing on the page.
+  const showFinish =
+    !data.viewerCanGrade && (data.canMarkDone || data.selfMark != null);
+  const finishCopy = offlineHomeworkFinishCopy(data.teacherName);
 
   return (
     <Flex flex={1} flexDir="column" overflow="hidden" bg="white">
@@ -140,8 +150,32 @@ export function OfflineSessionView({
               </Stack>
             </Stack>
           )}
+          {showFinish && data.assignmentId && data.activityId && (
+            <OfflineHomeworkFinishBlock
+              assignmentId={data.assignmentId}
+              activityId={data.activityId}
+              selfMark={data.selfMark}
+              markedText={
+                data.selfMark
+                  ? offlineHomeworkMarkedText(
+                      data.selfMark.completedAt,
+                      data.timeZone,
+                      data.teacherName,
+                    )
+                  : null
+              }
+              prompt={finishCopy.prompt}
+              detail={finishCopy.detail}
+            />
+          )}
         </Stack>
-        {data.items.length === 0 ? (
+        {data.items.length === 0 && showFinish ? (
+          data.selfMark ? null : (
+            <Text color="charcoal.400" fontFamily="body" fontSize="sm" maxW="3xl">
+              {finishCopy.paperLine}
+            </Text>
+          )
+        ) : data.items.length === 0 ? (
           data.viewerCanGrade ? (
             <Text color="charcoal.400" fontFamily="body" fontSize="sm">
               No scans filed to this activity.
@@ -327,24 +361,6 @@ export function OfflineSessionView({
                     {data.viewerCanGrade && (
                       <HStack mt={2} gap={2}>
                         <AssessScanButton deliverableId={item.deliverableId} />
-                        {item.magicUrl && (
-                          <Button
-                            size="2xs"
-                            variant="ghost"
-                            color="violet.500"
-                            _hover={{ color: "violet.600", bg: "violet.50" }}
-                            asChild
-                          >
-                            <a
-                              href={item.magicUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              <Sparkle size={12} weight="fill" style={{ marginRight: 4 }} />
-                              Magic
-                            </a>
-                          </Button>
-                        )}
                       </HStack>
                     )}
                   </Box>
@@ -356,5 +372,116 @@ export function OfflineSessionView({
         )}
       </Box>
     </Flex>
+  );
+}
+
+/**
+ * "I did it" for offline homework (TRA-458). One tap, no confirm: the undo sits
+ * where the tap happened and is cheaper than an "Are you sure?" on every mark.
+ * The block flips in place from the live query, so it survives a reload.
+ */
+function OfflineHomeworkFinishBlock({
+  assignmentId,
+  activityId,
+  selfMark,
+  markedText,
+  prompt,
+  detail,
+}: {
+  assignmentId: Id<"assignments">;
+  activityId: Id<"activities">;
+  selfMark: {
+    completionId: Id<"activityCompletions">;
+    completedAt: number;
+    canUndo: boolean;
+  } | null;
+  markedText: string | null;
+  prompt: string;
+  detail: string;
+}) {
+  const markDone = useMutation(api.activityCompletions.markHomeworkDoneForSelf);
+  const undo = useMutation(api.activityCompletions.undoHomeworkDoneForSelf);
+  const [busy, setBusy] = useState(false);
+
+  const run = async (
+    write: () => Promise<{ ok: true } | { ok: false; message: string }>,
+  ) => {
+    setBusy(true);
+    const result = await write().catch(() => null);
+    setBusy(false);
+    if (!result) toaster.error({ title: "Couldn't save that. Try again." });
+    else if (!result.ok) toaster.error({ title: result.message });
+  };
+
+  if (selfMark) {
+    return (
+      <HStack
+        mt={4}
+        p={4}
+        gap={3}
+        borderWidth="1px"
+        borderColor="green.200"
+        bg="green.50"
+        borderRadius="xl"
+        align="center"
+      >
+        <Box color="green.600" flexShrink={0}>
+          <CheckCircle size={22} weight="fill" />
+        </Box>
+        <Stack gap={0} flex={1} minW={0}>
+          <Text fontFamily="heading" fontWeight="600" color="navy.500" fontSize="md">
+            You marked this done
+          </Text>
+          {markedText && (
+            <Text fontFamily="body" color="charcoal.500" fontSize="sm">
+              {markedText}
+            </Text>
+          )}
+        </Stack>
+        {selfMark.canUndo && (
+          <Button
+            size="sm"
+            variant="ghost"
+            color="charcoal.500"
+            fontFamily="heading"
+            loading={busy}
+            onClick={() =>
+              void run(() => undo({ completionId: selfMark.completionId }))
+            }
+          >
+            Undo
+          </Button>
+        )}
+      </HStack>
+    );
+  }
+
+  return (
+    <Stack
+      mt={4}
+      p={4}
+      gap={3}
+      borderWidth="1px"
+      borderColor="gray.200"
+      borderRadius="xl"
+      align="flex-start"
+    >
+      <Stack gap={1}>
+        <Text fontFamily="heading" fontWeight="600" color="navy.500" fontSize="md">
+          {prompt}
+        </Text>
+        <Text fontFamily="body" color="charcoal.500" fontSize="sm" lineHeight="1.5">
+          {detail}
+        </Text>
+      </Stack>
+      <Button
+        colorPalette="violet"
+        fontFamily="heading"
+        loading={busy}
+        onClick={() => void run(() => markDone({ assignmentId, activityId }))}
+      >
+        I did it
+      </Button>
+    </Stack>
   );
 }

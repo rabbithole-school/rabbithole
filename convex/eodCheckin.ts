@@ -11,17 +11,21 @@ import {
   checkinDateLabel,
   checkinDayKey,
   checkinDayStartMs,
+  compareOverdueHomework,
   isCheckinWeekend,
+  mergeCheckinQuestions,
   parentMessageText,
   renderMechanicalFallback,
   renderThreadMessage,
   sanitizeEodSlackText,
   type EodChannelInput,
+  type EodOverdueHomework,
   type EodScheduledActivity,
   type EodScholarDay,
   rankEodSignals,
 } from "./lib/eodCheckin";
 import {
+  assignmentPath,
   scholarPath,
   scholarSlug,
   sessionPath,
@@ -39,6 +43,10 @@ import {
 } from "./lib/slackApi";
 import { suspendedInstitutionIds } from "./lib/access";
 import { scholarInstitutionId as resolveScholarInstitutionId } from "./lib/scholarEnrollment";
+import { teacherCanMarkCompleteForGroup } from "./lib/activityCompletionCore";
+import { ONBOARDING_UNIT_SLUG } from "./onboardingData";
+import { unstartedAssignedRowSurface } from "./scholarPlate";
+import { dueStatus } from "../shared/institutionDay";
 
 const LIST_LIMIT = 20;
 const READ_LIMIT = 100;
@@ -184,6 +192,7 @@ export const collectChannelDay = internalQuery({
       Array<Doc<"activityCompletions">>
     >();
     const scholarNameById = new Map<string, string>();
+    const scholarPronounsById = new Map<string, string | null>();
     const scholarUrlById = new Map<string, string>();
     const scholars: EodScholarDay[] = [];
     for (const scholarId of scholarIds) {
@@ -270,26 +279,28 @@ export const collectChannelDay = internalQuery({
         )
         .slice(0, LIST_LIMIT);
 
+      // `practiceAttempts` / `practiceDistinctSkills` are COUNTS the teacher
+      // reads as facts, not a display list, so they have to span the whole day
+      // window. Paging `by_scholar` newest-first and then truncating to
+      // LIST_LIMIT reported exactly "20 attempts" for every scholar who did
+      // more, and derived the distinct-skill spread from only those newest 20
+      // (2026-09-01: six scholars whose real counts were 24-116 all rendered as
+      // 20, which also inverted which scholar had ranged across the most
+      // skills). Range-scan the day on `by_scholar_createdAt` instead — the same
+      // bounded read `practiceDigest.ts` uses — so the window, not a page size,
+      // decides what is counted. Rows without `createdAt` fall outside the
+      // range, exactly as the old null check intended.
       const practice = (
         await ctx.db
           .query("practiceAttempts")
-          .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
-          // Exclude retry rows in the query, BEFORE the bounded `.take`: they are
-          // the newest rows on this index, so a JS-side exclusion after `.take`
-          // would let a heavy-retry day evict that day's genuine graded attempts
-          // from the fetched page and UNDER-count. Only the day-window predicate
-          // stays in JS below.
-          .filter((q) => q.neq(q.field("retry"), true))
-          .order("desc")
-          .take(READ_LIMIT)
-      )
-        .filter(
-          (row) =>
-            row.createdAt != null &&
-            row.createdAt >= args.dayStartMs &&
-            row.createdAt <= args.nowMs,
-        )
-        .slice(0, LIST_LIMIT);
+          .withIndex("by_scholar_createdAt", (q) =>
+            q
+              .eq("scholarId", scholarId)
+              .gte("createdAt", args.dayStartMs)
+              .lte("createdAt", args.nowMs),
+          )
+          .collect()
+      ).filter((row) => row.retry !== true);
 
       const observations = (
         await ctx.db
@@ -349,10 +360,13 @@ export const collectChannelDay = internalQuery({
         siteUrl(),
         scholarPath(scholarSlug(scholar.username, scholar._id)),
       );
+      const pronouns = scholar.pronouns ?? null;
       scholarNameById.set(String(scholarId), name);
+      scholarPronounsById.set(String(scholarId), pronouns);
       scholarUrlById.set(String(scholarId), scholarUrl);
       scholars.push({
         name,
+        pronouns,
         scholarUrl,
         sessions: sessionRows,
         completions,
@@ -436,6 +450,7 @@ export const collectChannelDay = internalQuery({
         keyMoments.push({
           kind: moment.kind,
           scholarName,
+          pronouns: scholarPronounsById.get(scholarKey) ?? null,
           scholarUrl,
           sessionUrl,
           headline,
@@ -509,6 +524,111 @@ export const collectChannelDay = internalQuery({
       if (scheduled.length === LIST_LIMIT) break;
     }
 
+    // ── Past-due homework still open on scholars' Home ────────────────────
+    // Asks only about rows the scholar's Home actually shows, using the
+    // plate's own definitions: pushed live (`setAt`), aimed at this scholar
+    // (`entry.scholarIds`), not ended (`endsAt`), not onboarding, a surface
+    // the plate renders (`unstartedAssignedRowSurface` — no shareBack, no
+    // unreadable offline homework), and overdue by the same `dueStatus` the
+    // Home's due chip reads. The teacher's own `dueAt` is the only line — no
+    // invented staleness threshold — so undated homework (open-ended by
+    // design) never appears. Completion is assignment-scoped, as the plate
+    // reads it. And it only asks what the write side can act on
+    // (`teacherCanMarkCompleteForGroup`).
+    const institution = institutionId ? await ctx.db.get(institutionId) : null;
+    const timeZone = effectiveInstitutionTimeZone(institution?.timeZone);
+    const onboardingUnitId = (
+      await ctx.db
+        .query("units")
+        .withIndex("by_slug", (q) => q.eq("slug", ONBOARDING_UNIT_SLUG))
+        .first()
+    )?._id;
+    const teacherNameCache = new Map<string, string | null>();
+    const overdueByKey = new Map<string, EodOverdueHomework>();
+    for (const assignment of assignments) {
+      if (
+        onboardingUnitId !== undefined &&
+        String(assignment.unitId ?? "") === String(onboardingUnitId)
+      ) {
+        continue;
+      }
+      const assignmentScholars = assignment.scholarIds.filter((scholarId) =>
+        scholarNameById.has(String(scholarId)),
+      );
+      if (assignmentScholars.length === 0) continue;
+      for (const entry of assignment.activitySchedule ?? []) {
+        const due =
+          entry.mode === "homework"
+            ? dueStatus(entry.dueAt, args.nowMs, timeZone)
+            : null;
+        if (
+          due?.status !== "overdue" ||
+          entry.dueAt == null ||
+          entry.setAt == null ||
+          (entry.endsAt != null && entry.endsAt <= args.nowMs) ||
+          // Went live today → already asked about under "Scheduled activities".
+          (entry.setAt >= args.dayStartMs && entry.setAt <= args.nowMs)
+        ) {
+          continue;
+        }
+        const activity = await ctx.db.get(entry.activityId);
+        if (
+          !activity ||
+          !teacherCanMarkCompleteForGroup(assignment, activity) ||
+          // The iPad Home (web + game rows on) is the scholar's Home.
+          !(await unstartedAssignedRowSurface(ctx, activity, entry.mode, true))
+        ) {
+          continue;
+        }
+        const targetedIds =
+          entry.scholarIds && entry.scholarIds.length > 0
+            ? new Set(entry.scholarIds.map(String))
+            : null;
+        const incomplete: EodOverdueHomework["incompleteScholars"] = [];
+        for (const scholarId of assignmentScholars) {
+          if (targetedIds && !targetedIds.has(String(scholarId))) continue;
+          const done = await ctx.db
+            .query("activityCompletions")
+            .withIndex("by_scholar_assignment", (q) =>
+              q.eq("scholarId", scholarId).eq("assignmentId", assignment._id),
+            )
+            .filter((q) => q.eq(q.field("activityId"), entry.activityId))
+            .first();
+          if (done) continue;
+          incomplete.push({
+            name: scholarNameById.get(String(scholarId)) ?? "Scholar",
+            assignmentUrl: withBase(siteUrl(), assignmentPath(assignment._id)),
+          });
+        }
+        if (incomplete.length === 0) continue;
+        const teacherKey = String(assignment.teacherId);
+        if (!teacherNameCache.has(teacherKey)) {
+          const teacher = await ctx.db.get(assignment.teacherId);
+          teacherNameCache.set(teacherKey, teacher?.name ?? null);
+        }
+        const key = `${teacherKey}\u0000${activity.title.trim()}`;
+        const existing = overdueByKey.get(key);
+        if (existing) {
+          if (entry.dueAt < existing.earliestDueAt) {
+            existing.earliestDueAt = entry.dueAt;
+            existing.duePhrase = due.phrase;
+          }
+          existing.incompleteScholars.push(...incomplete);
+        } else {
+          overdueByKey.set(key, {
+            activityTitle: activity.title,
+            teacherName: teacherNameCache.get(teacherKey) ?? null,
+            earliestDueAt: entry.dueAt,
+            duePhrase: due.phrase,
+            incompleteScholars: incomplete,
+          });
+        }
+      }
+    }
+    const overdueHomework = [...overdueByKey.values()]
+      .sort(compareOverdueHomework)
+      .slice(0, LIST_LIMIT);
+
     const groupIdSet = new Set(tenantGroups.map((group) => String(group._id)));
     const queuedDigestRows = (
       await ctx.db
@@ -522,6 +642,7 @@ export const collectChannelDay = internalQuery({
       scholars,
       keyMoments,
       scheduled,
+      overdueHomework,
       queuedDigestIds: queuedDigestRows.map((row) => row._id),
       queuedDigestLines: queuedDigestRows.map((row) => row.text),
     };
@@ -897,7 +1018,12 @@ export const runDaily = internalAction({
               {
                 groupIds: checkin.groupIds,
                 dayStartMs,
-                nowMs: dayStartMs + 24 * 60 * 60 * 1000 - 1,
+                // A same-day retry must not count homework due later today
+                // as past due; an older day's retry keeps its day end.
+                nowMs: Math.min(
+                  dayStartMs + 24 * 60 * 60 * 1000 - 1,
+                  Date.now(),
+                ),
               },
             );
             input = { ...collected, dateLabel };
@@ -913,6 +1039,7 @@ export const runDaily = internalAction({
               scholars: [],
               keyMoments: [],
               scheduled: [],
+              overdueHomework: [],
               queuedDigestIds: [],
               queuedDigestLines: [],
             };
@@ -940,7 +1067,7 @@ export const runDaily = internalAction({
               narrative = {
                 hook: generated.hook,
                 wrapUp: generated.wrapUp,
-                questions: generated.questions,
+                questions: mergeCheckinQuestions(input, generated.questions),
               };
             }
           } catch (error: unknown) {

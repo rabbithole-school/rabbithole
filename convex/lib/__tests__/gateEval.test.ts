@@ -9,7 +9,14 @@ import { FLUENT_REPS } from "../practice/scheduler";
 import { WHOLE_NUMBER_ARITHMETIC_DOMAIN } from "../../seed/wholeNumberArithmeticGraph";
 import type { CrossDomainSeed } from "../practice/crossDomainSeeds";
 
-const base = { topic: "t", scholarInvitation: "i", rationale: "r", connectionTo: "c" };
+const base = {
+  topic: "t",
+  cardTitle: "ct",
+  visualEmoji: "e",
+  scholarInvitation: "i",
+  rationale: "r",
+  connectionTo: "c",
+};
 
 function facts(
   over: Partial<{ reps: Record<string, number>; signals: string[]; topics: string[] }> = {},

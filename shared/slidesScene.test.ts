@@ -26,6 +26,10 @@ import {
   canUndo,
   canRedo,
   DEFAULT_HISTORY_LIMIT,
+  DEFAULT_TEXT_STYLE,
+  normColor,
+  SLIDE_TEXT_COLORS,
+  SLIDE_BACKGROUND_COLORS,
   type Deck,
   type SlideOp,
 } from "./slidesScene";
@@ -988,5 +992,17 @@ describe("slide history reducer", () => {
   it("the default depth is a sane, documented cap", () => {
     expect(DEFAULT_HISTORY_LIMIT).toBe(50);
     expect(createHistory().limit).toBe(50);
+  });
+});
+
+describe("author color palettes", () => {
+  it("every palette value survives normColor unchanged", () => {
+    for (const { value } of [...SLIDE_TEXT_COLORS, ...SLIDE_BACKGROUND_COLORS]) {
+      expect(normColor(value, "#000000")).toBe(value);
+    }
+  });
+
+  it("the first text color is the deck default", () => {
+    expect(SLIDE_TEXT_COLORS[0]?.value).toBe(DEFAULT_TEXT_STYLE.color);
   });
 });

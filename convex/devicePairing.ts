@@ -51,8 +51,8 @@
  *      userId → a normal, revocable Convex Auth session is minted.
  *   5. Immediately after signIn succeeds, the (now authenticated) device
  *      calls api.devicePairing.attachDeviceSession({ deviceId }) so a lost
- *      iPad can later be signed out remotely without disturbing the scholar's
- *      other sessions.
+ *      manually paired iPad can later be signed out without disturbing the
+ *      scholar's other sessions.
  *
  * ── Security properties (each is enforced below) ────────────────────────
  *   - The verifier is high-entropy, generated ON-DEVICE, never displayed,
@@ -91,9 +91,11 @@ import {
   revokedManagedClaimPatch,
   auditManagedClaim,
 } from "./lib/managedDeviceClaimState";
+import { forgetClaimVerification } from "./lib/simpleMdmSnapshots";
 import { scheduleClaimDecommissionLock } from "./lib/deviceAppUnlockScheduling";
 import {
   hasSchoolOperationsAccessAtInstitution,
+  liveSchoolOperationsInstitutionIds,
   schoolOperationsInstitutionIds,
 } from "./lib/staffCapabilities";
 
@@ -139,25 +141,11 @@ export function formatCode(code: string): string {
   return code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
 }
 
-/** Delete an auth session + its refresh tokens (mirrors the framework's
- *  deleteSession, and enrollment.prepareScholarForEnroll's loop). Used to
- *  sign a specific device out without touching the scholar's other sessions.
- *  Exported so the managed-claim path (managedDeviceClaims.ts) reuses the exact
- *  same session-revocation plumbing rather than forking it. */
-export async function revokeAuthSession(
-  ctx: MutationCtx,
-  sessionId: Id<"authSessions">,
-): Promise<boolean> {
-  const session = await ctx.db.get(sessionId);
-  if (!session) return false;
-  const refreshTokens = await ctx.db
-    .query("authRefreshTokens")
-    .withIndex("sessionId", (q) => q.eq("sessionId", sessionId))
-    .collect();
-  for (const rt of refreshTokens) await ctx.db.delete(rt._id);
-  await ctx.db.delete(sessionId);
-  return true;
-}
+// Session teardown lives in lib/authSessions.ts (shared with MCP revocation);
+// re-exported because managedDeviceClaims.ts imports it from here.
+import { revokeAuthSession } from "./lib/authSessions";
+import { writeAuditLog } from "./lib/auditLog";
+export { revokeAuthSession };
 
 // Mirrors @convex-dev/auth's own default (sessions.ts) so a mint here behaves
 // identically to a normal Convex Auth sign-in when the env override is unset.
@@ -293,11 +281,7 @@ export async function deleteDeviceAuthSessionLog(
 /**
  * The one shared "invalidate this managed claim's credential" sequence,
  * called by every caller that must treat a claim as durably decommissioned:
- * `managedDeviceClaims.revokeManagedDeviceClaim` (the explicit staff action)
- * AND `revokeDeviceSession` below (the "remote sign-out" console action,
- * which — for a managed-native pairing — must have the exact same effect,
- * not merely drop the tracked session and let the durable claim/token
- * silently re-mint one on the device's next foreground).
+ * explicit managed-device claim lifecycle actions.
  *
  * Order matters and is fail-closed throughout:
  *   1. Schedule the device relock BEFORE the claim is invalidated (see
@@ -316,6 +300,36 @@ export async function deleteDeviceAuthSessionLog(
  * already imports from this file — putting the shared helper in the other
  * direction would create a cycle.
  */
+/**
+ * Clear the temporary Robotics capture-station assignment from the binding a
+ * managed claim currently points at. Part of `decommissionManagedClaim` so
+ * every credential teardown sheds it identically — see the call site.
+ */
+async function clearAssignedDeviceCaptureForClaim(
+  ctx: MutationCtx,
+  claim: Doc<"managedDeviceClaims">,
+  actorUserId: Id<"users">,
+): Promise<void> {
+  if (!claim.lastDeviceId) return;
+  const binding = await ctx.db
+    .query("pairedDevices")
+    .withIndex("by_device", (q) =>
+      q.eq("institutionId", claim.institutionId).eq("deviceId", claim.lastDeviceId!),
+    )
+    .unique();
+  if (!binding || binding.assignedDeviceCaptureStationId === undefined) return;
+  const now = Date.now();
+  await ctx.db.patch(binding._id, {
+    assignedDeviceCaptureStationId: undefined,
+    assignedDeviceCaptureExpiresAt: undefined,
+    assignedDeviceCaptureUpdatedAt: Math.max(
+      now,
+      (binding.assignedDeviceCaptureUpdatedAt ?? 0) + 1,
+    ),
+    assignedDeviceCaptureUpdatedBy: actorUserId,
+  });
+}
+
 export async function decommissionManagedClaim(
   ctx: MutationCtx,
   claim: Doc<"managedDeviceClaims">,
@@ -323,6 +337,13 @@ export async function decommissionManagedClaim(
   auditAction: string,
 ): Promise<{ sessionRevoked: boolean }> {
   await scheduleClaimDecommissionLock(ctx, claim._id);
+  // TRA-332 ruling 2: clear the capture-station assignment here, in the ONE
+  // shared sequence, rather than in whichever caller remembered to. Force
+  // sign out cleared it and Disable device did not — moot while Disable
+  // deleted the binding row that holds these fields, but an asymmetry in a
+  // path documented as "must have identical effect" is how the next one
+  // starts. Callers that delete the binding are unaffected; this runs first.
+  await clearAssignedDeviceCaptureForClaim(ctx, claim, actorUserId);
   const sessionRevoked = await revokeManagedClaimSessions(
     ctx,
     claim._id,
@@ -332,12 +353,14 @@ export async function decommissionManagedClaim(
     claim._id,
     revokedManagedClaimPatch(Date.now(), claim.claimGeneration, actorUserId),
   );
+  await forgetClaimVerification(ctx, claim.institutionId, claim.serial);
   await auditManagedClaim(
     ctx,
     actorUserId,
     auditAction,
     claim.scholarId ?? actorUserId,
     `serial ${claim.serial}`,
+    claim.institutionId,
   );
   return { sessionRevoked };
 }
@@ -486,11 +509,15 @@ export const lookupPairingRequestByCode = authedQuery({
       .collect();
     const req = rows.find((r) => r.status === "pending" && r.expiresAt > now);
     if (!req) return null;
-    const authorizedInstitutionIds = await schoolOperationsInstitutionIds(
+    // Live set, not the raw grant: the raw helper answers "all" for a platform
+    // admin without ever loading an institution, so the old
+    // `=== "all" || has(...)` form below surfaced a binding at a SUSPENDED
+    // school that every per-institution gate refuses (TRA-359).
+    const authorizedInstitutionIds = await liveSchoolOperationsInstitutionIds(
       ctx,
       ctx.user,
     );
-    if (authorizedInstitutionIds !== "all" && authorizedInstitutionIds.size === 0) {
+    if (!authorizedInstitutionIds) {
       throw new Error("Forbidden: school operations access required");
     }
 
@@ -502,17 +529,34 @@ export const lookupPairingRequestByCode = authedQuery({
       .query("pairedDevices")
       .withIndex("by_device_id", (q) => q.eq("deviceId", req.deviceId))
       .collect();
+    // An ORPHAN binding — one whose institution row is GONE, because
+    // institution deletion does not cascade the device tables (TRA-360) — has
+    // no live tenant to protect, and it is exactly what the staffer must be
+    // warned about. The binding upsert key is (institutionId, deviceId), so
+    // re-pairing this iPad inserts a SECOND pairedDevices row for the same
+    // deviceId, and `deviceLock.stateForDevice` returns null whenever two
+    // share one — the iPad's Rabbithole Lock then silently stops working. So
+    // an orphan is surfaced. A SUSPENDED school is the opposite case: the
+    // tenant still exists, so its binding stays hidden.
+    const candidates: { row: Doc<"pairedDevices">; inScope: boolean }[] = [];
     for (const b of bindings) {
-      const visible =
-        authorizedInstitutionIds === "all" ||
-        authorizedInstitutionIds.has(b.institutionId);
-      if (!visible) continue;
-      const scholar = await ctx.db.get(b.scholarId);
+      const inScope = authorizedInstitutionIds.has(b.institutionId);
+      const orphan = !inScope && (await ctx.db.get(b.institutionId)) === null;
+      if (inScope || orphan) candidates.push({ row: b, inScope });
+    }
+    // Prefer an in-scope binding: it can name who is about to be signed out,
+    // where an orphan is only ever the bare warning.
+    candidates.sort((a, b) => Number(b.inScope) - Number(a.inScope));
+    for (const { row, inScope } of candidates) {
+      const scholar = await ctx.db.get(row.scholarId);
       if (!scholar) continue;
       existingBinding = {
-        scholarName: scholar.name ?? null,
-        scholarUsername: scholar.username ?? null,
-        pairedAt: b.pairedAt,
+        // The warning is the point; the identity is not. Never name a scholar
+        // at a school this caller has no standing at — the console only tests
+        // this object for presence (app/school/devices/page.tsx).
+        scholarName: inScope ? scholar.name ?? null : null,
+        scholarUsername: inScope ? scholar.username ?? null : null,
+        pairedAt: row.pairedAt,
       };
       break;
     }
@@ -582,7 +626,8 @@ export const approvePairingRequest = authedMutation({
       approvalExpiresAt: now + EXCHANGE_WINDOW_MS,
     });
 
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: scholar.institutionId ?? null,
       actorUserId: ctx.user._id,
       action: "device.pair.approve",
       targetUserId: args.scholarId,
@@ -641,6 +686,9 @@ export const listPairedDevices = authedQuery({
         : lens.institution
           ? [lens.institution._id]
           : [];
+    // Raw grant on purpose: this intersects with the lens above, and
+    // resolveInstitutionLens has already dropped suspended institutions — so
+    // the "all" branch cannot widen past them here (cf. TRA-359).
     const operationsInstitutions = await schoolOperationsInstitutionIds(
       ctx,
       ctx.user,
@@ -697,7 +745,14 @@ export const listPairedDevices = authedQuery({
         )
         .map(async (row) => {
         const scholar = await ctx.db.get(row.scholarId);
-        if (!scholar) return null; // scholar deleted — hide the orphan binding
+        // Deleting a scholar leaves their iPad's binding behind (lib/cascade.ts
+        // purges people, not a school's hardware). Keep the row (TRA-441, the
+        // twin of readManagedDevices' TRA-434): this roster is where staff
+        // unpair it, and hiding it made a re-pair add a second row for the
+        // same deviceId. Its tenancy is the binding's own institutionId (the
+        // per-institution read above), never the deleted scholar's. It reads
+        // as unassigned, and `scholarDeleted` says why it still needs staff.
+        const scholarDeleted = !scholar;
         const pairedByUser = row.pairedBy ? await ctx.db.get(row.pairedBy) : null;
         let hasLiveSession = false;
         if (row.authSessionId) {
@@ -729,10 +784,11 @@ export const listPairedDevices = authedQuery({
                 )
               : undefined) ??
             null,
-          scholarId: row.scholarId,
-          scholarName: scholar.name ?? null,
-          scholarUsername: scholar.username ?? null,
-          scholarImage: scholar.image ?? null,
+          scholarId: scholar?._id ?? null,
+          scholarDeleted,
+          scholarName: scholar?.name ?? null,
+          scholarUsername: scholar?.username ?? null,
+          scholarImage: scholar?.image ?? null,
           pairedAt: row.pairedAt,
           pairedByName: pairedByUser?.name ?? null,
           hasLiveSession,
@@ -744,9 +800,7 @@ export const listPairedDevices = authedQuery({
         }),
     );
 
-    return enriched
-      .filter((r): r is NonNullable<typeof r> => r !== null)
-      .sort((a, b) => b.pairedAt - a.pairedAt);
+    return enriched.sort((a, b) => b.pairedAt - a.pairedAt);
   },
 });
 
@@ -798,7 +852,8 @@ export async function unpairDeviceBinding(
       managedClaim._id,
       unassignedManagedClaimPatch(Date.now(), managedClaim.claimGeneration),
     );
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: row.institutionId,
       actorUserId,
       action: "managed-claim.unassign",
       targetUserId: row.scholarId,
@@ -812,7 +867,8 @@ export async function unpairDeviceBinding(
   // is gone — sessions are already revoked above, this just prevents an
   // unbounded accumulation of dead log rows across the fleet's lifetime.
   await deleteDeviceAuthSessionLog(ctx, row._id);
-  await ctx.db.insert("auditLog", {
+  await writeAuditLog(ctx, {
+    institutionId: row.institutionId,
     actorUserId,
     action: auditAction,
     targetUserId: row.scholarId,
@@ -850,24 +906,10 @@ export const unpairDevice = authedMutation({
 });
 
 /**
- * Sign a device out remotely WITHOUT unpairing it (the lost-iPad case): revoke
- * the device's tracked session but keep the binding visible, so staff still see
- * whose iPad it was and can unpair or re-pair later. This is the "separate
- * explicit way to revoke a device's session" — deliberately distinct from
- * pairing, which never disturbs a scholar's other (e.g. laptop) sessions.
- *
- * ⚠️ For a MANAGED-NATIVE pairing (`row.managedDeviceClaimId` set), this must
- * be a real decommission, not merely dropping the tracked Convex Auth
- * session: the durable claim credential and its MDM allowlist unlock are
- * separate state that a plain session revoke never touches, so the device
- * would otherwise auto-re-exchange its still-valid claim token on next
- * foreground and sign itself right back in — and the managed app would stay
- * unlocked for up to the reconciler's normal recheck interval regardless.
- * So when a managed claim is bound here, this routes through the exact same
- * `decommissionManagedClaim` sequence `revokeManagedDeviceClaim` uses:
- * schedule the relock, revoke by immutable claim+generation, invalidate the
- * claim token, bump the generation. A manually-paired (non-managed) device's
- * session revoke is unaffected.
+ * Sign a manually paired device out remotely WITHOUT unpairing it: revoke the
+ * device's tracked session but keep the binding visible. Managed iPads always
+ * sign themselves back in, so their lifecycle uses Unassign, Reassign, or
+ * Disable instead.
  */
 export const revokeDeviceSession = authedMutation({
   args: { pairedDeviceId: v.id("pairedDevices") },
@@ -884,28 +926,16 @@ export const revokeDeviceSession = authedMutation({
       throw new Error("Forbidden: device is not in your current school context");
     }
 
-    let managedSessionRevoked = false;
     if (row.managedDeviceClaimId) {
-      const claim = await ctx.db.get(row.managedDeviceClaimId);
-      // Only an active (still-redeemable) claim needs decommissioning — a
-      // claim already unassigned/revoked has no live credential left to kill,
-      // and re-running the sequence would just bump the generation again for
-      // no reason (harmless, but not what "revoke this device's session"
-      // means for an already-inert claim).
-      if (claim && claim.scholarId && claim.claimTokenHash) {
-        const decommission = await decommissionManagedClaim(
-          ctx,
-          claim,
-          ctx.user._id,
-          "managed-claim.revoke",
-        );
-        managedSessionRevoked = decommission.sessionRevoked;
-      }
+      throw new Error(
+        "This iPad is managed and signs itself back in. Use Unassign, Reassign, or Disable device instead.",
+      );
     }
 
-    const sessionRevoked =
-      (await revokeAllDeviceAuthSessions(ctx, args.pairedDeviceId)) ||
-      managedSessionRevoked;
+    const sessionRevoked = await revokeAllDeviceAuthSessions(
+      ctx,
+      args.pairedDeviceId,
+    );
     const now = Date.now();
     await ctx.db.patch(args.pairedDeviceId, {
       authSessionId: undefined,
@@ -918,7 +948,8 @@ export const revokeDeviceSession = authedMutation({
       assignedDeviceCaptureUpdatedBy: undefined,
     });
 
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: row.institutionId,
       actorUserId: ctx.user._id,
       action: "device.session.revoke",
       targetUserId: row.scholarId,
@@ -982,12 +1013,12 @@ export const listPairableScholars = authedQuery({
 // ── Device-facing (authenticated, post-exchange) ──────────────────────
 
 /**
- * The just-paired device records its OWN session on its binding, so a lost
- * iPad can later be signed out remotely (revokeDeviceSession) without touching
- * the scholar's other sessions. Called by the native app immediately after a
- * successful signIn("devicePair"/"deviceClaim", …). Keyed on the caller's own
- * getAuthSessionId — unspoofable — and it only ever writes the binding for
- * the authenticated scholar's own device.
+ * The just-paired device records its OWN session on its binding so lifecycle
+ * actions can revoke exactly that device without touching the scholar's other
+ * sessions. Called by the native app immediately after a successful
+ * signIn("devicePair"/"deviceClaim", …). Keyed on the caller's own
+ * getAuthSessionId — unspoofable — and it only ever writes the binding for the
+ * authenticated scholar's own device.
  *
  * Both exchange paths (consumePairingExchange / managedDeviceClaims's
  * consumeManagedClaim) now mint + record the session ATOMICALLY inside their

@@ -240,7 +240,16 @@ function FlairChip({
             <VStack
               alignment="leading"
               spacing={4}
-              modifiers={[frame({ maxWidth: 280 }), padding()]}
+              modifiers={[
+                // A popover is sized from its content's IDEAL size (no width
+                // proposed). Under a bare `maxWidth` text measures as one
+                // unwrapped line, then wraps at 280 inside a popover that is
+                // already too short — clipping the first and last lines. A
+                // definite width makes the measuring pass wrap the same way the
+                // layout pass does, for a long label as much as a long note.
+                frame({ width: 280, alignment: "leading" }),
+                padding(),
+              ]}
             >
               <SwiftUIText
                 modifiers={[font({ family: fonts.semibold, size: 14 })]}

@@ -49,6 +49,7 @@ import {
   deleteInstitutionScopedBatch,
   deleteStrayMembershipsBatch,
 } from "./lib/cascade";
+import { writeAuditLog } from "./lib/auditLog";
 
 // ─── Batching budgets ─────────────────────────────────────────────────
 // Kept well under a single Convex mutation's write ceiling so each step is a
@@ -128,6 +129,7 @@ type Footprint = {
   invites: number;
   usageEvents: number;
   portfolioItems: number;
+  devices: number; // managed roster rows + manually paired iPads, all signed out
   capped: boolean; // any count hit a read cap (real number is higher)
 };
 
@@ -294,6 +296,22 @@ async function computeFootprint(
       .take(budget.left)
   ).length;
   spend(portfolioInst);
+  // One physical iPad per managed roster row; a managed iPad's pairedDevices
+  // binding is the same device, so only manual pairings add to the count.
+  const managedDevices = (
+    await ctx.db
+      .query("managedDeviceClaims")
+      .withIndex("by_institution", (q) => q.eq("institutionId", targetId))
+      .take(budget.left)
+  ).length;
+  spend(managedDevices);
+  const bindings = await ctx.db
+    .query("pairedDevices")
+    .withIndex("by_institution", (q) => q.eq("institutionId", targetId))
+    .take(budget.left);
+  spend(bindings.length);
+  const devices =
+    managedDevices + bindings.filter((b) => !b.managedDeviceClaimId).length;
 
   if (budget.left <= 0) capped = true;
 
@@ -312,6 +330,7 @@ async function computeFootprint(
     invites,
     usageEvents,
     portfolioItems: portfolioInst,
+    devices,
     capped,
   };
 }
@@ -412,7 +431,8 @@ export const requestDeletion = schoolAdminMutation({
     });
 
     // Mirror into the global admin audit trail (impersonation's convention).
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: institution._id,
       actorUserId: ctx.user._id,
       action: "institution.delete",
       at: now,
@@ -518,8 +538,9 @@ export const deletionStep = internalMutation({
       return { done: false };
     }
 
-    // Phase 4 — INSTITUTION-SCOPED ROWS (spaces, equipment, groups, usage,
-    // reporting periods, invites, portfolio, closures, …).
+    // Phase 4 — INSTITUTION-SCOPED ROWS (iPads — signed out and unbound first —
+    // spaces, equipment, groups, usage, reporting periods, invites, portfolio,
+    // closures, …).
     const scoped = await deleteInstitutionScopedBatch(ctx, counts, targetId, DOC_BUDGET);
     if (scoped > 0) {
       await save("institutionScoped");

@@ -11,8 +11,8 @@
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import { api } from "../_generated/api";
-import type { Doc, Id } from "../_generated/dataModel";
 import schema from "../schema";
+import { makeActivity, makeLesson, makeStaff, makeUnit, makeWorld } from "./factories/world";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -20,142 +20,96 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
-  const sessionId = await t.run(async (ctx) => {
-    const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
-      userId,
-      expirationTime: Date.now() + 60 * 60 * 1000,
-    };
-    return await ctx.db.insert("authSessions", session);
-  });
-  return t.withIdentity({
-    subject: `${userId}|${sessionId}`,
-    issuer: "https://convex.dev",
-  });
-}
-
 /** Two schools, each with a unit → lesson → activity tree whose titles share
  *  the needle "autorotation", plus a plain staffer with no curriculum access. */
 async function seedWorld(t: ReturnType<typeof convexTest>) {
-  return await t.run(async (ctx) => {
-    const moli = await ctx.db.insert("institutions", {
-      name: "Moli School",
-      slug: "moli",
-      kind: "school",
-      isPrimary: true,
-    });
-    const guests = await ctx.db.insert("institutions", {
-      name: "Guests",
-      slug: "guests",
-      kind: "guest",
-    });
-    const teacher = await ctx.db.insert("users", {
-      name: "Teacher",
-      username: "teacher",
-      role: "teacher",
-    });
-    const designer = await ctx.db.insert("users", {
-      name: "Designer",
-      username: "designer",
-      role: "staff",
-    });
-    const plainStaff = await ctx.db.insert("users", {
-      name: "Plain staff",
-      username: "plain-staff",
-      role: "staff",
-    });
-    // A TEACHER is the important caller: `curriculumAccessInstitutionIds`
-    // returns "all" for a curriculum ROLE, so the capability grant stops being
-    // a second guard and the institution lens is the ONLY thing standing
-    // between them and another school's curriculum.
-    const homeTeacher = await ctx.db.insert("users", {
+  const world = await makeWorld(t, {
+    schools: 2,
+    scholarsPerSchool: 0,
+    parentsPerSchool: 0,
+    includePlatformAdmin: false,
+  });
+  const homeSchool = world.schools[0];
+  const foreignSchool = world.schools[1];
+
+  await t.run(async (ctx) => {
+    await ctx.db.patch(homeSchool.id, { slug: "moli" });
+    await ctx.db.patch(foreignSchool.id, { name: "Guests", slug: "guests", kind: "guest" });
+    await ctx.db.patch(homeSchool.teacher.id, {
       name: "Home teacher",
       username: "home-teacher",
-      role: "teacher",
     });
-    for (const membership of [
-      { userId: designer, role: "staff" as const, institutionId: moli },
-      { userId: plainStaff, role: "staff" as const, institutionId: moli },
-      { userId: teacher, role: "teacher" as const, institutionId: moli },
-      { userId: homeTeacher, role: "teacher" as const, institutionId: moli },
-    ]) {
-      await ctx.db.insert("memberships", membership);
-    }
+  });
+
+  const designer = homeSchool.ops.id;
+  await t.run(async (ctx) => {
+    await ctx.db.patch(designer, { name: "Designer", username: "designer" });
     await ctx.db.insert("staffCapabilityGrants", {
       granteeUserId: designer,
-      institutionId: moli,
+      institutionId: homeSchool.id,
       capability: "curriculum:edit",
-      grantedBy: teacher,
+      grantedBy: homeSchool.teacher.id,
       grantedAt: Date.now(),
     });
-
-    const tree = async (
-      institutionId: Id<"institutions">,
-      label: string,
-    ) => {
-      const unitId = await ctx.db.insert("units", {
-        teacherId: teacher,
-        institutionId,
-        title: `${label} unit`,
-        subject: "Flight",
-        isActive: true,
-      });
-      const lessonId = await ctx.db.insert("lessons", {
-        unitId,
-        title: `${label} autorotation lesson`,
-        order: 0,
-      });
-      const activityId = await ctx.db.insert("activities", {
-        lessonId,
-        title: `${label} autorotation drill`,
-        kind: "offline",
-        order: 0,
-      });
-      // Sorts alphabetically BEFORE the exact-match title while merely
-      // containing it — so a rank-blind sort would return this one first.
-      await ctx.db.insert("activities", {
-        lessonId,
-        title: `Away ${label} autorotation drill`,
-        kind: "offline",
-        order: 2,
-      });
-      const archivedId = await ctx.db.insert("activities", {
-        lessonId,
-        title: `${label} autorotation retired drill`,
-        kind: "offline",
-        order: 1,
-        archivedAt: Date.now(),
-      });
-      const archivedUnitId = await ctx.db.insert("units", {
-        teacherId: teacher,
-        institutionId,
-        title: `${label} archived unit`,
-        subject: "Flight",
-        isActive: false,
-      });
-      const archivedUnitLessonId = await ctx.db.insert("lessons", {
-        unitId: archivedUnitId,
-        title: `${label} autorotation shelved lesson`,
-        order: 0,
-      });
-      return {
-        unitId,
-        lessonId,
-        activityId,
-        archivedId,
-        archivedUnitId,
-        archivedUnitLessonId,
-      };
-    };
-
-    return {
-      designer,
-      homeTeacher,
-      plainStaff,
-      home: await tree(moli, "Home"),
-      foreign: await tree(guests, "Foreign"),
-    };
   });
+  const plainStaff = await makeStaff(t, homeSchool, "staff", {
+    name: "Plain staff",
+    username: "plain-staff",
+  });
+
+  const tree = async (institution: typeof homeSchool, label: string) => {
+    const unitId = await makeUnit(t, homeSchool.teacher, institution, {
+      title: `${label} unit`,
+      subject: "Flight",
+      isActive: true,
+    });
+    const lessonId = await makeLesson(t, unitId, {
+      title: `${label} autorotation lesson`,
+      order: 0,
+    });
+    const activityId = await makeActivity(t, lessonId, {
+      title: `${label} autorotation drill`,
+      kind: "offline",
+      order: 0,
+    });
+    await makeActivity(t, lessonId, {
+      title: `Away ${label} autorotation drill`,
+      kind: "offline",
+      order: 2,
+    });
+    const archivedId = await makeActivity(t, lessonId, {
+      title: `${label} autorotation retired drill`,
+      kind: "offline",
+      order: 1,
+      archivedAt: Date.now(),
+    });
+    const archivedUnitId = await makeUnit(t, homeSchool.teacher, institution, {
+      title: `${label} archived unit`,
+      subject: "Flight",
+      isActive: false,
+    });
+    const archivedUnitLessonId = await makeLesson(t, archivedUnitId, {
+      title: `${label} autorotation shelved lesson`,
+      order: 0,
+    });
+    return {
+      unitId,
+      lessonId,
+      activityId,
+      archivedId,
+      archivedUnitId,
+      archivedUnitLessonId,
+    };
+  };
+
+  return {
+    world,
+    homeSchool,
+    foreignSchool,
+    plainStaff: plainStaff.id,
+    home: await tree(homeSchool, "Home"),
+    foreign: await tree(foreignSchool, "Foreign"),
+  };
 }
 
 const titles = (hits: Array<Record<string, unknown>>) =>
@@ -164,8 +118,8 @@ const titles = (hits: Array<Record<string, unknown>>) =>
 describe("units.searchCurriculum", () => {
   test("finds a lesson and an activity below the unit the caller can open", async () => {
     const t = convexTest(schema, modules);
-    const { designer } = await seedWorld(t);
-    const asDesigner = await asUser(t, designer);
+    const { world, homeSchool } = await seedWorld(t);
+    const asDesigner = await world.as.staffOf(homeSchool, "staff");
 
     const hits = await asDesigner.query(api.units.searchCurriculum, {
       query: "autorotation",
@@ -180,8 +134,8 @@ describe("units.searchCurriculum", () => {
 
   test("never returns another school's curriculum — not by default, not by naming their scope, not via 'all'", async () => {
     const t = convexTest(schema, modules);
-    const { designer } = await seedWorld(t);
-    const asDesigner = await asUser(t, designer);
+    const { world, homeSchool } = await seedWorld(t);
+    const asDesigner = await world.as.staffOf(homeSchool, "staff");
 
     for (const scope of [undefined, "guests", "all"]) {
       const hits = await asDesigner.query(api.units.searchCurriculum, {
@@ -196,8 +150,8 @@ describe("units.searchCurriculum", () => {
 
   test("returns units' children only — units themselves stay the shell's job", async () => {
     const t = convexTest(schema, modules);
-    const { designer } = await seedWorld(t);
-    const asDesigner = await asUser(t, designer);
+    const { world, homeSchool } = await seedWorld(t);
+    const asDesigner = await world.as.staffOf(homeSchool, "staff");
 
     // "Home" matches the unit title AND its lesson/activity titles. The unit
     // must never come back here: the palette already renders units from its
@@ -215,8 +169,8 @@ describe("units.searchCurriculum", () => {
 
   test("a teacher — the caller the institution lens alone protects — still cannot read another school's curriculum", async () => {
     const t = convexTest(schema, modules);
-    const { homeTeacher } = await seedWorld(t);
-    const asTeacher = await asUser(t, homeTeacher);
+    const { world, homeSchool } = await seedWorld(t);
+    const asTeacher = await world.as.staffOf(homeSchool);
 
     expect(
       await asTeacher.query(api.users.currentUser, {}),
@@ -238,8 +192,8 @@ describe("units.searchCurriculum", () => {
 
   test("skips the children of archived units", async () => {
     const t = convexTest(schema, modules);
-    const { designer } = await seedWorld(t);
-    const asDesigner = await asUser(t, designer);
+    const { world, homeSchool } = await seedWorld(t);
+    const asDesigner = await world.as.staffOf(homeSchool, "staff");
 
     const hits = await asDesigner.query(api.units.searchCurriculum, {
       query: "autorotation",
@@ -249,8 +203,8 @@ describe("units.searchCurriculum", () => {
 
   test("ranks an exact title above substring matches so the cap cannot bury it", async () => {
     const t = convexTest(schema, modules);
-    const { designer } = await seedWorld(t);
-    const asDesigner = await asUser(t, designer);
+    const { world, homeSchool } = await seedWorld(t);
+    const asDesigner = await world.as.staffOf(homeSchool, "staff");
 
     // Two rows match: "Home autorotation drill" exactly, and "Away Home
     // autorotation drill" as a substring — and the latter sorts FIRST
@@ -264,8 +218,8 @@ describe("units.searchCurriculum", () => {
 
   test("excludes archived activities", async () => {
     const t = convexTest(schema, modules);
-    const { designer } = await seedWorld(t);
-    const asDesigner = await asUser(t, designer);
+    const { world, homeSchool } = await seedWorld(t);
+    const asDesigner = await world.as.staffOf(homeSchool, "staff");
 
     const hits = await asDesigner.query(api.units.searchCurriculum, {
       query: "retired",
@@ -275,8 +229,11 @@ describe("units.searchCurriculum", () => {
 
   test("a staffer with no curriculum access gets nothing", async () => {
     const t = convexTest(schema, modules);
-    const { plainStaff } = await seedWorld(t);
-    const asPlainStaff = await asUser(t, plainStaff);
+    const { plainStaff, world } = await seedWorld(t);
+    const asPlainStaff = await world.as.staffOf(
+      { ...world.schools[0], ops: { ...world.schools[0].ops, id: plainStaff } },
+      "staff",
+    );
 
     expect(
       await asPlainStaff.query(api.users.currentUser, {}),
@@ -288,8 +245,8 @@ describe("units.searchCurriculum", () => {
 
   test("mirrors the client's 2-character floor", async () => {
     const t = convexTest(schema, modules);
-    const { designer } = await seedWorld(t);
-    const asDesigner = await asUser(t, designer);
+    const { world, homeSchool } = await seedWorld(t);
+    const asDesigner = await world.as.staffOf(homeSchool, "staff");
 
     await expect(
       asDesigner.query(api.units.searchCurriculum, { query: "a" }),
@@ -298,8 +255,8 @@ describe("units.searchCurriculum", () => {
 
   test("caps the result list", async () => {
     const t = convexTest(schema, modules);
-    const { designer } = await seedWorld(t);
-    const asDesigner = await asUser(t, designer);
+    const { world, homeSchool } = await seedWorld(t);
+    const asDesigner = await world.as.staffOf(homeSchool, "staff");
 
     const hits = await asDesigner.query(api.units.searchCurriculum, {
       query: "autorotation",

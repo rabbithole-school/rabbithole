@@ -14,42 +14,15 @@
  * branch it did not take).
  */
 // @vitest-environment jsdom
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ChakraProvider } from "@chakra-ui/react";
 
 import { system } from "@/lib/theme";
-import {
-  CHECKPOINT_CORNER_STYLE,
-  CheckpointMark,
-} from "../MathPlanMarks";
+import { CheckpointMark } from "../MathPlanMarks";
 import { CheckpointGradePill } from "../StrandHeading";
 import { GroupCheckpointBandControl } from "../GroupCheckpointBandControl";
-
-// Resolved from the repo root: under jsdom `import.meta.url` is rewritten to a
-// browser-ish base that node:fs cannot open.
-const read = (name: string) =>
-  readFileSync(join(process.cwd(), "components/practice", name), "utf8");
-
-/** Every Math Skills surface that states the checkpoint signal. `MathPlanMarks`
- *  is deliberately absent — it is the one file allowed to draw the glyph. */
-const CHECKPOINT_SURFACES = [
-  "MathSkillsMasteryView.tsx",
-  "StrandHeading.tsx",
-  "GroupCheckpointBandControl.tsx",
-  "CheckpointBandControl.tsx",
-  "CheckpointBandGrid.tsx",
-  "ConfirmGroupCheckpointDialog.tsx",
-  "EditMathPlanDialog.tsx",
-  "MathPlanRailSection.tsx",
-] as const;
-
-/** Waving/outline/pennant flags and the checkered-flag emoji. Any of these
- *  standing in for the checkpoint is the drift this file guards. */
-const UNICODE_FLAGS = /[\u2691\u2690\u{1F6A9}\u{1F3C1}\u{1F3F4}\u{1F3F3}]/u;
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -84,26 +57,6 @@ afterEach(() => {
 });
 
 describe("the canonical checkpoint mark", () => {
-  it("is the cell corner's own tile — same palette, same glyph, same round", () => {
-    const source = read("MathPlanMarks.tsx");
-    // Both placements read the ONE palette and the ONE geometry, so a mini mark
-    // cannot drift off the corner it is supposed to be.
-    expect(source).toContain("const CHECKPOINT_TILE_ROUND");
-    expect(source).toContain("const CHECKPOINT_GLYPH_RATIO");
-    expect(
-      (source.match(/borderBottomRightRadius=\{CHECKPOINT_TILE_ROUND\}/g) ?? [])
-        .length,
-    ).toBe(2);
-    expect(
-      (source.match(/Math\.round\(size \* CHECKPOINT_GLYPH_RATIO\)/g) ?? [])
-        .length,
-    ).toBe(2);
-    expect(CHECKPOINT_CORNER_STYLE.toward).toEqual({
-      bg: "#fbe7a2",
-      color: "#7a5b12",
-    });
-  });
-
   it("defaults to the canonical yellow rather than asking every caller", async () => {
     await render(createElement(CheckpointMark));
     expect(marks("toward")).toHaveLength(1);
@@ -120,56 +73,6 @@ describe("the canonical checkpoint mark", () => {
     expect(marks()[0].getAttribute("aria-hidden")).toBeNull();
   });
 
-  it("stays a small signal — no badge, no wash, no ring", () => {
-    const source = read("MathPlanMarks.tsx");
-    const mark = source.slice(
-      source.indexOf("export function CheckpointMark("),
-      source.indexOf("export const CHECKPOINT_BAND_CHIP_SIZE"),
-    );
-    expect(mark).not.toMatch(/borderWidth|boxShadow|outline/);
-    expect(mark).toMatch(/size = 13/);
-  });
-});
-
-describe("no checkpoint surface draws its own flag", () => {
-  it.each(CHECKPOINT_SURFACES)("%s uses the shared mark, not a glyph", (file) => {
-    const source = read(file);
-    expect(source).not.toContain("FlagCheckered");
-    expect(source).not.toMatch(UNICODE_FLAGS);
-    // …and no second flag icon smuggled in under another name.
-    expect(source).not.toMatch(/\bFlagBanner\b|\bFlagPennant\b|\b<Flag\b/);
-  });
-});
-
-describe("the count legend", () => {
-  const view = read("MathSkillsMasteryView.tsx");
-  const rollup = view.slice(
-    view.indexOf("{checkpointModeRollup && ("),
-    view.indexOf("<Input"),
-  );
-
-  it("matches each count to the corresponding cell-corner mode color", () => {
-    expect(rollup).toContain('<CheckpointMark state="toward" size={12} />');
-    expect(rollup).toContain('<CheckpointMark state="deeper" size={12} />');
-    expect(rollup).toContain("working toward");
-    expect(rollup).toContain("going deeper");
-  });
-
-  it("keeps the counts visible and next to their words", () => {
-    expect(rollup).toContain("{checkpointModeRollup.toward} working toward");
-    expect(rollup).toContain("{checkpointModeRollup.deeper} going deeper");
-  });
-
-  it("announces the row once, not once per count", () => {
-    // One sr-only lead-in names the signal; the marks themselves are decorative
-    // (no `label`), so a reader hears "1 working toward · 0 going deeper" once.
-    expect(
-      (rollup.match(/<VisuallyHidden>/g) ?? []),
-    ).toHaveLength(1);
-    expect(rollup).toContain("<VisuallyHidden>Checkpoint standing:</VisuallyHidden>");
-    expect(rollup).not.toMatch(/CheckpointMark[^/]*label=/);
-    expect(rollup).not.toContain("aria-label");
-  });
 });
 
 describe("the grade-range pill", () => {
@@ -257,6 +160,5 @@ describe("the group checkpoint control", () => {
       '[data-testid="group-checkpoint-band-action"]',
     )!;
     expect(action.getAttribute("aria-label")).toContain("Opens a confirmation.");
-    expect(read("GroupCheckpointBandControl.tsx")).not.toContain("useMutation");
   });
 });

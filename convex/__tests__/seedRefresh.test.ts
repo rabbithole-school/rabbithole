@@ -112,24 +112,21 @@ describe("observer seed declared refresh", () => {
     expect(rows[0].rationale).toBe("refreshed");
   });
 
-  test("garbage refreshesSeedId does not throw and falls through to insert", async () => {
+  test("an unresolvable refreshesSeedId (malformed, or belonging to another scholar) is ignored and falls through to insert", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedUser(t);
 
+    // Garbage id: does not throw, falls through to insert.
     const id = await recordObserverSeed(t, scholarId, {
       topic: "Why do vampire bats share blood",
       domain: "Biology",
       refreshesSeedId: "not-an-id",
     });
-
     const rows = await seedsFor(t, scholarId);
     expect(rows).toHaveLength(1);
     expect(rows[0]._id).toBe(id);
-  });
 
-  test("another scholar's pending seed id is ignored", async () => {
-    const t = convexTest(schema, modules);
-    const scholarId = await seedUser(t);
+    // Another scholar's (well-formed) pending seed id is likewise ignored.
     const otherScholarId = await t.run(async (ctx) =>
       ctx.db.insert("users", {
         name: "Other Scholar",
@@ -142,14 +139,14 @@ describe("observer seed declared refresh", () => {
       domain: "Biology",
     });
 
-    const id = await recordObserverSeed(t, scholarId, {
-      topic: "Why do vampire bats share blood",
+    const crossId = await recordObserverSeed(t, scholarId, {
+      topic: "How octopuses solve puzzles",
       domain: "Biology",
       refreshesSeedId: otherSeed,
     });
 
-    expect(id).not.toBe(otherSeed);
-    expect(await seedsFor(t, scholarId)).toHaveLength(1);
+    expect(crossId).not.toBe(otherSeed);
+    expect(await seedsFor(t, scholarId)).toHaveLength(2);
     expect(await seedsFor(t, otherScholarId)).toHaveLength(1);
   });
 
@@ -247,6 +244,10 @@ describe("observer pending seed context", () => {
     scholarId: "user123",
     title: "Seed Session",
     unitContext: null,
+    origin: {
+      kind: "scholarStarted",
+      label: "The scholar started this session on their own.",
+    },
   };
 
   test("buildObserverUserMessage renders pending seeds only when provided", () => {

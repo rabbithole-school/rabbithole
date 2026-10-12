@@ -86,7 +86,7 @@ export const FINISH_TEACH_BACK_TOOL = {
  * mode has opened. It is what actually steers the tutor into the novice stance
  * (let them teach, withhold the answer, ask naive "but why…?" probes, no grade),
  * so it lives here — pure + exported — rather than inline in the http action.
- * Both the live /project-stream handler AND the teach-back eval hand the model
+ * Both the live /session-stream handler AND the teach-back eval hand the model
  * this exact text, so what's measured can't drift from what ships.
  */
 export function teachBackStartGuidance(conceptLabel: string): string {

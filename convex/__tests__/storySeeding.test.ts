@@ -4,6 +4,8 @@ import schema from "../schema";
 import { internal } from "../_generated/api";
 import type { Doc } from "../_generated/dataModel";
 import { STORY_REGISTRY } from "../lib/practice/storyRegistry";
+import { assertSingleVisualEmoji } from "../edgeStories";
+import { PRACTICE_DOMAINS } from "../lib/practice/domains";
 import { validateRegistryStoryAuthoring } from "../edgeStories";
 
 const modules = (
@@ -34,8 +36,51 @@ async function edgeByPair(
 }
 
 describe("edge story registry seeding", () => {
+  test("no story files its far-end node under a practice-domain slug", () => {
+    // A toDomain equal to a practice domain seeds the story's world node INSIDE
+    // that graph, breaking its node count and DAG checks (Merge Marshal caught
+    // this on the first content fill, 2026-09-06). World domains only.
+    const practiceSlugs = new Set(PRACTICE_DOMAINS.map((d) => d.domain));
+    const offenders = STORY_REGISTRY.filter((story) => practiceSlugs.has(story.toDomain));
+    expect(offenders.map((s) => `${s.fromKey} -> ${s.toKey} (${s.toDomain})`)).toEqual([]);
+  });
+
   test("assigns every registry story an authored curiosity cue", () => {
     expect(STORY_REGISTRY.every((story) => story.visualEmoji !== undefined)).toBe(true);
+  });
+
+  test("every registry visual emoji is a real, single emoji", () => {
+    // Fails fast here, not deep in a seed run, and names the offender.
+    const offenders = STORY_REGISTRY.filter((story) => {
+      if (story.visualEmoji === undefined) return false;
+      try {
+        assertSingleVisualEmoji(story.visualEmoji);
+        // An Emoji=No symbol can pass on older Unicode data; require the
+        // Emoji property so the check doesn't depend on the Node version.
+        return !/\p{Emoji}/u.test(story.visualEmoji);
+      } catch {
+        return true;
+      }
+    }).map((story) => `${story.toKey}: ${story.visualEmoji}`);
+    expect(offenders).toEqual([]);
+  });
+
+  test("math-preview stories carry generated provenance and reveal-card metadata", () => {
+    const pairs = [
+      ["subtract_within_20", "competitive darts"],
+      ["mult_facts_3_4_6", "dozens and divisibility"],
+      ["two_step_expressions", "calculator input methods"],
+    ] as const;
+
+    for (const [fromKey, toKey] of pairs) {
+      const story = STORY_REGISTRY.find(
+        (entry) => entry.fromKey === fromKey && entry.toKey === toKey,
+      );
+      expect(story).toMatchObject({ provenance: "generated" });
+      expect(story?.teaser).toBeTruthy();
+      expect(story?.probe).toBeTruthy();
+      expect(story?.source).toBeTruthy();
+    }
   });
 
   test("rebuildPracticeNodes seeds registry story edges and deduped world nodes", async () => {
@@ -62,6 +107,21 @@ describe("edge story registry seeding", () => {
 
     const lcmStory = await edgeByPair(t, "lcm", "cicada life cycles");
     expect(lcmStory?.story?.hook).toBe("The 221-year cicada reunion");
+
+    const cryptographyStory = await edgeByPair(
+      t,
+      "prime_or_composite",
+      "cryptography",
+    );
+    expect(cryptographyStory?.story?.hook).toBe("Primes guard your secrets");
+    const ulamStory = await edgeByPair(
+      t,
+      "prime_or_composite",
+      "ulam spiral",
+    );
+    expect(ulamStory?.story?.hook).toBe(
+      "The doodle that found a pattern in the primes",
+    );
 
     // Level-fit move (Finding 1): Simpson's Paradox lives on ratio_compare
     // (grade 6), NOT on the grade-4 compare_unlike it was authored on.

@@ -28,9 +28,11 @@ export const metadata: Metadata = {
     title: "Rabbithole",
     description: "AI that makes you think harder.",
   },
-  icons: {
-    icon: "/favicon.ico",
-  },
+  // No `icons` key on purpose. Next only falls back to the app/ file
+  // conventions (favicon.ico, icon.png, apple-icon.png) when metadata.icons
+  // is unset, so declaring one here silently suppresses the other two — and
+  // for a long while this pointed at a /favicon.ico that did not exist, which
+  // is why the site (and the MCP connector card) had no icon at all.
 };
 
 // viewport-fit=cover lets the app draw edge-to-edge in the iPad shell (the

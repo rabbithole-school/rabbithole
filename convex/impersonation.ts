@@ -3,7 +3,7 @@
 // The admin STAYS signed in as themselves; startImpersonation records an
 // overlay keyed to the admin's OWN live session. While it's active,
 // getCurrentUser (convex/lib/auth.ts) resolves as the target for scholar-
-// facing reads + the app UI (read-only — assertNotImpersonating blocks
+// facing reads + the app UI (read-only — assertCanWrite blocks
 // writes), and the banner shows via myImpersonation. Exit ends the row.
 //
 // No session mint, no token-in-URL, no client bind, no re-mint — so the whole
@@ -30,6 +30,7 @@ import {
 import { isEnrolledScholar } from "./lib/enrollmentStanding";
 import { ROLES, isPlatformAdminRole } from "./lib/roles";
 import type { Doc, Id } from "./_generated/dataModel";
+import { writeAuditLog } from "./lib/auditLog";
 
 type ImpersonationTargetArgs = {
   targetUserId?: Id<"users">;
@@ -83,15 +84,9 @@ async function resolveImpersonationTarget(
 async function requirePlatformAdminSessionOwner(ctx: QueryCtx | MutationCtx) {
   const owner = await getSessionOwner(ctx);
   if (!owner) throw new Error("Not authenticated");
+  // Platform-admin standing is users.role alone (TRA-375): a stale
+  // platform_admin membership must not unlock "view as".
   if (isPlatformAdminRole(owner.role)) return owner;
-
-  const memberships = await ctx.db
-    .query("memberships")
-    .withIndex("by_user", (q) => q.eq("userId", owner._id))
-    .collect();
-  if (memberships.some((membership) => isPlatformAdminRole(membership.role))) {
-    return owner;
-  }
   throw new Error("Platform admin access required");
 }
 
@@ -153,7 +148,10 @@ export const startImpersonation = platformAdminMutation({
       expiresAt: now + impersonationTtlMs(), // hard TTL — auto-expires (see impersonationConfig)
       active: true,
     });
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      // A platform admin acts globally, so the row belongs to the TARGET's
+      // school — writeAuditLog resolves it (lib/auditLog.ts).
+      institutionId: null,
       actorUserId: admin._id,
       action: "impersonation.start",
       targetUserId: target._id,
@@ -203,7 +201,10 @@ export const switchImpersonationTarget = mutation({
       expiresAt: now + impersonationTtlMs(),
       active: true,
     });
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      // A platform admin acts globally, so the row belongs to the TARGET's
+      // school — writeAuditLog resolves it (lib/auditLog.ts).
+      institutionId: null,
       actorUserId: admin._id,
       action: "impersonation.switch",
       targetUserId: target._id,
@@ -234,7 +235,10 @@ export const stopImpersonation = mutation({
       .collect();
     for (const ov of active) {
       await ctx.db.patch(ov._id, { active: false, endedAt: now });
-      await ctx.db.insert("auditLog", {
+      await writeAuditLog(ctx, {
+        // A platform admin acts globally, so the row belongs to the TARGET's
+        // school — writeAuditLog resolves it (lib/auditLog.ts).
+        institutionId: null,
         actorUserId: ov.adminUserId,
         action: "impersonation.stop",
         targetUserId: ov.targetUserId,
@@ -353,7 +357,10 @@ export const sweepStaleOverlays = internalMutation({
       const orphaned = (await ctx.db.get(ov.adminSessionId)) === null;
       if (!expired && !orphaned) continue;
       await ctx.db.patch(ov._id, { active: false, endedAt: now });
-      await ctx.db.insert("auditLog", {
+      await writeAuditLog(ctx, {
+        // A platform admin acts globally, so the row belongs to the TARGET's
+        // school — writeAuditLog resolves it (lib/auditLog.ts).
+        institutionId: null,
         actorUserId: ov.adminUserId,
         action: "impersonation.expire",
         targetUserId: ov.targetUserId,

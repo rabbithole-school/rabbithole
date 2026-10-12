@@ -10,7 +10,7 @@
  * extend the same probability domain so scholars can move between chance and
  * data without a second domain registration.
  *
- * Six strands:
+ * Seven strands:
  *   • chance       — likelihood language and the 0-to-1 scale
  *   • theoretical  — sample spaces, simple theoretical probability, fractions,
  *                    and complements
@@ -18,6 +18,8 @@
  *   • compound     — two-dice sample spaces and total distributions
  *   • data-displays — picture graphs, bar graphs, and whole/fraction line plots
  *   • center-spread — statistical questions, center, variability, and outliers
+ *   • sampling-inference — representative samples, population estimates,
+ *                          sampling variability, comparisons, and margin of error
  *
  * CROSS-DOMAIN (D4, Stage 3): three LIVE cross-domain prerequisite edges —
  * `fraction_as_parts` (fraction-arithmetic, grade 3) → `probability_as_fraction`
@@ -251,6 +253,56 @@ export const PROBABILITY_SKILLS: SeedSkill[] = [
     strand: "center-spread",
     rationale: "Reason that an extreme value pulls the fair-share mean much more than the positional median, then choose the more revealing center for the context.",
   },
+
+  // ── Statistics extension: sampling and inference (grades 7–9) ───────────
+  {
+    skillKey: "population_vs_sample",
+    label: "Distinguish a population from a sample",
+    grade: "7",
+    ccCodes: ["7.SP.A.1"],
+    strand: "sampling-inference",
+    rationale: "Keep the whole group of interest separate from the smaller group observed so every later inference names what the evidence can and cannot represent.",
+  },
+  {
+    skillKey: "representative_random_sample",
+    label: "Choose a random sample likely to represent a population",
+    grade: "7",
+    ccCodes: ["7.SP.A.1"],
+    strand: "sampling-inference",
+    rationale: "Give every member a fair chance of selection so the sample does not systematically favor one part of the population.",
+  },
+  {
+    skillKey: "estimate_population_from_sample",
+    label: "Estimate a population count from a sample proportion",
+    grade: "7",
+    ccCodes: ["7.SP.A.2"],
+    strand: "sampling-inference",
+    rationale: "Scale an observed sample proportion to the full population so limited data can support a useful, explicitly approximate claim.",
+  },
+  {
+    skillKey: "sampling_variability",
+    label: "Interpret variability across repeated random samples",
+    grade: "7",
+    ccCodes: ["7.SP.A.2"],
+    strand: "sampling-inference",
+    rationale: "Expect repeated random samples to give nearby but different estimates so ordinary sample-to-sample wobble is not mistaken for contradiction.",
+  },
+  {
+    skillKey: "compare_populations_from_samples",
+    label: "Compare two populations from sample centers and spreads",
+    grade: "7",
+    ccCodes: ["7.SP.B.4"],
+    strand: "sampling-inference",
+    rationale: "Use both typical value and variability to make a cautious comparison between populations instead of overclaiming from one summary or one observation.",
+  },
+  {
+    skillKey: "margin_of_error_range",
+    label: "Interpret a margin of error as a plausible range around an estimate",
+    grade: "9",
+    ccCodes: ["S-IC.B.4"],
+    strand: "sampling-inference",
+    rationale: "Attach an uncertainty range to a sample estimate so the conclusion communicates precision instead of pretending the estimate is exact.",
+  },
 ];
 
 export const PROBABILITY_EDGES: SeedEdge[] = [
@@ -273,12 +325,13 @@ export const PROBABILITY_EDGES: SeedEdge[] = [
   // "probability") then sees it, and the engine's foreign-aware `stateOf`
   // (buildFrontierStateOf, convex/practiceSkills.ts) resolves the foreign
   // fraction prereq against the scholar's real fraction mastery instead of
-  // reading it as never-practiced. `probability_as_fraction` is a LEAF (nothing
-  // downstream depends on it), so gating it strands nothing else in probability.
+  // reading it as never-practiced. `probability_as_fraction` now feeds only the
+  // sampling branch that scales a sample proportion; population/sample,
+  // representative-sampling, and comparison work remain reachable without it.
   // This is the live demonstrator that exercises the D4 seam end-to-end.
   { fromKey: "fraction_as_parts", toKey: "probability_as_fraction" },
 
-  // ── Statistics extension: 21 internal + 2 cross-domain edges ─────────────
+  // ── Statistics extension: 29 internal + 2 cross-domain edges ─────────────
   { fromKey: "read_picture_graph", toKey: "compare_graph_categories" },
   { fromKey: "read_bar_graph", toKey: "compare_graph_categories" },
   { fromKey: "read_picture_graph", toKey: "read_scaled_picture_bar_graph" },
@@ -304,6 +357,19 @@ export const PROBABILITY_EDGES: SeedEdge[] = [
   { fromKey: "mean", toKey: "outlier_effect_on_mean_median" },
   { fromKey: "median", toKey: "outlier_effect_on_mean_median" },
   { fromKey: "compare_same_center_different_spread", toKey: "outlier_effect_on_mean_median" },
+
+  // Sampling and inference: the internal chain is deliberately separate from
+  // the center/spread strand until a target genuinely uses those summaries.
+  // `expected_frequency` is deliberately absent: it uses an analogous
+  // proportion-times-total calculation, but analogy is not prerequisite.
+  { fromKey: "population_vs_sample", toKey: "representative_random_sample" },
+  { fromKey: "representative_random_sample", toKey: "estimate_population_from_sample" },
+  { fromKey: "probability_as_fraction", toKey: "estimate_population_from_sample" },
+  { fromKey: "estimate_population_from_sample", toKey: "sampling_variability" },
+  { fromKey: "sampling_variability", toKey: "margin_of_error_range" },
+  { fromKey: "representative_random_sample", toKey: "compare_populations_from_samples" },
+  { fromKey: "mean", toKey: "compare_populations_from_samples" },
+  { fromKey: "range", toKey: "compare_populations_from_samples" },
 
   // Audited and deliberately declined / deferred cross-domain hard gates:
   // P10 HOLD: Whole-number comparison → `ordering` is a true dependency (sorting

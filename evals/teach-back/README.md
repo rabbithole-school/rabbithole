@@ -58,7 +58,7 @@ gate flips on — they cannot drift. (The eval imports them directly, bypassing 
 
 To make the guidance faithful, the two tool-callback strings were extracted out of
 `convex/http.ts` into `convex/lib/teachBack.ts` so the eval's tool loop hands the
-model the *same* text the live `/project-stream` handler returns.
+model the *same* text the live `/session-stream` handler returns.
 **`__tests__/specSync.test.ts`** locks all of this in: it asserts referential
 identity between the eval's imports and the shipped module, and that `http.ts` still
 calls the extracted guidance rather than re-inlining it.

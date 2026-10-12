@@ -257,11 +257,11 @@ describe("picking a web image", () => {
     const artifactId = await seedDeck(t, ownerId);
     vi.stubEnv("JWT_PRIVATE_KEY", SIGNING_SECRET);
     vi.stubGlobal("fetch", vi.fn(async () =>
-      new Response(new Uint8Array([137, 80, 78, 71]), {
+      new Response(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGM8EaDBwMDAxAAGAA/KAUR0s/I7AAAAAElFTkSuQmCC", "base64"), {
         status: 200,
         headers: {
           "Content-Type": "image/png",
-          "Content-Length": "4",
+          "Content-Length": "75",
         },
       })
     ));
@@ -331,6 +331,45 @@ describe("picking a web image", () => {
     expect(result).toMatchObject({ status: "inserted" });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(String(fetchSpy.mock.calls[0]?.[0])).toBe(IMAGE_URL);
+    expect(String(fetchSpy.mock.calls[1]?.[0])).toBe(PROXY_URL);
+  });
+
+  test("falls back to the Brave proxy when the original serves a corrupt image", async () => {
+    // A hotlink-blocked host answered 200 image/png with a 1x1 PNG whose chunk
+    // CRC was wrong: it renders blank, and Anthropic 400s every request that
+    // carries it. It must count as a failed download, not a picture.
+    const t = convexTest(schema, modules);
+    const ownerId = await seedScholar(t, "corrupt-original");
+    const artifactId = await seedDeck(t, ownerId);
+    vi.stubEnv("JWT_PRIVATE_KEY", SIGNING_SECRET);
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === IMAGE_URL) {
+        return new Response(
+          Buffer.from(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9sXsdrgAAAAASUVORK5CYII=",
+            "base64",
+          ),
+          { status: 200, headers: { "Content-Type": "image/png" } },
+        );
+      }
+      return new Response(new Uint8Array([255, 216, 255]), {
+        status: 200,
+        headers: { "Content-Type": "image/jpeg" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await t
+      .withIdentity({ subject: ownerId })
+      .action(api.slidesImageSearch.pickWebImage, {
+        artifactId,
+        query: "Egyptian tomb painting",
+        image: await makeImageResult(),
+      });
+
+    expect(result).toMatchObject({ status: "inserted" });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(String(fetchSpy.mock.calls[1]?.[0])).toBe(PROXY_URL);
   });
 

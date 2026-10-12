@@ -1,14 +1,8 @@
 import { describe, expect, test } from "vitest";
-import {
-  remainingViewportHeight,
-  VIEWPORT_SHELL_HEIGHT,
-} from "../viewportShell";
+import { remainingViewportHeight } from "../viewportShell";
 
 describe("viewport shell height contract", () => {
   test("falls back to the full dynamic viewport until a banner is measured", () => {
-    expect(VIEWPORT_SHELL_HEIGHT).toBe(
-      "var(--rh-viewport-shell-height, 100dvh)",
-    );
     expect(remainingViewportHeight(Number.NaN)).toBe("100dvh");
   });
 

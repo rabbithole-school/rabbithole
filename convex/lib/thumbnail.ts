@@ -19,7 +19,6 @@
 // (native) — those don't deploy on Convex.
 
 import type { PDFiumDocument } from "@hyzyla/pdfium";
-import { PNG } from "pngjs";
 
 /** Longest edge of the generated thumbnail, in px. Covers the 140px card. */
 const MAX_EDGE = 512;
@@ -139,15 +138,6 @@ async function renderPageRgba(
   return { data: render.data, width: render.width, height: render.height };
 }
 
-/** Encode raw RGBA as a PNG, dropping the (always-opaque) alpha channel. */
-function rgbaToPng(data: Uint8Array, width: number, height: number): Uint8Array {
-  const png = new PNG({ width, height, colorType: 2, inputColorType: 6 });
-  png.data = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-  return new Uint8Array(
-    PNG.sync.write(png, { colorType: 2, inputColorType: 6 }),
-  );
-}
-
 /** PDF path: rasterize page 1 with PDFium -> resize/encode with photon. */
 async function pdfThumb(bytes: Uint8Array): Promise<Uint8Array> {
   return withPdfDocument(bytes, async (doc) => {
@@ -180,39 +170,4 @@ export async function renderThumbnailJpeg(
   if (mime.startsWith("image/")) return imageThumb(bytes);
   if (mime === "application/pdf") return pdfThumb(bytes);
   return null;
-}
-
-/** DPI for a full-page raster handed to an image model — bigger than the
- *  thumbnail DPI so the model has real detail to read/redraw. 150 DPI ≈
- *  1275×1650 for US Letter, a good input size without being wasteful. */
-const PDF_MODEL_DPI = 150;
-
-/** Upper bound on pages we rasterize for Magic detection on a single item, so a
- *  pathologically long submission can't blow up an action. A per-student
- *  segment is normally a handful of pages; the cap only bites on outliers
- *  (caller logs when it truncates). */
-const MAGIC_MAX_PAGES = 30;
-
-/**
- * Rasterize each page of a PDF to a full-resolution PNG (no thumbnail
- * downscale) so the pages can be handed to an image model — Magic Annotations
- * needs images, not a PDF, and has to look at EVERY page (a marker can be on
- * any page of a multi-page submission). Opens the document once. Returns the
- * page PNGs plus the true total so the caller can tell when the cap truncated.
- */
-export async function rasterizePdfPages(
-  bytes: Uint8Array,
-  dpi = PDF_MODEL_DPI,
-  maxPages = MAGIC_MAX_PAGES,
-): Promise<{ pages: Uint8Array[]; total: number }> {
-  return withPdfDocument(bytes, async (doc) => {
-    const total = doc.getPageCount();
-    const n = Math.min(total, maxPages);
-    const pages: Uint8Array[] = [];
-    for (let i = 0; i < n; i++) {
-      const raster = await renderPageRgba(doc, i, dpi);
-      pages.push(rgbaToPng(raster.data, raster.width, raster.height));
-    }
-    return { pages, total };
-  });
 }

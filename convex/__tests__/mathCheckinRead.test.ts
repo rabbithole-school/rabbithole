@@ -6,8 +6,8 @@
 // `practicePlacements.status`, and (b) a question that can no longer be rebuilt
 // reports itself unavailable rather than being fabricated.
 
-import { convexTest } from "convex-test";
-import { describe, expect, test, vi } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { internal } from "../_generated/api";
 import { makeItemId } from "../lib/practice/session";
@@ -17,6 +17,23 @@ const modules = (
     glob: (pattern: string) => Record<string, () => Promise<unknown>>;
   }
 ).glob("../**/*.ts");
+
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
 
 describe("getScholarMathCheckIn", () => {
   test("reports the map, probe chronology, reconstructed template questions, and the held probe", async () => {
@@ -128,8 +145,7 @@ describe("getScholarMathCheckIn", () => {
   });
 
   test("reports no placement rows as not started, and never fabricates an unknown item", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await t.run((ctx) =>
       ctx.db.insert("users", {
         name: "Test Scholar",
@@ -206,8 +222,7 @@ describe("getScholarMathCheckIn", () => {
   });
 
   test("a scholar with mastery but no converged run reads as shadow placed, not mapped", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await t.run((ctx) =>
       ctx.db.insert("users", {
         name: "Shadow Scholar",
@@ -241,8 +256,7 @@ describe("getScholarMathCheckIn", () => {
   });
 
   test("a stale held probe on a CONVERGED domain is ignored — only a servable domain holds the live probe", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await t.run((ctx) =>
       ctx.db.insert("users", {
         name: "Interrupted Scholar",
@@ -324,8 +338,7 @@ describe("getScholarMathCheckIn", () => {
   });
 
   test("refuses a non-scholar id", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const teacher = await t.run((ctx) =>
       ctx.db.insert("users", {
         name: "Teacher",

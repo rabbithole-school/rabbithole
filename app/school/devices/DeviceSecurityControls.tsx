@@ -25,13 +25,14 @@ import {
 } from "@chakra-ui/react";
 import { Camera, LockKey, LockKeyOpen, Siren } from "@phosphor-icons/react";
 import { useAction, useMutation, useQuery } from "convex/react";
+import { ConvexError } from "convex/values";
 import type { Id } from "@/convex/_generated/dataModel";
 import { api } from "@/convex/_generated/api";
 import { FieldSelect } from "@/components/ui/FieldSelect";
 import { Surface } from "@/components/ui/Surface";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { toaster } from "@/lib/toaster";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import type { FunctionReturnType } from "convex/server";
 
 type DisarmMode =
@@ -101,6 +102,37 @@ export type LockControlDevice = {
 };
 
 type LostModeState = FunctionReturnType<typeof api.simplemdm.lostModeStatus>;
+
+/**
+ * What SimpleMDM last reported for this iPad, as persisted by the backend
+ * (`simpleMdmDeviceSnapshots`) and delivered on the host's reactive query.
+ * `null` = SimpleMDM has never been asked about this serial.
+ */
+export type LostModeSnapshot = {
+  checkedAt: number;
+  foundInSimpleMdm: boolean;
+  isSupervised: boolean | null;
+  lostModeEnabled: boolean | null;
+} | null;
+
+/**
+ * The staff-facing message from a SimpleMDM client ConvexError, else the Error
+ * message. Exported because the devices drawer sends SimpleMDM commands too:
+ * a ConvexError's raw `.message` crossing the action boundary is the whole
+ * `[CONVEX A(...)] ... Uncaught ConvexError: ...` blob plus a stack trace, which
+ * is what staff would otherwise read in a toast mid-emergency.
+ */
+export function simpleMdmErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof ConvexError) {
+    const data: unknown = error.data;
+    if (typeof data === "string" && data) return data;
+    if (data && typeof data === "object" && "message" in data) {
+      const message = (data as { message?: unknown }).message;
+      if (typeof message === "string" && message) return message;
+    }
+  }
+  return error instanceof Error && error.message ? error.message : fallback;
+}
 
 type SectionProps = {
   title: string;
@@ -303,9 +335,9 @@ export function RabbitholeLockControl({
                   "aria-labelledby": `disarm-for-${device.pairedDeviceId}`,
                 }}
               >
-                {DISARM_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
+                {DISARM_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
                   </option>
                 ))}
               </FieldSelect>
@@ -570,35 +602,60 @@ export function RoboticsCaptureStationModeControl({
 
 export function LostModeControl({
   pairedDeviceId,
+  snapshot,
+  simpleMdmConfigured = true,
   variant = "card",
   onCommandApplied,
 }: {
   pairedDeviceId: Id<"pairedDevices">;
+  /**
+   * The persisted SimpleMDM read-back for this iPad. Rendering never triggers
+   * a SimpleMDM request: opening a drawer must not spend API quota, and it
+   * must not fail when SimpleMDM is rate limiting. "Refresh status" is the
+   * one explicit read; every command also re-reads and re-persists.
+   */
+  snapshot: LostModeSnapshot | undefined;
+  /** False when the host already knows SimpleMDM isn't configured. */
+  simpleMdmConfigured?: boolean;
   variant?: "card" | "drawer";
   /**
    * Optional: called after a Lost Mode command succeeds AND live status has
-   * been re-read, so a host surface (the devices roster) can refresh the
-   * SimpleMDM-derived state it shows elsewhere.
+   * been re-read, so a host surface can react (e.g. close a confirmation).
    */
   onCommandApplied?: () => void;
 }) {
   const fetchLostModeStatus = useAction(api.simplemdm.lostModeStatus);
   const setLostMode = useAction(api.simplemdm.setLostMode);
-  const [status, setStatus] = useState<LostModeState>();
-  const [statusLoading, setStatusLoading] = useState(true);
+  // A live read-back from this session overrides the snapshot until the
+  // snapshot catches up (the backend persists every read, so it does).
+  const [liveStatus, setLiveStatus] = useState<LostModeState>();
+  const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  const status: LostModeState | undefined =
+    liveStatus ??
+    (!simpleMdmConfigured
+      ? { configured: false, foundInSimpleMdm: false, isSupervised: null, lostModeEnabled: null }
+      : snapshot
+        ? {
+            configured: true,
+            foundInSimpleMdm: snapshot.foundInSimpleMdm,
+            isSupervised: snapshot.isSupervised,
+            lostModeEnabled: snapshot.lostModeEnabled,
+          }
+        : undefined);
+  const statusAsOf = liveStatus ? null : snapshot?.checkedAt ?? null;
 
   const refreshStatus = useCallback(async () => {
     setStatusLoading(true);
     try {
       const result = await fetchLostModeStatus({ pairedDeviceId });
-      setStatus(result);
+      setLiveStatus(result);
       setStatusError(null);
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Please try again.";
+      const message = simpleMdmErrorMessage(error, "Please try again.");
       setStatusError(message);
       toaster.error({
         title: "Couldn't check Lost Mode status",
@@ -608,11 +665,6 @@ export function LostModeControl({
       setStatusLoading(false);
     }
   }, [fetchLostModeStatus, pairedDeviceId]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- reconcile live SimpleMDM state on mount
-    void refreshStatus();
-  }, [refreshStatus]);
 
   async function updateLostMode(enabled: boolean) {
     setBusy(true);
@@ -630,7 +682,7 @@ export function LostModeControl({
     } catch (error) {
       toaster.error({
         title: enabled ? "Couldn't enable Lost Mode" : "Couldn't disable Lost Mode",
-        description: error instanceof Error ? error.message : "Please try again.",
+        description: simpleMdmErrorMessage(error, "Please try again."),
       });
     } finally {
       setBusy(false);
@@ -660,15 +712,22 @@ export function LostModeControl({
         ) : undefined
       }
       action={
-        <Button
-          size="xs"
-          variant="ghost"
-          color="charcoal.500"
-          loading={statusLoading}
-          onClick={() => void refreshStatus()}
-        >
-          Refresh status
-        </Button>
+        <HStack gap={2}>
+          {statusAsOf !== null && (
+            <Text fontSize="xs" color="charcoal.400">
+              as of {formatTimestamp(statusAsOf)}
+            </Text>
+          )}
+          <Button
+            size="xs"
+            variant="ghost"
+            color="charcoal.500"
+            loading={statusLoading}
+            onClick={() => void refreshStatus()}
+          >
+            Refresh status
+          </Button>
+        </HStack>
       }
     >
       <VStack align="stretch" gap={3}>
@@ -684,9 +743,10 @@ export function LostModeControl({
             </HStack>
           ) : status === undefined ? (
             <VStack align="start" gap={2}>
-              <Text fontSize="xs" color="red.600">
-                Couldn&apos;t check Lost Mode status
-                {statusError ? `: ${statusError}` : "."}
+              <Text fontSize="xs" color={statusError ? "red.600" : "charcoal.400"}>
+                {statusError
+                  ? `Couldn't check Lost Mode status: ${statusError}`
+                  : "SimpleMDM hasn't been asked about this iPad yet."}
               </Text>
               <Button
                 size="xs"
@@ -694,7 +754,7 @@ export function LostModeControl({
                 loading={statusLoading}
                 onClick={() => void refreshStatus()}
               >
-                Retry
+                {statusError ? "Retry" : "Check SimpleMDM"}
               </Button>
             </VStack>
           ) : !status.configured ? (

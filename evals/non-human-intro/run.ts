@@ -11,9 +11,14 @@
 import { mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runTutor, type TutorCase, type TutorRun } from "./lib/runTutor";
+import {
+  runTutor,
+  tutorModel,
+  type TutorCase,
+  type TutorRun,
+} from "./lib/runTutor";
 import { judge, type Verdict } from "./lib/judge";
-import { MODELS, JUDGE_MODEL } from "../../convex/lib/models";
+import { JUDGE_MODEL } from "../../convex/lib/models";
 import { mean, parseEvalArgs, runPool, writeRunArtifacts } from "../lib/harness";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -211,7 +216,7 @@ function buildReport(
 ): string {
   const L: string[] = [];
   L.push(`# Non-Human Introduction Eval (PR #38)\n`);
-  L.push(`_Tutor model: ${MODELS.SONNET} (live tutor). Judge: ${JUDGE_MODEL}._\n`);
+  L.push(`_Tutor model: ${tutorModel} (live tutor). Judge: ${JUDGE_MODEL}._\n`);
   L.push(
     `Feeds the real \`buildSystemPrompt\` output to the tutor and checks: does it disclose it's an AI when (and only when) it should?\n`,
   );

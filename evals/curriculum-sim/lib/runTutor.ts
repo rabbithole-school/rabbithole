@@ -11,13 +11,21 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { buildSystemPrompt } from "../../../convex/sessionHelpers";
-import { MODELS } from "../../../convex/lib/models";
+import type { AideEffort } from "../../../convex/lib/aideModel";
+import type { ModelId } from "../../../convex/lib/models";
+import {
+  TUTOR_DEFAULT_MODEL,
+  tutorRuntime,
+} from "../../../convex/lib/tutorModel";
 import type { ScholarProfile, SimActivity, SimTurn } from "./types";
 import { sanitizeToolText } from "./toolText";
 
 const anthropic = new Anthropic();
 
-export const tutorModel = process.env.TUTOR_MODEL || MODELS.SONNET;
+export const tutorModel = process.env.TUTOR_MODEL || TUTOR_DEFAULT_MODEL;
+const runtime = tutorRuntime(tutorModel as ModelId);
+export const tutorEffort: AideEffort | undefined =
+  (process.env.TUTOR_EFFORT as AideEffort | undefined) || runtime.effort;
 export const tutorTokens = { input: 0, output: 0 };
 
 /** Assemble the production tutor system prompt for this scholar × activity. */
@@ -99,9 +107,10 @@ export async function generateTutorTurn(
   if (messages.length === 0) messages.push({ role: "user", content: "(start)" });
   const res = await anthropic.messages.create({
     model: tutorModel,
-    max_tokens: 1024,
+    max_tokens: runtime.maxTokens,
     system,
     messages,
+    ...(tutorEffort ? { output_config: { effort: tutorEffort } } : {}),
   });
   const usage = res.usage as unknown as Record<string, number | undefined>;
   tutorTokens.input += usage.input_tokens ?? 0;

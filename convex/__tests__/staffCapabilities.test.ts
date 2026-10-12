@@ -11,6 +11,7 @@ import {
   hasHealthAccessAtInstitution,
   healthInstitutionIds,
   hasSchoolOperationsAccessAtInstitution,
+  liveSchoolOperationsInstitutionIds,
   schoolOperationsInstitutionIds,
 } from "../lib/staffCapabilities";
 import { accessibleScholarIds, canReadScholarAsTeacher } from "../lib/access";
@@ -629,5 +630,130 @@ describe("staff capability grants", () => {
         await ctx.db.get(world.robotics),
       ]),
     ).resolves.toEqual([[], null]);
+  });
+});
+
+
+describe("liveSchoolOperationsInstitutionIds — the disabled-school gap (TRA-359)", () => {
+  // The whole point of this helper: `schoolOperationsInstitutionIds` answers
+  // "all" for a platform admin BEFORE loading any institution, so it does NOT
+  // agree with `hasSchoolOperationsAccessAtInstitution`, which fails closed on
+  // `disabledAt`. These tests pin the disagreement AND the fix, so nobody
+  // "simplifies" the helper back into the raw one.
+
+  let slugCounter = 0;
+
+  async function seedSchool(
+    t: ReturnType<typeof convexTest>,
+    slug: string,
+    opts: { disabled?: boolean } = {},
+  ) {
+    return t.run((ctx) =>
+      ctx.db.insert("institutions", {
+        name: slug,
+        slug,
+        kind: "school" as const,
+        ...(opts.disabled ? { disabledAt: Date.now() } : {}),
+      }),
+    );
+  }
+
+  async function seedStaff(
+    t: ReturnType<typeof convexTest>,
+    role: "staff" | "platform_admin",
+    institutionId?: Id<"institutions">,
+  ) {
+    const userId = await t.run((ctx) =>
+      ctx.db.insert("users", { name: `a ${role}`, username: `u-${role}-${slugCounter++}`, role }),
+    );
+    if (institutionId) {
+      await t.run(async (ctx) => {
+        await ctx.db.insert("memberships", { userId, role: "staff", institutionId });
+        await ctx.db.insert("staffCapabilityGrants", {
+          granteeUserId: userId,
+          institutionId,
+          capability: "school:operations" as const,
+          grantedBy: userId,
+          grantedAt: Date.now(),
+        });
+      });
+    }
+    return userId;
+  }
+
+  test("a platform admin gets every LIVE school and never a suspended one", async () => {
+    const t = convexTest(schema, modules);
+    const live = await seedSchool(t, "live-school");
+    const suspended = await seedSchool(t, "suspended-school", { disabled: true });
+    const admin = await seedStaff(t, "platform_admin");
+
+    await t.run(async (ctx) => {
+      const user = (await ctx.db.get(admin))!;
+      // The raw helper short-circuits before any institution is read...
+      expect(await schoolOperationsInstitutionIds(ctx, user)).toBe("all");
+      // ...so it disagrees with the per-institution boolean gate:
+      expect(
+        await hasSchoolOperationsAccessAtInstitution(ctx, user, suspended),
+      ).toBe(false);
+      // The live-set helper is the one that agrees with it.
+      const ids = await liveSchoolOperationsInstitutionIds(ctx, user);
+      expect(ids).not.toBeNull();
+      expect(ids!.has(live)).toBe(true);
+      expect(ids!.has(suspended)).toBe(false);
+    });
+  });
+
+  test("a granted staffer keeps their own school, and loses it when it is suspended", async () => {
+    const t = convexTest(schema, modules);
+    const school = await seedSchool(t, "ops-school");
+    const staff = await seedStaff(t, "staff", school);
+
+    await t.run(async (ctx) => {
+      const user = (await ctx.db.get(staff))!;
+      const ids = await liveSchoolOperationsInstitutionIds(ctx, user);
+      expect(ids && [...ids]).toEqual([school]);
+    });
+
+    await t.run((ctx) => ctx.db.patch(school, { disabledAt: Date.now() }));
+
+    await t.run(async (ctx) => {
+      const user = (await ctx.db.get(staff))!;
+      // The grant path already drops a suspended school, so this staffer has
+      // no standing at all any more — null, not an empty set.
+      expect(await liveSchoolOperationsInstitutionIds(ctx, user)).toBeNull();
+    });
+  });
+
+  test("null means NO standing, distinct from an empty live set", async () => {
+    const t = convexTest(schema, modules);
+    await seedSchool(t, "somewhere");
+    const ungranted = await seedStaff(t, "staff");
+
+    await t.run(async (ctx) => {
+      const user = (await ctx.db.get(ungranted))!;
+      expect(await liveSchoolOperationsInstitutionIds(ctx, user)).toBeNull();
+    });
+
+    // A platform admin in a world where every school is suspended has
+    // standing but nothing in reach — an empty SET, so a caller can answer
+    // "you may ask, there is just nothing here" rather than 403.
+    const t2 = convexTest(schema, modules);
+    await t2.run((ctx) =>
+      ctx.db.insert("institutions", {
+        name: "only-school",
+        slug: "only-school",
+        kind: "school" as const,
+        disabledAt: Date.now(),
+      }),
+    );
+    const admin = await t2.run((ctx) =>
+      ctx.db.insert("users", { name: "admin", username: "admin-empty", role: "platform_admin" }),
+    );
+    await t2.run(async (ctx) => {
+      const user = (await ctx.db.get(admin))!;
+      const ids = await liveSchoolOperationsInstitutionIds(ctx, user);
+      expect(ids).not.toBeNull();
+      expect(ids!.size).toBe(0);
+    });
   });
 });

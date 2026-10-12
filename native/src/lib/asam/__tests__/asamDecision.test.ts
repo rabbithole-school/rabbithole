@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   applyAsamAction,
+  asamTransitionReason,
   decideAsamAction,
   decideOneTimeDisarmAction,
   isManagedAsamEnabled,
@@ -10,6 +11,7 @@ import {
   shouldUseOfflineRecoveryBypass,
   type AsamAction,
   type AsamInputs,
+  type AsamReasonInputs,
 } from "../asamDecision";
 
 describe("isManagedAsamEnabled", () => {
@@ -398,4 +400,66 @@ describe("isAppReentry", () => {
     expect(isAppReentry("unknown", "active")).toBe(false);
     expect(isAppReentry("active", "active")).toBe(false);
   });
+});
+
+describe("asamTransitionReason (TRA-331 lock-change telemetry)", () => {
+  const settled: AsamReasonInputs = {
+    isOnline: true,
+    paired: true,
+    armed: true,
+    releasedForSystemUI: false,
+  };
+
+  // The controller feeds decideAsamAction `armed && !releasedForSystemUI`.
+  function decide(current: AsamReasonInputs, inSam: boolean) {
+    return decideAsamAction({
+      isOnline: current.isOnline,
+      paired: current.paired,
+      armed: current.armed && !current.releasedForSystemUI,
+      inSam,
+    });
+  }
+
+  // Every exit branch of decideAsamAction, with the reason it is recorded as.
+  const EXITS: Array<{ current: AsamReasonInputs; reason: string }> = [
+    { current: { ...settled, isOnline: false }, reason: "offline" },
+    // Offline wins even while the pairing read is still loading.
+    { current: { ...settled, isOnline: false, paired: "unknown" }, reason: "offline" },
+    { current: { ...settled, paired: false }, reason: "unpaired" },
+    { current: { ...settled, armed: false }, reason: "disarmed" },
+    {
+      current: { ...settled, armed: false, releasedForSystemUI: true },
+      reason: "disarmed",
+    },
+    { current: { ...settled, releasedForSystemUI: true }, reason: "system_ui_release" },
+  ];
+  for (const { current, reason } of EXITS) {
+    it(`exit ${JSON.stringify(current)} → ${reason}`, () => {
+      expect(decide(current, true)).toBe("exit");
+      expect(asamTransitionReason("exit", current, settled)).toBe(reason);
+    });
+  }
+
+  // The single enter branch, told apart by what changed since the last pass.
+  const ENTERS: Array<{ previous: AsamReasonInputs | null; reason: string }> = [
+    { previous: null, reason: "cold_start" },
+    { previous: { ...settled, paired: "unknown" }, reason: "cold_start" },
+    { previous: { ...settled, isOnline: false }, reason: "back_online" },
+    // Booted offline: reconnecting is what changed, not the cold start.
+    {
+      previous: { ...settled, isOnline: false, paired: "unknown" },
+      reason: "back_online",
+    },
+    { previous: { ...settled, releasedForSystemUI: true }, reason: "system_ui_restore" },
+    { previous: { ...settled, armed: false }, reason: "armed" },
+    { previous: { ...settled, paired: false }, reason: "armed" },
+    // Nothing changed, yet iOS was out of Single App Mode: worth knowing.
+    { previous: settled, reason: "reassert" },
+  ];
+  for (const { previous, reason } of ENTERS) {
+    it(`enter after ${JSON.stringify(previous)} → ${reason}`, () => {
+      expect(decide(settled, false)).toBe("enter");
+      expect(asamTransitionReason("enter", settled, previous)).toBe(reason);
+    });
+  }
 });

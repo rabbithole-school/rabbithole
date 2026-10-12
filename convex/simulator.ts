@@ -44,8 +44,6 @@ function projectSimulator(activity: Doc<"activities">, resolved: NonNullable<Ret
     // Scholar-facing Workbench payload — scholar copy only.
     description: activity.scholarDescription ?? null,
     simulatorSpec: resolved.spec,
-    // Kept through the fleet transition: worlds.getWorldSpec is a thin alias
-    // of this canonical endpoint, and released clients still read worldSpec.
     worldSpec: resolved.spec,
     template: {
       id: resolved.template.id,
@@ -170,7 +168,6 @@ export const simulatorDesign = authedQuery({
       title: activity.title,
       kind: activity.kind,
       simulatorSpec,
-      // worlds.worldDesign remains callable by the released iPad build.
       worldSpec: simulatorSpec,
       specError,
       templates,

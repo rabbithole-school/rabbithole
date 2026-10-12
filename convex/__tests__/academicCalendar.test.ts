@@ -1,5 +1,5 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import {
@@ -7,6 +7,18 @@ import {
   seedScholarInInstitution,
 } from "./institutionTestHelpers";
 import type { Id } from "../_generated/dataModel";
+
+// These suites seed a 2026-27 school calendar and assert on what is
+// "upcoming" from today. Left on the real clock, the assertions expire the
+// day after each seeded holiday (Labor Day 2026-09-07 took the marshal gate
+// down on 2026-09-08). Pin "today" to the start of that school year.
+beforeAll(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-01T18:00:00Z"));
+});
+afterAll(() => {
+  vi.useRealTimers();
+});
 
 const modules = (
   import.meta as ImportMeta & {
