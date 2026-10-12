@@ -10481,7 +10481,7 @@ export default defineSchema({
     text: v.string(),
     // The kid's named approach — "how will you try?" (SRL forethought).
     strategy: v.optional(v.string()),
-    // ISO date (YYYY-MM-DD) of the Monday that anchors the goal's week (HST).
+    // ISO date (YYYY-MM-DD) of the school-local Monday that anchors the goal's week.
     weekOf: v.string(),
     // A scholar-set goal is `active` the moment it's set (scholar owns it —
     // no approval gate). `proposed` is only a teacher SUGGESTION awaiting the

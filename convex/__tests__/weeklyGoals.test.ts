@@ -1,5 +1,5 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
@@ -614,5 +614,74 @@ describe("goalKeywords", () => {
     expect(kws).toContain("times");
     expect(kws).toContain("tables");
     expect(kws).not.toContain("my");
+  });
+});
+
+describe("tutor context — the school's own week and day (TRA-486)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("two schools in different zones each read their own 'this week' and 'today'", async () => {
+    // 2026-10-11 20:00 UTC is Sunday 10:00 in Honolulu (week of Oct 5) but
+    // already Monday 09:00 in Auckland (week of Oct 12).
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 9, 11, 20, 0));
+    const t = convexTest(schema, modules);
+
+    const hawaii = await seedTestInstitution(t, { slug: "tz-hawaii", isPrimary: true });
+    const auckland = await seedTestInstitution(t, { slug: "tz-auckland", name: "Kiwi School" });
+    await t.run(async (ctx) => {
+      await ctx.db.patch(hawaii, { timeZone: "Pacific/Honolulu" });
+      await ctx.db.patch(auckland, { timeZone: "Pacific/Auckland" });
+    });
+
+    // 10:30 UTC on Oct 11: after Honolulu's Sunday midnight (10:00 UTC), but
+    // still Sunday night (23:30) in Auckland — "today" there began at 11:00 UTC.
+    const webStartedAt = Date.UTC(2026, 9, 11, 10, 30);
+
+    const seedScholar = async (
+      institutionId: Id<"institutions">,
+      label: string,
+    ) => {
+      const scholarId = await seedScholarInInstitution(t, { institutionId });
+      const sessionId = await t.run(async (ctx) => {
+        for (const weekOf of ["2026-10-05", "2026-10-12"]) {
+          await ctx.db.insert("weeklyGoals", {
+            scholarId,
+            text: `${label} goal for ${weekOf}`,
+            weekOf,
+            status: "active",
+            source: "scholar",
+            createdAt: Date.now(),
+          });
+        }
+        await ctx.db.insert("webActivitySessions", {
+          scholarId,
+          startedAt: webStartedAt,
+          endedAt: webStartedAt + 10 * 60 * 1000,
+          screenshotIds: [],
+        });
+        return ctx.db.insert("sessions", {
+          userId: scholarId,
+          title: "Tutor session",
+          isArchived: false,
+        });
+      });
+      return t.query(internal.sessionHelpers.getSessionContext, { sessionId });
+    };
+
+    const hawaiiContext = await seedScholar(hawaii, "Hawaii");
+    const aucklandContext = await seedScholar(auckland, "Auckland");
+
+    expect(hawaiiContext?.weeklyGoals.map((g) => g.text)).toEqual([
+      "Hawaii goal for 2026-10-05",
+    ]);
+    expect(aucklandContext?.weeklyGoals.map((g) => g.text)).toEqual([
+      "Auckland goal for 2026-10-12",
+    ]);
+    // The same web session is "today" in Honolulu and "yesterday" in Auckland.
+    expect(hawaiiContext?.webPracticeContext).toHaveLength(1);
+    expect(aucklandContext?.webPracticeContext).toBeNull();
   });
 });

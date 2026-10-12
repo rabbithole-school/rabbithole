@@ -147,7 +147,12 @@ import {
   ideaConvosLoopConfig,
   makeIdeaConvoTools,
 } from "./lib/scholarIdeaTools";
-import { formattingGuidance, linkBaseFor } from "./lib/channels";
+import {
+  formattingGuidance,
+  linkBaseFor,
+  schoolTimeLabel,
+  wallClockUtcIdentity,
+} from "./lib/channels";
 import {
   STAFF_SCHOLAR_RECORDS_SECTION,
   GROUNDED_CLAIMS_DOCTRINE,
@@ -160,6 +165,7 @@ import {
 import {
   type InstitutionPromptProfile,
   DEFAULT_INSTITUTION_PROMPT_PROFILE,
+  longClockClause,
 } from "./lib/institutionPromptProfile";
 import {
   createStreamStopPredicate,
@@ -3239,14 +3245,15 @@ http.route({
     // model can reason about "this week" / "next week" without guessing.
     if (canSeeScholarData) {
       const nowMs = Date.now();
-      // HST = UTC-10, no DST — format off UTC parts of (now - 10h).
-      const hd = new Date(nowMs - 10 * 60 * 60 * 1000);
-      const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-      const MO = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-      let hh = hd.getUTCHours();
-      const ap = hh < 12 ? "AM" : "PM";
-      hh = hh % 12 || 12;
-      const nowLabel = `${WD[hd.getUTCDay()]}, ${MO[hd.getUTCMonth()]} ${hd.getUTCDate()}, ${hd.getUTCFullYear()}, ${hh}:${String(hd.getUTCMinutes()).padStart(2, "0")} ${ap} HST`;
+      // The aide's institution clock (Pacific/Honolulu for the primary, where
+      // this renders exactly the old fixed-HST text). The same resolver the
+      // assignment tools label with — the active membership behind
+      // aideInstitutionId — so the prompt's clock and the labels agree.
+      const aideTimeZone = await ctx.runQuery(
+        internal.institutions.staffTimeZone,
+        { userId: callerUserId },
+      );
+      const nowLabel = schoolTimeLabel(nowMs, aideTimeZone, { withYear: true });
       systemPromptSections.push(
         [
           "",
@@ -3268,9 +3275,9 @@ http.route({
           "",
           "**Roster + lifecycle.** `set_assignment_scholars` REPLACES the roster (anyone unlisted leaves); `add_assignment_scholars` only adds. `archive_assignment` ends an assignment (clears its pushes). All take scholar NAMES, resolved for you — but confirm the resolved names/assignment with the teacher before a roster change or archive.",
           "",
-          `**Time.** All times are epoch milliseconds in Hawaii time (HST, UTC-10, no daylight saving). Right now it is ${nowLabel} (${nowMs} ms). One day = 86400000 ms; one week = 604800000 ms. Each schedule item comes back with a human \`whenLabel\` so you can confirm you've got the right one.`,
+          `**Time.** All times are epoch milliseconds${longClockClause(aideProfile)}. Right now it is ${nowLabel} (${nowMs} ms). One day = 86400000 ms; one week = 604800000 ms. Each schedule item comes back with a human \`whenLabel\` so you can confirm you've got the right one.`,
           "",
-          `**Converting a wall-clock time to ms is error-prone — don't trust your first arithmetic.** Anchor off the current time above (e.g. \"this coming Monday 9am\" = step forward from now), and a useful identity is: 9:00 AM HST on a date = that date at 19:00 UTC. After ANY schedule_activity / reschedule_activity call, READ the returned \`startsAtLabel\` and check it matches the time the teacher asked for. If it's off, recompute and call again BEFORE telling the teacher it's done — don't narrate a guess as if it were confirmed.`,
+          `**Converting a wall-clock time to ms is error-prone — don't trust your first arithmetic.** Anchor off the current time above (e.g. \"this coming Monday 9am\" = step forward from now), and a useful identity is: ${wallClockUtcIdentity(nowMs, aideTimeZone)}. After ANY schedule_activity / reschedule_activity call, READ the returned \`startsAtLabel\` and check it matches the time the teacher asked for. If it's off, recompute and call again BEFORE telling the teacher it's done — don't narrate a guess as if it were confirmed.`,
           "",
           "**Bulk shifts** (e.g. \"push everything in the week of Jun 8 back by 1 week\"): call `get_schedule`, read each item's `whenLabel` to find the ones in that window, then call `reschedule_activity` once per item with `startsAtMs = agendaAtMs + 604800000`. Rescheduling a LIVE item only moves its agenda position; a PLANNED item also moves when it goes live.",
           "",

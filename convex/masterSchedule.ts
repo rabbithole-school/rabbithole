@@ -1155,6 +1155,36 @@ export const aideGrid = internalQuery({
   },
 });
 
+/**
+ * The zone a term's dates live in: its institution's, the same zone the grid
+ * and the placement mutations anchor `weekStartMs` to. The aide tools parse a
+ * YYYY-MM-DD date with it, so a caller whose own school differs from the
+ * term's (a lensed platform admin) still stores the term's Monday midnight.
+ * Takes the term directly or via a placement. Ids are the model's raw
+ * strings: an unknown one falls back to the default zone, and the mutation
+ * that follows reports the real error.
+ */
+export const aideTermTimeZone = internalQuery({
+  args: {
+    periodId: v.optional(v.string()),
+    placementId: v.optional(v.string()),
+  },
+  handler: async (ctx, args): Promise<string> => {
+    let periodId = args.periodId
+      ? ctx.db.normalizeId("reportingPeriods", args.periodId)
+      : null;
+    if (!periodId && args.placementId) {
+      const placementId = ctx.db.normalizeId("schedulePlacements", args.placementId);
+      periodId = placementId ? ((await ctx.db.get(placementId))?.periodId ?? null) : null;
+    }
+    const period = periodId ? await ctx.db.get(periodId) : null;
+    const institution = period?.institutionId
+      ? await ctx.db.get(period.institutionId)
+      : null;
+    return effectiveInstitutionTimeZone(institution?.timeZone);
+  },
+});
+
 /** Institution-local clock context for a period-scoped schedule subscription. */
 export const periodClock = teacherQuery({
   args: { periodId: v.id("reportingPeriods") },

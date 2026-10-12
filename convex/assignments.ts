@@ -3515,7 +3515,7 @@ export async function coreAideListAssignments(
  *  one item per (assignment, activity) push, optionally windowed to
  *  [from, to) by agenda position. The primary read for bulk reschedules
  *  ("everything in the week of X"). Times are epoch-ms; the tool layer
- *  attaches human HST labels. */
+ *  attaches human school-local labels. */
 export async function coreAideSchedule(
   ctx: QueryCtx,
   callerUserId: Id<"users">,

@@ -28,7 +28,10 @@ import {
   reviewableProgramGroups,
 } from "./lib/programGroupAccess";
 import { hasSchoolOperationsAccessAtInstitution } from "./lib/staffCapabilities";
-import { effectiveInstitutionTimeZone } from "./lib/institutionTime";
+import {
+  effectiveInstitutionTimeZone,
+  timeZoneForInstitution,
+} from "./lib/institutionTime";
 import {
   dayKeyForTimezone,
   instantForLocalMinutes,
@@ -1591,6 +1594,11 @@ export const registerCapture = mutation({
         { reservationId: poster.reservation._id },
       );
     }
+    // The build's date is the station's school-local day.
+    const stationTimeZone = await timeZoneForInstitution(
+      ctx,
+      station.institutionId,
+    );
     const portfolioItemId = await ctx.db.insert("portfolioItems", {
       scholarId: scholarIds[0],
       institutionId: station.institutionId,
@@ -1598,7 +1606,7 @@ export const registerCapture = mutation({
         month: "short",
         day: "numeric",
         year: "numeric",
-        timeZone: "Pacific/Honolulu",
+        timeZone: stationTimeZone,
       })}`,
       source: "capture_station",
       fileStorageId: reservation.storageId,

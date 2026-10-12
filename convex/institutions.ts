@@ -48,6 +48,7 @@ import {
 import {
   effectiveInstitutionTimeZone,
   timeZoneForScholar,
+  timeZoneForInstitution,
 } from "./lib/institutionTime";
 import {
   assertValidRoundsAnchor,
@@ -697,6 +698,22 @@ export const promptProfile = internalQuery({
   args: { institutionId: v.union(v.id("institutions"), v.null()) },
   handler: async (ctx, { institutionId }) =>
     institutionPromptProfileById(ctx, institutionId),
+});
+
+/**
+ * The IANA zone a staff member's aide work runs in, for the aide tool layers
+ * (actions) that label times and cannot read the db. Resolved from the ACTIVE
+ * MEMBERSHIP — the same institution `usage.resolveInstitution` hands the aide
+ * for its prompt profile — so the prompt's "right now" clock and the tools'
+ * labels can never disagree. Unset/invalid → the legacy default.
+ */
+export const staffTimeZone = internalQuery({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }): Promise<string> => {
+    const user = await ctx.db.get(userId);
+    const membership = user ? await resolveActiveMembership(ctx, user) : null;
+    return timeZoneForInstitution(ctx, membership?.institutionId);
+  },
 });
 
 /**

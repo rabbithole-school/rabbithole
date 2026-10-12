@@ -91,6 +91,7 @@ import {
 } from "@/components/MasterSchedule/scheduleAnchor";
 import { closuresForWeek, type SchoolClosure } from "@/shared/schoolClosures";
 import { scheduleWeekStartMs } from "@/shared/scheduleWeek";
+import { DEFAULT_TIMEZONE } from "@/shared/institutionDay";
 import {
   deriveClassMeetingPattern,
   generateMeetingSlots,
@@ -414,7 +415,7 @@ export function MasterScheduleView({
   const closuresByWeekday = useMemo<Map<number, SchoolClosure>>(() => {
     const rows = grid?.closures;
     if (!rows || rows.length === 0) return new Map();
-    return closuresForWeek(weekStartMs, grid?.closureTimeZone ?? "Pacific/Honolulu", rows);
+    return closuresForWeek(weekStartMs, grid?.closureTimeZone ?? DEFAULT_TIMEZONE, rows);
   }, [grid?.closures, grid?.closureTimeZone, weekStartMs]);
 
   // Birthdays that land on this displayed week, keyed to the weekday column
@@ -1355,7 +1356,7 @@ export function MasterScheduleView({
           blocks={blocks}
           placements={grid?.placements ?? []}
           closures={grid?.closures ?? []}
-          closureTimeZone={grid?.closureTimeZone ?? "Pacific/Honolulu"}
+          closureTimeZone={grid?.closureTimeZone ?? DEFAULT_TIMEZONE}
           anchorWeekStartMs={anchorWeekStartMs}
           groupOptions={groupOptions}
           teacherOptions={teacherOptions}
@@ -1524,6 +1525,7 @@ export function MasterScheduleView({
                 periodId: termId,
                 subject:
                   programDialogTarget?.subject ?? programDialogGroup.name,
+                timeZone: grid?.closureTimeZone,
                 scheduleTarget: programDialogTarget.scheduleTarget,
               }
             : undefined

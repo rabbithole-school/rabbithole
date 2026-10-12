@@ -34,7 +34,7 @@ import {
   unitPath,
   assignmentPath,
   sessionPath,
-  hstLabel,
+  schoolTimeLabel,
 } from "./channels";
 import type { AideEmit } from "./aideStream";
 
@@ -218,10 +218,11 @@ export const CLASS_FOCUS_ENDS_AT_DESCRIPTION =
 
 export function classFocusLifetimeConfirmation(
   endsAtMs: number | undefined,
+  timeZone: string,
   live = true,
 ): string {
   if (endsAtMs !== undefined) {
-    return `${live ? "Live now" : "Queued"} · stays until ${hstLabel(endsAtMs)}`;
+    return `${live ? "Live now" : "Queued"} · stays until ${schoolTimeLabel(endsAtMs, timeZone)}`;
   }
   return live
     ? 'Live now · fades from their screen after today. Say "make it homework" or give a lifetime to keep it.'
@@ -321,6 +322,15 @@ export async function makeAssignmentTools(
   const { betaTool } = await import(
     "@anthropic-ai/sdk/helpers/beta/json-schema"
   );
+
+  // The caller's school zone for every time label below (Pacific/Honolulu for
+  // the primary — byte-identical to the old fixed-HST labels). Resolved on the
+  // first tool run that labels a time, never while the toolset is built.
+  let timeZonePromise: Promise<string> | null = null;
+  const schoolTimeZone = () =>
+    (timeZonePromise ??= ctx.runQuery(internal.institutions.staffTimeZone, {
+      userId: callerUserId,
+    }));
 
   // Shared strict unit resolver (lib/aideResolvers.ts) — the SAME
   // implementation the curriculum tools use, so "Elements of Culture" resolves
@@ -551,7 +561,7 @@ export async function makeAssignmentTools(
   const assignActivityNowTool = betaTool({
     name: "assign_activity_now",
     description:
-      "Assign ONE activity to scholars and start it LIVE right now — it appears for the resolved scholars immediately (no scheduling, no separate push step). Use this when the teacher wants a specific activity in front of scholars NOW (\"put the Tide Pool activity up for the Geckos\", \"give Kai the fractions warm-up now\"). Resolves the unit by title, the activity by title WITHIN that unit, and the scholars by groupName OR scholarNames — exactly like assign_unit. It creates (or reuses) the cohort assignment for EXACTLY those scholars, then pushes the activity live in one call. `mode` classFocus = in-the-room focus; homework = on their plate (optional dueAtMs). Times are epoch-ms (Hawaii time). Because this makes work appear for scholars instantly, CONFIRM the unit, activity, roster, and mode with the teacher before calling. Note: it targets exactly the scholars you name — a named subset becomes its OWN right-sized assignment, so this cannot push to only part of a pre-existing larger cohort; to push to a subset of an EXISTING assignment, use push_activity_now on that assignment instead." +
+      "Assign ONE activity to scholars and start it LIVE right now — it appears for the resolved scholars immediately (no scheduling, no separate push step). Use this when the teacher wants a specific activity in front of scholars NOW (\"put the Tide Pool activity up for the Geckos\", \"give Kai the fractions warm-up now\"). Resolves the unit by title, the activity by title WITHIN that unit, and the scholars by groupName OR scholarNames — exactly like assign_unit. It creates (or reuses) the cohort assignment for EXACTLY those scholars, then pushes the activity live in one call. `mode` classFocus = in-the-room focus; homework = on their plate (optional dueAtMs). Times are epoch-ms (school-local time). Because this makes work appear for scholars instantly, CONFIRM the unit, activity, roster, and mode with the teacher before calling. Note: it targets exactly the scholars you name — a named subset becomes its OWN right-sized assignment, so this cannot push to only part of a pre-existing larger cohort; to push to a subset of an EXISTING assignment, use push_activity_now on that assignment instead." +
       currentUnitTitleHint,
     inputSchema: {
       type: "object" as const,
@@ -637,7 +647,7 @@ export async function makeAssignmentTools(
       if (result.status === "live") {
         const confirmation =
           input.mode === "classFocus"
-            ? classFocusLifetimeConfirmation(input.endsAtMs)
+            ? classFocusLifetimeConfirmation(input.endsAtMs, await schoolTimeZone())
             : null;
         emit({
           toolComplete: {
@@ -692,7 +702,7 @@ export async function makeAssignmentTools(
   const getScheduleTool = betaTool({
     name: "get_schedule",
     description:
-      "Read scheduled activities across ALL the teacher's assignments, flattened to one item per (assignment, activity) push. Each item has an `agendaAtMs` (epoch ms, its position on the agenda) plus a human `whenLabel` in Hawaii time, its `state` (planned | live | done), `mode`, and the assignment/unit/activity it belongs to. This is the read to use before a bulk reschedule. Optionally window by `fromMs`/`toMs` (epoch ms, matched against agendaAtMs).",
+      "Read scheduled activities across ALL the teacher's assignments, flattened to one item per (assignment, activity) push. Each item has an `agendaAtMs` (epoch ms, its position on the agenda) plus a human `whenLabel` in school-local time, its `state` (planned | live | done), `mode`, and the assignment/unit/activity it belongs to. This is the read to use before a bulk reschedule. Optionally window by `fromMs`/`toMs` (epoch ms, matched against agendaAtMs).",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -706,12 +716,13 @@ export async function makeAssignmentTools(
         internal.assignments.aideScheduleForTeacher,
         { callerUserId, from: input.fromMs, to: input.toMs },
       );
+      const timeZone = await schoolTimeZone();
       const enriched = items.map((it) => ({
         ...it,
         agendaAtMs: it.agendaAt,
-        whenLabel: hstLabel(it.agendaAt),
-        startsAtLabel: hstLabel(it.startsAt),
-        dueAtLabel: hstLabel(it.dueAt),
+        whenLabel: schoolTimeLabel(it.agendaAt, timeZone),
+        startsAtLabel: schoolTimeLabel(it.startsAt, timeZone),
+        dueAtLabel: schoolTimeLabel(it.dueAt, timeZone),
       }));
       emit({ toolComplete: { name: "get_schedule", result: `${enriched.length} scheduled items` } });
       return JSON.stringify(enriched);
@@ -736,6 +747,7 @@ export async function makeAssignmentTools(
       });
       if (!data) return `No assignment found with id "${input.assignmentId}" (or it isn't yours).`;
       emit({ toolComplete: { name: "get_assignment", result: data.unitTitle } });
+      const timeZone = await schoolTimeZone();
       return JSON.stringify({
         ...data,
         url: withBase(linkBase, assignmentPath(data.assignmentId)),
@@ -743,8 +755,8 @@ export async function makeAssignmentTools(
         unitUrl: data.unitId ? withBase(linkBase, unitPath(data.unitId)) : null,
         schedule: data.schedule.map((e) => ({
           ...e,
-          startsAtLabel: hstLabel(e.startsAt),
-          dueAtLabel: hstLabel(e.dueAt),
+          startsAtLabel: schoolTimeLabel(e.startsAt, timeZone),
+          dueAtLabel: schoolTimeLabel(e.dueAt, timeZone),
         })),
       });
     },
@@ -778,7 +790,7 @@ export async function makeAssignmentTools(
   const scheduleActivityTool = betaTool({
     name: "schedule_activity",
     description:
-      "Plan an activity push for an assignment's cohort at a future time. Adds a PLANNED entry to the agenda (it auto-goes-live at startsAtMs; a past startsAtMs stays planned until the teacher hits Start now). `mode` is classFocus (in-room) or homework. All scholars on the assignment's roster get it — there is no scholar arg. Times are epoch-ms (Hawaii time). Use get_assignment to find the activityId.",
+      "Plan an activity push for an assignment's cohort at a future time. Adds a PLANNED entry to the agenda (it auto-goes-live at startsAtMs; a past startsAtMs stays planned until the teacher hits Start now). `mode` is classFocus (in-room) or homework. All scholars on the assignment's roster get it — there is no scholar arg. Times are epoch-ms (school-local time). Use get_assignment to find the activityId.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -815,15 +827,15 @@ export async function makeAssignmentTools(
       } catch (e) {
         return `Could not schedule: ${e instanceof Error ? e.message : String(e)}`;
       }
-      emit({ toolComplete: { name: "schedule_activity", result: `Scheduled for ${hstLabel(input.startsAtMs)}` } });
-      return JSON.stringify({ ok: true, startsAtLabel: hstLabel(input.startsAtMs) });
+      emit({ toolComplete: { name: "schedule_activity", result: `Scheduled for ${schoolTimeLabel(input.startsAtMs, await schoolTimeZone())}` } });
+      return JSON.stringify({ ok: true, startsAtLabel: schoolTimeLabel(input.startsAtMs, await schoolTimeZone()) });
     },
   });
 
   const rescheduleActivityTool = betaTool({
     name: "reschedule_activity",
     description:
-      "Move an already-scheduled activity to a new time (epoch ms, Hawaii time). For a PLANNED item this moves when it goes live; for a LIVE item it only moves its agenda position (it does not un-push). To bulk-shift a week, call get_schedule, then call this once per item with startsAtMs + (days * 86400000). Identify the item by its assignmentId + activityId.",
+      "Move an already-scheduled activity to a new time (epoch ms, school-local time). For a PLANNED item this moves when it goes live; for a LIVE item it only moves its agenda position (it does not un-push). To bulk-shift a week, call get_schedule, then call this once per item with startsAtMs + (days * 86400000). Identify the item by its assignmentId + activityId.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -846,8 +858,8 @@ export async function makeAssignmentTools(
         return `Could not reschedule: ${e instanceof Error ? e.message : String(e)}`;
       }
       if (!res.found) return "No scheduled entry found for that activity on that assignment — nothing to move.";
-      emit({ toolComplete: { name: "reschedule_activity", result: `Moved to ${hstLabel(input.startsAtMs)}` } });
-      return JSON.stringify({ ok: true, startsAtLabel: hstLabel(input.startsAtMs) });
+      emit({ toolComplete: { name: "reschedule_activity", result: `Moved to ${schoolTimeLabel(input.startsAtMs, await schoolTimeZone())}` } });
+      return JSON.stringify({ ok: true, startsAtLabel: schoolTimeLabel(input.startsAtMs, await schoolTimeZone()) });
     },
   });
 
@@ -908,11 +920,12 @@ export async function makeAssignmentTools(
           result: `${data.unitTitle}: ${started}/${data.rosterSize} started`,
         },
       });
+      const timeZone = await schoolTimeZone();
       return JSON.stringify({
         ...data,
         roster: data.roster.map((r) => ({
           ...r,
-          lastActiveLabel: hstLabel(r.lastMessageAt),
+          lastActiveLabel: schoolTimeLabel(r.lastMessageAt, timeZone),
           // Deep link to the scholar's session under this assignment, opened
           // as that scholar for staff (?remote=). Null until they start.
           sessionUrl: r.sessionId
@@ -964,7 +977,7 @@ export async function makeAssignmentTools(
         emit({ toolComplete: { name: "push_activity_now", result: "Pushed live (homework)" } });
         return JSON.stringify({ ok: true, live: true, mode: input.mode });
       }
-      const confirmation = classFocusLifetimeConfirmation(input.endsAtMs);
+      const confirmation = classFocusLifetimeConfirmation(input.endsAtMs, await schoolTimeZone());
       emit({
         toolComplete: { name: "push_activity_now", result: confirmation },
       });

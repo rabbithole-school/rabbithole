@@ -90,7 +90,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { useKeepWorking } from "@/hooks/useKeepWorking";
 import { ArrowClockwise } from "@phosphor-icons/react";
 import { useInstitutionDay, } from "@/hooks/useInstitutionDay";
-import { dueStatus } from "@/shared/institutionDay";
+import { DEFAULT_TIMEZONE, dueStatus } from "@/shared/institutionDay";
 import { DueChip } from "@/components/ui/DueChip";
 import { OVERSIGHT_LINE, RELATIONAL_LINE } from "@/shared/admonishments";
 import { ScholarHomeTabs } from "@/components/ScholarHomeTabs";
@@ -859,7 +859,7 @@ function ScholarHome() {
             closure={blockResult?.closure ?? null}
             isPrepTime={isPrepTime}
             plannedToday={plannedTodayResult?.entries ?? []}
-            plannedTimeZone={plannedTodayResult?.timeZone ?? blockResult?.timeZone ?? "Pacific/Honolulu"}
+            plannedTimeZone={plannedTodayResult?.timeZone ?? blockResult?.timeZone ?? DEFAULT_TIMEZONE}
             nextOpenSchoolDayKey={plannedTodayResult?.nextOpenSchoolDayKey ?? null}
             nowMs={nowMs}
             nowDataLoaded={nowDataLoaded}

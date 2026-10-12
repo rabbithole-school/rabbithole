@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "ffcf8014b556196c28bcc5b63b6e7d978ef96ebb",
+  "sourceCommit": "b00afeb1577bb31ddadfde16135ae8d807209dc2",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -439,7 +439,7 @@
     },
     {
       "path": "app/scholar/page.tsx",
-      "sha256": "411be4276c4f0d70c90fc1fc76b45ba7a11f6d06ca3d03fcb7a6d95ef032308d",
+      "sha256": "803f74c6aa29f0a4e4fa5c7d229d9edb4b2f4555f2a07da7a6b232bc6a8e0a35",
       "mode": "100644"
     },
     {
@@ -1544,7 +1544,7 @@
     },
     {
       "path": "components/MasterSchedule/MasterScheduleView.tsx",
-      "sha256": "6826f07f8ec5c1121537b28b6d493fe1221b5aefe453db294e7f33bf13e08dd7",
+      "sha256": "0e0f59ac7ec7140acc962c8aa631a17cd2e795df0aa0db6ee0d07a0f7bba3a2e",
       "mode": "100644"
     },
     {
@@ -4229,12 +4229,12 @@
     },
     {
       "path": "components/startAssignment/types.ts",
-      "sha256": "93b0bdbb098eec56a4dd6a6beabb985645dc8ab6ea4810d01561adf7b132e7e9",
+      "sha256": "25ecf6229ade3e993fd1eac36221d5c06bb0dac4cda431e6c93af35204dfbe30",
       "mode": "100644"
     },
     {
       "path": "components/startAssignment/useProgramScheduleMode.ts",
-      "sha256": "6d83ee2e2e91e9c7330fd7b896b0c04884b38b0a93841af6b22dd27cba552d51",
+      "sha256": "02f9cb83e7bd866db1e2cd54613fcdab1eda41ca3b614d25657b873ff4032086",
       "mode": "100644"
     },
     {
@@ -4814,7 +4814,7 @@
     },
     {
       "path": "convex/__tests__/assignActivityNow.test.ts",
-      "sha256": "468b41aa08794f5fd062f7a0aa4ca9d863c1025ed4ac49849727a95b9c74ef02",
+      "sha256": "ada333a8ff392cee50711656538815a785023b0f90f0f17798fc26b25c00ce6c",
       "mode": "100644"
     },
     {
@@ -5309,7 +5309,7 @@
     },
     {
       "path": "convex/__tests__/focusLifetimeConfirmation.test.ts",
-      "sha256": "a1db0b7451b096cc7d1d03b131b258b3e47dfaacf7b49078e490ffee1296db30",
+      "sha256": "5962df4088dff9c302af9ace3c71016a0822bf55910bcfd200563789f815a04b",
       "mode": "100644"
     },
     {
@@ -5709,7 +5709,7 @@
     },
     {
       "path": "convex/__tests__/masterScheduleTools.test.ts",
-      "sha256": "2511cf274fcc9dcda77cede3139e1d9501263c84c50399c123488397f57dc021",
+      "sha256": "96c6c264fc4bde975b0285d2a68cb190a7370f75effa8e29eb21acbc89f7ed34",
       "mode": "100644"
     },
     {
@@ -7114,7 +7114,7 @@
     },
     {
       "path": "convex/__tests__/weeklyGoals.test.ts",
-      "sha256": "a469d991ba04c7ab309b89ea5a4ee9dc298893d528d59df6da188c9b2bb2df15",
+      "sha256": "2d38ca1e25620376c3cc7c155f77c9cf2d53bf756741fe4937ba547d3b47726d",
       "mode": "100644"
     },
     {
@@ -7369,7 +7369,7 @@
     },
     {
       "path": "convex/assignments.ts",
-      "sha256": "1ea355f1a35ba780b83ace475ccca782e834b25ed0d08364cf5eaf40c49023ee",
+      "sha256": "7bfedf32fcec93f8c0c2135bbcc68ecbbc2e3995766072b13f26a3e248470312",
       "mode": "100644"
     },
     {
@@ -7439,7 +7439,7 @@
     },
     {
       "path": "convex/captureStations.ts",
-      "sha256": "a13d0bcc97f991d25856face6e6233eacc8566cb7e559bdec35fccca2feb41d3",
+      "sha256": "3f869fd7c4f7410c7ce453a547cccfbf190f291de8206be5b13956d9547dd9e3",
       "mode": "100644"
     },
     {
@@ -7749,7 +7749,7 @@
     },
     {
       "path": "convex/http.ts",
-      "sha256": "fc18e76782d5299591d1497d264cb586c5a9d05447d9f7789f653cd6e4e5829d",
+      "sha256": "cabaf1f2693d1af79ebb1141251aae54287267d4ba095198ab8f77a497d830e7",
       "mode": "100644"
     },
     {
@@ -7779,7 +7779,7 @@
     },
     {
       "path": "convex/institutions.ts",
-      "sha256": "5745cbad2e7f83d0b032fdc935e48bfc466bd3970e9065dcdfa78f63000cf5d2",
+      "sha256": "9c921ea7e89182f61ad4f3ffe709eec0832ff857dc9e99c2f65f7afb7dad7083",
       "mode": "100644"
     },
     {
@@ -7919,7 +7919,7 @@
     },
     {
       "path": "convex/lib/__tests__/channels.test.ts",
-      "sha256": "22c059f9a8259e1bebeaadb681d40ced9e1aafdc38bdc2cb797bb60f11a2d6a9",
+      "sha256": "5da92b922795ff9bde851fc42a96369c65c9563f5137e22bf460a4086828c5d4",
       "mode": "100644"
     },
     {
@@ -8554,7 +8554,7 @@
     },
     {
       "path": "convex/lib/aideTools.ts",
-      "sha256": "a3e93543d69aef67c1a03a960d3704620e7a17f66429fd486729a6a6e1ad3a3d",
+      "sha256": "d1008136ef01853d0072ff57f6dec9a4f0d17b9c4ded1330237d66c2044a9869",
       "mode": "100644"
     },
     {
@@ -8609,7 +8609,7 @@
     },
     {
       "path": "convex/lib/assignmentTools.ts",
-      "sha256": "542e9507aa4543845b4efcecb6199eb02e93891e0d15e6af95dcd50f584dc15c",
+      "sha256": "721313280fdcb07baae4313f09ba9cb0913f9c9f7a34c9271fea8c36c64f3a70",
       "mode": "100644"
     },
     {
@@ -8684,7 +8684,7 @@
     },
     {
       "path": "convex/lib/channels.ts",
-      "sha256": "a379da576ca1ddffb2e27c47bb1cfb570691808701f571963dadd7dc9bf130d4",
+      "sha256": "c015f8e759f22a84f5700dd88af8a73155e16a0005a919a3e0b80bf3629f7af0",
       "mode": "100644"
     },
     {
@@ -9219,7 +9219,7 @@
     },
     {
       "path": "convex/lib/masterScheduleTools.ts",
-      "sha256": "e20d7945a726b2bd70a0e25660fcb1e56f1ad1bc7b18486adb47d2a9ac37d86e",
+      "sha256": "8f4f88f412be78bf36471e5eec1c33130a3778f8b72157f672490b1e6eb4e7ac",
       "mode": "100644"
     },
     {
@@ -10469,7 +10469,7 @@
     },
     {
       "path": "convex/masterSchedule.ts",
-      "sha256": "953099b49ce6a58ba0a858e22fa6a8b157d7f82a91a15cfc0b954d550b7dac2b",
+      "sha256": "5d4d451195e9954ac522f01e87d77d161395ed41793bfb703267c1a7d3978e03",
       "mode": "100644"
     },
     {
@@ -10859,7 +10859,7 @@
     },
     {
       "path": "convex/schema.ts",
-      "sha256": "76d6cbb8ef6989bb42d6ee22f2d56ea808b560196ae2ac81e138d6efa49bb19b",
+      "sha256": "1b68d0b64b15a8097097b1e4dd1d1b4a7e8b61e3e58bc1ce1716be927f819311",
       "mode": "100644"
     },
     {
@@ -11274,7 +11274,7 @@
     },
     {
       "path": "convex/sessionHelpers.ts",
-      "sha256": "8dab48a36b251950c0eba16d97af2dc01640aaaeb61dec24652d598319b321dc",
+      "sha256": "432cc1fc0d4603fce9666d0a0a7f5bc14561756f8d7662896ead6c1c64458f1d",
       "mode": "100644"
     },
     {
@@ -11364,7 +11364,7 @@
     },
     {
       "path": "convex/slackBot.ts",
-      "sha256": "0ede213ce8b3a288e195512f8df86dbb1f63474559d2223675664d7391ea36d8",
+      "sha256": "4fffcbd99875cb540cc1b9175628e3da5f777110f9d32e6fad2d8208afb9b5dd",
       "mode": "100644"
     },
     {
@@ -11574,7 +11574,7 @@
     },
     {
       "path": "convex/webActivitySessions.ts",
-      "sha256": "0bfee18a964c14801f7e3d0805e583af95a92ff84c0af9563aa7219ee0cee2e9",
+      "sha256": "d243c74dd194d9dbbf3820f8217880b4d06866e2d2e8c04b614a758fd788be81",
       "mode": "100644"
     },
     {
@@ -21293,5 +21293,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "cc4504d2f78b0fb66c324e17c46edd0b44699df712c545859254a22024ca5f80"
+  "treeHash": "3508284f75727edddebc834a3c5efc784aac309c15c700dd68709ff55079cdce"
 }

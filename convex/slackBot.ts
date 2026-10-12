@@ -45,11 +45,12 @@ import {
   searchDriveFiles,
 } from "./lib/driveAccess";
 import { extractDirectText } from "./lib/fileTextExtraction";
+import { effectiveInstitutionTimeZone } from "./lib/institutionTime";
 import { resolveAideModel, aideMaxTokens } from "./lib/aideModel";
 import {
   assembleCurriculumTools,
   googleDocsImagesFromAttachedFiles,
-  hstLabel,
+  schoolTimeLabel,
 } from "./lib/aideTools";
 import type { AttachedFile } from "./lib/scholarWriteTools";
 import { CUSTOM_APPS_SYSTEM_PROMPT_SECTION } from "./lib/customAppTools";
@@ -2081,6 +2082,11 @@ async function runConversation(
   const slackProfile = await ctx.runQuery(internal.institutions.promptProfile, {
     institutionId,
   });
+  // The "Now:" clock line reads the same institution's zone (Pacific/Honolulu
+  // for the primary — identical to the old fixed-HST label).
+  const slackTimeZone = effectiveInstitutionTimeZone(
+    slackProfile.timeZone ?? undefined,
+  );
   // First-party-only fleet-hardware context: the locked-iPad facts describe the
   // PRIMARY school's SimpleMDM fleet specifically, so gate them on the caller's
   // institution being primary — another school's staff must not be told the home
@@ -2446,7 +2452,7 @@ async function runConversation(
         : null;
 
     dynamicContext = [
-      `Now: ${hstLabel(Date.now())}.`,
+      `Now: ${schoolTimeLabel(Date.now(), slackTimeZone)}.`,
       `Surface: ${surfaceLabel(args.surface)}.`,
       audienceContextLine(audienceFromSlackSurface(args.surface)),
       ...[channelPrivacyContextLine(args.surface, args.channelPrivacy)].filter(

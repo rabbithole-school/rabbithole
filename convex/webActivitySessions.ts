@@ -434,7 +434,7 @@ export const listRecentForScholar = teacherQuery({
 
 /**
  * Sessions for one scholar since a timestamp — the tutor-context read
- * (getSessionContext computes "start of today, HST" and passes it).
+ * (getSessionContext computes the start of the school's local today and passes it).
  * Internal: called from the streaming path's context assembly.
  */
 export const sinceForScholarInternal = internalQuery({

@@ -84,6 +84,10 @@ import {
   shouldAnnotateGraphemes,
 } from "./lib/graphemeAnnotate";
 import { MAX_APP_ASSETS } from "../shared/appAssets";
+import {
+  dayStartForTimezone,
+  mondayDayKeyForTimezone,
+} from "../shared/institutionDay";
 import { readInventoryTeams } from "./graphemeInventory";
 import {
   resolveContextIdentity,
@@ -1123,9 +1127,9 @@ export const getSessionContext = internalQuery({
     // with no `expiresAt` is STANDING — every row written before that field
     // existed — so this filter is a no-op for them and the rendered prompt
     // stays byte-identical for any scholar with no expiring guidance.
-    const directiveNow = Date.now();
+    const contextNowMs = Date.now();
     const teacherDirectives = directiveRows
-      .filter((d) => d.expiresAt === undefined || d.expiresAt > directiveNow)
+      .filter((d) => d.expiresAt === undefined || d.expiresAt > contextNowMs)
       .map((d) => ({
         label: d.label,
         content: d.content,
@@ -1147,14 +1151,26 @@ export const getSessionContext = internalQuery({
       .filter((g) => g.feedsTutor)
       .map((g) => ({ title: g.title, description: g.description, kind: g.kind }));
 
+    // The scholar's school and its clock. Every "today" / "this week" boundary
+    // below is the SCHOOL's local day, never a fixed offset — Pacific/Honolulu
+    // for the primary, so its windows are unchanged. Null (→ the legacy
+    // default zone) in synthetic test-drive mode, where every scholar-keyed
+    // read that would use these boundaries is skipped anyway.
+    const institutionId = isSyntheticView
+      ? null
+      : ((await scholarInstitutionId(ctx, contextUserId)) ?? null);
+    const institution = institutionId ? await ctx.db.get(institutionId) : null;
+    const institutionTimeZone = effectiveInstitutionTimeZone(institution?.timeZone);
+
     // Learner-owned WEEKLY goals for THIS WEEK that are active (the SRL loop).
     // Governed authorship, scholar-owned, injected deterministically.
     // Skipped in synthetic view (a sim has no real goals). Week anchored to the
-    // Monday in Hawaiʻi time (HST = UTC−10, no DST) — matches weeklyGoals.ts.
-    const WEEKLY_HST_OFFSET_MS = 10 * 3_600_000;
-    const nowHst = new Date(Date.now() - WEEKLY_HST_OFFSET_MS);
-    nowHst.setUTCDate(nowHst.getUTCDate() - ((nowHst.getUTCDay() + 6) % 7));
-    const currentWeekOf = nowHst.toISOString().slice(0, 10);
+    // school-local Monday — the same key weeklyGoals.ts writes.
+    const currentWeekOf = mondayDayKeyForTimezone(
+      contextNowMs,
+      0,
+      institutionTimeZone,
+    );
     const weeklyGoalRows = isSyntheticView
       ? []
       : await ctx.db
@@ -1194,18 +1210,15 @@ export const getSessionContext = internalQuery({
 
     // Today's Web Assignment sessions (e.g. an external practice site) — lets the
     // tutor connect the conversation to the scholar's external practice.
-    // Hawaii has no DST, so HST midnight is a fixed UTC-10 offset.
+    // "Today" starts at the school's local midnight.
     // Skipped in synthetic mode like every scholar-keyed read.
-    const HST_OFFSET_MS = 10 * 3_600_000;
-    const hstDayStart =
-      Math.floor((Date.now() - HST_OFFSET_MS) / 86_400_000) * 86_400_000 +
-      HST_OFFSET_MS;
+    const schoolDayStart = dayStartForTimezone(contextNowMs, institutionTimeZone);
     const todayWebSessions = isSyntheticView
       ? []
       : await ctx.db
           .query("webActivitySessions")
           .withIndex("by_scholar", (q) =>
-            q.eq("scholarId", contextUserId).gte("startedAt", hstDayStart),
+            q.eq("scholarId", contextUserId).gte("startedAt", schoolDayStart),
           )
           .collect();
     const webPracticeContext: WebPracticeEntry[] = [];
@@ -1558,14 +1571,9 @@ export const getSessionContext = internalQuery({
     // the tutor only ever knows what a staffer opted in. Skipped in synthetic
     // test-drive mode (no real scholar → no institution) like every
     // scholar-keyed read. See review/physical-environment-teaching-tool-plan.html.
+    // The school identity (resolved once, above) serves the day boundaries,
+    // the physical-environment gate, and the prompt profile.
     let physicalEnvironmentContext: PhysicalEnvironmentContext | null = null;
-    const institutionId = isSyntheticView
-      ? null
-      : ((await scholarInstitutionId(ctx, contextUserId)) ?? null);
-    // The school identity serves both the physical-environment gate and prompt
-    // profile, so load it once rather than making the gate resolve it again.
-    const institution = institutionId ? await ctx.db.get(institutionId) : null;
-    const institutionTimeZone = effectiveInstitutionTimeZone(institution?.timeZone);
     if (institutionId) {
       // Physical inventory is only reachable when the scholar is actually at
       // school (derived from the Master Schedule bell blocks). Off-hours → skip
