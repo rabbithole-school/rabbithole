@@ -10,6 +10,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { ScholarFocusHeader } from "./ScholarFocusHeader";
 import { type Scholar, timeAgo } from "./types";
+import { talkLevelLabel } from "@/convex/lib/readingLevels";
 
 // ── Scholar Id Head ───────────────────────────────────────────────────────
 // The slim identity header atop a scholar's main column: the shared
@@ -26,11 +27,12 @@ import { type Scholar, timeAgo } from "./types";
 // became a scholar switcher. (The aide is now the global header Robot →
 // docked panel, not a per-scholar toggle here.)
 
+// The TALK level (TRA-503) — "Gr 3 talk", "K talk". A legacy "pre-reader"
+// reads as K (its listener half is the read level, shown on the profile).
 function fmtReading(level: string | null | undefined): string | null {
-  if (!level) return null;
-  if (level === "college") return "College reading";
-  if (level === "K") return "K reading";
-  return `Gr ${level} reading`;
+  const label = talkLevelLabel(level);
+  if (!label) return null;
+  return `${label.replace(/^Grade /, "Gr ")} talk`;
 }
 
 export function ScholarIdHead({

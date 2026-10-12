@@ -260,7 +260,7 @@ describe("teacherAide scholar-record writes", () => {
           readingLevel: "banana",
         }),
       ),
-    ).rejects.toThrow(/Invalid reading level/);
+    ).rejects.toThrow(/Invalid talk level/);
   });
 
   test("updateScholarProfile patches name + dob; rejects a blank name", async () => {

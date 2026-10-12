@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { describeLevelsForPrompt } from "./lib/readingLevels";
 import { internalMutation, internalQuery } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
 import { authedQuery, authedMutation, teacherMutation } from "./lib/customFunctions";
@@ -386,7 +387,7 @@ export const getBakeLaunchInfo = authedQuery({
       domain: seed.domain ?? null,
       // Scholar-facing only — prefer the invitation, never the teacher rationale.
       rationale: seed.scholarInvitation ?? seed.rationale ?? null,
-      readingLevel: ctx.user.readingLevel ?? null,
+      readingLevel: describeLevelsForPrompt(ctx.user),
     };
   },
 });

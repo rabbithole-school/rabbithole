@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { describeLevelsForPrompt } from "./lib/readingLevels";
 import { internalQuery, internalMutation } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
@@ -147,7 +148,7 @@ async function loadScholarPromptContext(
     scholarId,
     scholarName: scholar.name ?? "this scholar",
     pronouns: scholar.pronouns ?? null,
-    readingLevel: scholar.readingLevel ?? null,
+    readingLevel: describeLevelsForPrompt(scholar),
     ...chronology,
     dossier: dossier?.content ?? "No dossier data available yet.",
     directives: directives.map((d) => ({ label: d.label, content: d.content })),

@@ -11,6 +11,11 @@ import { promptVisualValidator } from "./lib/practice/promptVisual";
 import type { ErrorPattern } from "./lib/practice/errorPatterns";
 import { healthRecordSchemaFields } from "./lib/healthRecord";
 import { inputModalityValidator } from "./lib/inputModality";
+import {
+  levelDimensionValidator,
+  readLevelValidator,
+  writeModeValidator,
+} from "./lib/readingLevels";
 import { asamTransitionReasonValidator } from "./lib/deviceActivityValidators";
 import { policyIRValidator } from "../lib/simulator/policyIR";
 import { preflightResultValidator } from "./lib/curriculumPreflightResult";
@@ -395,7 +400,14 @@ const sessionTableFields = {
     pulseScore: v.optional(v.number()),
     teacherWhisper: v.optional(v.string()),
     pendingWhisper: v.optional(v.string()),
+    // Per-session TALK level override (teacher-only, `sessions.update`). A
+    // legacy "pre-reader" value here reads as talk K + read listener until
+    // `migrations:splitPreReaderLevels` moves it (lib/readingLevels.ts).
     readingLevelOverride: v.optional(v.string()),
+    // Per-session READ level override (TRA-503) — wins over the scholar's
+    // `readLevel`. The migration target for a "pre-reader" talk override, and
+    // how a teacher rehearses voice-first in their own session.
+    readLevelOverride: v.optional(readLevelValidator),
     // Time limit mode (parent-set)
     sessionTimeLimit: v.optional(v.number()), // minutes
     sessionStartTime: v.optional(v.number()), // timestamp ms
@@ -1225,7 +1237,16 @@ export default defineSchema({
     //     audit trail of a child's pronoun changes is exactly the artifact that
     //     could out them years later. Last write wins; nothing is logged.
     pronouns: v.optional(v.string()),
+    // TALK level — the grade band the tutor talks at (teacher UI: "Talk
+    // level"). Legacy "pre-reader" values read as talk K + read listener until
+    // `migrations:splitPreReaderLevels` runs. See lib/readingLevels.ts.
     readingLevel: v.optional(v.string()),
+    // READ level (TRA-503): listener | beginner | reader — how the tutor's
+    // words arrive. Unset = reader. Teacher-set only; Mentava may suggest.
+    readLevel: v.optional(readLevelValidator),
+    // WRITE mode (TRA-503): own | voice — how the scholar's words get in.
+    // Unset = own. Teacher-set only.
+    writeMode: v.optional(writeModeValidator),
     // WRITING-DERIVED grade estimate pending teacher review. Every input is the
     // scholar's own production (typed tutor chat + OCR'd handwritten work); nothing
     // observes what they can READ. Not a Lexile measure, not a normed assessment,
@@ -8833,8 +8854,12 @@ export default defineSchema({
     .index("by_document", ["documentId"])
     .index("by_scholar", ["scholarId"]),
 
+  // Every human-ratified level change, for all three levels (TRA-503). `level`
+  // holds the dimension's value ("3", "listener", "voice"); `dimension` unset
+  // means talk, so every row written before the split is a talk row.
   readingLevelHistory: defineTable({
     scholarId: v.id("users"),
+    dimension: v.optional(levelDimensionValidator),
     level: v.string(),
     source: v.union(v.literal("teacher"), v.literal("observer")),
     changedBy: v.optional(v.id("users")),

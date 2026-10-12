@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { describeLevelsForPrompt } from "./lib/readingLevels";
 import { internalQuery } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 
@@ -139,7 +140,7 @@ export const transcript = internalQuery({
       },
       scholar: {
         name: scholar?.name ?? null,
-        readingLevel: scholar?.readingLevel ?? null,
+        readingLevel: describeLevelsForPrompt(scholar),
       },
       anchor: unit || lesson || activity
         ? {

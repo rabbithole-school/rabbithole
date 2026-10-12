@@ -89,6 +89,7 @@ import {
   schoolOperationsInstitutionIds,
   STAFF_CAPABILITIES,
 } from "./lib/staffCapabilities";
+import { talkLevelOf } from "./lib/readingLevels";
 
 /**
  * The outcome of a successful `registerWithCode`, telling the client how to
@@ -769,7 +770,7 @@ export const listScholars = scholarAdminQuery({
           institutionKind: institutionId
             ? (instById.get(institutionId)?.kind ?? null)
             : null,
-          readingLevel: isNonTeachingOps ? null : (scholar.readingLevel ?? null),
+          readingLevel: isNonTeachingOps ? null : talkLevelOf(scholar.readingLevel),
           dateOfBirth: scholar.dateOfBirth ?? null,
           gradeLevel: scholar.gradeLevel ?? null,
           sessionCount: activeSessions.length,

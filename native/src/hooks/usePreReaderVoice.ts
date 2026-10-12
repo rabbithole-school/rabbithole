@@ -2,9 +2,9 @@
  * Pre-reader voice mode for the native tutor chat — the iPad twin of web's
  * voice-first mode (components/SessionInterface.tsx, TRA-492).
  *
- * When the session's EFFECTIVE reading level is `pre-reader` (the server
+ * When the session's EFFECTIVE read level is `listener` (TRA-503; the server
  * resolves it — session override first, then the scholar's saved level — and
- * ships it as `session.isPreReader`), voice mode starts ON:
+ * ships it as `session.readLevel`), voice mode starts ON:
  *
  *   1. Each tutor reply is spoken sentence by sentence AS IT STREAMS
  *      (SentenceAccumulator → the native TTS engine's queue), so the first

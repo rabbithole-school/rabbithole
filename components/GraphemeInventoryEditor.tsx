@@ -13,8 +13,8 @@
  * (teacher-gated), which also records every stage transition to the durable
  * `graphemeHistory` arc (a portfolio milestone, §10).
  *
- * It renders ONLY in the Reading Level neighborhood for a `pre-reader` scholar
- * (the caller gates on `isPreReader`); no other tier uses the ramp.
+ * It renders ONLY in the levels neighborhood for a read-level `listener` scholar
+ * (the caller gates on `readLevel`); no other read level uses the ramp yet.
  *
  * Team chips render in the SAME palette + fade the child sees (via GraphemeText),
  * so the teacher's editor and the scholar's screen can never drift.

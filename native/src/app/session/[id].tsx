@@ -308,8 +308,8 @@ export default function SessionScreen() {
   const ttsEnabled = me?.ttsEnabled !== false;
   // Pre-reader voice mode (TRA-492, web parity): replies are spoken as they
   // stream and the mic reopens hands-free. Keyed on the session's EFFECTIVE
-  // reading level (server-resolved — a teacher's per-session pre-reader
-  // override counts), and only on the viewer's own session.
+  // read level being `listener` (TRA-503; server-resolved — a teacher's
+  // per-session read override counts), and only on the viewer's own session.
   // `voice` (the dictation hook) is declared further down because it depends
   // on onSend; the voice loop reaches it through this ref.
   const dictationRef = useRef<{
@@ -318,7 +318,7 @@ export default function SessionScreen() {
   } | null>(null);
   const preReaderVoiceEligible =
     ttsEnabled &&
-    data?.session?.isPreReader === true &&
+    data?.session?.readLevel === "listener" &&
     me != null &&
     data.session.userId === me._id;
   const preReaderVoice = usePreReaderVoice({

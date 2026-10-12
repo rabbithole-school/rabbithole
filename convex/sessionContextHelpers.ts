@@ -67,22 +67,8 @@ export function resolveContextIdentity(session: ContextIdentitySession): {
   return { isSyntheticView, contextUserId };
 }
 
-/**
- * Reading-level precedence: a per-project override always wins; then in a
- * synthetic view the synthetic level, otherwise the context scholar's stored
- * level; else null.
- */
-export function resolveReadingLevel(args: {
-  isSyntheticView: boolean;
-  readingLevelOverride: string | undefined;
-  syntheticReadingLevel: string | undefined;
-  scholarReadingLevel: string | null | undefined;
-}): string | null {
-  if (args.isSyntheticView) {
-    return args.readingLevelOverride ?? args.syntheticReadingLevel ?? null;
-  }
-  return args.readingLevelOverride ?? args.scholarReadingLevel ?? null;
-}
+// Level precedence (talk / read / write, with per-session overrides) lives in
+// ONE place: `resolveEffectiveLevels` in lib/readingLevels.ts (TRA-503).
 
 /**
  * Return a human display name suitable for the AI's greeting, or null if the

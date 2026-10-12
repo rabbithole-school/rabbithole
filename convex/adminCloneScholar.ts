@@ -218,6 +218,8 @@ export const inspectSource = internalQuery({
       },
       copiedUserFields: {
         readingLevel: user.readingLevel ?? null,
+        readLevel: user.readLevel ?? null,
+        writeMode: user.writeMode ?? null,
         preferredFont: user.preferredFont ?? null,
         ttsEnabled: user.ttsEnabled ?? null,
         sttEnabled: user.sttEnabled ?? null,
@@ -305,6 +307,8 @@ export const cloneScholar = internalMutation({
       targetUserId = existing._id;
       await ctx.db.patch(targetUserId, {
         readingLevel: sourceUser.readingLevel,
+        readLevel: sourceUser.readLevel,
+        writeMode: sourceUser.writeMode,
         preferredFont: sourceUser.preferredFont,
         ttsEnabled: sourceUser.ttsEnabled,
         sttEnabled: sourceUser.sttEnabled,
@@ -319,6 +323,8 @@ export const cloneScholar = internalMutation({
         role: "scholar",
         gradeLevel: args.gradeLevel ?? "3",
         readingLevel: sourceUser.readingLevel,
+        readLevel: sourceUser.readLevel,
+        writeMode: sourceUser.writeMode,
         preferredFont: sourceUser.preferredFont,
         ttsEnabled: sourceUser.ttsEnabled,
         sttEnabled: sourceUser.sttEnabled,

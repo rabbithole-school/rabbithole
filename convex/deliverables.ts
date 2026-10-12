@@ -58,13 +58,14 @@ import {
   summarizeDeckForModel,
   validateDeck,
 } from "../shared/slidesScene";
-import { finalizeAndSplit } from "./sessionHelpers";
+import { finalizeAndSplit, loadSessionLevels } from "./sessionHelpers";
 import {
   parseStoredMapArtifact,
   projectStoredMapForScholar,
 } from "../lib/geomap/stored";
 import { portfolioFamilySharingEligibility } from "./lib/schoolMediaConsent";
 import { assertFreshUpload } from "./lib/freshUpload";
+import { describeEffectiveLevelsForPrompt } from "./lib/readingLevels";
 
 // ── Queries ───────────────────────────────────────────────────────────
 
@@ -1189,21 +1190,10 @@ export const internalGetCheckContext = internalQuery({
     const resolvedCriteria =
       session?.deliverableCriteria ?? activity.deliverable?.criteria ?? [];
 
-    let readingLevel: string | null = null;
-    if (session) {
-      if (session.isTestDrive && session.testDriveSyntheticReadingLevel) {
-        readingLevel = session.testDriveSyntheticReadingLevel;
-      } else if (session.testDriveAsScholarId) {
-        const s = await ctx.db.get(session.testDriveAsScholarId);
-        readingLevel = s?.readingLevel ?? null;
-      } else {
-        const s = await ctx.db.get(session.userId);
-        readingLevel = s?.readingLevel ?? null;
-      }
-      if (session.readingLevelOverride) {
-        readingLevel = session.readingLevelOverride;
-      }
-    }
+    // The session's levels as the tutor resolved them, phrased for the model.
+    const readingLevel = session
+      ? describeEffectiveLevelsForPrompt(await loadSessionLevels(ctx, session))
+      : null;
     return {
       deliverable,
       activity,
@@ -1545,17 +1535,9 @@ export const internalGetCriteriaGenContext = internalQuery({
     if (!activity?.deliverable) return null;
     if (activity.deliverable.mode !== "auto") return null;
 
-    let readingLevel: string | null = null;
-    if (session.isTestDrive && session.testDriveSyntheticReadingLevel) {
-      readingLevel = session.testDriveSyntheticReadingLevel;
-    } else if (session.testDriveAsScholarId) {
-      const s = await ctx.db.get(session.testDriveAsScholarId);
-      readingLevel = s?.readingLevel ?? null;
-    } else {
-      const s = await ctx.db.get(session.userId);
-      readingLevel = s?.readingLevel ?? null;
-    }
-    if (session.readingLevelOverride) readingLevel = session.readingLevelOverride;
+    const readingLevel = describeEffectiveLevelsForPrompt(
+      await loadSessionLevels(ctx, session),
+    );
 
     let unitTitle: string | null = null;
     let lessonTitle: string | null = null;

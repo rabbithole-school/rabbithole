@@ -14,6 +14,7 @@
 // chosen option is then threaded into the bake as the unit's "way in".
 
 import { v } from "convex/values";
+import { describeLevelsForPrompt } from "./lib/readingLevels";
 import { authedAction } from "./lib/customFunctions";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -184,7 +185,7 @@ export const suggestBakePaths = authedAction({
         topic,
         domain: null,
         rationale: args.rationale?.trim() || null,
-        readingLevel: user.readingLevel ?? null,
+        readingLevel: describeLevelsForPrompt(user),
       }, institutionId),
     };
   },

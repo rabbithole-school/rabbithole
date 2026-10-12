@@ -2,10 +2,24 @@ import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { internal } from "../_generated/api";
-import { buildPreReaderSection, buildYoungReaderTurnRules } from "../prompts";
+import {
+  buildEarlyReaderSection,
+  buildGenericReadingLevelSection,
+  buildLevelsSection,
+  buildListenerDeliverySection,
+  buildPreReaderSection,
+  buildWriteByVoiceSection,
+  buildYoungReaderTurnRules,
+} from "../prompts";
 import { buildSystemPrompt, buildSystemPromptParts } from "../sessionHelpers";
-import { resolveReadingLevel } from "../sessionContextHelpers";
-import { PRE_READER_LEVEL } from "../lib/readingLevels";
+import {
+  needsYoungReaderTurnRules,
+  PRE_READER_LEVEL,
+  resolveEffectiveLevels,
+  selectLevelSections,
+  type ReadLevel,
+  type WriteMode,
+} from "../lib/readingLevels";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -13,124 +27,213 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
-// The pre-reader tier activates the K tutor register (spoken to a 4–6-year-old
-// via TTS). These tests pin the register rules (§5 of the young-learners plan),
-// that it REPLACES the generic reading-level sentence at the tier and ONLY at
-// the tier, that a per-session override reaches it, and that swapping it in
-// leaves the prompt byte-identical for every other scholar.
+// TALK decides what the tutor says (the register); READ decides only how the
+// words arrive. These tests pin that split structurally (which builders are
+// chosen, and that the assembled prompt carries exactly those builders' output)
+// rather than rehashing prompt wording.
 
-// The exact generic reading-level sentence master emits for a graded scholar.
-// Kept verbatim here so the byte-identity test below fails loudly if the live
-// wording ever drifts.
-const generic = (level: string) =>
-  `\n\nREADING LEVEL: The scholar's reading level is set to "${level}". Adjust your vocabulary and sentence complexity accordingly. You can still explore advanced topics, but frame explanations at this reading level.`;
+// ── Section selection: talk → register, read/write → delivery ────────
 
-// ── buildSystemPrompt: renders at the tier, absent otherwise ─────────
+const sections = (
+  register: string,
+  youngReaderTurnRules: boolean,
+  listenerDelivery: boolean,
+  writeByVoice = false,
+) => ({ register, youngReaderTurnRules, listenerDelivery, writeByVoice });
 
-describe("buildSystemPrompt — pre-reader register wiring", () => {
-  const build = (readingLevel: string | null) =>
-    buildSystemPrompt(null, readingLevel, "Kai", null, null, null);
-
-  test("pre-reader level → the register replaces the generic sentence", () => {
-    const prompt = build(PRE_READER_LEVEL);
-    expect(prompt).toContain("PRE-READER MODE");
-    // The generic one-liner must NOT also appear.
-    expect(prompt).not.toContain("READING LEVEL: The scholar's reading level");
+describe("selectLevelSections", () => {
+  test("talk 7 + listener → grade-7 register, turn rules, listener delivery", () => {
+    expect(
+      selectLevelSections({ talk: "7", read: "listener", write: "own" }),
+    ).toEqual(sections("generic", true, true));
   });
 
-  test("a graded level → generic sentence, NO register", () => {
-    const prompt = build("5");
-    expect(prompt).toContain(generic("5"));
-    expect(prompt).not.toContain("PRE-READER MODE");
+  test("talk 7 + beginner → grade-7 register plus the turn rules, no voice delivery", () => {
+    expect(
+      selectLevelSections({ talk: "7", read: "beginner", write: "own" }),
+    ).toEqual(sections("generic", true, false));
   });
 
-  test("no reading level → neither the register nor the generic sentence", () => {
-    const prompt = build(null);
-    expect(prompt).not.toContain("PRE-READER MODE");
-    expect(prompt).not.toContain("READING LEVEL:");
+  test("talk 7 + reader → the grade-7 register alone", () => {
+    expect(
+      selectLevelSections({ talk: "7", read: "reader", write: "own" }),
+    ).toEqual(sections("generic", false, false));
   });
 
-  test("byte-identical for non-pre-readers: only the one slot differs", () => {
-    // Swapping the register in for the generic sentence must change NOTHING
-    // else in the assembled prompt — proving every graded scholar's prompt is
-    // untouched by this change (deliverable #3).
+  test("talk K + listener → the pre-reader register (it carries delivery itself)", () => {
+    expect(
+      selectLevelSections({ talk: "K", read: "listener", write: "own" }),
+    ).toEqual(sections("preReader", true, false));
+  });
+
+  test("unset talk + listener → the pre-reader register", () => {
+    expect(
+      selectLevelSections({ talk: null, read: "listener", write: "own" }).register,
+    ).toBe("preReader");
+  });
+
+  test("talk 2 + listener → early-reader register, turn rules, listener delivery", () => {
+    expect(
+      selectLevelSections({ talk: "2", read: "listener", write: "own" }),
+    ).toEqual(sections("earlyReader", true, true));
+  });
+
+  test("an early talk level keeps the turn rules for a reader", () => {
+    expect(
+      selectLevelSections({ talk: "K", read: "reader", write: "own" }),
+    ).toEqual(sections("earlyReader", true, false));
+    expect(
+      selectLevelSections({ talk: null, read: "reader", write: "voice" }),
+    ).toEqual(sections("none", false, false, true));
+  });
+});
+
+describe("needsYoungReaderTurnRules — read below reader, or an early talk level", () => {
+  test.each([
+    ["7", "listener", true],
+    ["7", "beginner", true],
+    ["college", "beginner", true],
+    ["K", "reader", true],
+    ["2.9", "reader", true],
+    ["3", "reader", false],
+    ["7", "reader", false],
+    [null, "reader", false],
+  ] as const)("talk %s + read %s → %s", (talk, read, expected) => {
+    expect(needsYoungReaderTurnRules({ talk, read })).toBe(expected);
+  });
+});
+
+describe("resolver → selection, end to end", () => {
+  const pick = (args: Parameters<typeof resolveEffectiveLevels>[0]) =>
+    selectLevelSections(resolveEffectiveLevels(args));
+
+  test("a stored pre-reader is unchanged: K register plus turn rules", () => {
+    expect(
+      pick({
+        isSyntheticView: false,
+        session: {},
+        scholar: { readingLevel: PRE_READER_LEVEL },
+      }),
+    ).toEqual(sections("preReader", true, false));
+  });
+
+  test("talk 7 + listener scholar → grade-7 register, voice delivery", () => {
+    expect(
+      pick({
+        isSyntheticView: false,
+        session: {},
+        scholar: { readingLevel: "7", readLevel: "listener" },
+      }),
+    ).toEqual(sections("generic", true, true));
+  });
+
+  test("a talk override of 5 on a K listener changes the register, not the delivery", () => {
+    const levels = resolveEffectiveLevels({
+      isSyntheticView: false,
+      session: { readingLevelOverride: "5" },
+      scholar: { readingLevel: "K", readLevel: "listener" },
+    });
+    expect(levels).toEqual({ talk: "5", read: "listener", write: "own" });
+    expect(selectLevelSections(levels)).toEqual(sections("generic", true, true));
+  });
+
+  test("a read override changes delivery and keeps the talk register", () => {
+    expect(
+      pick({
+        isSyntheticView: false,
+        session: { readLevelOverride: "reader" },
+        scholar: { readingLevel: "K", readLevel: "listener" },
+      }),
+    ).toEqual(sections("earlyReader", true, false));
+  });
+});
+
+// ── buildLevelsSection: exactly the chosen builders, in order ────────
+
+describe("buildLevelsSection", () => {
+  test("register, then turn rules, then the delivery add-ons", () => {
+    expect(buildLevelsSection({ talk: "7", read: "listener", write: "voice" })).toBe(
+      buildGenericReadingLevelSection("7") +
+        buildYoungReaderTurnRules() +
+        buildListenerDeliverySection() +
+        buildWriteByVoiceSection(),
+    );
+    expect(buildLevelsSection({ talk: "7", read: "beginner", write: "own" })).toBe(
+      buildGenericReadingLevelSection("7") + buildYoungReaderTurnRules(),
+    );
+    expect(buildLevelsSection({ talk: "K", read: "listener", write: "own" })).toBe(
+      buildPreReaderSection() + buildYoungReaderTurnRules(),
+    );
+    expect(buildLevelsSection({ talk: "2", read: "reader", write: "own" })).toBe(
+      buildEarlyReaderSection("2") + buildYoungReaderTurnRules(),
+    );
+    expect(buildLevelsSection({ talk: "7", read: "reader", write: "own" })).toBe(
+      buildGenericReadingLevelSection("7"),
+    );
+    expect(buildLevelsSection({ talk: null, read: "reader", write: "own" })).toBe("");
+  });
+});
+
+// ── Wiring: the assembled prompt carries the slot, cached ────────────
+
+describe("buildSystemPrompt — the levels slot", () => {
+  // `readWrite` is the trailing positional param; everything between the six
+  // required leading args and it takes its default (undefined).
+  const READ_WRITE_INDEX = 54;
+  const parts = (
+    readingLevel: string | null,
+    readWrite: { read: ReadLevel; write: WriteMode } | null,
+  ) => {
+    const args: unknown[] = new Array(READ_WRITE_INDEX + 1).fill(undefined);
+    args.splice(0, 6, null, readingLevel, "Kai", null, null, null);
+    args[READ_WRITE_INDEX] = readWrite;
+    return (
+      buildSystemPromptParts as unknown as (
+        ...a: unknown[]
+      ) => ReturnType<typeof buildSystemPromptParts>
+    )(...args);
+  };
+  // If a param is ever added before readWrite, the talk-7 listener test fails
+  // (the delivery section goes missing): the guard on READ_WRITE_INDEX.
+
+  test("talk 7 + listener: the slot sits in the cached stable prefix", () => {
+    const { stable, dynamic } = parts("7", { read: "listener", write: "own" });
+    const slot = buildLevelsSection({ talk: "7", read: "listener", write: "own" });
+    expect(stable).toContain(slot);
+    expect(stable).not.toContain(buildPreReaderSection());
+    expect(dynamic).not.toContain(buildListenerDeliverySection());
+    expect(dynamic).not.toContain(buildYoungReaderTurnRules());
+  });
+
+  test("only the levels slot differs between scholars", () => {
+    const build = (readingLevel: string | null) =>
+      buildSystemPrompt(null, readingLevel, "Kai", null, null, null);
+    const SLOT = "<<LEVELS_SLOT>>";
     const graded = build("5");
     const pre = build(PRE_READER_LEVEL);
-    const SLOT = "<<READING_LEVEL_SLOT>>";
-    expect(graded).toContain(generic("5"));
-    expect(pre).toContain(buildPreReaderSection());
-    expect(graded.replace(generic("5"), SLOT)).toBe(
+    const none = build(null);
+    expect(graded.replace(buildGenericReadingLevelSection("5"), SLOT)).toBe(
       pre.replace(buildPreReaderSection() + buildYoungReaderTurnRules(), SLOT),
     );
+    // An unset level contributes nothing: removing the graded slot yields it.
+    expect(graded.replace(buildGenericReadingLevelSection("5"), "")).toBe(none);
   });
 });
 
-// ── Cache placement: scholar-stable → the CACHED stable prefix ────────
+// ── getSessionContext: the session's levels reach the tutor ─────────
 
-describe("pre-reader register lands in the cached stable prefix (like the generic note)", () => {
-  // The reading level is scholar-stable (a per-session override is
-  // session-stable too), so both variants sit ahead of the prompt-cache
-  // breakpoint and are read from cache every turn (TRA-185).
-  // Positional call: only scholarName + readingLevel (2nd param) are set;
-  // the remaining required leading args are null.
-  const parts = (readingLevel: string | null) =>
-    buildSystemPromptParts(
-      null, // teacherWhisper
-      readingLevel, // readingLevel
-      "Kai", // scholarName
-      null, // unitContext
-      null, // personaContext
-      null, // perspectiveContext
-    );
-
-  test("the register is in `stable` (cached), not the per-turn `dynamic` tail", () => {
-    const { stable, dynamic } = parts(PRE_READER_LEVEL);
-    expect(stable).toContain("PRE-READER MODE");
-    expect(dynamic).not.toContain("PRE-READER MODE");
-  });
-
-  test("the generic reading-level note is in `stable` too — placement matched", () => {
-    const { stable, dynamic } = parts("5");
-    expect(stable).toContain("READING LEVEL:");
-    expect(dynamic).not.toContain("READING LEVEL:");
-  });
-});
-
-// ── Override path: a per-session override activates the tier ─────────
-
-describe("resolveReadingLevel — pre-reader override precedence", () => {
-  test("a per-session readingLevelOverride of pre-reader wins over a graded scholar", () => {
-    expect(
-      resolveReadingLevel({
-        isSyntheticView: false,
-        readingLevelOverride: PRE_READER_LEVEL,
-        syntheticReadingLevel: undefined,
-        scholarReadingLevel: "5",
-      }),
-    ).toBe(PRE_READER_LEVEL);
-  });
-
-  test("the scholar's own pre-reader level resolves through with no override", () => {
-    expect(
-      resolveReadingLevel({
-        isSyntheticView: false,
-        readingLevelOverride: undefined,
-        syntheticReadingLevel: undefined,
-        scholarReadingLevel: PRE_READER_LEVEL,
-      }),
-    ).toBe(PRE_READER_LEVEL);
-  });
-});
-
-describe("getSessionContext — readingLevelOverride reaches the tier", () => {
-  test("session readingLevelOverride: 'pre-reader' resolves to the tier", async () => {
+describe("getSessionContext — the session's levels reach the tutor", () => {
+  async function contextFor(
+    user: Record<string, unknown>,
+    session: Record<string, unknown>,
+  ) {
     const t = convexTest(schema, modules);
     const userId = await t.run(async (ctx) =>
       ctx.db.insert("users", {
         name: "Test scholar",
         username: "testscholar",
         role: "scholar",
-        readingLevel: "5",
+        ...user,
       }),
     );
     const sessionId = await t.run(async (ctx) =>
@@ -138,15 +241,28 @@ describe("getSessionContext — readingLevelOverride reaches the tier", () => {
         userId,
         title: "New Project",
         isArchived: false,
-        readingLevelOverride: PRE_READER_LEVEL,
+        ...session,
       }),
     );
+    return t.query(internal.sessionHelpers.getSessionContext, { sessionId });
+  }
 
-    const c = await t.query(internal.sessionHelpers.getSessionContext, {
-      sessionId,
-    });
-    // The override wins over the scholar's stored graded level, so the tutor
-    // gets the K register — a teacher can test-drive it per session.
-    expect(c?.readingLevel).toBe(PRE_READER_LEVEL);
+  test("a legacy readingLevelOverride 'pre-reader' resolves to talk K + listener", async () => {
+    const c = await contextFor(
+      { readingLevel: "5" },
+      { readingLevelOverride: PRE_READER_LEVEL },
+    );
+    expect(c?.readingLevel).toBe("K");
+    expect(c?.readLevel).toBe("listener");
+  });
+
+  test("a readLevelOverride of listener keeps the scholar's talk level", async () => {
+    const c = await contextFor(
+      { readingLevel: "3", writeMode: "voice" },
+      { readLevelOverride: "listener" },
+    );
+    expect(c?.readingLevel).toBe("3");
+    expect(c?.readLevel).toBe("listener");
+    expect(c?.writeMode).toBe("voice");
   });
 });

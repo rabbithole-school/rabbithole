@@ -36,9 +36,7 @@ import {
   buildNonHumanIntroSection,
   buildOpeningTurnSection,
   buildPhysicalEnvironmentSection,
-  buildPreReaderSection,
-  buildEarlyReaderSection,
-  buildYoungReaderTurnRules,
+  buildLevelsSection,
   isSameSitting,
   TUTOR_PROMPT_SECTION_ORDER,
   TUTOR_TURN_CONTEXT_SECTIONS,
@@ -73,9 +71,12 @@ import type { StoredMapArtifact, GeoMapSpec } from "../lib/geomap/types";
 import { isSolved } from "../lib/geomap/grade";
 import { resolveRegion } from "../lib/geomap/registry";
 import {
-  isEarlyReader,
-  isPreReader,
-  needsYoungReaderTurnRules,
+  resolveEffectiveLevels,
+  talkLevelOf,
+  readLevelOf,
+  type EffectiveLevels,
+  type ReadLevel,
+  type WriteMode,
 } from "./lib/readingLevels";
 import {
   nonGraduatedTeams,
@@ -85,7 +86,6 @@ import { MAX_APP_ASSETS } from "../shared/appAssets";
 import { readInventoryTeams } from "./graphemeInventory";
 import {
   resolveContextIdentity,
-  resolveReadingLevel,
   resolveSessionHistory,
   buildMasteryContext,
   buildSignalContext,
@@ -861,15 +861,16 @@ export const getSessionContext = internalQuery({
     //     baseline behavior.
     const { isSyntheticView, contextUserId } = resolveContextIdentity(session);
 
-    // Get reading level: project override takes priority, then synthetic
-    // (when in synthetic view-as), then the context user's stored level.
+    // Talk / read / write (TRA-503): per-session overrides take priority, then
+    // synthetic (when in synthetic view-as), then the context user's stored
+    // levels. `readingLevel` below is the TALK level.
     const scholar = await ctx.db.get(contextUserId);
-    const readingLevel = resolveReadingLevel({
+    const levels = resolveEffectiveLevels({
       isSyntheticView,
-      readingLevelOverride: session.readingLevelOverride,
-      syntheticReadingLevel: session.testDriveSyntheticReadingLevel,
-      scholarReadingLevel: scholar?.readingLevel,
+      session,
+      scholar,
     });
+    const readingLevel = levels.talk;
 
     // Scholar session history — powers the SESSION CONTEXT prompt section and
     // the one-time non-human introduction. A "session" ≈ a project. Skipped in
@@ -1627,6 +1628,8 @@ export const getSessionContext = internalQuery({
       teacherWhisper: session.teacherWhisper ?? null,
       pendingWhisper: session.pendingWhisper ?? null,
       readingLevel,
+      readLevel: levels.read,
+      writeMode: levels.write,
       scholarName: resolvedScholarName,
       // Staff-only. Consumed by the OBSERVER (teacher-facing output) via
       // ObserverContext; buildSystemPrompt deliberately never injects it, so
@@ -1910,16 +1913,15 @@ export const finalizeStream = internalMutation({
         const { isSyntheticView, contextUserId } =
           resolveContextIdentity(session);
         const scholar = await ctx.db.get(contextUserId);
-        // Resolve the SAME reading level the tutor rendered against — session
-        // override included — never the raw stored users.readingLevel.
-        const readingLevel = resolveReadingLevel({
+        // Resolve the SAME read level the tutor rendered against — session
+        // override included — never the raw stored user fields.
+        const { read } = resolveEffectiveLevels({
           isSyntheticView,
-          readingLevelOverride: session.readingLevelOverride,
-          syntheticReadingLevel: session.testDriveSyntheticReadingLevel,
-          scholarReadingLevel: scholar?.readingLevel,
+          session,
+          scholar,
         });
         const teams = await readInventoryTeams(ctx, contextUserId);
-        if (shouldAnnotateGraphemes(readingLevel, teams)) {
+        if (shouldAnnotateGraphemes(read, teams)) {
           await ctx.scheduler.runAfter(
             0,
             internal.graphemeActions.annotateAndStore,
@@ -4069,7 +4071,15 @@ export function buildSystemPromptParts(
   // takes the free-play stance and the parking-lot slot becomes the free-play
   // opener. The contract is already absent (resolveActivityScopedContext).
   freePlay: boolean = false,
+  // The session's READ level and WRITE mode (TRA-503), from
+  // `resolveEffectiveLevels`. Omitted by positional/offline callers (evals),
+  // which pass only a talk-field string: then read comes from that string
+  // (a legacy "pre-reader" → listener) and write is "own".
+  readWrite: { read: ReadLevel; write: WriteMode } | null = null,
 ): { stable: string; dynamic: string; turnContext: string } {
+  const readLevel = readWrite?.read ?? readLevelOf({ readingLevel });
+  const writeMode = readWrite?.write ?? "own";
+  const talkLevel = talkLevelOf(readingLevel);
   // One entry per key in the system and turn-context order constants (the
   // Record type enforces exhaustiveness); the ordering lives in prompts.ts.
   const sections: Record<TutorPromptSectionKey, string | null> = {
@@ -4095,28 +4105,16 @@ export function buildSystemPromptParts(
       activityResourceContext,
       runtimeCapabilities.canShareResources,
     ),
-    // Reading level → tutor register. Scholar-stable (a per-session override
-    // is session-stable too). The pre-reader TIER swaps the generic
-    // one-sentence note for the full K register (buildPreReaderSection); any
-    // other level keeps the exact generic sentence — see the pre-reader
-    // section test for the "only this slot differs" guarantee. Levels K–2.9
-    // get the early-reader register (buildEarlyReaderSection) instead. An
-    // unset level gets nothing; a grade-based fallback is a product call.
-    // The young-reader turn rules ride in the same slot, after the register;
-    // WHO gets them is decided only by needsYoungReaderTurnRules (TRA-501).
+    // Talk / read / write → tutor register + delivery. Scholar-stable (a
+    // per-session override is session-stable too). TALK picks the register,
+    // READ and WRITE only how words arrive and get in (buildLevelsSection /
+    // selectLevelSections in lib/readingLevels.ts).
     readingLevel:
-      [
-        isPreReader(readingLevel)
-          ? buildPreReaderSection()
-          : isEarlyReader(readingLevel)
-            ? buildEarlyReaderSection(readingLevel)
-            : readingLevel
-              ? `\n\nREADING LEVEL: The scholar's reading level is set to "${readingLevel}". Adjust your vocabulary and sentence complexity accordingly. You can still explore advanced topics, but frame explanations at this reading level.`
-              : "",
-        needsYoungReaderTurnRules(readingLevel)
-          ? buildYoungReaderTurnRules()
-          : "",
-      ].join("") || null,
+      buildLevelsSection({
+        talk: talkLevel,
+        read: readLevel,
+        write: writeMode,
+      }) || null,
     // DEPRECATED (anti-parasocial): the PERSONA block is intentionally omitted —
     // the tutor must never be instructed to act as a character. The
     // `personaContext` param above is retained only for call-site signature
@@ -4573,3 +4571,18 @@ export const splitStream = internalMutation({
     return newMessageId;
   },
 });
+
+/**
+ * A session's effective talk / read / write levels, resolved exactly as the
+ * tutor resolves them (view-as identity, then `resolveEffectiveLevels`), for a
+ * model-facing consumer outside the tutor stream (rubric criteria, feedback).
+ * Pair with `describeEffectiveLevelsForPrompt`.
+ */
+export async function loadSessionLevels(
+  ctx: QueryCtx,
+  session: Doc<"sessions">,
+): Promise<EffectiveLevels> {
+  const { isSyntheticView, contextUserId } = resolveContextIdentity(session);
+  const scholar = isSyntheticView ? null : await ctx.db.get(contextUserId);
+  return resolveEffectiveLevels({ isSyntheticView, session, scholar });
+}

@@ -18,6 +18,7 @@
 // Full design + context: review/seed-to-unit-bake-plan.md.
 
 import { v } from "convex/values";
+import { describeLevelsForPrompt } from "./lib/readingLevels";
 import type { ActionCtx } from "./_generated/server";
 import { internalAction, internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -154,7 +155,7 @@ export const loadBakeContextFromSeed = internalQuery({
     return {
       scholarId: seed.scholarId,
       scholarRole: (scholar?.role ?? null) as Role | null,
-      readingLevel: scholar?.readingLevel ?? null,
+      readingLevel: describeLevelsForPrompt(scholar),
       topic: seed.topic,
       domain: seed.domain ?? null,
       rationale: seed.rationale ?? null,
@@ -179,7 +180,7 @@ export const loadBakeContextFromUnit = internalQuery({
     return {
       scholarId,
       scholarRole: (scholar?.role ?? null) as Role | null,
-      readingLevel: scholar?.readingLevel ?? null,
+      readingLevel: describeLevelsForPrompt(scholar),
       topic: unit.title,
       domain: unit.subject ?? null,
       rationale: unit.description ?? null,

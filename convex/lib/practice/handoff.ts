@@ -36,6 +36,7 @@
  */
 
 import { parseItemId } from "./session";
+import { talkLevelOf } from "../readingLevels";
 import { generateItem, hasTemplate } from "./templates";
 import {
   accessProven,
@@ -150,8 +151,9 @@ export function resolveScholarCoachContext(args: {
   );
   return {
     ...(ageBand ? { ageBand } : {}),
+    // The TALK level (TRA-503): a legacy "pre-reader" reaches the coach as K.
     ...(args.scholar.readingLevel
-      ? { readingLevel: args.scholar.readingLevel }
+      ? { readingLevel: talkLevelOf(args.scholar.readingLevel) ?? undefined }
       : {}),
     ...(args.skillKey
       ? { skillStatus: resolveCoachSkillStatus(args.mastery, args.now) }

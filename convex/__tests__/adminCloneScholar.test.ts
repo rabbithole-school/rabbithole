@@ -40,6 +40,8 @@ type InspectResult = {
   };
   copiedUserFields: {
     readingLevel: string | null;
+    readLevel: string | null;
+    writeMode: string | null;
     preferredFont: string | null;
     ttsEnabled: boolean | null;
     sttEnabled: boolean | null;
@@ -128,6 +130,8 @@ async function seedRepresentativeSource(t: Rig) {
       role: "scholar",
       gradeLevel: "4",
       readingLevel: "R",
+      readLevel: "beginner",
+      writeMode: "voice",
       preferredFont: "andika",
       ttsEnabled: false,
       sttEnabled: true,
@@ -420,6 +424,8 @@ describe("adminCloneScholar", () => {
     });
     expect(sourceInspection?.copiedUserFields).toEqual({
       readingLevel: "R",
+      readLevel: "beginner",
+      writeMode: "voice",
       preferredFont: "andika",
       ttsEnabled: false,
       sttEnabled: true,
@@ -495,6 +501,8 @@ describe("adminCloneScholar", () => {
       role: "scholar",
       gradeLevel: "3",
       readingLevel: "R",
+      readLevel: "beginner",
+      writeMode: "voice",
       preferredFont: "andika",
       ttsEnabled: false,
       sttEnabled: true,
@@ -785,6 +793,8 @@ describe("adminCloneScholar", () => {
       name: "Precreated Demo",
       gradeLevel: "3",
       readingLevel: "R",
+      readLevel: "beginner",
+      writeMode: "voice",
       preferredFont: "andika",
       ttsEnabled: false,
       sttEnabled: true,

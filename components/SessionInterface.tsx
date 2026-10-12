@@ -361,26 +361,26 @@ export function SessionInterface({
     { id: sessionId as Id<"sessions"> }
   );
 
-  // Pre-readers (age ~4–6) can't work a toggle and roam devices, so voice mode
-  // defaults ON from the session's EFFECTIVE reading level (server-resolved the
-  // way the tutor prompt resolves it — a teacher's per-session pre-reader
-  // override counts, TRA-492; the iPad keys on the same flag) rather than
-  // localStorage. Never for a teacher watching a scholar's session remotely.
-  // An explicit "off" ("0") still wins; an explicit "on" ("1") still forces it
-  // for anyone.
-  const isPreReaderSession =
-    sessionData?.session?.isPreReader === true && !isRemoteMode;
+  // Listeners (read level `listener`, TRA-503 — usually age ~4–6) can't work a
+  // toggle and roam devices, so voice mode defaults ON from the session's
+  // EFFECTIVE read level (server-resolved the way the tutor prompt resolves it
+  // — a teacher's per-session read override counts, TRA-492; the iPad keys on
+  // the same field) rather than localStorage. Never for a teacher watching a
+  // scholar's session remotely. An explicit "off" ("0") still wins; an
+  // explicit "on" ("1") still forces it for anyone.
+  const isListenerSession =
+    sessionData?.session?.readLevel === "listener" && !isRemoteMode;
   useEffect(() => {
     // Hydrate the persisted preference (deferred past SSR).
     const stored = localStorage.getItem("rabbithole.voiceMode");
     const defaultOn =
-      ttsEnabled && (stored === "1" || (stored !== "0" && isPreReaderSession));
+      ttsEnabled && (stored === "1" || (stored !== "0" && isListenerSession));
     if (defaultOn) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only preference hydration
       setVoiceModeState(true);
       voiceModeRef.current = true;
     }
-  }, [ttsEnabled, isPreReaderSession]);
+  }, [ttsEnabled, isListenerSession]);
 
   const messages = useMemo(
     () => sessionData?.messages ?? [],

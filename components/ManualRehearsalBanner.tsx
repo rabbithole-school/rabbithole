@@ -40,6 +40,12 @@ import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { toaster } from "@/lib/toaster";
 import type { ManualRehearsalReplay } from "@/hooks/useManualRehearsalReplay";
 import { newestHtmlArtifact } from "@/lib/vibecode/helpers";
+import { FieldSelect } from "@/components/ui/FieldSelect";
+import {
+  READ_LEVELS,
+  READ_LEVEL_LABELS,
+  type ReadLevel,
+} from "@/convex/lib/readingLevels";
 
 type Session = Doc<"sessions">;
 
@@ -449,6 +455,7 @@ export function ManualRehearsalBanner({
         sessionId={session._id}
         initialName={currentSyntheticName ?? ""}
         initialReadingLevel={currentSyntheticReadingLevel ?? ""}
+        initialReadLevel={isSynthetic ? (session.readLevelOverride ?? "reader") : "reader"}
         initialDossier={currentSyntheticDossier ?? ""}
       />
     </>
@@ -608,6 +615,7 @@ function SyntheticScholarDialog({
   sessionId,
   initialName,
   initialReadingLevel,
+  initialReadLevel,
   initialDossier,
 }: {
   open: boolean;
@@ -615,11 +623,13 @@ function SyntheticScholarDialog({
   sessionId: Id<"sessions">;
   initialName: string;
   initialReadingLevel: string;
+  initialReadLevel: ReadLevel;
   initialDossier: string;
 }) {
   const setViewAs = useMutation(api.sessions.setTestDriveViewAs);
   const [name, setName] = useState(initialName);
   const [readingLevel, setReadingLevel] = useState(initialReadingLevel);
+  const [readLevel, setReadLevel] = useState<ReadLevel>(initialReadLevel);
   const [dossier, setDossier] = useState(initialDossier);
   const [saving, setSaving] = useState(false);
 
@@ -628,6 +638,7 @@ function SyntheticScholarDialog({
   useResetOnOpen(open, () => {
     setName(initialName);
     setReadingLevel(initialReadingLevel);
+    setReadLevel(initialReadLevel);
     setDossier(initialDossier);
   });
 
@@ -645,6 +656,7 @@ function SyntheticScholarDialog({
         mode: "synthetic",
         syntheticName: name.trim() || undefined,
         syntheticReadingLevel: readingLevel.trim() || undefined,
+        syntheticReadLevel: readLevel,
         syntheticDossier: dossier.trim() || undefined,
       });
       onClose();
@@ -700,7 +712,7 @@ function SyntheticScholarDialog({
                 </Box>
                 <Box>
                   <Text fontSize="xs" fontFamily="heading" color="charcoal.500" mb={1}>
-                    Reading level (optional)
+                    Talk level (optional)
                   </Text>
                   <Input
                     size="sm"
@@ -709,7 +721,29 @@ function SyntheticScholarDialog({
                     placeholder='e.g. "1st grade", "early elementary", "8.2"'
                   />
                   <Text fontSize="2xs" color="charcoal.400" mt={1}>
-                    Free-form. Same field as a real scholar&apos;s reading level.
+                    Free-form. Same field as a real scholar&apos;s talk level.
+                  </Text>
+                </Box>
+                <Box>
+                  <Text fontSize="xs" fontFamily="heading" color="charcoal.500" mb={1}>
+                    Read
+                  </Text>
+                  <FieldSelect
+                    w="full"
+                    size="sm"
+                    fieldProps={{ "aria-label": "Read" }}
+                    value={readLevel}
+                    onChange={(v) => setReadLevel(v as ReadLevel)}
+                  >
+                    {READ_LEVELS.map((value) => (
+                      <option key={value} value={value}>
+                        {READ_LEVEL_LABELS[value]}
+                      </option>
+                    ))}
+                  </FieldSelect>
+                  <Text fontSize="2xs" color="charcoal.400" mt={1}>
+                    How the tutor&apos;s words arrive. Listener hears every reply
+                    aloud.
                   </Text>
                 </Box>
                 <Box>

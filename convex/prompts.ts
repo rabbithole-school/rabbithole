@@ -15,6 +15,10 @@ import {
 } from "./lib/institutionPromptProfile";
 import { SCHOLAR_PRONOUN_GUIDANCE } from "./lib/scholarPronouns";
 import {
+  selectLevelSections,
+  type EffectiveLevels,
+} from "./lib/readingLevels";
+import {
   SESSION_SIGNAL_META,
   SESSION_SIGNAL_TYPES,
 } from "../shared/learningSignals";
@@ -1399,8 +1403,10 @@ export function buildDesignerPhysicalEnvironmentSection(
 /**
  * The K register — how the tutor talks with a pre-reader (about 4–6 years old)
  * whose reasoning runs years ahead of their reading and typing. Active only when
- * the resolved reading level is the pre-reader tier (`isPreReader`), where it
- * REPLACES the generic one-sentence "READING LEVEL: …" note.
+ * the session's READ level is `listener` AND its TALK level is K or unset
+ * (`selectLevelSections`), where it REPLACES the generic one-sentence
+ * "READING LEVEL: …" note. A listener who talks above K gets their own talk
+ * register plus `buildListenerDeliverySection` instead.
  *
  * Everything the tutor says is spoken ALOUD by a voice (web and iPad voice mode)
  * to a child holding roughly one sentence in working memory. The words also
@@ -1436,6 +1442,75 @@ export function buildPreReaderSection(): string {
 - Warmth here is about their THINKING — "you kept going even when it got tricky", "you figured that out yourself" — never a hollow praise-opener. The no-empty-validators rule above stays in FULL force: still no "Great job!", "Good question!", "So smart!", "Nice!" — and that goes double out loud, where a bright kid hears the flattery and tunes out. Warmth comes from the effort and the idea, never from grading them.
 
 SPOKEN OUTPUT: your reply is spoken by a text-to-speech voice, so write it to be HEARD, not read. Spell things out the way you'd say them — "one hundred and two", not "102"; "plus" not "+"; "minus" not "-"; "and so on", not "etc." Anything a voice would trip over or read as gibberish, say in words.`;
+}
+
+/**
+ * LISTENER delivery (TRA-503): the scholar's READ level is `listener` but their
+ * TALK level is above K, so the talk register (generic or early-reader) sets
+ * the words and ideas, and this section sets only how the words arrive. A
+ * talk-K (or unset) listener gets the pre-reader register instead, which
+ * already carries these rules.
+ *
+ * Voice-only on purpose: a listener always gets the young-reader turn rules
+ * too (`needsYoungReaderTurnRules`), placed just before this section, and those
+ * own turn length, one question, choices and garbled-word repair. This section
+ * adds only what reading aloud changes, so no rule is stated twice.
+ *
+ * FOR PARENTS:
+ * - Some children think and listen far beyond what they can read yet. For them
+ *   the tutor keeps grade-level ideas and words, but writes every reply to be
+ *   heard: it's read aloud by a voice, with nothing they'd have to read.
+ */
+export function buildListenerDeliverySection(): string {
+  return `\n\nLISTENER: This scholar can't read the screen yet. Their ideas and vocabulary are at the level above; only their reading isn't. Everything you write is spoken ALOUD to them by a voice and also shown on the screen, so the voice is what reaches them. Keep the ideas and words at their level; change only how you carry them. (The young-reader turn rules above already set turn length, questions, choices and repair.)
+- No headings, bullet points, numbered lists, bold, tables or asides in parentheses; read aloud they're noise.
+- Never ask them to read something on the screen. If they need to see it, describe it, or make a picture.
+
+SPOKEN OUTPUT: write to be HEARD. Spell things out the way you'd say them: "one hundred and two", not "102"; "plus", not "+".`;
+}
+
+/** The generic one-sentence talk-level note (talk levels above 2.9). */
+export function buildGenericReadingLevelSection(talkLevel: string): string {
+  return `\n\nREADING LEVEL: The scholar's reading level is set to "${talkLevel}". Adjust your vocabulary and sentence complexity accordingly. You can still explore advanced topics, but frame explanations at this reading level.`;
+}
+
+/**
+ * The whole level-driven slot of the tutor prompt: the register from TALK,
+ * then the listener-delivery and write-by-voice add-ons from READ and WRITE
+ * (`selectLevelSections`). Empty string when no level applies.
+ */
+export function buildLevelsSection(levels: EffectiveLevels): string {
+  const picked = selectLevelSections(levels);
+  const register =
+    picked.register === "preReader"
+      ? buildPreReaderSection()
+      : picked.register === "earlyReader" && levels.talk
+        ? buildEarlyReaderSection(levels.talk)
+        : picked.register === "generic" && levels.talk
+          ? buildGenericReadingLevelSection(levels.talk)
+          : "";
+  return [
+    register,
+    picked.youngReaderTurnRules ? buildYoungReaderTurnRules() : "",
+    picked.listenerDelivery ? buildListenerDeliverySection() : "",
+    picked.writeByVoice ? buildWriteByVoiceSection() : "",
+  ].join("");
+}
+
+/**
+ * WRITE by voice (TRA-503) — the scholar's write mode is `voice`: they get their
+ * own words in by dictating with the mic, not by typing. Appended to the
+ * reading-level slot. Deliberately one short line: the general dictation rules
+ * (dictated work is the child's own, full credit, no spelling detours) belong
+ * to TRA-501; this only says which way to lean for THIS scholar.
+ *
+ * FOR PARENTS:
+ * - Some children can think and talk far beyond what they can spell. For them
+ *   the tutor points to the microphone first, and never asks them to type.
+ *   The words they say go into their own work as their own words.
+ */
+export function buildWriteByVoiceSection(): string {
+  return `\n\nWRITES BY VOICE: This scholar gets their words in by talking, not typing. Whenever you want something from them in their own words, offer the mic first ("tap the mic and say it") and never ask them to type it.`;
 }
 
 /**

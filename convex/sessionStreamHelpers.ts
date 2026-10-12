@@ -50,6 +50,7 @@ import {
 } from "./sessionHelpers";
 import type { DocumentNote, PhysicalEnvironmentContext } from "./prompts";
 import type { Interest } from "./lib/interests";
+import type { ReadLevel, WriteMode } from "./lib/readingLevels";
 import {
   DEFAULT_INSTITUTION_PROMPT_PROFILE,
   type InstitutionPromptProfile,
@@ -426,7 +427,11 @@ export function teacherBuildKickoffInstruction(): string {
  */
 export type TutorPromptContext = {
   teacherWhisper: string | null;
+  /** The TALK level (lib/readingLevels.ts). */
   readingLevel: string | null;
+  /** READ level and WRITE mode (TRA-503). Optional for offline callers. */
+  readLevel?: ReadLevel;
+  writeMode?: WriteMode;
   scholarName: string | null;
   sessionMode?: "conversation" | "workbench" | "vibecode" | null;
   vibecodeStarterUsedAt?: number | null;
@@ -612,6 +617,9 @@ export function buildTutorSystemPromptParts(ctx: TutorPromptContext): {
     ctx.parkingLot ?? null,
     ctx.callerIsSessionOwner ?? true,
     ctx.freePlay ?? false,
+    ctx.readLevel
+      ? { read: ctx.readLevel, write: ctx.writeMode ?? "own" }
+      : null,
   );
 }
 

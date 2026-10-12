@@ -14,6 +14,7 @@
 // ctx.runQuery sub-transactions or api-inference cycles.
 
 import { v } from "convex/values";
+import { describeLevelsForPrompt } from "./readingLevels";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { internalQuery } from "../_generated/server";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -1189,7 +1190,7 @@ export async function readScholarRoster(
       id: s._id,
       name: s.name ?? "Unknown",
       username: s.username ?? "",
-      readingLevel: s.readingLevel ?? null,
+      readingLevel: describeLevelsForPrompt(s),
       ...chronology,
       sessionCount: sessions.length,
       observationCount: observations.length,

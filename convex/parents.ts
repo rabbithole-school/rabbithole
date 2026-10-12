@@ -16,6 +16,7 @@
 // optional.
 
 import { v } from "convex/values";
+import { talkLevelOf } from "./lib/readingLevels";
 import { authedQuery, authedMutation, scholarAdminQuery, scholarAdminMutation } from "./lib/customFunctions";
 import {
   canReadScholarAsTeacher,
@@ -738,7 +739,7 @@ export const childSummary = authedQuery({
 
     return {
       name: scholar.name ?? "Scholar",
-      readingLevel: scholar.readingLevel ?? null,
+      readingLevel: talkLevelOf(scholar.readingLevel),
       dateOfBirth: scholar.dateOfBirth ?? null,
       recentPulseScore: recentPulse?.pulseScore ?? null,
       totalSessions: sessions.length,

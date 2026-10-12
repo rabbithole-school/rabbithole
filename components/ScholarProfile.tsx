@@ -5,7 +5,16 @@ import { useQuery, useMutation, useAction } from "convex/react";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useHealthManagementAccess } from "@/hooks/useSchoolOperationsAccess";
 import { isPlatformAdminRole } from "@/convex/lib/roles";
-import { PRE_READER_LEVEL, isPreReader } from "@/convex/lib/readingLevels";
+import {
+  READ_LEVELS,
+  READ_LEVEL_LABELS,
+  WRITE_MODES,
+  WRITE_MODE_LABELS,
+  talkLevelLabel,
+  talkLevelToNumber,
+  type ReadLevel,
+  type WriteMode,
+} from "@/convex/lib/readingLevels";
 import { api } from "@/convex/_generated/api";
 import { toaster } from "@/lib/toaster";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -133,7 +142,6 @@ interface ScholarProfileProps {
 function buildReadingLevels(): { value: string; label: string }[] {
   const levels: { value: string; label: string }[] = [
     { value: "", label: "Not set" },
-    { value: PRE_READER_LEVEL, label: "Pre-reader — voice-first (age 4–6)" },
     { value: "K", label: "K — Kindergarten" },
   ];
   for (let grade = 1; grade <= 12; grade++) {
@@ -146,6 +154,17 @@ function buildReadingLevels(): { value: string; label: string }[] {
   return levels;
 }
 const READING_LEVELS = buildReadingLevels();
+
+// Read and write controls (TRA-503). Unset reads as the default (reader / own),
+// so there is no "Not set" option: the select shows what the tutor acts on.
+const READ_OPTIONS = READ_LEVELS.map((value) => ({
+  value,
+  label: READ_LEVEL_LABELS[value],
+}));
+const WRITE_OPTIONS = WRITE_MODES.map((value) => ({
+  value,
+  label: WRITE_MODE_LABELS[value],
+}));
 
 // Chronological grade options for the Knowledge Tree notch (users.gradeLevel).
 // K–8 only — must match the acceleration grade columns (ACCELERATION_GRADES).
@@ -611,6 +630,8 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
   );
   const setInterestState = useMutation(api.dossier.setInterestState);
   const updateReadingLevel = useMutation(api.scholars.updateReadingLevel);
+  const updateReadLevel = useMutation(api.scholars.updateReadLevel);
+  const updateWriteMode = useMutation(api.scholars.updateWriteMode);
   const updateAudioSettings = useMutation(api.scholars.updateAudioSettings);
   const acceptReadingLevelSuggestion = useMutation(api.scholars.acceptReadingLevelSuggestion);
   const dismissReadingLevelSuggestion = useMutation(api.scholars.dismissReadingLevelSuggestion);
@@ -742,6 +763,28 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
       });
     } catch (error) {
       console.error("Error updating reading level:", error);
+    } finally {
+      setIsSavingReadingLevel(false);
+    }
+  };
+
+  const handleReadLevelChange = async (readLevel: ReadLevel) => {
+    setIsSavingReadingLevel(true);
+    try {
+      await updateReadLevel({ scholarId: scholarId as Id<"users">, readLevel });
+    } catch (error) {
+      console.error("Error updating read level:", error);
+    } finally {
+      setIsSavingReadingLevel(false);
+    }
+  };
+
+  const handleWriteModeChange = async (writeMode: WriteMode) => {
+    setIsSavingReadingLevel(true);
+    try {
+      await updateWriteMode({ scholarId: scholarId as Id<"users">, writeMode });
+    } catch (error) {
+      console.error("Error updating write mode:", error);
     } finally {
       setIsSavingReadingLevel(false);
     }
@@ -924,15 +967,27 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                   <VStack gap={2} align="stretch" pb={3}>
                     {!isOperationsMode && scholar?.readingLevel && (
                       <HStack justify="space-between">
-                        <Text fontSize="xs" color="charcoal.400" fontFamily="heading">Reading level</Text>
+                        <Text fontSize="xs" color="charcoal.400" fontFamily="heading">Talk level</Text>
                         <Badge bg="violet.100" color="violet.700" fontSize="xs" fontFamily="heading">
-                          {scholar.readingLevel === PRE_READER_LEVEL
-                            ? "Pre-reader"
-                            : scholar.readingLevel === "college"
-                              ? "College"
-                              : scholar.readingLevel === "K"
-                                ? "K"
-                                : `Grade ${scholar.readingLevel}`}
+                          {talkLevelLabel(scholar.readingLevel)}
+                        </Badge>
+                      </HStack>
+                    )}
+                    {/* Read / write only when they differ from the default —
+                        a fluent reader-writer shows nothing new. */}
+                    {!isOperationsMode && scholar?.readLevel && scholar.readLevel !== "reader" && (
+                      <HStack justify="space-between">
+                        <Text fontSize="xs" color="charcoal.400" fontFamily="heading">Read</Text>
+                        <Badge bg="violet.100" color="violet.700" fontSize="xs" fontFamily="heading">
+                          {READ_LEVEL_LABELS[scholar.readLevel]}
+                        </Badge>
+                      </HStack>
+                    )}
+                    {!isOperationsMode && scholar?.writeMode === "voice" && (
+                      <HStack justify="space-between">
+                        <Text fontSize="xs" color="charcoal.400" fontFamily="heading">Write</Text>
+                        <Badge bg="violet.100" color="violet.700" fontSize="xs" fontFamily="heading">
+                          {WRITE_MODE_LABELS.voice}
                         </Badge>
                       </HStack>
                     )}
@@ -1077,8 +1132,8 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
               <Surface p={5}>
                 <CardHeading
                   icon={<BookOpenText />}
-                  title="Reading level"
-                  hint={"adjusts vocabulary & complexity"}
+                  title="Talk, read and write"
+                  hint={"how the tutor talks, reads and listens"}
                   action={isSavingReadingLevel ? <Spinner size="xs" color="violet.500" /> : undefined}
                 />
 
@@ -1225,19 +1280,20 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                   </Box>
                 </VStack>
 
-                {/* Reading level table: Method | Grade | ⋯ */}
+                {/* Levels table: Method | Level | ⋯ */}
                 <Box display="grid" gridTemplateColumns="1fr 1fr 24px" gap={2} alignItems="center">
                   {/* Header row */}
                   <Text fontSize="2xs" color="charcoal.300" fontFamily="heading" fontWeight="600" textTransform="uppercase" letterSpacing="wider" pb={1} borderBottom="1px solid" borderColor="gray.100">Method</Text>
-                  <Text fontSize="2xs" color="charcoal.300" fontFamily="heading" fontWeight="600" textTransform="uppercase" letterSpacing="wider" pb={1} borderBottom="1px solid" borderColor="gray.100">Grade</Text>
+                  <Text fontSize="2xs" color="charcoal.300" fontFamily="heading" fontWeight="600" textTransform="uppercase" letterSpacing="wider" pb={1} borderBottom="1px solid" borderColor="gray.100">Level</Text>
                   <Box pb={1} borderBottom="1px solid" borderColor="gray.100" />
 
-                  {/* Output level row */}
-                  <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5}>Output level</Text>
+                  {/* Talk level row — the grade band the tutor talks at */}
+                  <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5}>Talk level</Text>
                   <Box py={1.5}>
                     <FieldSelect
                       w="full"
                       size="xs"
+                      fieldProps={{ "aria-label": "Talk level" }}
                       value={scholar?.readingLevel || ""}
                       onChange={(v) => handleReadingLevelChange(v)}
                       disabled={isSavingReadingLevel}
@@ -1249,7 +1305,48 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                       ))}
                     </FieldSelect>
                   </Box>
-                  <Box py={1.5} /> {/* no menu for the output row — edited directly */}
+                  <Box py={1.5} /> {/* no menu for the talk row — edited directly */}
+
+                  {/* Read row — how the tutor's words arrive (TRA-503).
+                      Listener turns on voice-first. */}
+                  <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5} borderTop="1px solid" borderColor="gray.50">Read</Text>
+                  <Box py={1.5} borderTop="1px solid" borderColor="gray.50">
+                    <FieldSelect
+                      w="full"
+                      size="xs"
+                      fieldProps={{ "aria-label": "Read" }}
+                      value={scholar?.readLevel ?? "reader"}
+                      onChange={(v) => handleReadLevelChange(v as ReadLevel)}
+                      disabled={isSavingReadingLevel}
+                    >
+                      {READ_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </FieldSelect>
+                  </Box>
+                  <Box py={1.5} borderTop="1px solid" borderColor="gray.50" />
+
+                  {/* Write row — how the scholar's words get in (TRA-503) */}
+                  <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5} borderTop="1px solid" borderColor="gray.50">Write</Text>
+                  <Box py={1.5} borderTop="1px solid" borderColor="gray.50">
+                    <FieldSelect
+                      w="full"
+                      size="xs"
+                      fieldProps={{ "aria-label": "Write" }}
+                      value={scholar?.writeMode ?? "own"}
+                      onChange={(v) => handleWriteModeChange(v as WriteMode)}
+                      disabled={isSavingReadingLevel}
+                    >
+                      {WRITE_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </FieldSelect>
+                  </Box>
+                  <Box py={1.5} borderTop="1px solid" borderColor="gray.50" />
 
                   {/* Observer AI row */}
                   <>
@@ -1286,7 +1383,7 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                                 <>
                                   <Menu.Item value="accept" cursor="pointer"
                                     onClick={() => acceptReadingLevelSuggestion({ scholarId: scholarId as Id<"users"> })}>
-                                    Set output reading level
+                                    Set as talk level
                                   </Menu.Item>
                                   <Menu.Item value="dismiss" cursor="pointer"
                                     onClick={() => dismissReadingLevelSuggestion({ scholarId: scholarId as Id<"users"> })}>
@@ -1340,14 +1437,15 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                   </Text>
                 )}
 
-                {/* Reading level sparkline — only shown when 2+ history entries */}
-                {readingLevelHistory.length >= 2 && (() => {
-                  const levelToNum = (level: string): number => {
-                    if (level === "K") return 0.5;
-                    if (level === "college") return 13;
-                    return parseFloat(level);
-                  };
-                  const pts = [...readingLevelHistory].reverse().map((h) => levelToNum(h.level));
+                {/* Talk level sparkline — only shown when 2+ plottable history
+                    entries. talkLevelToNumber plots a legacy "pre-reader" row
+                    as K and skips anything unparseable (never NaN). */}
+                {(() => {
+                  const pts = [...readingLevelHistory]
+                    .reverse()
+                    .map((h) => talkLevelToNumber(h.level))
+                    .filter((n): n is number => n !== null);
+                  if (pts.length < 2) return null;
                   const minY = Math.min(...pts);
                   const maxY = Math.max(...pts);
                   const range = maxY - minY || 1;
@@ -1383,12 +1481,13 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                 })()}
               </Surface>
             )}
-            {/* Reading-ramp grapheme inventory — pre-reader tier only (§10). The
-                per-team fade editor lives next to Reading Level because it's the
-                same "how does this scholar read?" region. */}
+            {/* Reading-ramp grapheme inventory — read level listener only
+                (§10; beginner joins in TRA-504). The per-team fade editor lives
+                next to the levels because it's the same "how does this scholar
+                read?" region. */}
             {progressSection === "reading" &&
               !isOperationsMode &&
-              isPreReader(scholar?.readingLevel) && (
+              scholar?.readLevel === "listener" && (
                 <GraphemeInventoryEditor scholarId={scholarId as Id<"users">} />
               )}
               </Box>
