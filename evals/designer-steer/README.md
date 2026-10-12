@@ -2,8 +2,10 @@
 
 Plays scholar lines through the REAL App designer on a private dev deployment
 (`sessions.sendMessage` in Edit mode, then `/session-stream`, the real designer
-prompt and tools), records every turn, and has a model judge the run. No
-browser. Built to compare the designer BEFORE and AFTER a steering change (the
+prompt and tools), records every turn, and has a model judge the run. The web
+client is never driven, but the app itself runs in headless Chromium
+(`appRunner.mjs`) unless `--no-app` is passed. Built to compare the designer
+BEFORE and AFTER a steering change (the
 model contract, parking, questions with consequences, `allowSilence`) on the
 same inputs. The contract fields are described where they live:
 `activities.buildContract` / `allowSilence` in `convex/schema.ts`.
@@ -28,7 +30,7 @@ node $H judge  --run <id>
   prints the ids and saves them as `<RUNS_DIR>/setups/<name>.json`.
 - `replay` assigns and pushes the activity to the scholar as a teacher does,
   archives their open session of it, opens a fresh one, and sends each line in
-  order, waiting for the turn to end (180 s cap; a 429 busy is retried after
+  order, waiting for the turn to end (300 s cap; a 429 busy is retried after
   `Retry-After`, as the client does). Per turn it records the streamed reply,
   the tools called (`create_code`, `edit_document` with its result, e.g.
   `Viewed …`, `park_idea`, `stay_silent`, …), the app's HTML when it changed,

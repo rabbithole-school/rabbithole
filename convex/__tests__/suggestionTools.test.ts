@@ -43,7 +43,7 @@ async function runTool(
 }
 
 describe("makeSuggestionTools gating (teacher+ only, no env flag)", () => {
-  test("exposes exactly the two tools for a teacher", async () => {
+  test("exposes exactly the four tools for a teacher", async () => {
     const tools = await makeSuggestionTools(stubCtx({}), vi.fn(), {
       role: "teacher",
       callerUserId: CALLER_ID,

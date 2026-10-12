@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "c6aa95887d74e437f3d385bb2c6d7a075ced399f",
+  "sourceCommit": "ae5dcbe9ecb03a7ea54ab8f0657c288c0a3700c4",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -6869,7 +6869,7 @@
     },
     {
       "path": "convex/__tests__/suggestionTools.test.ts",
-      "sha256": "17b2db801bde746a93faae9be3b24a1cdac4eacfed91e2e9b1efc215547db109",
+      "sha256": "2d328e6578f7b0c7a1e725c4773367a06be22532ec77e5dc602577350dc9626f",
       "mode": "100644"
     },
     {
@@ -8639,7 +8639,7 @@
     },
     {
       "path": "convex/lib/botTools.ts",
-      "sha256": "6e0baa1938d37de2596d8b9c75cda6fc6381e7ca66cffc6737b5383816cd217f",
+      "sha256": "9918e3d27a5163c87c692b5abab72d97d846ffa96b0f591ab5057ad44a9eedad",
       "mode": "100644"
     },
     {
@@ -11929,7 +11929,7 @@
     },
     {
       "path": "evals/designer-steer/README.md",
-      "sha256": "f0c3cda0aa00f6448a71b21443e69d5fcb54c09c99a41b9bb647c16bb489965d",
+      "sha256": "c285dab4ca6b4f7b617d41dd7a54fd5f3ec603afdb5ba5ffb088af1b7dee2c37",
       "mode": "100644"
     },
     {
@@ -17044,7 +17044,7 @@
     },
     {
       "path": "native/src/components/vibecode/VibecodeModeControl.tsx",
-      "sha256": "fc2d3134929fe093a9125ddb0ab87cae4c23368425709c208a3d3b7568c5383d",
+      "sha256": "02295a8a6319c42a6ade184aa97882a858870253423a21f495b774b951e3e59b",
       "mode": "100644"
     },
     {
@@ -21163,5 +21163,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "78a7a5c0ed2c7b3941f8fd018a829c9909805b9e7aaaf65627b2d748ac380a70"
+  "treeHash": "6d149b5319ae0a7429116e0ac49863fc0cce54743d6b9ef618b4072f9ed9b8c4"
 }
