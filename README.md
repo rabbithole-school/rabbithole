@@ -38,4 +38,16 @@ pnpm test
 pnpm build
 ```
 
+To run it on this computer with a fictional school, a local backend, and no
+accounts (macOS or Linux, Node 22, pnpm 10):
+
+```bash
+pnpm local:setup    # install, start a local Convex backend, seed, start the web app
+pnpm local:status
+pnpm local:stop
+```
+
+It prints `/dev-login` links for a teacher, a scholar, and a parent. It refuses
+to run against a cloud Convex deployment.
+
 The native Expo application lives in `native/`.

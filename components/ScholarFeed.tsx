@@ -19,6 +19,7 @@ import type { ScholarTabKey } from "@/components/ScholarProfile";
 import { readingTileCaption } from "@/components/readingTileCaption";
 import { useNow } from "@/hooks/useNow";
 import { roundsWeekLabel } from "@/lib/roundsCadence";
+import { talkLevelLabel, talkLevelToNumber } from "@/convex/lib/readingLevels";
 import {
   systemAttentionCopy,
   systemAttentionHeadline,
@@ -35,11 +36,12 @@ import {
 // links into the tab that owns the detail. No new data — everything here is
 // already queried elsewhere; Convex dedupes the subscriptions.
 
-const READING_NUM = (level: string): number =>
-  level === "K" ? 0.5 : level === "college" ? 13 : parseFloat(level) || 0;
+// Talk-level history (TRA-503): the shared helpers plot and label a legacy
+// "pre-reader" row as K, never "Gr pre-reader" or NaN.
+const READING_NUM = (level: string): number => talkLevelToNumber(level) ?? 0;
 
 const fmtLevel = (level: string | null | undefined): string =>
-  !level ? "—" : level === "K" ? "K" : level === "college" ? "College" : `Gr ${level}`;
+  (talkLevelLabel(level) ?? "—").replace(/^Grade /, "Gr ");
 
 /**
  * How each record-eligible alert kind renders as a feed row. The allowlist that
@@ -363,7 +365,7 @@ export function ScholarFeed({
         seedAction: { seedId: s._id, added: s.status === "active" },
       });
     }
-    // Reading level-ups: each history entry that rose above the previous.
+    // Talk level-ups: each history entry that rose above the previous.
     const hist = [...readingHistory].sort((a, b) => a._creationTime - b._creationTime);
     for (let i = 1; i < hist.length; i++) {
       if (READING_NUM(hist[i].level) > READING_NUM(hist[i - 1].level)) {
@@ -372,7 +374,7 @@ export function ScholarFeed({
           ts: hist[i]._creationTime,
           emoji: "📈",
           iconBg: "violet.100",
-          lead: (<>Reading level rose to <b>{fmtLevel(hist[i].level).replace("Gr", "Grade")}</b></>),
+          lead: (<>Talk level rose to <b>{fmtLevel(hist[i].level).replace("Gr", "Grade")}</b></>),
           meta: `up from ${fmtLevel(hist[i - 1].level)}`,
         });
       }
@@ -556,7 +558,7 @@ export function ScholarFeed({
           )}
         </Tile>
 
-        <Tile label="Reading" onClick={onOpenReading ?? (onOpenTab ? () => onOpenTab("map") : undefined)}>
+        <Tile label="Talk level" onClick={onOpenReading ?? (onOpenTab ? () => onOpenTab("map") : undefined)}>
           <Text fontSize="xl" fontWeight="800" fontFamily="heading" color="navy.500" lineHeight="1">
             {fmtLevel(scholar?.readingLevel)}
           </Text>

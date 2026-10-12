@@ -2,7 +2,6 @@ import { describe, expect, test } from "vitest";
 import type { Id } from "../_generated/dataModel";
 import {
   resolveContextIdentity,
-  resolveReadingLevel,
   friendlyScholarName,
   resolveSessionHistory,
   buildMasteryContext,
@@ -70,68 +69,6 @@ describe("resolveContextIdentity", () => {
     expect(
       resolveContextIdentity({ userId: user("teacher"), isTestDrive: true }),
     ).toEqual({ isSyntheticView: false, contextUserId: user("teacher") });
-  });
-});
-
-describe("resolveReadingLevel", () => {
-  test("override wins regardless of mode", () => {
-    expect(
-      resolveReadingLevel({
-        isSyntheticView: false,
-        readingLevelOverride: "3",
-        syntheticReadingLevel: "5",
-        scholarReadingLevel: "8",
-      }),
-    ).toBe("3");
-    expect(
-      resolveReadingLevel({
-        isSyntheticView: true,
-        readingLevelOverride: "3",
-        syntheticReadingLevel: "5",
-        scholarReadingLevel: "8",
-      }),
-    ).toBe("3");
-  });
-
-  test("synthetic mode uses the synthetic level when no override", () => {
-    expect(
-      resolveReadingLevel({
-        isSyntheticView: true,
-        readingLevelOverride: undefined,
-        syntheticReadingLevel: "5",
-        scholarReadingLevel: "8",
-      }),
-    ).toBe("5");
-  });
-
-  test("real mode uses the scholar's stored level when no override", () => {
-    expect(
-      resolveReadingLevel({
-        isSyntheticView: false,
-        readingLevelOverride: undefined,
-        syntheticReadingLevel: "5",
-        scholarReadingLevel: "8",
-      }),
-    ).toBe("8");
-  });
-
-  test("falls back to null", () => {
-    expect(
-      resolveReadingLevel({
-        isSyntheticView: false,
-        readingLevelOverride: undefined,
-        syntheticReadingLevel: undefined,
-        scholarReadingLevel: null,
-      }),
-    ).toBeNull();
-    expect(
-      resolveReadingLevel({
-        isSyntheticView: true,
-        readingLevelOverride: undefined,
-        syntheticReadingLevel: undefined,
-        scholarReadingLevel: "8",
-      }),
-    ).toBeNull();
   });
 });
 

@@ -15,6 +15,7 @@ import { MarkdownBlock } from "@/components/StreamingMarkdown";
 import { StreamingText } from "@/components/StreamingText";
 import { ToolActivityIndicator } from "@/components/ToolActivityIndicator";
 import { pendingTurnLabel } from "@/shared/streamRetry";
+import { stripYourTurnMarkers } from "@/shared/beginnerReading";
 
 export interface SessionTranscriptMessage {
   id: string;
@@ -155,6 +156,9 @@ export function SessionAssistantMessageBody({
   // leaves this undefined to avoid double-rendering.
   stopRequestedAt?: number | null;
 }) {
+  // A beginner's "your turn" line (TRA-504) shows as its words here; only the
+  // iPad styles it as the child's line so far.
+  const shown = stripYourTurnMarkers(content);
   return (
     <Box
       className="chat-markdown"
@@ -163,9 +167,9 @@ export function SessionAssistantMessageBody({
       color="charcoal.500"
     >
       <StreamingText
-        content={content}
+        content={shown}
         done={!isStreaming}
-        settled={settled ?? <MarkdownBlock content={content} />}
+        settled={settled ?? <MarkdownBlock content={shown} />}
       />
       {generatingImage && (
         <Flex align="center" gap={2} mt={2}>
@@ -275,11 +279,18 @@ function TutorThinkingIndicator({
  * retyping, no duplicate message). Shown only when the placeholder is dead —
  * the client gave up, or the server's orphan-reap window has passed.
  */
-export function TutorTurnFailedNotice({ onRetry }: { onRetry: () => void }) {
+export function TutorTurnFailedNotice({
+  onRetry,
+  note,
+}: {
+  onRetry: () => void;
+  /** Why, when it's worth saying (a busy server's honest wait). */
+  note?: string | null;
+}) {
   return (
-    <Flex align="center" gap={2} alignSelf="flex-start" px={4} py={1}>
+    <Flex align="center" gap={2} alignSelf="flex-start" px={4} py={1} wrap="wrap">
       <Text fontSize="sm" fontFamily="body" color="charcoal.300">
-        Didn&apos;t go through
+        {note ?? "Didn't go through"}
       </Text>
       <Button
         size="xs"

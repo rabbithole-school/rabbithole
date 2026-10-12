@@ -9,7 +9,13 @@ import { plantTeacherSeed } from "./lib/seeds";
 import { toKeyedGranules } from "./lib/granules";
 import { institutionIdForUnitAuthor } from "./lib/unitAccess";
 import { ROLES } from "./lib/roles";
-import { isValidReadingLevel } from "./lib/readingLevels";
+import {
+  isValidReadingLevel,
+  legacyPreReaderSplit,
+  readLevelValidator,
+  writeModeValidator,
+} from "./lib/readingLevels";
+import { writeReadWriteLevels } from "./scholars";
 import { deleteUserCore } from "./users";
 import { moveLessonToUnitCore } from "./lessons";
 import type { Doc, Id } from "./_generated/dataModel";
@@ -679,45 +685,70 @@ export const updateScholarDossier = internalMutation({
 });
 
 /**
- * Set (or clear) a scholar's reading level. Mirrors
- * `scholars.updateReadingLevel`: validates the level, patches the user,
- * clears any pending AI suggestion, and records a teacher-sourced history
- * row. `readingLevel: null` clears the level. Role gating (teacher/admin)
- * is in the assembler.
+ * Set (or clear) any of a scholar's three levels (TRA-503). Mirrors
+ * `scholars.updateReadingLevel` / `updateReadLevel` / `updateWriteMode`:
+ * validates, patches the user, records a teacher-sourced history row per
+ * changed dimension. A TALK change also clears any pending AI suggestion. Each
+ * arg is optional (omit = leave alone); `null` clears that level. Role gating
+ * (teacher/admin) is in the assembler.
  */
 export const setScholarReadingLevel = internalMutation({
   args: {
     callerUserId: v.id("users"),
     scholarId: v.id("users"),
-    readingLevel: v.union(v.string(), v.null()),
+    readingLevel: v.optional(v.union(v.string(), v.null())),
+    readLevel: v.optional(v.union(readLevelValidator, v.null())),
+    writeMode: v.optional(v.union(writeModeValidator, v.null())),
   },
   handler: async (ctx, args) => {
-    if (args.readingLevel !== null && !isValidReadingLevel(args.readingLevel)) {
+    if (
+      args.readingLevel !== undefined &&
+      args.readingLevel !== null &&
+      !isValidReadingLevel(args.readingLevel)
+    ) {
       throw new Error(
-        `Invalid reading level "${args.readingLevel}". Use "K", a grade like "3" or "5.4", or "college".`,
+        `Invalid talk level "${args.readingLevel}". Use "K", a grade like "3" or "5.4", or "college". For a scholar who can't read yet, set readLevel to "listener".`,
       );
     }
     const scholar = await ctx.db.get(args.scholarId);
     if (!scholar || scholar.role !== ROLES.SCHOLAR) {
       throw new Error("Scholar not found");
     }
-    await ctx.db.patch(args.scholarId, {
-      readingLevel: args.readingLevel ?? undefined,
-      // Mirror scholars.updateReadingLevel: the teacher has ruled, so the pending
-      // writing-derived estimate and its timestamp are both superseded.
-      // DEPENDS ON pending schema addition users.readingLevelSuggestionAt.
-      readingLevelSuggestion: undefined,
-      readingLevelSuggestionAt: undefined,
+    // Read/write first: it splits a legacy "pre-reader" (talk → K) before a
+    // talk change below can overwrite it.
+    await writeReadWriteLevels(ctx, {
+      scholarId: args.scholarId,
+      changedBy: args.callerUserId,
+      readLevel: args.readLevel,
+      writeMode: args.writeMode,
     });
-    if (args.readingLevel !== null) {
-      await ctx.db.insert("readingLevelHistory", {
-        scholarId: args.scholarId,
-        level: args.readingLevel,
-        source: "teacher",
-        changedBy: args.callerUserId,
+    if (args.readingLevel !== undefined) {
+      const current = await ctx.db.get(args.scholarId);
+      const legacy = current ? legacyPreReaderSplit(current) : null;
+      await ctx.db.patch(args.scholarId, {
+        ...(legacy ? { readLevel: legacy.readLevel } : {}),
+        readingLevel: args.readingLevel ?? undefined,
+        // Mirror scholars.updateReadingLevel: the teacher has ruled, so the
+        // pending writing-derived estimate and its timestamp are superseded.
+        // DEPENDS ON pending schema addition users.readingLevelSuggestionAt.
+        readingLevelSuggestion: undefined,
+        readingLevelSuggestionAt: undefined,
       });
+      if (args.readingLevel !== null) {
+        await ctx.db.insert("readingLevelHistory", {
+          scholarId: args.scholarId,
+          dimension: "talk",
+          level: args.readingLevel,
+          source: "teacher",
+          changedBy: args.callerUserId,
+        });
+      }
     }
-    return { readingLevel: args.readingLevel };
+    return {
+      readingLevel: args.readingLevel,
+      readLevel: args.readLevel,
+      writeMode: args.writeMode,
+    };
   },
 });
 

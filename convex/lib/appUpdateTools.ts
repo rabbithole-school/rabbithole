@@ -249,6 +249,44 @@ export function appUpdateInstruction(args: {
     (args.canStaySilent
       ? ` To say nothing, call ${STAY_SILENT_TOOL_NAME} before writing any text.`
       : "") +
+    APP_UPDATE_VOICE_RULE +
+    (args.hasCharacter && args.canStaySilent
+      ? ` Anything you write before a director tool call is discarded unseen, ` +
+        `so if you also speak, speak after it.`
+      : "") +
     `]`
   );
+}
+
+/**
+ * The voice rule for an app-update turn, at the model's decision point (the
+ * same place stay_silent is offered). The tutor's reasoning has a private
+ * channel (its adaptive thinking; lib/tutorModel), and its text has none:
+ * every word of it streams to the scholar's line strip. TRA-477.
+ */
+export const APP_UPDATE_VOICE_RULE =
+  ` Every word of text you write goes straight to the scholar, so your first ` +
+  `word is addressed to them. Do all your weighing in your private thinking, ` +
+  `never in the reply: do not describe what happened in the app, and never ` +
+  `say "the notes say" or "the author", never name a verdict, stage, part, ` +
+  `loophole, or app-state field, and never read a [bracketed placeholder] ` +
+  `aloud. Speak only in your own voice as the tutor, in the scholar's register.`;
+
+/**
+ * An app update with no asks holds the model's text until its first tool
+ * decision (convex/http.ts). stay_silent drops it, and so does a director
+ * tool on such a turn: the scholar never sees a direction, so text written
+ * before one is the tutor talking to itself about the play ("Biscuit did
+ * something useless… the notes say this is the moment"), never a line for
+ * the scholar. Any other tool, or the end of the message, releases it.
+ */
+export function heldTextFateAtTool(
+  toolName: string | undefined,
+  args: { quietAppUpdate: boolean; directorToolNames: ReadonlySet<string> },
+): "drop" | "release" {
+  if (toolName === STAY_SILENT_TOOL_NAME) return "drop";
+  if (args.quietAppUpdate && args.directorToolNames.has(toolName ?? "")) {
+    return "drop";
+  }
+  return "release";
 }

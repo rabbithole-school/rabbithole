@@ -11,6 +11,11 @@ import { promptVisualValidator } from "./lib/practice/promptVisual";
 import type { ErrorPattern } from "./lib/practice/errorPatterns";
 import { healthRecordSchemaFields } from "./lib/healthRecord";
 import { inputModalityValidator } from "./lib/inputModality";
+import {
+  levelDimensionValidator,
+  readLevelValidator,
+  writeModeValidator,
+} from "./lib/readingLevels";
 import { asamTransitionReasonValidator } from "./lib/deviceActivityValidators";
 import { policyIRValidator } from "../lib/simulator/policyIR";
 import { preflightResultValidator } from "./lib/curriculumPreflightResult";
@@ -395,7 +400,14 @@ const sessionTableFields = {
     pulseScore: v.optional(v.number()),
     teacherWhisper: v.optional(v.string()),
     pendingWhisper: v.optional(v.string()),
+    // Per-session TALK level override (teacher-only, `sessions.update`). A
+    // legacy "pre-reader" value here reads as talk K + read listener until
+    // `migrations:splitPreReaderLevels` moves it (lib/readingLevels.ts).
     readingLevelOverride: v.optional(v.string()),
+    // Per-session READ level override (TRA-503) — wins over the scholar's
+    // `readLevel`. The migration target for a "pre-reader" talk override, and
+    // how a teacher rehearses voice-first in their own session.
+    readLevelOverride: v.optional(readLevelValidator),
     // Time limit mode (parent-set)
     sessionTimeLimit: v.optional(v.number()), // minutes
     sessionStartTime: v.optional(v.number()), // timestamp ms
@@ -1146,6 +1158,7 @@ export default defineSchema({
     .index("by_institution", ["institutionId"]),
 
   // Override the users table to include both auth fields and our custom fields
+
   users: defineTable({
     // Auth fields (from @convex-dev/auth)
     name: v.optional(v.string()),
@@ -1225,7 +1238,16 @@ export default defineSchema({
     //     audit trail of a child's pronoun changes is exactly the artifact that
     //     could out them years later. Last write wins; nothing is logged.
     pronouns: v.optional(v.string()),
+    // TALK level — the grade band the tutor talks at (teacher UI: "Talk
+    // level"). Legacy "pre-reader" values read as talk K + read listener until
+    // `migrations:splitPreReaderLevels` runs. See lib/readingLevels.ts.
     readingLevel: v.optional(v.string()),
+    // READ level (TRA-503): listener | beginner | reader — how the tutor's
+    // words arrive. Unset = reader. Teacher-set only; Mentava may suggest.
+    readLevel: v.optional(readLevelValidator),
+    // WRITE mode (TRA-503): own | voice — how the scholar's words get in.
+    // Unset = own. Teacher-set only.
+    writeMode: v.optional(writeModeValidator),
     // WRITING-DERIVED grade estimate pending teacher review. Every input is the
     // scholar's own production (typed tutor chat + OCR'd handwritten work); nothing
     // observes what they can READ. Not a Lexile measure, not a normed assessment,
@@ -2169,6 +2191,11 @@ export default defineSchema({
     // How this user turn entered the composer. Optional preserves historical
     // rows and messages sent by older native clients during rollout.
     inputModality: v.optional(inputModalityValidator),
+    // Beginner reader (TRA-504): this spoken turn is the scholar READING ALOUD
+    // the "your turn" line of the reply before it, started from the line's own
+    // mic. Holds that line (copied server-side from the previous tutor reply,
+    // never from the client) so the tutor can check the reading word by word.
+    readAloudOf: v.optional(v.string()),
     // App designer (TRA-301): which of the session's two threads this turn
     // belongs to. Edit talks to the DESIGNER (code tools, versions); Play talks
     // to the TUTOR (no code tools, never a version). Stamped server-side from
@@ -8833,8 +8860,12 @@ export default defineSchema({
     .index("by_document", ["documentId"])
     .index("by_scholar", ["scholarId"]),
 
+  // Every human-ratified level change, for all three levels (TRA-503). `level`
+  // holds the dimension's value ("3", "listener", "voice"); `dimension` unset
+  // means talk, so every row written before the split is a talk row.
   readingLevelHistory: defineTable({
     scholarId: v.id("users"),
+    dimension: v.optional(levelDimensionValidator),
     level: v.string(),
     source: v.union(v.literal("teacher"), v.literal("observer")),
     changedBy: v.optional(v.id("users")),
@@ -10450,7 +10481,7 @@ export default defineSchema({
     text: v.string(),
     // The kid's named approach — "how will you try?" (SRL forethought).
     strategy: v.optional(v.string()),
-    // ISO date (YYYY-MM-DD) of the Monday that anchors the goal's week (HST).
+    // ISO date (YYYY-MM-DD) of the school-local Monday that anchors the goal's week.
     weekOf: v.string(),
     // A scholar-set goal is `active` the moment it's set (scholar owns it —
     // no approval gate). `proposed` is only a teacher SUGGESTION awaiting the

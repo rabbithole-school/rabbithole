@@ -39,6 +39,7 @@ const STAFF_TOOL_LABELS: Record<string, string> = {
   get_scholar_signals: "Reading session signals",
   get_seeds: "Loading exploration seeds",
   get_mentava_progress: "Reading Mentava progress",
+  link_mentava_student: "Linking a Mentava student",
   get_scholar_seeds: "Loading exploration seeds",
   get_observations: "Reading observations",
   get_scholar_observations: "Reading observations",

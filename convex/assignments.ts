@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import { talkLevelOf } from "./lib/readingLevels";
 import { publishUnitOnAssign } from "./lib/unitPublication";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -1829,7 +1830,7 @@ export const get = teacherQuery({
           name: s?.name ?? s?.username ?? "(unknown)",
           username: s?.username ?? null,
           image: s?.image ?? null,
-          readingLevel: s?.readingLevel ?? null,
+          readingLevel: talkLevelOf(s?.readingLevel),
           sessionId: session?._id ?? null,
           sessionStartedAt: session?._creationTime ?? null,
           lastMessageAt: lastMsg?._creationTime ?? null,
@@ -2125,7 +2126,7 @@ export const getForReview = teacherQuery({
           sessionCreatedAt: proj._creationTime,
           name: scholar?.name ?? null,
           image: scholar?.image ?? null,
-          readingLevel: scholar?.readingLevel ?? null,
+          readingLevel: talkLevelOf(scholar?.readingLevel),
           dateOfBirth: scholar?.dateOfBirth ?? null,
           pulseScore: proj.pulseScore ?? null,
           lastMessageAt: lastMsg?._creationTime ?? null,
@@ -3514,7 +3515,7 @@ export async function coreAideListAssignments(
  *  one item per (assignment, activity) push, optionally windowed to
  *  [from, to) by agenda position. The primary read for bulk reschedules
  *  ("everything in the week of X"). Times are epoch-ms; the tool layer
- *  attaches human HST labels. */
+ *  attaches human school-local labels. */
 export async function coreAideSchedule(
   ctx: QueryCtx,
   callerUserId: Id<"users">,

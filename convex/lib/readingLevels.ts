@@ -1,3 +1,7 @@
+// The young-reader TURN RULES (TRA-501: turn length, one question, no option
+// menus, repair) are a third, separate piece, keyed on read AND talk
+// (`needsYoungReaderTurnRules`). Listener delivery covers only what voice
+// adds on top, so no rule is stated twice.
 // Single source of truth for scholar reading levels.
 //
 // ⚠️ WHAT THIS VALUE IS, AND WHAT IT IS NOT
@@ -8,10 +12,8 @@
 //   • The CONFIRMED level (`users.readingLevel`, appended to
 //     `readingLevelHistory` when a teacher sets or accepts it) is a
 //     HUMAN-RATIFIED SETTING that the system ACTS ON. It is rendered verbatim
-//     into the tutor's READING LEVEL prompt section (`sessionHelpers`), and
-//     `pre-reader` switches the tutor to a K register with voice-first UI
-//     defaults. A teacher owns it, and "the level we adapt reading TO" is a
-//     legitimate reading construct.
+//     into the tutor's READING LEVEL prompt section (`sessionHelpers`). It is
+//     the TALK level (see "Talk, read, write" below). A teacher owns it.
 //
 //   • The COMPUTED estimate (`users.readingLevelSuggestion`) is current
 //     evidence, not a setting. It is WRITING-DERIVED: every input to
@@ -42,12 +44,33 @@
 // the tutor's READING LEVEL prompt section (`sessionHelpers`) — so any string
 // here must read naturally after "the scholar's reading level is set to …".
 //
-// Alongside the grade bands there is one non-grade TIER — `pre-reader` — for a
-// scholar who can't decode text yet (age ~4–6). It is deliberately NOT a member
-// of VALID_READING_LEVELS (which enumerates the K→college grade bands and feeds
-// grade dropdowns + the AI estimator's normalization): pre-reader drives a
-// dedicated tutor register + voice-first UI defaults rather than a vocabulary
-// tweak. A teacher may still *assign* it, so `isValidReadingLevel` accepts it.
+// ── Talk, read, write (TRA-503) ─────────────────────────────────────────
+//
+// One grade can't describe a young scholar whose talking, reading and writing
+// sit years apart, so a scholar carries THREE levels:
+//
+//   • TALK  — `users.readingLevel` (+ `sessions.readingLevelOverride`): the grade
+//             band above. Teacher UI calls it "Talk level". It drives the
+//             tutor's vocabulary and register. (The stored field keeps its old
+//             name; renaming it is a migration with no payoff.)
+//   • READ  — `users.readLevel`: listener | beginner | reader. How the tutor's
+//             words arrive. Unset = reader (today's behavior). `listener` is
+//             the voice-first tier (TRA-492's voice loop, the K register).
+//   • WRITE — `users.writeMode`: own | voice. How the child's words get in.
+//             Unset = own. `voice` tells the tutor to offer the mic first and
+//             never ask the child to type.
+//
+// A teacher sets read and write; no machine writes them without a human
+// (Mentava only SUGGESTS a read level — `lib/mentava.ts`).
+//
+// LEGACY: the old non-grade tier `pre-reader` lived in the talk field. It now
+// means read `listener` + talk `K` (`migrations:splitPreReaderLevels`). Until
+// that migration runs — and until a later PR narrows it away — every reader
+// goes through `talkLevelOf` / `readLevelOf` / `resolveEffectiveLevels` below,
+// which treat a stored `pre-reader` exactly that way. No consumer may compare a
+// level against "pre-reader" itself.
+
+import { v } from "convex/values";
 
 /** Every valid reading level, in ascending order (K → 12.9 → college). */
 export const VALID_READING_LEVELS: string[] = (() => {
@@ -65,26 +88,17 @@ export const VALID_READING_LEVELS: string[] = (() => {
 const VALID_SET = new Set(VALID_READING_LEVELS);
 
 /**
- * The pre-reader tier: a scholar (age ~4–6) whose reasoning runs years ahead of
- * her decoding. A recognized reading-level value that flows through the existing
- * `resolveReadingLevel` machinery (so a per-session `readingLevelOverride` lets a
- * teacher test-drive it), but a distinct *tier* — not a grade band. It activates
- * the K tutor register (`buildPreReaderSection`) and voice-first UI defaults.
+ * LEGACY talk-field value for what is now read `listener` + talk `K`. Kept only
+ * so the dual-read helpers below recognise un-migrated rows; no setter accepts
+ * it any more. Remove with the narrowing follow-up to TRA-503.
  */
 export const PRE_READER_LEVEL = "pre-reader";
 
-/** Is the resolved reading level the pre-reader tier? */
-export function isPreReader(level: string | null | undefined): boolean {
-  return level === PRE_READER_LEVEL;
-}
-
 /**
- * The early-reader tier: a graded level from K through 2.9 — a scholar who can
- * decode but reads at a K–2 level. Unlike `pre-reader` this is not a separate
- * stored value; it is a band of the ordinary grade levels that swaps the generic
+ * The early-reader band: a TALK level from K through 2.9. It swaps the generic
  * reading-level sentence for the early-reader register
- * (`buildEarlyReaderSection`). Pre-readers are NOT early readers (they get their
- * own register), and an unset level is neither.
+ * (`buildEarlyReaderSection`). A `listener` gets its own register instead, the
+ * legacy `pre-reader` string is not a band, and an unset level is neither.
  */
 export function isEarlyReader(
   level: string | null | undefined,
@@ -99,24 +113,30 @@ export function isEarlyReader(
  * Does this scholar get the young-reader TURN RULES — short turns, one
  * question, no text menus, voice-first repair (TRA-501)?
  *
- * The ONE seam for "who gets these rules". Today it is every pre-reader and
- * early reader (K–2.9). The talk/read/write split (TRA-503) re-points it at
- * the new read/write levels ("read below reader, or write by voice") without
- * touching its callers: the tutor prompt's reading-level slot and the
- * completion-closing pool both ask this, never the tier predicates directly.
+ * The ONE seam for "who gets these rules"; the tutor prompt's levels slot
+ * (`selectLevelSections`) and the completion-closing pool both ask this,
+ * never the tier predicates directly.
+ *
+ * Keyed on the talk/read split (TRA-503): anyone who doesn't read
+ * independently yet (read `listener` or `beginner`) gets them at ANY talk
+ * level, since the turn's shape is about getting the words in and out, not
+ * about the ideas. An early TALK level (K–2.9) keeps them too. A stored legacy
+ * "pre-reader" resolves to listener first (`resolveEffectiveLevels`).
  */
-export function needsYoungReaderTurnRules(
-  level: string | null | undefined,
-): boolean {
-  return isPreReader(level) || isEarlyReader(level);
+export function needsYoungReaderTurnRules(levels: {
+  talk: string | null;
+  read: ReadLevel;
+}): boolean {
+  return levels.read !== "reader" || isEarlyReader(levels.talk);
 }
 
 /**
- * Is `level` a value a teacher may assign — one of the canonical grade bands OR
- * the pre-reader tier?
+ * Is `level` a talk level a teacher may assign — one of the canonical grade
+ * bands? The legacy `pre-reader` value is no longer assignable: a scholar who
+ * can't read yet is talk `K` (or higher) with read `listener`.
  */
 export function isValidReadingLevel(level: string): boolean {
-  return VALID_SET.has(level) || level === PRE_READER_LEVEL;
+  return VALID_SET.has(level);
 }
 
 /**
@@ -213,4 +233,283 @@ export function decideEstimateWrite(args: {
   }
   if (valueUnchanged) return { action: "refreshed", nextSuggestion };
   return { action: agrees ? "cleared" : "stored", nextSuggestion };
+}
+
+// ── Talk, read, write helpers (TRA-503) ──────────────────────────────────
+
+/** How the tutor's words reach the scholar. Unset means `reader`. */
+export const READ_LEVELS = ["listener", "beginner", "reader"] as const;
+export type ReadLevel = (typeof READ_LEVELS)[number];
+export const DEFAULT_READ_LEVEL: ReadLevel = "reader";
+
+/** How the scholar's words get in. Unset means `own`. */
+export const WRITE_MODES = ["own", "voice"] as const;
+export type WriteMode = (typeof WRITE_MODES)[number];
+export const DEFAULT_WRITE_MODE: WriteMode = "own";
+
+/** Which of the three levels a `readingLevelHistory` row records. */
+export type LevelDimension = "talk" | "read" | "write";
+
+export const readLevelValidator = v.union(
+  v.literal("listener"),
+  v.literal("beginner"),
+  v.literal("reader"),
+);
+export const writeModeValidator = v.union(v.literal("own"), v.literal("voice"));
+export const levelDimensionValidator = v.union(
+  v.literal("talk"),
+  v.literal("read"),
+  v.literal("write"),
+);
+
+export function isReadLevel(value: unknown): value is ReadLevel {
+  return (READ_LEVELS as readonly unknown[]).includes(value);
+}
+
+export function isWriteMode(value: unknown): value is WriteMode {
+  return (WRITE_MODES as readonly unknown[]).includes(value);
+}
+
+/** Teacher-facing labels (sentence case). Scholars never see their levels. */
+export const READ_LEVEL_LABELS: Record<ReadLevel, string> = {
+  listener: "Listener",
+  beginner: "Beginner",
+  reader: "Reader",
+};
+export const WRITE_MODE_LABELS: Record<WriteMode, string> = {
+  own: "On their own",
+  voice: "By voice",
+};
+
+/**
+ * The TALK level a stored talk-field value means: identity for every grade
+ * band; the legacy `pre-reader` value means talk `K`.
+ */
+export function talkLevelOf(level: string | null | undefined): string | null {
+  if (!level) return null;
+  return level === PRE_READER_LEVEL ? "K" : level;
+}
+
+/**
+ * A scholar's READ level: the stored field when set, else `listener` for an
+ * un-migrated `pre-reader` talk value, else `reader`.
+ */
+export function readLevelOf(
+  scholar:
+    | { readLevel?: ReadLevel | null; readingLevel?: string | null }
+    | null
+    | undefined,
+): ReadLevel {
+  if (scholar?.readLevel) return scholar.readLevel;
+  return scholar?.readingLevel === PRE_READER_LEVEL
+    ? "listener"
+    : DEFAULT_READ_LEVEL;
+}
+
+/**
+ * The patch that splits an un-migrated `pre-reader` scholar (or session) into
+ * talk `K` + read `listener`, or null when there's nothing legacy to split.
+ * Shared by the migration and by every talk/read SETTER, so a teacher editing
+ * one level before the migration has run never silently drops the other (a
+ * talk edit would otherwise overwrite "pre-reader" and lose the listener).
+ * An explicit read level already stored wins over the inferred `listener`.
+ */
+export function legacyPreReaderSplit(row: {
+  readingLevel?: string | null;
+  readLevel?: ReadLevel | null;
+}): { readingLevel: string; readLevel: ReadLevel } | null {
+  if (row.readingLevel !== PRE_READER_LEVEL) return null;
+  return { readingLevel: "K", readLevel: row.readLevel ?? "listener" };
+}
+
+/** A scholar's WRITE mode: the stored field, else `own`. */
+export function writeModeOf(
+  scholar: { writeMode?: WriteMode | null } | null | undefined,
+): WriteMode {
+  return scholar?.writeMode ?? DEFAULT_WRITE_MODE;
+}
+
+/** The talk/read/write a tutor session runs with, after every override. */
+export interface EffectiveLevels {
+  /** The talk grade band, or null when unset. Never the legacy `pre-reader`. */
+  talk: string | null;
+  read: ReadLevel;
+  write: WriteMode;
+}
+
+/**
+ * The ONE resolver for a session's effective levels. The tutor prompt, the
+ * grapheme gate, the completion-closing pool and both clients' voice mode all
+ * read it, so a per-session override moves every one of them together.
+ *
+ * Precedence, per dimension:
+ *  • talk  — `readingLevelOverride` > (synthetic view: the synthetic level |
+ *            otherwise: the context scholar's level), then `talkLevelOf`.
+ *  • read  — `readLevelOverride` > a legacy `pre-reader` talk override or
+ *            synthetic level (= listener) > (synthetic view: reader |
+ *            otherwise: the context scholar's read level).
+ *  • write — the context scholar's write mode; a synthetic view is `own`.
+ */
+export function resolveEffectiveLevels(args: {
+  isSyntheticView: boolean;
+  session: {
+    readingLevelOverride?: string;
+    readLevelOverride?: ReadLevel;
+    testDriveSyntheticReadingLevel?: string;
+  };
+  scholar:
+    | {
+        readingLevel?: string | null;
+        readLevel?: ReadLevel | null;
+        writeMode?: WriteMode | null;
+      }
+    | null
+    | undefined;
+}): EffectiveLevels {
+  const { isSyntheticView, session, scholar } = args;
+  const sessionTalk = isSyntheticView
+    ? (session.readingLevelOverride ?? session.testDriveSyntheticReadingLevel)
+    : session.readingLevelOverride;
+  const rawTalk = isSyntheticView
+    ? (sessionTalk ?? null)
+    : (sessionTalk ?? scholar?.readingLevel ?? null);
+  const read: ReadLevel =
+    session.readLevelOverride ??
+    (sessionTalk === PRE_READER_LEVEL
+      ? "listener"
+      : isSyntheticView
+        ? DEFAULT_READ_LEVEL
+        : readLevelOf(scholar));
+  return {
+    talk: talkLevelOf(rawTalk),
+    read,
+    write: isSyntheticView ? DEFAULT_WRITE_MODE : writeModeOf(scholar),
+  };
+}
+
+/**
+ * Plot position for a talk level on a trend line: K = 0.5, college = 13, a
+ * grade its number; a legacy `pre-reader` row plots as K. Null for anything
+ * unparseable, so a chart skips it instead of drawing NaN.
+ */
+export function talkLevelToNumber(
+  level: string | null | undefined,
+): number | null {
+  const talk = talkLevelOf(level);
+  if (!talk) return null;
+  if (talk === "K") return 0.5;
+  if (talk === "college") return 13;
+  const n = Number.parseFloat(talk);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** "K", "College" or "Grade 3.4"; null when unset. Legacy `pre-reader` → "K". */
+export function talkLevelLabel(
+  level: string | null | undefined,
+): string | null {
+  const talk = talkLevelOf(level);
+  if (!talk) return null;
+  if (talk === "K") return "K";
+  if (talk === "college") return "College";
+  return `Grade ${talk}`;
+}
+
+// ── Talk decides WHAT, read decides HOW ──────────────────────────────────
+//
+// TALK picks the tutor's register (vocabulary, ideas, sentence size). READ
+// picks only how the words arrive. A talk-7 listener (a twice-exceptional
+// eight-year-old who follows grade-9 ideas by ear) gets grade-7 wording,
+// delivered by voice. The one place the two meet is the K register: a listener
+// whose talk level is K or unset keeps the existing pre-reader register, which
+// already carries the spoken-delivery rules (today's pre-reader behavior).
+//
+// The young-reader TURN RULES (TRA-501: turn length, one question, no option
+// menus, repair) are a third, separate piece, keyed on read AND talk
+// (`needsYoungReaderTurnRules`). Listener delivery covers only what voice adds
+// on top, so no rule is stated twice.
+
+/** Which talk register the tutor uses. */
+export type TutorRegister = "preReader" | "earlyReader" | "generic" | "none";
+
+/** The level-driven pieces of the tutor prompt, chosen from the levels alone. */
+export interface LevelSections {
+  register: TutorRegister;
+  /** The young-reader turn rules (`needsYoungReaderTurnRules`). */
+  youngReaderTurnRules: boolean;
+  /** Spoken-delivery rules for a listener whose register doesn't carry them. */
+  listenerDelivery: boolean;
+  /** Read-along delivery + the "your turn" line for a beginner (TRA-504). */
+  beginnerDelivery: boolean;
+  writeByVoice: boolean;
+}
+
+/** Pick the register (from talk) and the delivery add-ons (from read/write). */
+export function selectLevelSections(levels: EffectiveLevels): LevelSections {
+  const listener = levels.read === "listener";
+  const register: TutorRegister =
+    listener && (levels.talk === null || levels.talk === "K")
+      ? "preReader"
+      : isEarlyReader(levels.talk)
+        ? "earlyReader"
+        : levels.talk
+          ? "generic"
+          : "none";
+  return {
+    register,
+    youngReaderTurnRules: needsYoungReaderTurnRules(levels),
+    listenerDelivery: listener && register !== "preReader",
+    beginnerDelivery: levels.read === "beginner",
+    writeByVoice: levels.write === "voice",
+  };
+}
+
+const READ_LEVEL_PROMPT_PHRASES: Record<ReadLevel, string> = {
+  listener: "not yet (listener: hears the words, can't read them)",
+  beginner: "beginning to decode (beginner)",
+  reader: "independently (reader)",
+};
+const WRITE_MODE_PROMPT_PHRASES: Record<WriteMode, string> = {
+  own: "on their own",
+  voice: "by voice (dictates)",
+};
+
+/**
+ * A scholar's levels as one phrase for a model-facing prompt or tool result.
+ * The ONE renderer for every consumer that used to paste the raw talk string.
+ *
+ *  • Default read + write (reader, on their own): the talk string alone ("3"),
+ *    so an ordinary scholar's prompt is byte-identical to before.
+ *  • Otherwise all three: "talk K; reads: not yet (listener: …); writes: by
+ *    voice (dictates)". Without this a migrated pre-reader would read as a
+ *    plain "K", and the model would lose the "can't read yet" signal.
+ *  • Null when nothing is set.
+ *
+ * Takes the stored scholar row; a legacy "pre-reader" resolves through
+ * `talkLevelOf` / `readLevelOf`.
+ */
+export function describeLevelsForPrompt(
+  scholar:
+    | {
+        readingLevel?: string | null;
+        readLevel?: ReadLevel | null;
+        writeMode?: WriteMode | null;
+      }
+    | null
+    | undefined,
+): string | null {
+  return describeEffectiveLevelsForPrompt({
+    talk: talkLevelOf(scholar?.readingLevel),
+    read: readLevelOf(scholar),
+    write: writeModeOf(scholar),
+  });
+}
+
+/** `describeLevelsForPrompt` for already-resolved session levels. */
+export function describeEffectiveLevelsForPrompt({
+  talk,
+  read,
+  write,
+}: EffectiveLevels): string | null {
+  if (read === DEFAULT_READ_LEVEL && write === DEFAULT_WRITE_MODE) return talk;
+  return `talk ${talk ?? "unset"}; reads: ${READ_LEVEL_PROMPT_PHRASES[read]}; writes: ${WRITE_MODE_PROMPT_PHRASES[write]}`;
 }

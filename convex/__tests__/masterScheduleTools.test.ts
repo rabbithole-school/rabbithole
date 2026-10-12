@@ -4,9 +4,14 @@ import schema from "../schema";
 import type { ActionCtx } from "../_generated/server";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { Role } from "../lib/roles";
-import { makeMasterScheduleTools } from "../lib/masterScheduleTools";
+import {
+  makeMasterScheduleTools,
+  parseSchoolDate,
+} from "../lib/masterScheduleTools";
+import { internal } from "../_generated/api";
 import { scheduleWeekStartMs } from "../../shared/scheduleWeek";
 import {
+  grantInstitutionMembership,
   seedScholarInInstitution,
   seedStaffWithMembership,
   seedTestInstitution,
@@ -893,5 +898,108 @@ describe("master-schedule aide tools (end-to-end)", () => {
       detachApp: true,
     });
     expect(out).toMatch(/not both/i);
+  });
+});
+
+describe("school-local dates and clocks (TRA-486)", () => {
+  test("parseSchoolDate anchors the week in the school's own zone", () => {
+    // Honolulu: byte-identical to the old fixed -10:00 parse.
+    const legacyNoon = Date.parse("2026-10-12T12:00:00-10:00");
+    expect(parseSchoolDate("2026-10-12", "Pacific/Honolulu")).toEqual({
+      weekday: 1,
+      weekStartMs: scheduleWeekStartMs(legacyNoon, "Pacific/Honolulu"),
+    });
+    // Auckland's Monday Oct 12 starts at its own local midnight
+    // (2026-10-11 11:00 UTC), not Honolulu's.
+    expect(parseSchoolDate("2026-10-12", "Pacific/Auckland")).toEqual({
+      weekday: 1,
+      weekStartMs: Date.UTC(2026, 9, 11, 11, 0),
+    });
+    expect(parseSchoolDate("2026-10-11", "Pacific/Auckland")).toEqual({
+      error: "2026-10-11 is a weekend. Choose a Monday–Friday school date.",
+    });
+    expect(parseSchoolDate("2026-02-30", "Pacific/Auckland")).toEqual({
+      error: 'Invalid date "2026-02-30". Use YYYY-MM-DD.',
+    });
+  });
+
+  test("staffTimeZone gives each school's staff their own zone", async () => {
+    const t = convexTest(schema, modules);
+    const hawaii = await seedTestInstitution(t, { slug: "clock-hawaii", isPrimary: true });
+    const kiwi = await seedTestInstitution(t, { slug: "clock-kiwi", name: "Kiwi School" });
+    const unset = await seedTestInstitution(t, { slug: "clock-unset", name: "Unset School" });
+    await t.run(async (ctx) => {
+      await ctx.db.patch(hawaii, { timeZone: "Pacific/Honolulu" });
+      await ctx.db.patch(kiwi, { timeZone: "Pacific/Auckland" });
+    });
+    const zoneFor = async (institutionId: Id<"institutions">) =>
+      t.query(internal.institutions.staffTimeZone, {
+        userId: await seedStaffWithMembership(t, { institutionId }),
+      });
+
+    expect(await zoneFor(hawaii)).toBe("Pacific/Honolulu");
+    expect(await zoneFor(kiwi)).toBe("Pacific/Auckland");
+    // No zone on file → the static legacy default.
+    expect(await zoneFor(unset)).toBe("Pacific/Honolulu");
+  });
+
+  test("place_class and move_class parse dates in the TERM's zone, not the caller's", async () => {
+    const t = convexTest(schema, modules);
+    const hawaii = await seedTestInstitution(t, { slug: "place-hawaii", isPrimary: true });
+    const kiwi = await seedTestInstitution(t, { slug: "place-kiwi", name: "Kiwi School" });
+    await t.run(async (ctx) => {
+      await ctx.db.patch(hawaii, { timeZone: "Pacific/Honolulu" });
+      await ctx.db.patch(kiwi, { timeZone: "Pacific/Auckland" });
+    });
+    // A platform admin whose own membership is Auckland, editing a Honolulu
+    // school's term. Monday noon in Auckland is still Sunday in Honolulu.
+    const admin = await t.run((ctx) =>
+      ctx.db.insert("users", {
+        name: "Platform Admin",
+        username: "tz-platform-admin",
+        role: "platform_admin",
+      }),
+    );
+    await grantInstitutionMembership(t, admin, kiwi);
+    expect(
+      await t.query(internal.institutions.staffTimeZone, { userId: admin }),
+    ).toBe("Pacific/Auckland");
+    const periodId = await seedPeriod(t, hawaii);
+    const groupId = await seedGroup(t, admin);
+    const tools = await toolsFor(t, admin, "platform_admin");
+    const blk = parse(
+      await tools.create_schedule_block.run({
+        termId: periodId, label: "Block A", startLocal: "08:30", endLocal: "09:40",
+      }),
+    );
+    const out = parse(
+      await tools.place_class.run({
+        termId: periodId,
+        groupId,
+        subject: "Math",
+        date: "2026-10-12",
+        blockId: blk.blockId,
+      }),
+    );
+    expect(out.ok).toBe(true);
+    const placement = await t.run((ctx) =>
+      ctx.db.get(out.placementId as Id<"schedulePlacements">),
+    );
+    // Honolulu's own Monday midnight (Oct 12 10:00 UTC), not the week
+    // before (where Auckland's Monday noon falls in Honolulu).
+    expect(placement?.weekStartMs).toBe(Date.UTC(2026, 9, 12, 10, 0));
+    expect(placement?.weekday).toBe(1);
+
+    // A dated move resolves the zone through the placement's term.
+    await tools.move_class.run({
+      placementId: out.placementId,
+      date: "2026-10-19",
+      blockId: blk.blockId,
+    });
+    const moved = await t.run((ctx) =>
+      ctx.db.get(out.placementId as Id<"schedulePlacements">),
+    );
+    expect(moved?.weekStartMs).toBe(Date.UTC(2026, 9, 19, 10, 0));
+    expect(moved?.weekday).toBe(1);
   });
 });

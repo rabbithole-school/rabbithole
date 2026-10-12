@@ -80,13 +80,13 @@ import {
   type GoogleDocsEmbeddableImage,
 } from "./googleDocsTools";
 import { makeUnitResolver } from "./aideResolvers";
-import { withBase, unitPath, hstLabel } from "./channels";
+import { withBase, unitPath, schoolTimeLabel } from "./channels";
 import type { AideEmit, AideTool } from "./aideStream";
 
-// hstLabel now lives in lib/channels (a pure, Convex-free module) so the
-// MCP queries + Next route can format HST times the same way. Re-exported
+// schoolTimeLabel lives in lib/channels (a pure, Convex-free module) so the
+// MCP queries + Next route can format school times the same way. Re-exported
 // here because callers (slackBot) import it from the aide tool layer.
-export { hstLabel };
+export { schoolTimeLabel };
 
 /** Convert a transport's authorized stored attachments into the shared Docs
  * factory's single approved-image shape. */

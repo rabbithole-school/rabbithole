@@ -1,4 +1,9 @@
-import { isPreReader, needsYoungReaderTurnRules } from "./readingLevels";
+import {
+  readLevelOf,
+  selectLevelSections,
+  talkLevelOf,
+  type ReadLevel,
+} from "./readingLevels";
 
 export const SCHOLAR_OWNED_COMPLETION_CLOSING_GUIDANCE =
   "Unless they explicitly asked for a recap, close with exactly one brief, plain sentence and no question or next task. Preserve ownership of the conclusion: name at most the shape of the thinking they did, never restate, paraphrase, improve, or evaluate their answer; never enumerate the components of their reasoning; and never list what they learned. If the sentence would remind a reader what the answer was, remove that detail. Avoid approving adjectives such as solid, strong, clear, good, great, or correct.";
@@ -43,19 +48,26 @@ const ALL_COMPLETION_CLOSINGS: readonly string[] = [
 ];
 
 /**
- * Which closing pool a scholar gets. Young readers are decided by the same
- * seam as the tutor's young-reader turn rules (`needsYoungReaderTurnRules`),
- * so the two can never disagree about who is a young reader. (This used to
- * hand-parse the level with its own `<= 3` cutoff, one band wider than the
- * early-reader register's `< 3`.)
+ * The closing pool for a scholar, from the same section selection as the tutor
+ * prompt (`selectLevelSections`), so the two can never disagree:
+ *  • the pre-reader register (listener at talk K or unset) → the spoken
+ *    pre-reader closings;
+ *  • anyone else who gets the young-reader turn rules
+ *    (`needsYoungReaderTurnRules`: read below reader, or talk K–2.9) → the
+ *    short early-reader closings, which fit the short turns;
+ *  • everyone else → standard.
+ * `readLevel` omitted (offline/eval callers) is inferred from the talk string,
+ * so a legacy "pre-reader" still lands in the pre-reader pool.
  */
 export function completionClosingPool(
   readingLevel: string | null | undefined,
+  readLevel?: ReadLevel,
 ): readonly string[] {
-  if (isPreReader(readingLevel)) return PRE_READER_COMPLETION_CLOSINGS;
-  if (needsYoungReaderTurnRules(readingLevel)) {
-    return EARLY_READER_COMPLETION_CLOSINGS;
-  }
+  const talk = talkLevelOf(readingLevel);
+  const read = readLevel ?? readLevelOf({ readingLevel });
+  const picked = selectLevelSections({ talk, read, write: "own" });
+  if (picked.register === "preReader") return PRE_READER_COMPLETION_CLOSINGS;
+  if (picked.youngReaderTurnRules) return EARLY_READER_COMPLETION_CLOSINGS;
   return STANDARD_COMPLETION_CLOSINGS;
 }
 
@@ -71,8 +83,9 @@ function stableIndex(key: string, length: number): number {
 export function selectCompletionClosing(
   readingLevel: string | null | undefined,
   key: string,
+  readLevel?: ReadLevel,
 ): string {
-  const pool = completionClosingPool(readingLevel);
+  const pool = completionClosingPool(readingLevel, readLevel);
   return pool[stableIndex(key, pool.length)];
 }
 

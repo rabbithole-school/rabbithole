@@ -3,6 +3,7 @@ import { DatabaseReader } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { teacherQuery } from "./lib/customFunctions";
 import { requireActiveScholarAccess } from "./lib/access";
+import { talkLevelLabel } from "./lib/readingLevels";
 import { PRACTICE_DOMAIN_LABELS } from "../shared/practiceDomainLabels";
 import {
   frontierGradeValue,
@@ -65,11 +66,13 @@ export async function gatherWorkingLevel(
 
   // ── Reading level (governed: teacher-set / observer-suggested) ──────
   const scholar = await db.get(scholarId);
-  const readingLevel = scholar?.readingLevel ?? null;
-  if (readingLevel) {
+  // The TALK level as a label ("K", "Grade 3", "College"); a legacy
+  // "pre-reader" reads as K, never "Grade pre-reader" (TRA-503).
+  const talkLabel = talkLevelLabel(scholar?.readingLevel);
+  if (talkLabel) {
     byDomain.push({
       domain: "Reading",
-      level: `Grade ${readingLevel}`.replace(/Grade (college)/i, "College"),
+      level: talkLabel,
       source: "reading level (teacher-set / observer-suggested)",
     });
   }

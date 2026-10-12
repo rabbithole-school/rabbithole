@@ -103,6 +103,7 @@ import { assembleProjectStreamApiMessages } from "./lib/projectStreamMessages";
 import {
   STAY_SILENT_TOOL_NAME,
   appUpdateInstruction,
+  heldTextFateAtTool,
 } from "./lib/appUpdateTools";
 import { buildCharacterOnStageSection } from "./sessionHelpers";
 import { buildUnitDesignerResponse } from "./unitDesignerStream";
@@ -146,7 +147,12 @@ import {
   ideaConvosLoopConfig,
   makeIdeaConvoTools,
 } from "./lib/scholarIdeaTools";
-import { formattingGuidance, linkBaseFor } from "./lib/channels";
+import {
+  formattingGuidance,
+  linkBaseFor,
+  schoolTimeLabel,
+  wallClockUtcIdentity,
+} from "./lib/channels";
 import {
   STAFF_SCHOLAR_RECORDS_SECTION,
   GROUNDED_CLAIMS_DOCTRINE,
@@ -159,6 +165,7 @@ import {
 import {
   type InstitutionPromptProfile,
   DEFAULT_INSTITUTION_PROMPT_PROFILE,
+  longClockClause,
 } from "./lib/institutionPromptProfile";
 import {
   createStreamStopPredicate,
@@ -1426,8 +1433,14 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                       ).name;
                       if (holdingText) {
                         holdingText = false;
-                        if (toolName === STAY_SILENT_TOOL_NAME) heldText = "";
-                        else releaseHeldText();
+                        if (
+                          heldTextFateAtTool(toolName, {
+                            quietAppUpdate: offerStaySilent,
+                            directorToolNames: CHARACTER_DIRECTOR_TOOL_NAMES,
+                          }) === "drop"
+                        ) {
+                          heldText = "";
+                        } else releaseHeldText();
                       }
                       flushSafeText();
                       if (toolName === MARK_ACTIVITY_COMPLETE_TOOL_NAME) {
@@ -2874,7 +2887,7 @@ ${MULTI_PARTY_ETIQUETTE}
 
 ${audienceContextLine("private")}
 
-**You can ACT on a scholar's record, not just read it — the same things a teacher does on the scholar page.** \`add_scholar_observation\` covers praise/concern/suggestion/intervention plus neutral notes; add the optional Whole Child category tag when the take is about executive function, social-emotional growth, collaboration & character, or passions & quests. \`add_scholar_report\` adds a dated narrative note (also folded into the dossier), \`update_scholar_dossier\` appends a note or replaces the whole thing, \`set_scholar_reading_level\`, and \`update_scholar_profile\` changes display name / date of birth. When a teacher says a scholar passed the calculator test or asks to give them the calculator license, call \`grant_calculator_license\` directly if the name resolves to exactly one scholar (ask which scholar if it's ambiguous); confirm before \`revoke_calculator_license\` or a \`rerecord\`, since re-recording reprints the card. For account recovery: \`reset_scholar_password\` (returns a one-time PIN), \`reset_scholar_passkeys\`. And \`delete_scholar\` PERMANENTLY removes a scholar and ALL their data. **You are a SCRIBE on the record, not an author.** The observation/report/dossier tools write the TEACHER's words and judgment, in the teacher's voice — only ever record what the teacher tells you to or explicitly approves. NEVER compose, infer, editorialize, or volunteer your OWN observation, report, or dossier note, and never proactively "log what you noticed." Your own read of a scholar is not a teacher observation — it has its own separate observer channel and must never land in this human-authored record. If you think something is worth noting, SUGGEST it to the teacher and let them decide; don't write it yourself. **Confirmation discipline:** for a routine observation the teacher dictated, just do it if their ask is unambiguous; but for anything that touches credentials, identity, or is destructive — password/passkey reset, a dossier REPLACE, a profile rename, and ESPECIALLY delete_scholar — echo back exactly what you're about to do (and to whom) and get an explicit yes first. Never call delete_scholar speculatively.
+**You can ACT on a scholar's record, not just read it — the same things a teacher does on the scholar page.** \`add_scholar_observation\` covers praise/concern/suggestion/intervention plus neutral notes; add the optional Whole Child category tag when the take is about executive function, social-emotional growth, collaboration & character, or passions & quests. \`add_scholar_report\` adds a dated narrative note (also folded into the dossier), \`update_scholar_dossier\` appends a note or replaces the whole thing, \`set_scholar_reading_level\` sets the talk, read and write levels a teacher has decided on, and \`update_scholar_profile\` changes display name / date of birth. When a teacher says a scholar passed the calculator test or asks to give them the calculator license, call \`grant_calculator_license\` directly if the name resolves to exactly one scholar (ask which scholar if it's ambiguous); confirm before \`revoke_calculator_license\` or a \`rerecord\`, since re-recording reprints the card. For account recovery: \`reset_scholar_password\` (returns a one-time PIN), \`reset_scholar_passkeys\`. And \`delete_scholar\` PERMANENTLY removes a scholar and ALL their data. **You are a SCRIBE on the record, not an author.** The observation/report/dossier tools write the TEACHER's words and judgment, in the teacher's voice — only ever record what the teacher tells you to or explicitly approves. NEVER compose, infer, editorialize, or volunteer your OWN observation, report, or dossier note, and never proactively "log what you noticed." Your own read of a scholar is not a teacher observation — it has its own separate observer channel and must never land in this human-authored record. If you think something is worth noting, SUGGEST it to the teacher and let them decide; don't write it yourself. **Confirmation discipline:** for a routine observation the teacher dictated, just do it if their ask is unambiguous; but for anything that touches credentials, identity, or is destructive — password/passkey reset, a dossier REPLACE, a profile rename, and ESPECIALLY delete_scholar — echo back exactly what you're about to do (and to whom) and get an explicit yes first. Never call delete_scholar speculatively.
 
 **Attached files.** A teacher can attach a file to their message with the "+" button (a scanned worksheet, a cognitive assessment PDF, a photo). When they do, you can SEE images and PDFs inline. To file it on a scholar's record: \`upload_scholar_document\` for sensitive adult-facing source material (cognitive/neuropsych assessments → kind "assessment", IEP/504 → "iep", parent emails, written observations) — this kicks an automatic extract→redact→summarize pipeline and lands on the scholar's Documents tab; or \`add_portfolio_item\` for the kid's OWN work (worksheets, drawings, project artifacts). Both use the file attached to the current message. Before filing a sensitive document, confirm the resolved scholar + file name + document kind.
 
@@ -3232,14 +3245,15 @@ http.route({
     // model can reason about "this week" / "next week" without guessing.
     if (canSeeScholarData) {
       const nowMs = Date.now();
-      // HST = UTC-10, no DST — format off UTC parts of (now - 10h).
-      const hd = new Date(nowMs - 10 * 60 * 60 * 1000);
-      const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-      const MO = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-      let hh = hd.getUTCHours();
-      const ap = hh < 12 ? "AM" : "PM";
-      hh = hh % 12 || 12;
-      const nowLabel = `${WD[hd.getUTCDay()]}, ${MO[hd.getUTCMonth()]} ${hd.getUTCDate()}, ${hd.getUTCFullYear()}, ${hh}:${String(hd.getUTCMinutes()).padStart(2, "0")} ${ap} HST`;
+      // The aide's institution clock (Pacific/Honolulu for the primary, where
+      // this renders exactly the old fixed-HST text). The same resolver the
+      // assignment tools label with — the active membership behind
+      // aideInstitutionId — so the prompt's clock and the labels agree.
+      const aideTimeZone = await ctx.runQuery(
+        internal.institutions.staffTimeZone,
+        { userId: callerUserId },
+      );
+      const nowLabel = schoolTimeLabel(nowMs, aideTimeZone, { withYear: true });
       systemPromptSections.push(
         [
           "",
@@ -3261,9 +3275,9 @@ http.route({
           "",
           "**Roster + lifecycle.** `set_assignment_scholars` REPLACES the roster (anyone unlisted leaves); `add_assignment_scholars` only adds. `archive_assignment` ends an assignment (clears its pushes). All take scholar NAMES, resolved for you — but confirm the resolved names/assignment with the teacher before a roster change or archive.",
           "",
-          `**Time.** All times are epoch milliseconds in Hawaii time (HST, UTC-10, no daylight saving). Right now it is ${nowLabel} (${nowMs} ms). One day = 86400000 ms; one week = 604800000 ms. Each schedule item comes back with a human \`whenLabel\` so you can confirm you've got the right one.`,
+          `**Time.** All times are epoch milliseconds${longClockClause(aideProfile)}. Right now it is ${nowLabel} (${nowMs} ms). One day = 86400000 ms; one week = 604800000 ms. Each schedule item comes back with a human \`whenLabel\` so you can confirm you've got the right one.`,
           "",
-          `**Converting a wall-clock time to ms is error-prone — don't trust your first arithmetic.** Anchor off the current time above (e.g. \"this coming Monday 9am\" = step forward from now), and a useful identity is: 9:00 AM HST on a date = that date at 19:00 UTC. After ANY schedule_activity / reschedule_activity call, READ the returned \`startsAtLabel\` and check it matches the time the teacher asked for. If it's off, recompute and call again BEFORE telling the teacher it's done — don't narrate a guess as if it were confirmed.`,
+          `**Converting a wall-clock time to ms is error-prone — don't trust your first arithmetic.** Anchor off the current time above (e.g. \"this coming Monday 9am\" = step forward from now), and a useful identity is: ${wallClockUtcIdentity(nowMs, aideTimeZone)}. After ANY schedule_activity / reschedule_activity call, READ the returned \`startsAtLabel\` and check it matches the time the teacher asked for. If it's off, recompute and call again BEFORE telling the teacher it's done — don't narrate a guess as if it were confirmed.`,
           "",
           "**Bulk shifts** (e.g. \"push everything in the week of Jun 8 back by 1 week\"): call `get_schedule`, read each item's `whenLabel` to find the ones in that window, then call `reschedule_activity` once per item with `startsAtMs = agendaAtMs + 604800000`. Rescheduling a LIVE item only moves its agenda position; a PLANNED item also moves when it goes live.",
           "",

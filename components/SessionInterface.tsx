@@ -33,6 +33,20 @@ import {
   SentenceAccumulator,
   stripMarkdownForSpeech,
 } from "@/lib/sentenceStream";
+import { busyRetryCopy } from "@/shared/llmLimiter";
+import {
+  beginnerAlphabet,
+  checkDecodable,
+  conversationTextSteps,
+  readsAlong,
+  partSpans,
+  splitYourTurn,
+  withoutYourTurn,
+  YourTurnSpeechFilter,
+  yourTurnCue,
+  type DecodableAlphabet,
+} from "@/shared/beginnerReading";
+import { BeginnerReplyWeb } from "@/components/BeginnerReplyWeb";
 import { voiceMark } from "@/lib/voicePerf";
 import { useTimeLimit } from "@/hooks/useTimeLimit";
 import { TimeLimitModal } from "./TimeLimitModal";
@@ -80,7 +94,6 @@ import {
 } from "@/components/practice/InstructionChatCard";
 import { useSwipeDismiss } from "@/hooks/useSwipeGesture";
 import { MAX_FLAG_SNIPPET_LEN } from "@/lib/manualRehearsalFlags";
-import { isPreReader } from "@/convex/lib/readingLevels";
 import { pickAdmonishment } from "@/lib/admonishments";
 import { useNow } from "@/hooks/useNow";
 import { dueStatus } from "@/shared/institutionDay";
@@ -203,21 +216,12 @@ export function SessionInterface({
   const [voiceMode, setVoiceModeState] = useState(false);
   const voiceModeRef = useRef(false);
   const voiceAccRef = useRef(new SentenceAccumulator());
-  // Pre-readers (age ~4–6) can't work a toggle and roam devices, so voice mode
-  // defaults ON from the scholar record rather than localStorage. An explicit
-  // "off" ("0") still wins; an explicit "on" ("1") still forces it for anyone.
-  const isPreReaderScholar = isPreReader(currentUser?.readingLevel);
-  useEffect(() => {
-    // Hydrate the persisted preference (deferred past SSR).
-    const stored = localStorage.getItem("rabbithole.voiceMode");
-    const defaultOn =
-      ttsEnabled && (stored === "1" || (stored !== "0" && isPreReaderScholar));
-    if (defaultOn) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only preference hydration
-      setVoiceModeState(true);
-      voiceModeRef.current = true;
-    }
-  }, [ttsEnabled, isPreReaderScholar]);
+  // A beginner's "your turn" line (TRA-504) is for the child to read, so the
+  // voice never speaks it.
+  const voiceTurnFilterRef = useRef(new YourTurnSpeechFilter());
+  // A beginner's alphabet once their inventory has loaded (null otherwise):
+  // a reply whose your-turn line the box will show ends with a spoken cue.
+  const beginnerCueAlphabetRef = useRef<DecodableAlphabet | null>(null);
 
   // Activity nav (eyebrow breadcrumb + Mark Complete button + modal). The
   // modal lives below the header; the eyebrow + button are slotted into
@@ -257,22 +261,38 @@ export function SessionInterface({
     // Voice mode: speak completed sentences as the reply streams in.
     if (data.text && voiceModeRef.current) {
       const engine = getTTSEngine();
-      for (const s of voiceAccRef.current.push(data.text)) {
+      const speakable = voiceTurnFilterRef.current.push(data.text);
+      for (const s of voiceAccRef.current.push(speakable)) {
         engine?.enqueue(stripMarkdownForSpeech(s));
       }
     }
     if (data.done) {
       if (voiceModeRef.current) {
         const engine = getTTSEngine();
+        const tail = voiceAccRef.current.push(
+          voiceTurnFilterRef.current.flush(),
+        );
+        for (const s of tail) engine?.enqueue(stripMarkdownForSpeech(s));
         const rest = voiceAccRef.current.flush();
-        if (rest) {
-          engine?.enqueue(stripMarkdownForSpeech(rest));
-        } else if (engine?.state === "idle") {
+        if (rest) engine?.enqueue(stripMarkdownForSpeech(rest));
+        // The line itself is never spoken; a short cue points the child at
+        // its box — only when the box will show it (TRA-504, iPad parity).
+        const lines = voiceTurnFilterRef.current.lines;
+        const line = lines[lines.length - 1];
+        const alphabet = beginnerCueAlphabetRef.current;
+        const cue =
+          line && alphabet && checkDecodable(line, alphabet).ok
+            ? yourTurnCue(line)
+            : null;
+        if (cue) engine?.enqueue(cue);
+        if (!rest && !cue && tail.length === 0 && engine?.state === "idle") {
           // Everything was already spoken before done arrived — the
           // engine won't fire another onIdle, so resume listening here.
           maybeAutoListenRef.current();
         }
       }
+      // Each reply gets a fresh filter, so its lines are its own.
+      voiceTurnFilterRef.current = new YourTurnSpeechFilter();
       onSessionUpdate?.();
     }
   }, [onSessionUpdate]);
@@ -376,6 +396,60 @@ export function SessionInterface({
     api.sessions.getWithMessages,
     { id: sessionId as Id<"sessions"> }
   );
+
+  // Listeners (read level `listener`, TRA-503 — usually age ~4–6) can't work a
+  // toggle and roam devices, so voice mode defaults ON from the session's
+  // EFFECTIVE read level (server-resolved the way the tutor prompt resolves it
+  // — a teacher's per-session read override counts, TRA-492; the iPad keys on
+  // the same field) rather than localStorage. Never for a teacher watching a
+  // scholar's session remotely. An explicit "off" ("0") still wins; an
+  // explicit "on" ("1") still forces it for anyone.
+  const isListenerSession =
+    sessionData?.session?.readLevel === "listener" && !isRemoteMode;
+  // Beginner readers (TRA-504) are read to by default too, but the mic does
+  // NOT reopen on its own: they're looking at the words and answer with the
+  // tap-to-talk mic (native: usePreReaderVoice `autoListen`).
+  const isBeginnerSession =
+    sessionData?.session?.readLevel === "beginner" && !isRemoteMode;
+  const isBeginnerSessionRef = useRef(isBeginnerSession);
+  // Listeners and beginners get the cleaned read-along reply (the word
+  // highlight and tap-a-word are iPad-only for now) and larger conversation
+  // text; only a beginner gets the your-turn box.
+  const isReadAlongSession =
+    readsAlong(sessionData?.session?.readLevel) && !isRemoteMode;
+  const textSteps = isRemoteMode
+    ? 0
+    : conversationTextSteps(sessionData?.session?.readLevel);
+  // What a beginner can decode; null until the inventory query resolves, so
+  // the your-turn box and its cue wait for the real teams (iPad parity).
+  const decodableAlphabet = useMemo(
+    () =>
+      graphemeInventory === undefined
+        ? null
+        : beginnerAlphabet(
+            graphemeInventory.map((t) => t.team),
+            // what a linked Mentava level has taught (TRA-507); null = none
+            sessionData?.session?.beginnerSpellings,
+          ),
+    [graphemeInventory, sessionData?.session?.beginnerSpellings],
+  );
+  useEffect(() => {
+    isBeginnerSessionRef.current = isBeginnerSession;
+    beginnerCueAlphabetRef.current = isBeginnerSession ? decodableAlphabet : null;
+  }, [isBeginnerSession, decodableAlphabet]);
+  useEffect(() => {
+    // Hydrate the persisted preference (deferred past SSR).
+    const stored = localStorage.getItem("rabbithole.voiceMode");
+    const defaultOn =
+      ttsEnabled &&
+      (stored === "1" ||
+        (stored !== "0" && (isListenerSession || isBeginnerSession)));
+    if (defaultOn) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only preference hydration
+      setVoiceModeState(true);
+      voiceModeRef.current = true;
+    }
+  }, [ttsEnabled, isListenerSession, isBeginnerSession]);
 
   const messages = useMemo(
     () => sessionData?.messages ?? [],
@@ -890,8 +964,15 @@ export function SessionInterface({
   );
 
   const sendMessageRef = useRef<
-    (text: string, inputModality: MessageInputModality) => void
+    (
+      text: string,
+      inputModality: MessageInputModality,
+      options?: { readingYourTurn?: boolean },
+    ) => void
   >(() => {});
+  // Set when a take was started from a your-turn box's mic (TRA-504), so its
+  // transcript goes to the tutor marked as the child reading the line aloud.
+  const readingYourTurnRef = useRef(false);
   // Lets handleSend tell the replay driver a manual turn was sent (so the
   // strip retires when the teacher takes over) without a use-before-decl on
   // the replay hook, which is set up further down.
@@ -899,8 +980,30 @@ export function SessionInterface({
 
   const { state: dictationState, error: dictationError, isTooLoud, hasSpeech, isMicBusy, toggleRecording, startRecording, stopRecording, cancelRecording } =
     useStreamingDictation((text) => {
-      sendMessageRef.current(text, "spoken");
+      const readingYourTurn = readingYourTurnRef.current;
+      readingYourTurnRef.current = false;
+      sendMessageRef.current(
+        text,
+        "spoken",
+        readingYourTurn ? { readingYourTurn } : undefined,
+      );
     }, sessionId as Id<"sessions">);
+  // The your-turn box's mic: the ordinary dictation (silence ends the take),
+  // marked as the child reading the line aloud.
+  const onReadYourTurn = useCallback(() => {
+    readingYourTurnRef.current = true;
+    getTTSEngine()?.stop(); // don't record over the tutor's voice
+    void startRecording({ latched: true });
+  }, [startRecording]);
+  // The composer's own mic starts an ordinary take, never a read-aloud.
+  const composerToggleRecording = useCallback(() => {
+    if (dictationState === "idle") readingYourTurnRef.current = false;
+    return toggleRecording();
+  }, [dictationState, toggleRecording]);
+  const composerCancelRecording = useCallback(() => {
+    readingYourTurnRef.current = false;
+    cancelRecording();
+  }, [cancelRecording]);
 
   // Voice-first loop plumbing. The engine's onIdle fires when the spoken
   // reply drains; if the stream is also done, listening resumes (latched,
@@ -910,6 +1013,7 @@ export function SessionInterface({
   isStreamingRef.current = isStreaming;
   const maybeAutoListen = useCallback(() => {
     if (!voiceModeRef.current || !sttEnabled) return;
+    if (isBeginnerSessionRef.current) return; // read to, answers by tap-to-talk
     if (isStreamingRef.current) return; // more sentences may still arrive
     if (document.visibilityState === "hidden") return;
     // Eyes-free "your turn" cue — kids docked in the Folio can't feel the
@@ -1160,6 +1264,8 @@ export function SessionInterface({
     directText?: string,
     inputModality: MessageInputModality = "typed",
     options?: {
+      /** A spoken read-aloud of the last reply's your-turn line (TRA-504). */
+      readingYourTurn?: boolean;
       appUpdate?: {
         batch: AppTutorUpdateBatch;
         onPrepared: (result: AppTutorSendResult) => void;
@@ -1249,6 +1355,7 @@ export function SessionInterface({
           message: userMessage,
           ...(imageId ? { imageId: imageId as Id<"_storage"> } : {}),
           ...(userMessage !== "<start>" ? { inputModality } : {}),
+          ...(options?.readingYourTurn ? { readingYourTurn: true } : {}),
         });
         // Both the artifact flush and message mutation succeeded. Keep the
         // composer intact when a revision conflict blocks either operation.
@@ -1978,6 +2085,11 @@ export function SessionInterface({
           questBakeHolding,
           userTurnFailed,
           onRetryTurn: handleRetryTurn,
+          // A busy server's honest wait, said in kid words (busyRetryCopy).
+          failedTurnNote:
+            stream.busyRetryAfterSec !== undefined
+              ? busyRetryCopy(stream.busyRetryAfterSec)
+              : null,
           input,
           setInput,
           handleKeyDown,
@@ -1987,10 +2099,19 @@ export function SessionInterface({
           dictationState,
           dictationError,
           isMicBusy,
-          toggleRecording,
+          toggleRecording: composerToggleRecording,
           startRecording,
           stopRecording,
-          cancelRecording,
+          cancelRecording: composerCancelRecording,
+          beginner: isReadAlongSession
+            ? {
+                // A listener gets no alphabet, so no your-turn box.
+                alphabet: isBeginnerSession ? decodableAlphabet : null,
+                onReadAloud: isBeginnerSession && sttEnabled ? onReadYourTurn : undefined,
+                readAloudDisabled: dictationState !== "idle" || isStreaming,
+                textSteps,
+              }
+            : null,
           isRemoteMode,
           remoteScholarName: scholarName ?? null,
           voiceMode,
@@ -2377,6 +2498,12 @@ interface ChatColumnProps {
   userTurnFailed?: boolean;
   /** Re-run the trailing failed user turn (no new user message). */
   onRetryTurn?: () => void;
+  /** Why the last turn failed, when worth saying (a busy server's wait). */
+  failedTurnNote?: string | null;
+  /** A listener's or beginner's own session (TRA-504): cleaned replies and
+   *  larger text; a beginner's also gets the your-turn box and its mic. Null
+   *  for everyone else. */
+  beginner?: BeginnerBubbleProps | null;
   input: string;
   setInput: (v: string) => void;
   handleKeyDown: (e: React.KeyboardEvent) => void;
@@ -2635,6 +2762,8 @@ function ChatColumn({
   questBakeHolding = false,
   userTurnFailed = false,
   onRetryTurn,
+  failedTurnNote = null,
+  beginner = null,
   input,
   setInput,
   handleKeyDown,
@@ -3425,6 +3554,17 @@ function ChatColumn({
                   canFlagWrong={canFlagWrong}
                   onFlagWrong={onFlagWrong}
                   showInputModality={!!isRemoteMode}
+                  beginner={
+                    beginner
+                      ? {
+                          ...beginner,
+                          onReadAloud:
+                            message.id === messages[messages.length - 1]?.id
+                              ? beginner.onReadAloud
+                              : undefined,
+                        }
+                      : null
+                  }
                 />
               );
             })}
@@ -3454,7 +3594,10 @@ function ChatColumn({
           />
 
           {isTurnDead && onRetryTurn && (
-            <TutorTurnFailedNotice onRetry={onRetryTurn} />
+            <TutorTurnFailedNotice
+              onRetry={onRetryTurn}
+              note={failedTurnNote}
+            />
           )}
 
           <div ref={messagesEndRef} />
@@ -4117,6 +4260,20 @@ function GeneratedImage({ url }: { url: string }) {
   );
 }
 
+/** What a listener's or beginner's message bubbles need (TRA-504). */
+type BeginnerBubbleProps = {
+  /** Null for a listener (and while a beginner's inventory loads). */
+  alphabet: DecodableAlphabet | null;
+  onReadAloud?: () => void;
+  readAloudDisabled: boolean;
+  /** `conversationTextSteps`: listener 2, beginner 1. */
+  textSteps: number;
+};
+
+/** One young-reader step is one notch on Chakra's font-size scale. */
+const CONVERSATION_FONT_SIZES = ["lg", "xl", "2xl"] as const;
+const YOUR_TURN_FONT_SIZES = ["3xl", "4xl", "5xl"] as const;
+
 // Message Bubble Component
 const MessageBubble = memo(function MessageBubble({
   message,
@@ -4132,7 +4289,9 @@ const MessageBubble = memo(function MessageBubble({
   canFlagWrong = false,
   onFlagWrong,
   showInputModality = false,
+  beginner = null,
 }: {
+  beginner?: BeginnerBubbleProps | null;
   message: MessageData;
   personaOptions?: DimensionOption[];
   isStreaming?: boolean;
@@ -4241,7 +4400,11 @@ const MessageBubble = memo(function MessageBubble({
           maxW="100%"
           shadow="sm"
         >
-          <Text fontFamily="body" fontSize="lg" whiteSpace="pre-wrap">
+          <Text
+            fontFamily="body"
+            fontSize={CONVERSATION_FONT_SIZES[beginner?.textSteps ?? 0]}
+            whiteSpace="pre-wrap"
+          >
             {message.content}
           </Text>
         </Box>
@@ -4284,17 +4447,33 @@ const MessageBubble = memo(function MessageBubble({
           minW={0}
         >
           <SessionAssistantMessageBody
+            fontSize={CONVERSATION_FONT_SIZES[beginner?.textSteps ?? 0]}
             content={message.content}
             isStreaming={isStreaming}
             generatingImage={generatingImage}
             settled={
-              useGrapheme ? (
+              beginner && message.content ? (
+                <BeginnerReplyWeb
+                  content={message.content}
+                  spans={message.graphemeSpans}
+                  stages={graphemeStages ?? {}}
+                  alphabet={beginner.alphabet}
+                  onReadAloud={beginner.onReadAloud}
+                  readAloudDisabled={beginner.readAloudDisabled}
+                  yourTurnFontSize={YOUR_TURN_FONT_SIZES[beginner.textSteps]}
+                />
+              ) : useGrapheme ? (
                 <Box as="span" whiteSpace="pre-wrap">
-                  <GraphemeText
-                    text={message.content}
-                    spans={message.graphemeSpans!}
-                    stages={graphemeStages}
-                  />
+                  {/* Per part, so a beginner's `<your-turn>` tags never show
+                      (TRA-504) while the spans still land on their letters. */}
+                  {splitYourTurn(message.content).map((part) => (
+                    <GraphemeText
+                      key={part.start}
+                      text={part.text}
+                      spans={partSpans(part, message.graphemeSpans!)}
+                      stages={graphemeStages}
+                    />
+                  ))}
                 </Box>
               ) : undefined
             }
@@ -4374,7 +4553,7 @@ const MessageBubble = memo(function MessageBubble({
                             });
                             return;
                           }
-                          tts.toggle(message.content);
+                          tts.toggle(withoutYourTurn(message.content));
                         }}
                       >
                         <SpeakerHigh size={14} />

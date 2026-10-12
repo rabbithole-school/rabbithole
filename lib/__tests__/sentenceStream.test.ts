@@ -64,3 +64,11 @@ describe("stripMarkdownForSpeech", () => {
     );
   });
 });
+
+describe("stripMarkdownForSpeech — emoji", () => {
+  test("never reads emoji aloud", () => {
+    expect(stripMarkdownForSpeech("Catch the 🧊 ice!")).toBe("Catch the ice!");
+    expect(stripMarkdownForSpeech("🍪🍪🍪 How many?")).toBe("How many?");
+    expect(stripMarkdownForSpeech("Hi 👋🏽 there 👨‍👩‍👧")).toBe("Hi there");
+  });
+});

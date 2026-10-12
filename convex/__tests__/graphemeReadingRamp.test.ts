@@ -88,6 +88,15 @@ describe("shouldAnnotateGraphemes — the pre-stream gate", () => {
     expect(shouldAnnotateGraphemes("college", active)).toBe(false);
   });
 
+  test("read level: listener and beginner annotate, reader never does (TRA-504)", () => {
+    expect(shouldAnnotateGraphemes("listener", active)).toBe(true);
+    expect(shouldAnnotateGraphemes("beginner", active)).toBe(true);
+    expect(shouldAnnotateGraphemes("reader", active)).toBe(false);
+    expect(
+      shouldAnnotateGraphemes("beginner", [{ team: "sh", stage: "graduated" }]),
+    ).toBe(false);
+  });
+
   test("null / undefined reading level → false", () => {
     expect(shouldAnnotateGraphemes(null, active)).toBe(false);
     expect(shouldAnnotateGraphemes(undefined, active)).toBe(false);

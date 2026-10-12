@@ -11,11 +11,12 @@
  * The three states come straight from the SERVER's verdict, projected by the
  * shared `editControlFor` (never re-derived here):
  *  - allowed → both segments live;
- *  - locked  → the Edit segment is a small lock glyph; selecting it is REJECTED
- *    (the Picker is remounted so its native selection returns to Play) and the
- *    unlock sentence appears as a transient popover on that tap — the nearest
- *    native analog of the web's hover tooltip; the design says "long-press",
- *    a deviation the PR calls out for a ruling;
+ *  - locked  → the Edit segment keeps its word with a lock in front, so what
+ *    is locked is named on the control (Andy, 2026-10-11); selecting it is
+ *    REJECTED (the Picker is remounted so its native selection returns to
+ *    Play) and the unlock sentence appears as a transient popover on that tap
+ *    — the nearest native analog of the web's hover tooltip; the design says
+ *    "long-press", a deviation the PR calls out for a ruling;
  *  - hidden  → this component renders nothing at all (the caller checks
  *    `showControl`), so a coached scholar never sees the word "Edit".
  */

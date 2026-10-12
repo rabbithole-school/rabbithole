@@ -17,6 +17,7 @@ import { internalMutation } from "../_generated/server";
 import type { MutationCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
 import { ROLES } from "../lib/roles";
+import { ensureDefaultMembershipForUser } from "../memberships";
 
 // Shared "Guests" slug — matches institutions.GUEST_SLUG so the same UI logic
 // (hide-by-default) works in dev and prod. "moli" is the dev-only primary.
@@ -168,8 +169,10 @@ export async function assignDevInstitutions(ctx: MutationCtx): Promise<{
 }
 
 /**
- * CLI entry: seed + assign the dev institutions over whatever scholars exist.
- * Run by scripts/db-seed.sh and re-runnable by hand:
+ * CLI entry: seed + assign the dev institutions over whatever scholars exist,
+ * then give every seeded user its default membership. Staff scoping reads the
+ * active membership, so without this step a seeded teacher sees no scholars.
+ * Run by scripts/db-seed.sh and local/setup.sh, and re-runnable by hand:
  *
  *   CONVEX_ALLOW_ANONYMOUS=false npx convex run seed/institutions:seedDevInstitutions
  */
@@ -177,6 +180,9 @@ export const seedDevInstitutions = internalMutation({
   args: {},
   handler: async (ctx) => {
     const result = await assignDevInstitutions(ctx);
+    for (const user of await ctx.db.query("users").collect()) {
+      await ensureDefaultMembershipForUser(ctx, user._id);
+    }
     console.log(
       `Dev institutions: Moli School (${result.assignedMoli}) + Guests (${result.assignedGuests}) + Kona Tutoring (${result.assignedKonaTutoring}).`,
     );

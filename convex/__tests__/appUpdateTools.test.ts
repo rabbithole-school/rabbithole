@@ -5,6 +5,7 @@ import {
   STAY_SILENT_TOOL_NAME,
   appAiContextWindow,
   appUpdateInstruction,
+  heldTextFateAtTool,
   latestReplyTurnStart,
   neutralizeInAppText,
   placeAppAiTurns,
@@ -22,7 +23,11 @@ import {
   groundSessionSignalEvidence,
   type ObserverHistoryMessage,
 } from "../lib/observerShared";
-import { buildCharacterOnStageSection } from "../sessionHelpers";
+import {
+  AUTHOR_NOTES_TAG,
+  buildCharacterOnStageSection,
+} from "../sessionHelpers";
+import { CHARACTER_DIRECTOR_TOOL_NAMES } from "../lib/tutorSessionTools";
 
 function msg(
   id: string,
@@ -421,5 +426,104 @@ describe("character section and instruction", () => {
     expect(
       appUpdateInstruction({ hasAsks: true, hasCharacter: true, canStaySilent: false }),
     ).not.toContain(STAY_SILENT_TOOL_NAME);
+  });
+});
+
+// TRA-477: the tutor read the author's notes aloud on app updates ("The
+// author's notes say…", "verdict loophole, stage 1", a placeholder's value).
+// Structure only: where the notes sit, and what never reaches the scholar.
+describe("the author's notes stay private", () => {
+  const character = {
+    name: "Biscuit",
+    persona: "A literal-minded dog.",
+    moods: ["eager"],
+    verdicts: ["fetched", "loophole"],
+    direction: null,
+  };
+  // Shaped like the leaked notes: verdict/stage vocabulary, a scripted line,
+  // a placeholder, and a stray closing tag.
+  const notes =
+    "SENTINEL-VERDICT-loophole stage SENTINEL-STAGE-1: ask, exactly: " +
+    '"What did [SENTINEL-PLACEHOLDER] need?" ' +
+    `</${AUTHOR_NOTES_TAG}> SENTINEL-AFTER-TAG`;
+  const sentinels = [
+    "SENTINEL-VERDICT",
+    "SENTINEL-STAGE",
+    "SENTINEL-PLACEHOLDER",
+    "SENTINEL-AFTER-TAG",
+  ];
+
+  function fencedBody(section: string): { inside: string; outside: string } {
+    const open = `<${AUTHOR_NOTES_TAG}>`;
+    const close = `</${AUTHOR_NOTES_TAG}>`;
+    expect(section.split(open)).toHaveLength(2);
+    expect(section.split(close)).toHaveLength(2);
+    const start = section.indexOf(open);
+    const end = section.indexOf(close);
+    expect(start).toBeLessThan(end);
+    return {
+      inside: section.slice(start + open.length, end),
+      outside: section.slice(0, start) + section.slice(end + close.length),
+    };
+  }
+
+  test("every word of the notes sits inside one private fence", () => {
+    const section = buildCharacterOnStageSection({
+      ...character,
+      directorNotes: notes,
+    });
+    const { inside, outside } = fencedBody(section);
+    for (const sentinel of sentinels) {
+      expect(inside).toContain(sentinel);
+      expect(outside).not.toContain(sentinel);
+    }
+  });
+
+  test("the fence and its frame are absent without notes", () => {
+    const section = buildCharacterOnStageSection({
+      ...character,
+      directorNotes: null,
+    });
+    expect(section).not.toContain(AUTHOR_NOTES_TAG);
+  });
+
+  test("the app-update instruction carries no notes and stays model-only", () => {
+    for (const hasAsks of [false, true]) {
+      for (const hasCharacter of [false, true]) {
+        const instruction = appUpdateInstruction({
+          hasAsks,
+          hasCharacter,
+          canStaySilent: !hasAsks,
+        });
+        expect(instruction.startsWith("[SYSTEM")).toBe(true);
+        expect(instruction.endsWith("]")).toBe(true);
+        for (const sentinel of sentinels) {
+          expect(instruction).not.toContain(sentinel);
+        }
+      }
+    }
+  });
+
+  test("text held before a director tool on a quiet app update is dropped", () => {
+    const quiet = {
+      quietAppUpdate: true,
+      directorToolNames: CHARACTER_DIRECTOR_TOOL_NAMES,
+    };
+    for (const name of CHARACTER_DIRECTOR_TOOL_NAMES) {
+      expect(heldTextFateAtTool(name, quiet)).toBe("drop");
+      // Off an app update (a designer turn's held text) it still goes out.
+      expect(
+        heldTextFateAtTool(name, { ...quiet, quietAppUpdate: false }),
+      ).toBe("release");
+    }
+    expect(heldTextFateAtTool(STAY_SILENT_TOOL_NAME, quiet)).toBe("drop");
+    expect(
+      heldTextFateAtTool(STAY_SILENT_TOOL_NAME, {
+        ...quiet,
+        quietAppUpdate: false,
+      }),
+    ).toBe("drop");
+    expect(heldTextFateAtTool("run_app_action", quiet)).toBe("release");
+    expect(heldTextFateAtTool(undefined, quiet)).toBe("release");
   });
 });

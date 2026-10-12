@@ -51,6 +51,15 @@ import {
   type ResourceShare,
 } from "@/components/ResourceShareCard";
 import { GraphemeText } from "@/components/GraphemeText";
+import { BeginnerReplyText } from "@/components/BeginnerReplyText";
+import { busyRetryCopy } from "../../../vendor/shared/llmLimiter";
+import {
+  beginnerAlphabet,
+  conversationTextSteps,
+  readsAlong,
+  stripYourTurnMarkers,
+  withoutYourTurn,
+} from "../../../vendor/shared/beginnerReading";
 import { ChatActivityRow, type ChatActivity } from "@/components/ChatActivityRow";
 import {
   ChatPracticeItem,
@@ -59,6 +68,8 @@ import {
 import { InstructionChatCard, type InstructionChatPayload, type InstructionHandbackStart } from "@/components/practice/InstructionChatCard";
 import { ManipulativeScrollContext } from "@/components/manipulatives/kit";
 import { useStreamingDictation } from "@/hooks/useStreamingDictation";
+import { usePreReaderVoice } from "@/hooks/usePreReaderVoice";
+import { lastTutorSpeech, LOW_VOLUME_CARD } from "@/lib/voiceLoop";
 import { useImageAttachment } from "@/hooks/useImageAttachment";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { useUnitProgress } from "@/hooks/useUnitProgress";
@@ -75,7 +86,7 @@ import { isTextArtifact } from "../../../vendor/shared/textArtifacts";
 import { uploadChangedAppSnapshot } from "@/lib/appSnapshot";
 import { uploadImageDataUrl } from "@/lib/uploadImage";
 import { shouldSkipLearnerQueries } from "@/lib/sessionLearnerQueries";
-import { CHAT_COMPOSER_INPUT } from "@/lib/chatType";
+import { CHAT_COMPOSER_INPUT, CHAT_MESSAGE_TEXT, chatTextAt } from "@/lib/chatType";
 import { chatBubbleStyles, OPENER_SENTINEL } from "@/lib/chatBubbles";
 import { composerPayloadKey, createSendLock } from "@/lib/sendLock";
 import { friendlyToolName } from "@/lib/toolLabels";
@@ -127,6 +138,17 @@ import {
 } from "../../../vendor/shared/homeworkFraming";
 import { useNow } from "@/hooks/useNow";
 const COLUMN_MAX_WIDTH = 720;
+// The composer field: its text input's vertical padding, and the bordered
+// wrap's padding and border around it. The buttons beside the field are sized
+// from these (`composerFieldHeight`), so they match it at every text size.
+const COMPOSER_INPUT_PAD_V = 8;
+const COMPOSER_WRAP_PAD_V = 6;
+const COMPOSER_WRAP_BORDER = 1;
+/** The field's one-line height for a composer line height: the "+", the
+ *  Voice pill and the mic/send/stop circle are all exactly this tall. */
+function composerFieldHeight(lineHeight: number): number {
+  return lineHeight + 2 * (COMPOSER_INPUT_PAD_V + COMPOSER_WRAP_PAD_V + COMPOSER_WRAP_BORDER);
+}
 // How long a pending turn must run before the Stop control arms with no text
 // yet on screen (the escape hatch for a busy-backend wait). See stopArmed.
 const STOP_ARM_DELAY_MS = 2000;
@@ -152,11 +174,24 @@ function sleepAbortable(ms: number, signal: AbortSignal): Promise<boolean> {
  * calm inline row offers a one-tap retry that re-runs the same turn (no
  * retyping, no duplicate message). The native twin of web's TutorTurnFailedNotice.
  */
-function TutorTurnFailedRow({ onRetry }: { onRetry: () => void }) {
+function TutorTurnFailedRow({
+  onRetry,
+  note,
+}: {
+  onRetry: () => void;
+  /** Why, when it's worth saying (a busy server's honest wait). */
+  note?: string | null;
+}) {
   const colors = useColors();
   return (
     <View
-      style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 4 }}
+      style={{
+        flexDirection: "row",
+        flexWrap: "wrap",
+        alignItems: "center",
+        gap: 8,
+        paddingVertical: 4,
+      }}
     >
       <Text
         style={{
@@ -166,7 +201,7 @@ function TutorTurnFailedRow({ onRetry }: { onRetry: () => void }) {
           color: colors.charcoalSubtle,
         }}
       >
-        Didn&apos;t go through
+        {note ?? "Didn't go through"}
       </Text>
       <Pressable
         onPress={onRetry}
@@ -304,6 +339,73 @@ export default function SessionScreen() {
     me?.role === "scholar" ||
     memberships?.some((membership) => membership.role === "scholar") === true;
   const ttsEnabled = me?.ttsEnabled !== false;
+  // Pre-reader voice mode (TRA-492, web parity): replies are spoken as they
+  // stream and the mic reopens hands-free. Keyed on the session's EFFECTIVE
+  // read level being `listener` (TRA-503; server-resolved — a teacher's
+  // per-session read override counts), and only on the viewer's own session.
+  // `voice` (the dictation hook) is declared further down because it depends
+  // on onSend; the voice loop reaches it through this ref.
+  const dictationRef = useRef<{
+    startRecording: (o?: { latched?: boolean }) => Promise<void>;
+    cancelRecording: () => void;
+  } | null>(null);
+  // Beginner readers (TRA-504) get the same read-to-me default, minus the
+  // hands-free mic: they answer with tap-to-talk (see usePreReaderVoice).
+  const sessionReadLevel = data?.session?.readLevel;
+  const isBeginnerSession = sessionReadLevel === "beginner";
+  // Listeners and beginners both read along: the word lights as it's spoken
+  // and a tapped word is said. Only a beginner gets the your-turn line.
+  const isReadAlongSession = readsAlong(sessionReadLevel);
+  // Young readers' conversation text is set larger (listener +2 steps,
+  // beginner +1), on top of the device's Dynamic Type size.
+  const textSteps = conversationTextSteps(sessionReadLevel);
+  const convText = useMemo(() => chatTextAt(CHAT_MESSAGE_TEXT, textSteps), [textSteps]);
+  const composerText = useMemo(() => chatTextAt(CHAT_COMPOSER_INPUT, textSteps), [textSteps]);
+  // The buttons beside the composer field are its height (circles: diameter).
+  const fieldH = composerFieldHeight(composerText.lineHeight);
+  const circle = useMemo(
+    () => ({ width: fieldH, height: fieldH, borderRadius: fieldH / 2 }),
+    [fieldH],
+  );
+  const glyph = Math.round(fieldH * 0.42);
+  const preReaderVoiceEligible =
+    ttsEnabled &&
+    (sessionReadLevel === "listener" || isBeginnerSession) &&
+    me != null &&
+    data?.session?.userId === me._id;
+  // What a beginner can decode: the short-a/short-i floor plus their
+  // inventory's letter teams — gates the "your turn" line's card and cue.
+  // Null until the inventory query resolves: the card and its cue wait for
+  // the scholar's real teams rather than judging a line against none.
+  const decodableAlphabet = useMemo(
+    () =>
+      graphemeInventory === undefined
+        ? null
+        : beginnerAlphabet(
+            graphemeInventory.map((t) => t.team),
+            // what a linked Mentava level has taught (TRA-507); null = none
+            data?.session?.beginnerSpellings,
+          ),
+    [graphemeInventory, data?.session?.beginnerSpellings],
+  );
+  const preReaderVoice = usePreReaderVoice({
+    enabled: preReaderVoiceEligible,
+    sttEnabled: me?.sttEnabled !== false,
+    autoListen: sessionReadLevel === "listener",
+    yourTurnAlphabet: isBeginnerSession ? decodableAlphabet : null,
+    startListening: () => {
+      void dictationRef.current?.startRecording({ latched: true });
+    },
+    cancelListening: () => dictationRef.current?.cancelRecording(),
+    sessionKey: sessionId,
+    lastTutorText: lastTutorSpeech(data?.messages),
+  });
+  const {
+    onReplyStart: onVoiceReplyStart,
+    onReplyText: onVoiceReplyText,
+    onReplyDone: onVoiceReplyDone,
+    onReplyEnd: onVoiceReplyEnd,
+  } = preReaderVoice;
   const graphemeStages = useMemo(
     () => buildStageMap(graphemeInventory),
     [graphemeInventory],
@@ -395,6 +497,11 @@ export default function SessionScreen() {
   // never set it. A dead user placeholder after a remount is derived from server
   // truth below.
   const [userTurnFailed, setUserTurnFailed] = useState(false);
+  // A turn that failed on a busy server: the wait it asked for (Retry-After
+  // seconds, null if none). Undefined otherwise. Feeds busyRetryCopy.
+  const [busyRetryAfterSec, setBusyRetryAfterSec] = useState<
+    number | null | undefined
+  >(undefined);
   // When the in-flight turn began (ms) — clock for the escalating pending copy.
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   // Ticks once a second while a turn is pending, to advance that copy and to
@@ -839,6 +946,7 @@ export default function SessionScreen() {
 
       const runAttempt = async (): Promise<AttemptOutcome> => {
         let full = "";
+        onVoiceReplyStart();
         try {
           const resp = await expoFetch(`${convexSiteUrl}/session-stream`, {
             method: "POST",
@@ -906,12 +1014,14 @@ export default function SessionScreen() {
               full += ev.text;
               setStreamingText(full);
               setActivity((a) => (a ? null : a));
+              onVoiceReplyText(ev.text); // pre-reader voice mode: speak as it streams
             }
             if (ev.newAssistantMsg) {
               setLiveAssistantId(ev.newAssistantMsg);
               full = "";
               setStreamingText("");
             }
+            if (ev.done === true) onVoiceReplyDone();
             return ev.done === true;
           };
           // Only a `done` event completes the turn. A mid-stream error (the
@@ -932,6 +1042,10 @@ export default function SessionScreen() {
       };
 
       const startedAt = Date.now();
+      setBusyRetryAfterSec(undefined);
+      // Voice mode silences a reply that didn't complete (Stop / failure /
+      // abort), so its queued sentences can't drain into a hands-free listen.
+      let turnCompleted = false;
       try {
         for (;;) {
           if (controller.signal.aborted) return "aborted";
@@ -941,6 +1055,7 @@ export default function SessionScreen() {
           setActivity(null);
           const outcome = await runAttempt();
           if (outcome.kind === "completed") {
+            turnCompleted = true;
             // Let the wet-ink reveal finish AND the persisted row catch up before
             // the handoff to the settled Markdown render, so the swap is seamless.
             await sleepAbortable(320, controller.signal);
@@ -960,17 +1075,19 @@ export default function SessionScreen() {
               if (!waited) return "aborted"; // unmounted / stopped mid-wait
               continue;
             }
+            setBusyRetryAfterSec(outcome.retryAfterSec);
             return "failed"; // budget exhausted → caller shows inline retry
           }
           return "failed"; // hard error → caller shows inline retry
         }
       } finally {
+        onVoiceReplyEnd(turnCompleted);
         if (streamAbortRef.current === controller) {
           streamAbortRef.current = null;
         }
       }
     },
-    [authToken],
+    [authToken, onVoiceReplyStart, onVoiceReplyText, onVoiceReplyDone, onVoiceReplyEnd],
   );
 
   // Stop the in-flight reply: ask the server to finalize at the current partial,
@@ -1049,6 +1166,9 @@ export default function SessionScreen() {
     overrideText?: string,
     inputModality: "typed" | "spoken" | "app" = "typed",
     options?: {
+      /** This spoken turn reads the last reply's "your turn" line aloud
+       *  (started from the line's own mic, TRA-504). */
+      readingYourTurn?: boolean;
       appUpdate?: {
         batch: AppTutorUpdateBatch;
         onPrepared: (result: AppTutorSendResult) => void;
@@ -1179,6 +1299,7 @@ export default function SessionScreen() {
           message: text,
           ...(imageId ? { imageId } : {}),
           ...(text !== OPENER_SENTINEL ? { inputModality } : {}),
+          ...(options?.readingYourTurn ? { readingYourTurn: true } : {}),
         }));
       // A scholar's own turn carries the app's character/judge events to the
       // tutor, so a queued character-only update is now redundant.
@@ -1392,13 +1513,24 @@ export default function SessionScreen() {
     requestStopMut,
   ]);
 
+  // Set when the take was started from a "your turn" card's mic (TRA-504),
+  // so the transcript goes to the tutor marked as the child's read-aloud.
+  const readingYourTurnRef = useRef(false);
   const onVoiceTranscript = useCallback(
     (text: string) => {
-      void onSend(text, "spoken");
+      const readingYourTurn = readingYourTurnRef.current;
+      readingYourTurnRef.current = false;
+      void onSend(text, "spoken", readingYourTurn ? { readingYourTurn } : undefined);
     },
     [onSend],
   );
   const voice = useStreamingDictation(onVoiceTranscript, sessionId);
+  useEffect(() => {
+    dictationRef.current = {
+      startRecording: voice.startRecording,
+      cancelRecording: voice.cancelRecording,
+    };
+  }, [voice.startRecording, voice.cancelRecording]);
 
   // "Check my work" — re-score the deliverable against its
   // rubric WITHOUT faking a user turn. startRubricCheck persists only the
@@ -1605,12 +1737,16 @@ export default function SessionScreen() {
   // button finishes → transcribe → send in one step (the kid decides when
   // they're done, then it goes). No text is dropped into the input box to
   // review, and there's no silence auto-stop — nothing fires until they tap ✓.
-  const onMicStart = useCallback(async () => {
+  const onMicStart = useCallback(async (readingYourTurn = false) => {
     if (appStatusBus.isMicOwned()) return; // the writing box is dictating — one recorder at a time
+    readingYourTurnRef.current = readingYourTurn;
     getNativeTTS().stop(); // don't record over the tutor's voice (web parity)
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     await voice.start();
   }, [voice]);
+  // The mic on a "your turn" card: the same tap-to-talk take, marked as the
+  // child reading the line aloud.
+  const onReadYourTurn = useCallback(() => void onMicStart(true), [onMicStart]);
 
   const onMicStop = useCallback(() => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -1618,6 +1754,7 @@ export default function SessionScreen() {
   }, [voice]);
 
   const onMicCancel = useCallback(() => {
+    readingYourTurnRef.current = false;
     Haptics.selectionAsync();
     voice.cancel();
   }, [voice]);
@@ -1875,7 +2012,14 @@ export default function SessionScreen() {
                 <View style={[styles.row, styles.rowTutor]}>
                   <View style={styles.colTutor}>
                     <View style={styles.tutorBare}>
-                      <TutorTurnFailedRow onRetry={onRetryTurn} />
+                      <TutorTurnFailedRow
+                        onRetry={onRetryTurn}
+                        note={
+                          busyRetryAfterSec !== undefined
+                            ? busyRetryCopy(busyRetryAfterSec)
+                            : null
+                        }
+                      />
                     </View>
                   </View>
                 </View>
@@ -1985,9 +2129,11 @@ export default function SessionScreen() {
             !item.content
               ? stoppedPartial.text
               : "";
-          const displayContent = isStreaming
-            ? streamingText
-            : item.content || bridgedStop;
+          // `<your-turn>` tags (TRA-504) never show as text: a beginner's
+          // settled bubble styles the line; everything else shows its words.
+          const displayContent = stripYourTurnMarkers(
+            isStreaming ? streamingText : item.content || bridgedStop,
+          );
           const empty = displayContent.length === 0;
           // Server-truth pending for the trailing placeholder, so a remount (or
           // a busy wait-and-retry) still shows the thinking state. A DEAD turn's
@@ -2020,6 +2166,11 @@ export default function SessionScreen() {
           // stream, so this needs no client reading-level check and never fires
           // on the in-flight streaming bubble. An empty stage map (every other
           // scholar) short-circuits to the plain Markdown path.
+          // Listener or beginner (TRA-504): read-along words, tap a word and
+          // marked letter teams on the settled bubble; a beginner's also
+          // carries the "your turn" line.
+          const useBeginner =
+            isTutor && !isStreaming && isReadAlongSession && !!item.content;
           const useGrapheme =
             isTutor &&
             !isStreaming &&
@@ -2038,7 +2189,9 @@ export default function SessionScreen() {
                 {hasImage && <ImageBubble url={item.imageUrl ?? null} />}
                 {showBubble && (
                   <SpeakableBubble
-                    content={displayContent}
+                    content={
+                      useBeginner ? withoutYourTurn(item.content) : displayContent
+                    }
                     speakable={isTutor && !isStreaming && !empty}
                     ttsEnabled={ttsEnabled}
                     onCopy={() => {
@@ -2085,7 +2238,7 @@ export default function SessionScreen() {
                           <Text style={[styles.bubbleText, styles.thinking]}>…</Text>
                         )
                       ) : mine ? (
-                        <Text style={[styles.bubbleText, styles.textMine]}>
+                        <Text style={[styles.bubbleText, convText, styles.textMine]}>
                           {item.content}
                         </Text>
                       ) : isStreaming ? (
@@ -2097,11 +2250,11 @@ export default function SessionScreen() {
                         // quiet status row below the text, matching the web.
                         <>
                           <StreamingText
-                            content={streamingText}
+                            content={displayContent}
                             done={false}
                             color={colors.charcoal}
                             fadeMs={420}
-                            style={styles.bubbleText}
+                            style={[styles.bubbleText, convText]}
                           />
                           {activity ? (
                             <View style={{ marginTop: 6 }}>
@@ -2109,6 +2262,21 @@ export default function SessionScreen() {
                             </View>
                           ) : null}
                         </>
+                      ) : useBeginner ? (
+                        <BeginnerReplyText
+                          content={item.content}
+                          spans={item.graphemeSpans}
+                          stages={graphemeStages}
+                          alphabet={isBeginnerSession ? decodableAlphabet : null}
+                          style={[styles.bubbleText, convText]}
+                          textSteps={textSteps}
+                          onReadAloud={
+                            isBeginnerSession && isLastPlaceholder && me?.sttEnabled !== false
+                              ? onReadYourTurn
+                              : undefined
+                          }
+                          readAloudDisabled={composerBusy || voice.isRecording || voice.isTranscribing}
+                        />
                       ) : useGrapheme ? (
                         // Reading ramp: the same styles.bubbleText metrics (18/26,
                         // fonts.regular, charcoal) as the Markdown branch, so the
@@ -2119,7 +2287,7 @@ export default function SessionScreen() {
                           text={item.content}
                           spans={item.graphemeSpans!}
                           stages={graphemeStages}
-                          style={styles.bubbleText}
+                          style={[styles.bubbleText, convText]}
                         />
                       ) : (
                         <Markdown content={displayContent} color={colors.charcoal} />
@@ -2197,6 +2365,31 @@ export default function SessionScreen() {
             )}
           </View>
         )}
+        {/* Pre-reader voice mode on a muted / nearly-muted iPad (web's "Turn up
+            the iPad volume" nudge, here read live from the system volume).
+            Shown, never spoken — a muted iPad can't say it. Clears itself when
+            the volume comes back up; "Hide" lasts until the next drop. */}
+        {preReaderVoice.volumeCard && (
+          <View style={styles.volumeCardRow} testID="low-volume-card">
+            <View style={styles.volumeCard}>
+              <SymbolView
+                name="speaker.slash.fill"
+                size={26}
+                tintColor={colors.violet}
+              />
+              <Text style={styles.volumeCardTitle}>{LOW_VOLUME_CARD.title}</Text>
+              <Pressable
+                onPress={preReaderVoice.hideVolumeCard}
+                hitSlop={8}
+                style={styles.volumeCardHide}
+                accessibilityRole="button"
+                accessibilityLabel={LOW_VOLUME_CARD.dismiss}
+              >
+                <SymbolView name="xmark" size={14} tintColor={colors.charcoalSubtle} />
+              </Pressable>
+            </View>
+          </View>
+        )}
         {image.previewUri && (
           <View style={styles.previewRow}>
             <View style={styles.previewChip}>
@@ -2235,22 +2428,22 @@ export default function SessionScreen() {
             <Pressable
               onPress={onAttach}
               hitSlop={8}
-              style={styles.attachBtn}
+              style={[
+                styles.circleBtn,
+                circle,
+                { backgroundColor: composerBusy ? colors.gray300 : colors.charcoalSubtle },
+              ]}
               disabled={composerBusy}
               accessibilityRole="button"
               accessibilityLabel="Add a photo"
             >
-              <SymbolView
-                name="plus.circle.fill"
-                size={32}
-                tintColor={composerBusy ? colors.gray300 : colors.charcoalSubtle}
-              />
+              <SymbolView name="plus" size={glyph} tintColor={colors.white} />
             </Pressable>
 
-            <View style={styles.inputWrap}>
+            <View style={[styles.inputWrap, { minHeight: fieldH }]}>
               <AppTextInput
                 ref={inputRef}
-                style={styles.input}
+                style={[styles.input, composerText]}
                 value={input}
                 onChangeText={onChangeInput}
                 placeholder="Message your tutor…"
@@ -2282,6 +2475,60 @@ export default function SessionScreen() {
                 onSubmitEditing={() => onSend()}
                 editable={!composerBusy}
               />
+            </View>
+              {/* Pre-reader voice mode toggle (web parity: left of the action
+                  slot). Only in a listener or beginner session — the mode defaults ON
+                  there. The two states must be unmistakable at a glance: ON is
+                  a filled violet pill with a sounding speaker + "Voice on"; OFF
+                  is an outlined pill with a crossed-out speaker + "Voice off"
+                  (a bare grey glyph read as disabled — TRA-492). Tapping OFF
+                  stops the tutor's voice and any listening; tapping ON reads
+                  the tutor's last reply aloud, then listens (a beginner answers with
+                  tap-to-talk instead, TRA-504). Glows while the
+                  tutor is speaking (why the mic isn't listening yet). */}
+              {preReaderVoiceEligible && (
+                <Pressable
+                  onPress={preReaderVoice.toggleVoiceMode}
+                  hitSlop={8}
+                  style={[
+                    styles.voiceModeBtn,
+                    { height: fieldH, borderRadius: fieldH / 2 },
+                    preReaderVoice.voiceMode
+                      ? styles.voiceModeBtnOn
+                      : styles.voiceModeBtnOff,
+                    preReaderVoice.speaking && styles.voiceModeBtnSpeaking,
+                  ]}
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: preReaderVoice.voiceMode }}
+                  accessibilityLabel={
+                    preReaderVoice.voiceMode
+                      ? "Turn off voice mode"
+                      : "Turn on voice mode"
+                  }
+                  testID="voice-mode-toggle"
+                >
+                  <SymbolView
+                    name={
+                      preReaderVoice.voiceMode
+                        ? "speaker.wave.2.fill"
+                        : "speaker.slash.fill"
+                    }
+                    size={18}
+                    tintColor={
+                      preReaderVoice.voiceMode ? colors.white : colors.charcoal
+                    }
+                  />
+                  <Text
+                    style={
+                      preReaderVoice.voiceMode
+                        ? styles.voiceModeLabelOn
+                        : styles.voiceModeLabelOff
+                    }
+                  >
+                    {preReaderVoice.voiceMode ? "Voice on" : "Voice off"}
+                  </Text>
+                </Pressable>
+              )}
               {/* Mic when there's nothing to send yet; send button otherwise.
                   Both are big filled violet circles so an empty composer clearly
                   reads "tap the mic to talk" — tap it, then tap ✓ to send. While
@@ -2292,62 +2539,53 @@ export default function SessionScreen() {
                 <Pressable
                   onPress={onStop}
                   hitSlop={8}
-                  style={styles.sendBtn}
+                  style={[styles.circleBtn, circle, { backgroundColor: colors.violet }]}
                   accessibilityRole="button"
                   accessibilityLabel="Stop generating"
                 >
-                  <SymbolView
-                    name="stop.circle.fill"
-                    size={38}
-                    tintColor={colors.violet}
-                  />
+                  <SymbolView name="stop.fill" size={glyph} tintColor={colors.white} />
                 </Pressable>
               ) : visiblyStreaming ? (
                 // Pre-token: an inert Send in the same slot (see stopArmed).
                 <View
-                  style={styles.sendBtn}
+                  style={[styles.circleBtn, circle, { backgroundColor: colors.gray300 }]}
                   accessibilityRole="button"
                   accessibilityState={{ disabled: true }}
                   accessibilityLabel="Sending"
                 >
-                  <SymbolView
-                    name="arrow.up.circle.fill"
-                    size={38}
-                    tintColor={colors.gray300}
-                  />
+                  <SymbolView name="arrow.up" size={glyph} tintColor={colors.white} />
                 </View>
               ) : !canSend && !image.imageId ? (
                 <Pressable
-                  onPress={onMicStart}
+                  onPress={() => void onMicStart()}
                   hitSlop={8}
-                  style={styles.micBtn}
+                  style={[
+                    styles.circleBtn,
+                    circle,
+                    { backgroundColor: composerBusy ? colors.gray300 : colors.violet },
+                  ]}
                   disabled={composerBusy}
                   accessibilityRole="button"
                   accessibilityLabel="Start recording — tap to talk, tap the check to send"
                 >
-                  <SymbolView
-                    name="mic.circle.fill"
-                    size={38}
-                    tintColor={composerBusy ? colors.gray300 : colors.violet}
-                  />
+                  <SymbolView name="mic.fill" size={glyph} tintColor={colors.white} />
                 </Pressable>
               ) : (
                 <Pressable
                   onPress={() => onSend()}
                   disabled={!canSend}
                   hitSlop={8}
-                  style={styles.sendBtn}
+                  style={[
+                    styles.circleBtn,
+                    circle,
+                    { backgroundColor: canSend ? colors.violet : colors.gray300 },
+                  ]}
                   accessibilityRole="button"
                   accessibilityLabel="Send message"
                 >
-                  <SymbolView
-                    name="arrow.up.circle.fill"
-                    size={38}
-                    tintColor={canSend ? colors.violet : colors.gray300}
-                  />
+                  <SymbolView name="arrow.up" size={glyph} tintColor={colors.white} />
                 </Pressable>
               )}
-            </View>
           </View>
         )}
       </GlassBar>
@@ -3065,16 +3303,17 @@ function makeStyles(c: ReturnType<typeof useColors>) {
   inputWrap: {
     flex: 1,
     flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 10,
+    alignItems: "center",
     backgroundColor: c.bg + "b3", // bg at ~70% opacity for the text-input pill
-    borderWidth: 1,
+    borderWidth: COMPOSER_WRAP_BORDER,
     borderColor: c.border,
     borderRadius: 24,
     paddingLeft: 18,
-    paddingRight: 6,
-    paddingVertical: 6,
+    paddingRight: 12,
+    paddingVertical: COMPOSER_WRAP_PAD_V,
   },
+  // The "+" and the mic/send/stop: filled circles the field's height.
+  circleBtn: { alignItems: "center", justifyContent: "center" },
   composerRow: {
     width: "100%",
     maxWidth: COLUMN_MAX_WIDTH,
@@ -3083,8 +3322,6 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     alignItems: "flex-end",
     gap: 8,
   },
-  attachBtn: { paddingBottom: 8 },
-  micBtn: { paddingBottom: 2 },
   toolActivityRow: {
     width: "100%",
     maxWidth: COLUMN_MAX_WIDTH,
@@ -3104,6 +3341,30 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     alignSelf: "center",
     marginBottom: 8,
   },
+  volumeCardRow: {
+    width: "100%",
+    maxWidth: COLUMN_MAX_WIDTH,
+    alignSelf: "center",
+    marginBottom: 8,
+  },
+  volumeCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: c.violet,
+    backgroundColor: c.bg,
+  },
+  volumeCardTitle: {
+    flex: 1,
+    fontSize: 17,
+    fontFamily: fonts.semibold,
+    color: c.fg,
+  },
+  volumeCardHide: { padding: 4 },
   previewChip: {
     width: 88,
     height: 88,
@@ -3134,9 +3395,25 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     ...CHAT_COMPOSER_INPUT,
     fontFamily: fonts.regular,
     color: c.charcoal,
-    paddingVertical: 8,
+    paddingVertical: COMPOSER_INPUT_PAD_V,
     maxHeight: 140,
   },
-  sendBtn: { paddingBottom: 2 },
+  voiceModeBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    borderWidth: 1.5,
+  },
+  voiceModeBtnOn: { backgroundColor: c.violet, borderColor: c.violet },
+  voiceModeBtnOff: { backgroundColor: c.bg, borderColor: c.charcoalSubtle },
+  voiceModeLabelOn: { fontSize: 14, fontFamily: fonts.semibold, color: c.white },
+  voiceModeLabelOff: { fontSize: 14, fontFamily: fonts.semibold, color: c.fg },
+  voiceModeBtnSpeaking: {
+    shadowColor: c.violet,
+    shadowOpacity: 0.6,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 0 },
+  },
   });
 }

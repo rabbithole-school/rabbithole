@@ -22,48 +22,80 @@
 // link base (via `withBase`) to get the channel's form.
 
 import { appBaseUrl } from "./deploymentConfig";
+import {
+  dayKeyForTimezone,
+  instantForLocalMinutes,
+} from "../../shared/institutionDay";
 
 export type AideChannel = "web" | "slack";
 
 /** Absolute app origin for this deployment (per-deployment via SITE_URL). */
 export const siteUrl = appBaseUrl;
 
-// ── HST time labels ──────────────────────────────────────────────────────
-// The primary school runs on Hawaii time (HST = UTC-10, no DST ever), so a fixed
-// -10h offset formatted off UTC parts is always correct — and avoids
-// depending on ICU/`timeZone` support in the Convex runtime. The aide
-// reasons in epoch-ms; these labels make timestamps legible to the model
-// (and let it sanity-check that a computed time is right). Lives here (a
-// pure, Convex-free module) so every surface — the aide tool layer, the
-// MCP queries, the Next route — can format the same way.
-const HST_OFFSET_MS = 10 * 60 * 60 * 1000;
-const WEEKDAYS = [
-  "Sunday",
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
-];
-const MONTHS = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
-export function hstLabel(ms: number | null | undefined): string | null {
-  if (ms == null) return null;
-  const d = new Date(ms - HST_OFFSET_MS);
-  let h = d.getUTCHours();
-  const ap = h < 12 ? "AM" : "PM";
-  h = h % 12 || 12;
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${WEEKDAYS[d.getUTCDay()].slice(0, 3)}, ${MONTHS[d.getUTCMonth()].slice(0, 3)} ${d.getUTCDate()}, ${h}:${mm} ${ap} HST`;
+// ── School-time labels ──────────────────────────────────────────────────
+// The aide reasons in epoch-ms; these labels make timestamps legible to the
+// model (and let it sanity-check that a computed time is right) in the
+// SCHOOL's own clock. The zone is a required argument — the caller resolves it
+// from the institution (lib/institutionTime.ts) — so no surface can silently
+// fall back to another school's clock. For Pacific/Honolulu the output is
+// byte-identical to the old fixed-offset "…, 9:00 AM HST" label. Lives here
+// (a pure, Convex-free module) so every surface — the aide tool layer, the
+// MCP queries, the Next route — formats the same way.
+const schoolTimeFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function schoolTimeFormatter(timeZone: string): Intl.DateTimeFormat {
+  let formatter = schoolTimeFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hourCycle: "h12",
+      timeZoneName: "short",
+    });
+    schoolTimeFormatters.set(timeZone, formatter);
+  }
+  return formatter;
 }
 
-/** HST calendar date in the teacher-facing "Monday, July 27" form. */
-export function hstDateLabel(ms: number): string {
-  const d = new Date(ms - HST_OFFSET_MS);
-  return `${WEEKDAYS[d.getUTCDay()]}, ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+/** "Mon, Jul 27, 9:00 AM HST" (or "Mon, Jul 27, 2026, 9:00 AM HST" with
+ *  `withYear`) in the given IANA zone; null for a null time. */
+export function schoolTimeLabel(
+  ms: number | null | undefined,
+  timeZone: string,
+  options: { withYear?: boolean } = {},
+): string | null {
+  if (ms == null) return null;
+  const parts = schoolTimeFormatter(timeZone).formatToParts(new Date(ms));
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  const year = options.withYear ? `${part("year")}, ` : "";
+  return `${part("weekday")}, ${part("month")} ${part("day")}, ${year}${part("hour")}:${part("minute")} ${part("dayPeriod")} ${part("timeZoneName")}`;
+}
+
+/**
+ * The wall-clock → UTC anchor the aide is handed for converting "9am" into
+ * epoch ms, at today's offset in the zone ("9:00 AM HST on a date = that date
+ * at 19:00 UTC" for Pacific/Honolulu).
+ */
+export function wallClockUtcIdentity(nowMs: number, timeZone: string): string {
+  const today = dayKeyForTimezone(nowMs, timeZone);
+  const nineAm = instantForLocalMinutes(today, 9 * 60, timeZone);
+  const utc = new Date(nineAm);
+  const utcDay = utc.toISOString().slice(0, 10);
+  const hhmm = `${String(utc.getUTCHours()).padStart(2, "0")}:${String(utc.getUTCMinutes()).padStart(2, "0")}`;
+  const which =
+    utcDay === today
+      ? "that date"
+      : utcDay < today
+        ? "the day before"
+        : "the day after";
+  const zoneName = schoolTimeLabel(nineAm, timeZone)?.split(" ").pop() ?? "";
+  return `9:00 AM ${zoneName} on a date = ${which} at ${hhmm} UTC`;
 }
 
 /**

@@ -36,9 +36,7 @@ import {
   buildNonHumanIntroSection,
   buildOpeningTurnSection,
   buildPhysicalEnvironmentSection,
-  buildPreReaderSection,
-  buildEarlyReaderSection,
-  buildYoungReaderTurnRules,
+  buildLevelsSection,
   isSameSitting,
   TUTOR_PROMPT_SECTION_ORDER,
   TUTOR_TURN_CONTEXT_SECTIONS,
@@ -73,19 +71,26 @@ import type { StoredMapArtifact, GeoMapSpec } from "../lib/geomap/types";
 import { isSolved } from "../lib/geomap/grade";
 import { resolveRegion } from "../lib/geomap/registry";
 import {
-  isEarlyReader,
-  isPreReader,
-  needsYoungReaderTurnRules,
+  resolveEffectiveLevels,
+  talkLevelOf,
+  readLevelOf,
+  type EffectiveLevels,
+  type ReadLevel,
+  type WriteMode,
 } from "./lib/readingLevels";
 import {
   nonGraduatedTeams,
+  normalizeTeams,
   shouldAnnotateGraphemes,
 } from "./lib/graphemeAnnotate";
 import { MAX_APP_ASSETS } from "../shared/appAssets";
+import {
+  dayStartForTimezone,
+  mondayDayKeyForTimezone,
+} from "../shared/institutionDay";
 import { readInventoryTeams } from "./graphemeInventory";
 import {
   resolveContextIdentity,
-  resolveReadingLevel,
   resolveSessionHistory,
   buildMasteryContext,
   buildSignalContext,
@@ -817,6 +822,10 @@ export const getSessionContext = internalQuery({
         ...(m.role === "user" && m.inputModality
           ? { inputModality: m.inputModality }
           : {}),
+        // A beginner's read-aloud of their "your turn" line (TRA-504).
+        ...(m.role === "user" && m.readAloudOf
+          ? { readAloudOf: m.readAloudOf }
+          : {}),
       }));
     let latestInstructionCompletionIndex = -1;
     for (let index = messages.length - 1; index >= 0; index--) {
@@ -861,15 +870,19 @@ export const getSessionContext = internalQuery({
     //     baseline behavior.
     const { isSyntheticView, contextUserId } = resolveContextIdentity(session);
 
-    // Get reading level: project override takes priority, then synthetic
-    // (when in synthetic view-as), then the context user's stored level.
+    // Talk / read / write (TRA-503): per-session overrides take priority, then
+    // synthetic (when in synthetic view-as), then the context user's stored
+    // levels. `readingLevel` below is the TALK level.
     const scholar = await ctx.db.get(contextUserId);
-    const readingLevel = resolveReadingLevel({
+    const levels = resolveEffectiveLevels({
       isSyntheticView,
-      readingLevelOverride: session.readingLevelOverride,
-      syntheticReadingLevel: session.testDriveSyntheticReadingLevel,
-      scholarReadingLevel: scholar?.readingLevel,
+      session,
+      scholar,
     });
+    const readingLevel = levels.talk;
+    // A beginner's Mentava-taught letters (TRA-507, first-party). The level
+    // itself never reaches the prompt; only the letters it implies.
+    let beginnerExtra: { letters: string; teams: string[] } | null = null;
 
     // Scholar session history — powers the SESSION CONTEXT prompt section and
     // the one-time non-human introduction. A "session" ≈ a project. Skipped in
@@ -1114,9 +1127,9 @@ export const getSessionContext = internalQuery({
     // with no `expiresAt` is STANDING — every row written before that field
     // existed — so this filter is a no-op for them and the rendered prompt
     // stays byte-identical for any scholar with no expiring guidance.
-    const directiveNow = Date.now();
+    const contextNowMs = Date.now();
     const teacherDirectives = directiveRows
-      .filter((d) => d.expiresAt === undefined || d.expiresAt > directiveNow)
+      .filter((d) => d.expiresAt === undefined || d.expiresAt > contextNowMs)
       .map((d) => ({
         label: d.label,
         content: d.content,
@@ -1138,14 +1151,26 @@ export const getSessionContext = internalQuery({
       .filter((g) => g.feedsTutor)
       .map((g) => ({ title: g.title, description: g.description, kind: g.kind }));
 
+    // The scholar's school and its clock. Every "today" / "this week" boundary
+    // below is the SCHOOL's local day, never a fixed offset — Pacific/Honolulu
+    // for the primary, so its windows are unchanged. Null (→ the legacy
+    // default zone) in synthetic test-drive mode, where every scholar-keyed
+    // read that would use these boundaries is skipped anyway.
+    const institutionId = isSyntheticView
+      ? null
+      : ((await scholarInstitutionId(ctx, contextUserId)) ?? null);
+    const institution = institutionId ? await ctx.db.get(institutionId) : null;
+    const institutionTimeZone = effectiveInstitutionTimeZone(institution?.timeZone);
+
     // Learner-owned WEEKLY goals for THIS WEEK that are active (the SRL loop).
     // Governed authorship, scholar-owned, injected deterministically.
     // Skipped in synthetic view (a sim has no real goals). Week anchored to the
-    // Monday in Hawaiʻi time (HST = UTC−10, no DST) — matches weeklyGoals.ts.
-    const WEEKLY_HST_OFFSET_MS = 10 * 3_600_000;
-    const nowHst = new Date(Date.now() - WEEKLY_HST_OFFSET_MS);
-    nowHst.setUTCDate(nowHst.getUTCDate() - ((nowHst.getUTCDay() + 6) % 7));
-    const currentWeekOf = nowHst.toISOString().slice(0, 10);
+    // school-local Monday — the same key weeklyGoals.ts writes.
+    const currentWeekOf = mondayDayKeyForTimezone(
+      contextNowMs,
+      0,
+      institutionTimeZone,
+    );
     const weeklyGoalRows = isSyntheticView
       ? []
       : await ctx.db
@@ -1185,18 +1210,15 @@ export const getSessionContext = internalQuery({
 
     // Today's Web Assignment sessions (e.g. an external practice site) — lets the
     // tutor connect the conversation to the scholar's external practice.
-    // Hawaii has no DST, so HST midnight is a fixed UTC-10 offset.
+    // "Today" starts at the school's local midnight.
     // Skipped in synthetic mode like every scholar-keyed read.
-    const HST_OFFSET_MS = 10 * 3_600_000;
-    const hstDayStart =
-      Math.floor((Date.now() - HST_OFFSET_MS) / 86_400_000) * 86_400_000 +
-      HST_OFFSET_MS;
+    const schoolDayStart = dayStartForTimezone(contextNowMs, institutionTimeZone);
     const todayWebSessions = isSyntheticView
       ? []
       : await ctx.db
           .query("webActivitySessions")
           .withIndex("by_scholar", (q) =>
-            q.eq("scholarId", contextUserId).gte("startedAt", hstDayStart),
+            q.eq("scholarId", contextUserId).gte("startedAt", schoolDayStart),
           )
           .collect();
     const webPracticeContext: WebPracticeEntry[] = [];
@@ -1549,14 +1571,9 @@ export const getSessionContext = internalQuery({
     // the tutor only ever knows what a staffer opted in. Skipped in synthetic
     // test-drive mode (no real scholar → no institution) like every
     // scholar-keyed read. See review/physical-environment-teaching-tool-plan.html.
+    // The school identity (resolved once, above) serves the day boundaries,
+    // the physical-environment gate, and the prompt profile.
     let physicalEnvironmentContext: PhysicalEnvironmentContext | null = null;
-    const institutionId = isSyntheticView
-      ? null
-      : ((await scholarInstitutionId(ctx, contextUserId)) ?? null);
-    // The school identity serves both the physical-environment gate and prompt
-    // profile, so load it once rather than making the gate resolve it again.
-    const institution = institutionId ? await ctx.db.get(institutionId) : null;
-    const institutionTimeZone = effectiveInstitutionTimeZone(institution?.timeZone);
     if (institutionId) {
       // Physical inventory is only reachable when the scholar is actually at
       // school (derived from the Master Schedule bell blocks). Off-hours → skip
@@ -1627,6 +1644,19 @@ export const getSessionContext = internalQuery({
       teacherWhisper: session.teacherWhisper ?? null,
       pendingWhisper: session.pendingWhisper ?? null,
       readingLevel,
+      readLevel: levels.read,
+      writeMode: levels.write,
+      // The letter teams a beginner's "your turn" line may use (TRA-504): the
+      // context scholar's grapheme inventory, every stage — a graduated team
+      // is one they read without help. None in a synthetic view.
+      // What a linked Mentava level adds (TRA-507); null without one.
+      beginnerExtra,
+      beginnerTeams:
+        levels.read === "beginner" && !isSyntheticView
+          ? normalizeTeams(
+              (await readInventoryTeams(ctx, contextUserId)).map((t) => t.team),
+            )
+          : [],
       scholarName: resolvedScholarName,
       // Staff-only. Consumed by the OBSERVER (teacher-facing output) via
       // ObserverContext; buildSystemPrompt deliberately never injects it, so
@@ -1910,16 +1940,15 @@ export const finalizeStream = internalMutation({
         const { isSyntheticView, contextUserId } =
           resolveContextIdentity(session);
         const scholar = await ctx.db.get(contextUserId);
-        // Resolve the SAME reading level the tutor rendered against — session
-        // override included — never the raw stored users.readingLevel.
-        const readingLevel = resolveReadingLevel({
+        // Resolve the SAME read level the tutor rendered against — session
+        // override included — never the raw stored user fields.
+        const { read } = resolveEffectiveLevels({
           isSyntheticView,
-          readingLevelOverride: session.readingLevelOverride,
-          syntheticReadingLevel: session.testDriveSyntheticReadingLevel,
-          scholarReadingLevel: scholar?.readingLevel,
+          session,
+          scholar,
         });
         const teams = await readInventoryTeams(ctx, contextUserId);
-        if (shouldAnnotateGraphemes(readingLevel, teams)) {
+        if (shouldAnnotateGraphemes(read, teams)) {
           await ctx.scheduler.runAfter(
             0,
             internal.graphemeActions.annotateAndStore,
@@ -2505,7 +2534,20 @@ function buildOwnIsUnitCoDesignSection(
   outline: OwnIsUnitOutlineLesson[],
   builtInChat: boolean,
   nextActivityTitle: string | null,
+  youngReader = false,
 ): string {
+  // A listener or beginner (TRA-504 playtest): the planning vocabulary is
+  // adult jargon to them, and a 6-year-old who said no to planning was asked
+  // again turn after turn. Appended to whichever variant renders below.
+  const youngReaderNote = youngReader
+    ? `
+
+FOR THIS YOUNG READER: never say "unit", "lesson", "activity" or
+"chapter" to them: it's "your quest" and its "parts". Offer to set
+the quest up at most once. If they say no or change the subject,
+drop the planning for the rest of this chat and just explore what
+they're curious about.`
+    : "";
   const header = `
 INDEPENDENT STUDY CO-DESIGN — YOU CAN BUILD THIS UNIT WITH THEM:
 
@@ -2557,7 +2599,7 @@ scholar's to use however they like:
      going — don't steer them back to the activities or repeat the
      offer unless they ask what to do next.
   3. Don't re-plan the unit as if nothing exists. To change or add to
-     it, propose it out loud, wait for a yes, then use the tools above.`;
+     it, propose it out loud, wait for a yes, then use the tools above.${youngReaderNote}`;
   }
 
   return `${header}${outlineText}
@@ -2590,10 +2632,15 @@ How co-design should go:
 Don't overwhelm. The kid is here to learn what THEY chose. Match
 their energy. If they want to dive into the topic instead of
 planning, that's fine too — but help them put something in place
-before you let the session end so they have a unit to come back to.`;
+before you let the session end so they have a unit to come back to.${youngReaderNote}`;
 }
 
-function buildUnitSection(unitContext: UnitContext | null): string | null {
+function buildUnitSection(
+  unitContext: UnitContext | null,
+  // A listener or beginner READ level (TRA-504): kid words for the quest
+  // co-design, and no repeated planning push.
+  youngReader = false,
+): string | null {
   if (!unitContext) return null;
   const lines: string[] = [`\n\nUNIT: "${unitContext.title}"`];
   if (unitContext.bigIdea) lines.push(`Big Idea: ${unitContext.bigIdea}`);
@@ -2619,6 +2666,7 @@ ${unitContext.videoTranscript}`);
         unitContext.ownIsUnitOutline ?? [],
         !!unitContext.ownIsUnitBuiltInChat,
         unitContext.ownIsUnitNextActivityTitle ?? null,
+        youngReader,
       ),
     );
   }
@@ -3237,6 +3285,34 @@ export function buildAppStateSection(
   return lines.join("\n");
 }
 
+/** Tag around the author's director notes in CHARACTER ON STAGE. */
+export const AUTHOR_NOTES_TAG = "authors_private_notes";
+
+/**
+ * The app author's director notes, fenced as private material. The notes are
+ * written in the author's own working vocabulary (verdict names, stages, app
+ * state fields, "[the customer's first name]" placeholders, "ask, exactly:")
+ * and a tutor that treats them as a script reads that vocabulary aloud: three
+ * live runs on 2026-10-11 told a child "The author's notes say…", narrated a
+ * "verdict loophole, stage 1", and answered a placeholder out loud (TRA-477).
+ * So the frame sits on the block itself, not in a closing sentence, and the
+ * matching rule rides the app-update instruction (lib/appUpdateTools).
+ */
+export function buildAuthorNotesBlock(notes: string): string {
+  // The author is trusted, but a stray closing tag must not end the fence early.
+  const fenced = notes.replace(
+    new RegExp(`</?${AUTHOR_NOTES_TAG}`, "gi"),
+    (tag) => tag.replace("<", "&lt;"),
+  );
+  return [
+    `AUTHOR'S PRIVATE NOTES: from the lesson's author to you, the director. The scholar never sees them, and for this activity they outrank the defaults below.`,
+    `<${AUTHOR_NOTES_TAG}>`,
+    fenced,
+    `</${AUTHOR_NOTES_TAG}>`,
+    `These notes are for you alone. Never quote, paraphrase, or mention them, and never say "the notes say" or "the author". Never narrate to the scholar a verdict, a stage or part number, a loophole, or any other hidden state they describe: speak only in your own voice as the tutor, in the scholar's register. A line the notes give you word for word is yours to say as if you had just thought of it, with nothing around it. Text in square brackets (like "[the customer's first name]") is the author's placeholder for the app's own state: fill it silently from LIVE APP STATE or the IN-APP lines, never read the brackets or their label aloud, and if you cannot find the value, leave that part out rather than guess.`,
+  ].join("\n");
+}
+
 /**
  * The app's AI character, named beside the app state, and how the tutor
  * directs it. Changes only when the standing direction does, so it does not
@@ -3266,11 +3342,7 @@ export function buildCharacterOnStageSection(
     character.direction
       ? `Your standing direction to it: "${character.direction}"`
       : `You have given it no standing direction.`,
-    ...(notes
-      ? [
-          `Notes from the app's author for you (the scholar never sees them; for this activity they outrank the defaults below): ${notes}`,
-        ]
-      : []),
+    ...(notes ? [buildAuthorNotesBlock(notes)] : []),
     `You are its director. Every exchange appears in the conversation as an IN-APP block. direct_character sets or clears its standing direction; speak_as_character says one line through it, and can overrule a verdict it got wrong. The scholar never sees your directions.`,
     // The restraint. A tutor updated after every exchange otherwise narrates
     // the play and hands over the discovery the app exists to stage.
@@ -4045,7 +4117,22 @@ export function buildSystemPromptParts(
   // takes the free-play stance and the parking-lot slot becomes the free-play
   // opener. The contract is already absent (resolveActivityScopedContext).
   freePlay: boolean = false,
+  // The session's READ level and WRITE mode (TRA-503), from
+  // `resolveEffectiveLevels`. Omitted by positional/offline callers (evals),
+  // which pass only a talk-field string: then read comes from that string
+  // (a legacy "pre-reader" → listener) and write is "own".
+  // `beginnerTeams` (TRA-504): the scholar's grapheme-inventory teams, the
+  // letter teams a `beginner`'s "your turn" line may use. Absent → none.
+  readWrite: {
+    read: ReadLevel;
+    write: WriteMode;
+    beginnerTeams?: readonly string[];
+    beginnerExtra?: { letters?: string; teams?: readonly string[] } | null;
+  } | null = null,
 ): { stable: string; dynamic: string; turnContext: string } {
+  const readLevel = readWrite?.read ?? readLevelOf({ readingLevel });
+  const writeMode = readWrite?.write ?? "own";
+  const talkLevel = talkLevelOf(readingLevel);
   // One entry per key in the system and turn-context order constants (the
   // Record type enforces exhaustiveness); the ordering lives in prompts.ts.
   const sections: Record<TutorPromptSectionKey, string | null> = {
@@ -4071,28 +4158,16 @@ export function buildSystemPromptParts(
       activityResourceContext,
       runtimeCapabilities.canShareResources,
     ),
-    // Reading level → tutor register. Scholar-stable (a per-session override
-    // is session-stable too). The pre-reader TIER swaps the generic
-    // one-sentence note for the full K register (buildPreReaderSection); any
-    // other level keeps the exact generic sentence — see the pre-reader
-    // section test for the "only this slot differs" guarantee. Levels K–2.9
-    // get the early-reader register (buildEarlyReaderSection) instead. An
-    // unset level gets nothing; a grade-based fallback is a product call.
-    // The young-reader turn rules ride in the same slot, after the register;
-    // WHO gets them is decided only by needsYoungReaderTurnRules (TRA-501).
+    // Talk / read / write → tutor register + delivery. Scholar-stable (a
+    // per-session override is session-stable too). TALK picks the register,
+    // READ and WRITE only how words arrive and get in (buildLevelsSection /
+    // selectLevelSections in lib/readingLevels.ts).
     readingLevel:
-      [
-        isPreReader(readingLevel)
-          ? buildPreReaderSection()
-          : isEarlyReader(readingLevel)
-            ? buildEarlyReaderSection(readingLevel)
-            : readingLevel
-              ? `\n\nREADING LEVEL: The scholar's reading level is set to "${readingLevel}". Adjust your vocabulary and sentence complexity accordingly. You can still explore advanced topics, but frame explanations at this reading level.`
-              : "",
-        needsYoungReaderTurnRules(readingLevel)
-          ? buildYoungReaderTurnRules()
-          : "",
-      ].join("") || null,
+      buildLevelsSection({
+        talk: talkLevel,
+        read: readLevel,
+        write: writeMode,
+      }, readWrite?.beginnerTeams ?? [], readWrite?.beginnerExtra ?? null) || null,
     // DEPRECATED (anti-parasocial): the PERSONA block is intentionally omitted —
     // the tutor must never be instructed to act as a character. The
     // `personaContext` param above is retained only for call-site signature
@@ -4100,7 +4175,7 @@ export function buildSystemPromptParts(
     perspective: perspectiveContext
       ? `\n\nPERSPECTIVE LENS: Guide the conversation through the "${perspectiveContext.title}" ${perspectiveContext.icon || ""} lens.${perspectiveContext.systemPrompt ? `\n${perspectiveContext.systemPrompt}` : ""}`
       : null,
-    unit: buildUnitSection(unitContext),
+    unit: buildUnitSection(unitContext, readLevel !== "reader"),
     lesson: buildLessonSection(lessonContext, !!lessonActivityContext),
     activity: buildActivitySection(lessonActivityContext),
     // Baseline evidence is read from the (finished) baseline conversation, so
@@ -4549,3 +4624,18 @@ export const splitStream = internalMutation({
     return newMessageId;
   },
 });
+
+/**
+ * A session's effective talk / read / write levels, resolved exactly as the
+ * tutor resolves them (view-as identity, then `resolveEffectiveLevels`), for a
+ * model-facing consumer outside the tutor stream (rubric criteria, feedback).
+ * Pair with `describeEffectiveLevelsForPrompt`.
+ */
+export async function loadSessionLevels(
+  ctx: QueryCtx,
+  session: Doc<"sessions">,
+): Promise<EffectiveLevels> {
+  const { isSyntheticView, contextUserId } = resolveContextIdentity(session);
+  const scholar = isSyntheticView ? null : await ctx.db.get(contextUserId);
+  return resolveEffectiveLevels({ isSyntheticView, session, scholar });
+}

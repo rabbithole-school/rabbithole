@@ -40,6 +40,12 @@ import {
 } from "./roles";
 import { matchScholarByName, resolveScholarByName } from "./scholarReadTools";
 import type { AideEmit } from "./aideStream";
+import {
+  isReadLevel,
+  isWriteMode,
+  type ReadLevel,
+  type WriteMode,
+} from "./readingLevels";
 import { withBase, scholarPath } from "./channels";
 
 /** Where the conversation lives — gates the sensitive/destructive tools. */
@@ -593,43 +599,80 @@ export async function makeScholarWriteTools(
       betaTool({
         name: "set_scholar_reading_level",
         description:
-          "Set (or clear) a scholar's reading level — the grade band the tutor calibrates its language to. Valid levels: \"K\", a grade number with an optional tenth (\"3\", \"5.4\"), or \"college\". Pass readingLevel=\"none\" to clear it. Records a teacher-sourced history entry.",
+          "Set (or clear) a scholar's levels. A scholar has three: TALK (readingLevel) — the grade band the tutor talks at: \"K\", a grade with an optional tenth (\"3\", \"5.4\"), or \"college\"; READ (readLevel) — how the tutor's words reach them: \"listener\" (can't read yet; the tutor speaks first, voice-first), \"beginner\" (decoding, not fluent) or \"reader\"; WRITE (writeMode) — how their words get in: \"own\" (types on their own) or \"voice\" (dictates with the mic; the tutor never asks them to type). Pass only the levels to change; \"none\" clears one back to its default (talk unset, reader, own). Only set a level a teacher has decided on — never from your own estimate. Records a teacher-sourced history entry per change.",
         inputSchema: {
           type: "object" as const,
           properties: {
             scholarName: scholarNameProp,
             readingLevel: {
               type: "string" as const,
-              description: "\"K\", a grade like \"3\" or \"5.4\", \"college\", or \"none\" to clear.",
+              description: "TALK level: \"K\", a grade like \"3\" or \"5.4\", \"college\", or \"none\" to clear.",
+            },
+            readLevel: {
+              type: "string" as const,
+              enum: ["listener", "beginner", "reader", "none"] as const,
+              description: "READ level, or \"none\" to clear (= reader).",
+            },
+            writeMode: {
+              type: "string" as const,
+              enum: ["own", "voice", "none"] as const,
+              description: "WRITE mode, or \"none\" to clear (= own).",
             },
           },
-          required: ["scholarName", "readingLevel"] as const,
+          required: ["scholarName"] as const,
         },
         run: async (input) => {
           const scholar = await resolve(input.scholarName);
           if (!scholar) return `No scholar found matching "${input.scholarName}".`;
-          const raw = input.readingLevel.trim();
-          const level = raw.toLowerCase() === "none" || raw === "" ? null : raw;
+          // undefined = leave alone; null = clear.
+          const parse = (raw: string | undefined): string | null | undefined => {
+            if (raw === undefined) return undefined;
+            const t = raw.trim();
+            return t.toLowerCase() === "none" || t === "" ? null : t;
+          };
+          const talk = parse(input.readingLevel);
+          const read = parse(input.readLevel);
+          const write = parse(input.writeMode);
+          if (talk === undefined && read === undefined && write === undefined) {
+            return "Pass at least one of readingLevel, readLevel or writeMode.";
+          }
+          if (read != null && !isReadLevel(read)) {
+            return `Invalid readLevel "${read}". Use listener, beginner, reader, or none.`;
+          }
+          if (write != null && !isWriteMode(write)) {
+            return `Invalid writeMode "${write}". Use own, voice, or none.`;
+          }
           try {
             await ctx.runMutation(internal.teacherAide.setScholarReadingLevel, {
               callerUserId,
               scholarId: scholar.id as Id<"users">,
-              readingLevel: level,
+              readingLevel: talk,
+              readLevel: read as ReadLevel | null | undefined,
+              writeMode: write as WriteMode | null | undefined,
             });
           } catch (e) {
             return e instanceof Error ? e.message : String(e);
           }
+          const said = (label: string, value: string | null | undefined) =>
+            value === undefined
+              ? null
+              : value === null
+                ? `${label} cleared`
+                : `${label} → ${value}`;
+          const summary = [
+            said("talk level", talk),
+            said("read", read),
+            said("write", write),
+          ]
+            .filter((s): s is string => s !== null)
+            .join(", ");
           emit({
             toolComplete: {
               name: "set_scholar_reading_level",
-              result: level
-                ? `Reading level → ${level} for ${scholar.name}`
-                : `Cleared reading level for ${scholar.name}`,
+              result: `${scholar.name}: ${summary}`,
             },
           });
-          return level
-            ? `Reading level set to ${level} for ${scholar.name}.`
-            : `Reading level cleared for ${scholar.name}.`;
+          return `Updated ${scholar.name}: ${summary}.`;
         },
       }),
     );

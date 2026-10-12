@@ -129,6 +129,10 @@ export interface UseAgentStreamReturn {
    * turn as failed and never toasts.
    */
   stop: () => Promise<boolean>;
+  /** When the last turn failed because the server was busy: the wait it
+   *  asked for (`Retry-After`, seconds; null if it sent none). Undefined when
+   *  the last turn did not fail on a busy refusal. Feeds `busyRetryCopy`. */
+  busyRetryAfterSec: number | null | undefined;
 }
 
 export function useAgentStream(options?: UseAgentStreamOptions): UseAgentStreamReturn {
@@ -138,6 +142,9 @@ export function useAgentStream(options?: UseAgentStreamOptions): UseAgentStreamR
   const [toolActivity, setToolActivity] = useState<ToolActivity[]>([]);
   const [generatingImage, setGeneratingImage] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
+  const [busyRetryAfterSec, setBusyRetryAfterSec] = useState<
+    number | null | undefined
+  >(undefined);
   const abortRef = useRef<AbortController | null>(null);
   // Set true by stop() so the in-flight run's finally keeps the partial content
   // (a user stop) instead of clearing it (a hard error / steer preemption).
@@ -373,6 +380,7 @@ export function useAgentStream(options?: UseAgentStreamOptions): UseAgentStreamR
       let completed = false;
       let failed = false;
       let userStopped = false;
+      setBusyRetryAfterSec(undefined);
 
       try {
         for (;;) {
@@ -408,7 +416,8 @@ export function useAgentStream(options?: UseAgentStreamOptions): UseAgentStreamR
             }
             // Budget exhausted (or a user-window Retry-After too long to wait).
             // No toast — the surface shows a calm inline "didn't go through —
-            // try again" affordance instead.
+            // try again" affordance instead, with the honest wait.
+            setBusyRetryAfterSec(outcome.retryAfterSec);
             failed = true;
             break;
           }
@@ -485,5 +494,6 @@ export function useAgentStream(options?: UseAgentStreamOptions): UseAgentStreamR
     isThinking,
     send,
     stop,
+    busyRetryAfterSec,
   };
 }

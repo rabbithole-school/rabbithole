@@ -55,6 +55,13 @@ import {
   NEW_SESSION_TITLE,
 } from "./lib/independentStudy";
 import { computePromptVersion } from "./lib/promptVersion";
+import { resolveContextIdentity } from "./sessionContextHelpers";
+import {
+  describeEffectiveLevelsForPrompt,
+  readLevelValidator,
+  resolveEffectiveLevels,
+  talkLevelOf,
+} from "./lib/readingLevels";
 import {
   institutionPromptProfileForScholar,
   DEFAULT_INSTITUTION_PROMPT_PROFILE,
@@ -74,6 +81,12 @@ import {
 import { inputModalityValidator } from "./lib/inputModality";
 import { markSeedMomentFollowed } from "./lib/moments/seedMomentLedger";
 import { rubricStarsEarned } from "../shared/rubricScore";
+import {
+  beginnerAlphabet,
+  checkDecodable,
+  lastYourTurnLine,
+} from "../shared/beginnerReading";
+import { readInventoryTeams } from "./graphemeInventory";
 import {
   hasScholarMembership,
   requireActiveLearnerInstitution,
@@ -96,7 +109,7 @@ import {
   toReplyTimeline,
   type TimelineSourceMessage,
 } from "./lib/appUpdateTools";
-import { isEmptyAppUpdatePlaceholder } from "./sessionHelpers";
+import { isEmptyAppUpdatePlaceholder, loadSessionLevels } from "./sessionHelpers";
 import { freePlayTitle, resolveFreePlayEligibility } from "./lib/freePlay";
 
 /** Parent password for time limit mode (set via PARENT_PASSWORD env var in Convex dashboard). */
@@ -747,6 +760,25 @@ export const getWithMessages = authedQuery({
     const freePlayEligible = (
       await resolveFreePlayEligibility(ctx, { session, caller: ctx.user })
     ).eligible;
+    // The EFFECTIVE read level — resolved exactly as the tutor prompt resolves
+    // it (`resolveEffectiveLevels`: view-as identity, then per-session override
+    // > synthetic/stored level). Web and iPad voice mode key on `listener`, so a
+    // teacher rehearsing with a per-session read override gets the voice-first
+    // tutor too (TRA-492, TRA-503). `beginner`'s read-along UX is TRA-504.
+    const { isSyntheticView, contextUserId } = resolveContextIdentity(session);
+    const contextScholar = isSyntheticView
+      ? null
+      : contextUserId === ctx.user._id
+        ? ctx.user
+        : await ctx.db.get(contextUserId);
+    const { read: sessionReadLevel } = resolveEffectiveLevels({
+      isSyntheticView,
+      session,
+      scholar: contextScholar,
+    });
+    // A beginner's Mentava-taught letters for the your-turn card (TRA-507):
+    // the derived set only, never the level.
+    let beginnerSpellings: { letters: string; teams: string[] } | null = null;
 
     return {
       session: {
@@ -760,6 +792,8 @@ export const getWithMessages = authedQuery({
         defaultWorkshopMode: opening.defaultMode,
         teacherEditOverride: opening.teacherEditOverride,
         freePlayEligible,
+        readLevel: sessionReadLevel,
+        beginnerSpellings,
         ...(session.isTestDrive === true ? { teacherBuildKickoff } : {}),
       },
       messages: await Promise.all(
@@ -1774,6 +1808,7 @@ export const update = authedMutation({
     teacherWhisper: v.optional(v.union(v.string(), v.null())),
     pendingWhisper: v.optional(v.union(v.string(), v.null())),
     readingLevelOverride: v.optional(v.union(v.string(), v.null())),
+    readLevelOverride: v.optional(v.union(readLevelValidator, v.null())),
     analysisSummary: v.optional(v.union(v.string(), v.null())),
   },
   handler: async (ctx, args) => {
@@ -1817,6 +1852,8 @@ export const update = authedMutation({
         updates.pendingWhisper = args.pendingWhisper ?? undefined;
       if (args.readingLevelOverride !== undefined)
         updates.readingLevelOverride = args.readingLevelOverride ?? undefined;
+      if (args.readLevelOverride !== undefined)
+        updates.readLevelOverride = args.readLevelOverride ?? undefined;
       if (args.analysisSummary !== undefined)
         updates.analysisSummary = args.analysisSummary ?? undefined;
     }
@@ -2135,6 +2172,7 @@ async function persistUserTurnMessage(
     imageId?: Id<"_storage">;
     inputModality?: InputModality;
     thread?: "designer" | "tutor";
+    readAloudOf?: string;
   },
 ): Promise<void> {
   const message =
@@ -2169,6 +2207,7 @@ async function persistUserTurnMessage(
       ? { inputModality: args.inputModality }
       : {}),
     ...(args.thread ? { thread: args.thread } : {}),
+    ...(args.readAloudOf ? { readAloudOf: args.readAloudOf } : {}),
   });
 
   // Denormalize last message info onto the session for efficient dashboard queries
@@ -2390,6 +2429,9 @@ export const sendMessage = authedMutation({
     // resulting thread on this turn (lib/workshopPolicy.ts). Absent (an older
     // client) counts as an Edit request, still clamped.
     mode: v.optional(v.union(v.literal("edit"), v.literal("play"))),
+    // Beginner reader (TRA-504): this spoken turn was started from the mic on
+    // the last reply's "your turn" line. The line itself is looked up here.
+    readingYourTurn: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
@@ -2434,11 +2476,36 @@ export const sendMessage = authedMutation({
 
     await stampLatestStreamingAssistant(ctx, args.sessionId);
 
+    // A read-aloud of the "your turn" line: take the line from the latest
+    // tutor reply (never from the client), so the tutor checks the real line.
+    let readAloudOf: string | undefined;
+    if (args.readingYourTurn && args.inputModality === "spoken") {
+      const lastAssistant = await ctx.db
+        .query("messages")
+        .withIndex("by_session_role", (q) =>
+          q.eq("sessionId", args.sessionId).eq("role", "assistant"),
+        )
+        .order("desc")
+        .first();
+      const line = lastAssistant
+        ? lastYourTurnLine(lastAssistant.content)
+        : null;
+      // Only a line the child could decode was shown as their card; anything
+      // else is not a reading to check (the client hides it too).
+      if (line) {
+        const teams = await readInventoryTeams(ctx, session.userId);
+        let extra: { letters: string; teams: string[] } | null = null;
+        const alphabet = beginnerAlphabet(teams.map((t) => t.team), extra);
+        if (checkDecodable(line, alphabet).ok) readAloudOf = line;
+      }
+    }
+
     await persistUserTurnMessage(ctx, session, {
       message: args.message,
       imageId: args.imageId,
       inputModality: args.inputModality,
       thread: turnThread,
+      readAloudOf,
     });
 
     // If there's a pending whisper, record it between user msg and assistant placeholder
@@ -3196,7 +3263,7 @@ export const listActiveByUnit = teacherQuery({
               sessionCreatedAt: session._creationTime,
               name: scholar?.name ?? null,
               image: scholar?.image ?? null,
-              readingLevel: scholar?.readingLevel ?? null,
+              readingLevel: talkLevelOf(scholar?.readingLevel),
               dateOfBirth: scholar?.dateOfBirth ?? null,
               pulseScore: session.pulseScore ?? null,
               lastMessageAt: session.lastMessageAt ?? null,
@@ -3242,7 +3309,7 @@ export const listActiveByUnit = teacherQuery({
           sessionCreatedAt: session._creationTime,
           name: scholar?.name ?? null,
           image: scholar?.image ?? null,
-          readingLevel: scholar?.readingLevel ?? null,
+          readingLevel: talkLevelOf(scholar?.readingLevel),
           dateOfBirth: scholar?.dateOfBirth ?? null,
           pulseScore: session.pulseScore ?? null,
           lastMessageAt: session.lastMessageAt ?? null,
@@ -3275,7 +3342,7 @@ export const listActiveByUnit = teacherQuery({
         sessionCreatedAt: s._creationTime,
         name: s.name ?? null,
         image: s.image ?? null,
-        readingLevel: s.readingLevel ?? null,
+        readingLevel: talkLevelOf(s.readingLevel),
         dateOfBirth: s.dateOfBirth ?? null,
         pulseScore: null,
         lastMessageAt: null,
@@ -3399,6 +3466,11 @@ export const setTestDriveViewAs = authedMutation({
     syntheticName: v.optional(v.string()),
     syntheticReadingLevel: v.optional(v.string()),
     syntheticDossier: v.optional(v.string()),
+    // The sim's READ level (TRA-503). Stored as the session's
+    // `readLevelOverride`; "reader" (the synthetic default) clears it, and
+    // switching to self or a real scholar clears it too, so a sim's read
+    // level never leaks into another view.
+    syntheticReadLevel: v.optional(readLevelValidator),
   },
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
@@ -3421,6 +3493,7 @@ export const setTestDriveViewAs = authedMutation({
         testDriveSyntheticName: undefined,
         testDriveSyntheticReadingLevel: undefined,
         testDriveSyntheticDossier: undefined,
+        readLevelOverride: undefined,
       });
       return null;
     }
@@ -3438,6 +3511,7 @@ export const setTestDriveViewAs = authedMutation({
         testDriveSyntheticName: undefined,
         testDriveSyntheticReadingLevel: undefined,
         testDriveSyntheticDossier: undefined,
+        readLevelOverride: undefined,
       });
       return null;
     }
@@ -3459,6 +3533,8 @@ export const setTestDriveViewAs = authedMutation({
       testDriveSyntheticName: args.syntheticName ?? undefined,
       testDriveSyntheticReadingLevel: args.syntheticReadingLevel ?? undefined,
       testDriveSyntheticDossier: args.syntheticDossier ?? undefined,
+      readLevelOverride:
+        args.syntheticReadLevel === "reader" ? undefined : args.syntheticReadLevel,
     });
     return null;
   },
@@ -3574,6 +3650,7 @@ export const resetTestDrive = authedMutation({
       testDriveSyntheticName: session.testDriveSyntheticName,
       testDriveSyntheticReadingLevel: session.testDriveSyntheticReadingLevel,
       testDriveSyntheticDossier: session.testDriveSyntheticDossier,
+      readLevelOverride: session.readLevelOverride,
       replayScript,
       replayStopAfter,
     });
@@ -3772,22 +3849,21 @@ export const internalGetReflectionContext = internalQuery({
       }
     }
 
-    // Reading level + scholar name (same resolution as criteria-gen)
-    let readingLevel: string | null = null;
+    // Scholar name (same resolution as criteria-gen) + the session's levels as
+    // the tutor resolved them, phrased for the model.
     let scholarName: string | null = null;
     if (session.isTestDrive && session.testDriveSyntheticReadingLevel) {
-      readingLevel = session.testDriveSyntheticReadingLevel;
       scholarName = session.testDriveSyntheticName ?? null;
     } else if (session.testDriveAsScholarId) {
       const s = await ctx.db.get(session.testDriveAsScholarId);
-      readingLevel = s?.readingLevel ?? null;
       scholarName = s?.name ?? null;
     } else {
       const s = await ctx.db.get(session.userId);
-      readingLevel = s?.readingLevel ?? null;
       scholarName = s?.name ?? null;
     }
-    if (session.readingLevelOverride) readingLevel = session.readingLevelOverride;
+    const readingLevel = describeEffectiveLevelsForPrompt(
+      await loadSessionLevels(ctx, session),
+    );
 
     // Prior activities in this unit. Walk the unit's lessons (ordered),
     // then within each lesson the activities (ordered). Anything BEFORE

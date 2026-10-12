@@ -12,6 +12,7 @@
 // the CLIENT does the time-window math — no cron, no scheduled functions (§4).
 
 import { v } from "convex/values";
+import { describeLevelsForPrompt } from "./lib/readingLevels";
 import { paginationOptsValidator } from "convex/server";
 import {
   authedQuery,
@@ -886,7 +887,7 @@ export const getContext = internalQuery({
     const purpose = chat.purpose;
     const scholar = await ctx.db.get(chat.scholarId);
     const firstName = scholar?.name?.trim().split(/\s+/)[0] || "there";
-    const readingLevel = scholar?.readingLevel ?? null;
+    const readingLevel = describeLevelsForPrompt(scholar);
 
     const messages = await recentModelMessages(ctx, args.chatId);
 

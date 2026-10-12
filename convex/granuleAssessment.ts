@@ -16,6 +16,7 @@
 // prior artifact-sourced evidence before re-writing.
 
 import { v } from "convex/values";
+import { describeLevelsForPrompt } from "./lib/readingLevels";
 import { internalAction, internalMutation, internalQuery } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -158,7 +159,7 @@ export const getArtifactAssessContext = internalQuery({
       unitId: resolvedUnitId,
       recipe: activity.recipe,
       activityTitle: activity.title,
-      readingLevel: scholar?.readingLevel ?? null,
+      readingLevel: describeLevelsForPrompt(scholar),
       granules: granules.map((g) => ({ key: g.key, kind: g.kind, text: g.text })),
       assessableText: text.slice(0, 6000),
     };

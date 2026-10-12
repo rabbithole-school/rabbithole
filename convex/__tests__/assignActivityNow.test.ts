@@ -120,7 +120,7 @@ describe("assign_activity_now composition", () => {
       }),
     ) as Record<string, unknown>;
     expect(withoutEnd.confirmation).toBe(
-      classFocusLifetimeConfirmation(undefined),
+      classFocusLifetimeConfirmation(undefined, "Pacific/Honolulu"),
     );
 
     const endsAtMs = Date.now() + HOUR;
@@ -134,7 +134,7 @@ describe("assign_activity_now composition", () => {
       }),
     ) as Record<string, unknown>;
     expect(withEnd.confirmation).toBe(
-      classFocusLifetimeConfirmation(endsAtMs),
+      classFocusLifetimeConfirmation(endsAtMs, "Pacific/Honolulu"),
     );
   });
 

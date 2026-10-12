@@ -19,6 +19,7 @@ import { Id } from "@/convex/_generated/dataModel";
 import { toaster } from "@/lib/toaster";
 import { fmtTimeRange } from "@/components/MasterSchedule/timeFormat";
 import { buildProgramSchedulePlan } from "./submitPlans";
+import { DEFAULT_TIMEZONE } from "@/shared/institutionDay";
 import type { ProgramSearchResult } from "./ProgramScheduleSection";
 import type { StartAssignmentProgramTarget } from "./types";
 
@@ -199,7 +200,7 @@ export function useProgramScheduleMode(args: ProgramScheduleModeArgs) {
       weekday: "short",
       month: "short",
       day: "numeric",
-      timeZone: "Pacific/Honolulu",
+      timeZone: programTarget.timeZone ?? DEFAULT_TIMEZONE,
     }).format(
       target.mode === "homework" ? homeworkDate : new Date(target.dateMs),
     );

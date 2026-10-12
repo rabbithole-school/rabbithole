@@ -22,7 +22,7 @@ import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import {
   dayKeyForTimezone,
-  DEFAULT_TIMEZONE,
+  dayStartForDayKey,
 } from "../../shared/institutionDay";
 import { scheduleWeekStartMs } from "../../shared/scheduleWeek";
 import { isTeacherRole, type Role } from "./roles";
@@ -43,24 +43,31 @@ const APP_TARGET_DESC =
   "and clears ten minutes after the block ends. Prefer it over enable_app_for_group, which " +
   "grants the app around the clock. A cell can carry an app or a curriculum activity, not both.";
 
-function parseSchoolDate(date: string):
+/** A YYYY-MM-DD school date → its weekday + the school-local Monday anchor of
+ *  its week, in the given institution zone. Exported for tests. */
+export function parseSchoolDate(
+  date: string,
+  timeZone: string,
+):
   | { weekday: number; weekStartMs: number }
   | { error: string } {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return { error: `Invalid date "${date}". Use YYYY-MM-DD.` };
   }
-  const noonMs = Date.parse(`${date}T12:00:00-10:00`);
-  if (
-    !Number.isFinite(noonMs) ||
-    dayKeyForTimezone(noonMs, DEFAULT_TIMEZONE) !== date
-  ) {
+  let noonMs: number;
+  try {
+    noonMs = dayStartForDayKey(date, timeZone) + 12 * 60 * 60 * 1000;
+  } catch {
+    return { error: `Invalid date "${date}". Use YYYY-MM-DD.` };
+  }
+  if (dayKeyForTimezone(noonMs, timeZone) !== date) {
     return { error: `Invalid date "${date}". Use YYYY-MM-DD.` };
   }
   const weekday = new Date(`${date}T12:00:00Z`).getUTCDay();
   if (weekday === 0 || weekday === 6) {
     return { error: `${date} is a weekend. Choose a Monday–Friday school date.` };
   }
-  return { weekday, weekStartMs: scheduleWeekStartMs(noonMs) };
+  return { weekday, weekStartMs: scheduleWeekStartMs(noonMs, timeZone) };
 }
 
 export async function makeMasterScheduleTools(
@@ -77,6 +84,20 @@ export async function makeMasterScheduleTools(
   // and scholar-group names, so teacher/admin only.
   if (!isTeacherRole(opts.role)) return [];
   const { callerUserId } = opts;
+  // A YYYY-MM-DD date the write tools take is parsed in the TERM's zone — the
+  // zone the grid and the placement mutations anchor weeks to — never the
+  // caller's, which can differ for a lensed platform admin.
+  // (Pacific/Honolulu for the primary — identical to the old fixed offset.)
+  const termTimeZone = (target: { periodId?: string; placementId?: string }) =>
+    ctx.runQuery(internal.masterSchedule.aideTermTimeZone, target);
+  // The caller's own zone labels a dispatched focus's end time (the same
+  // resolver the assignment tools use). Resolved on first use, never while
+  // the toolset is built.
+  let timeZonePromise: Promise<string> | null = null;
+  const schoolTimeZone = () =>
+    (timeZonePromise ??= ctx.runQuery(internal.institutions.staffTimeZone, {
+      userId: callerUserId,
+    }));
 
   // Name resolution must use the same institution lens as the aide's scholar
   // reads. Callers with an explicit lens pass it through; MCP and other callers
@@ -139,25 +160,22 @@ export async function makeMasterScheduleTools(
           result: `${grid.placements.length} classes, ${grid.shelf.length} on shelf, ${grid.conflicts.length} conflict(s)`,
         },
       });
+      // The term's own institution zone (what the grid's week math used).
+      const gridTimeZone = grid.closureTimeZone;
       const withWeeks = <T extends { weekStartMs: number | null }>(placement: T) =>
         placement.weekStartMs == null
           ? placement
           : {
               ...placement,
-              week: dayKeyForTimezone(
-                placement.weekStartMs,
-                DEFAULT_TIMEZONE,
-              ),
+              week: dayKeyForTimezone(placement.weekStartMs, gridTimeZone),
             };
-      const currentWeek = scheduleWeekStartMs(Date.now());
+      const nowMs = Date.now();
+      const currentWeek = scheduleWeekStartMs(nowMs, gridTimeZone);
       return JSON.stringify({
         ...grid,
         header: {
-          today: dayKeyForTimezone(Date.now(), DEFAULT_TIMEZONE),
-          currentWeekStart: dayKeyForTimezone(
-            currentWeek,
-            DEFAULT_TIMEZONE,
-          ),
+          today: dayKeyForTimezone(nowMs, gridTimeZone),
+          currentWeekStart: dayKeyForTimezone(currentWeek, gridTimeZone),
         },
         placements: grid.placements.map(withWeeks),
         shelf: grid.shelf.map(withWeeks),
@@ -314,7 +332,7 @@ export async function makeMasterScheduleTools(
       mode?: "classFocus" | "homework";
       note?: string;
     }) => {
-      const parsedDate = input.date ? parseSchoolDate(input.date) : null;
+      const parsedDate = input.date ? parseSchoolDate(input.date, await termTimeZone({ periodId: input.termId })) : null;
       if (parsedDate && "error" in parsedDate) {
         return validationError("place_class", parsedDate.error);
       }
@@ -370,7 +388,7 @@ export async function makeMasterScheduleTools(
     },
     run: async (input: { placementId: string; weekday?: number; date?: string; blockId?: string; toShelf?: boolean }) => {
       const toShelf = input.toShelf === true;
-      const parsedDate = !toShelf && input.date ? parseSchoolDate(input.date) : null;
+      const parsedDate = !toShelf && input.date ? parseSchoolDate(input.date, await termTimeZone({ placementId: input.placementId })) : null;
       if (parsedDate && "error" in parsedDate) {
         return validationError("move_class", parsedDate.error);
       }
@@ -727,6 +745,7 @@ export async function makeMasterScheduleTools(
           mode === "classFocus"
             ? classFocusLifetimeConfirmation(
                 input.endsAtMs,
+                await schoolTimeZone(),
                 input.live !== false,
               )
             : null;
@@ -786,7 +805,7 @@ export async function makeMasterScheduleTools(
       mode?: "classFocus" | "homework";
     }) => {
       const parsedDate = input.startDate
-        ? parseSchoolDate(input.startDate)
+        ? parseSchoolDate(input.startDate, await termTimeZone({ periodId: input.termId }))
         : null;
       if (parsedDate && "error" in parsedDate) {
         return validationError("cascade_unit", parsedDate.error);

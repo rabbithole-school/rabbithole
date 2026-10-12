@@ -204,7 +204,7 @@ describe("the three level instruments", () => {
       scholarId: "scholar-fixture",
       confirmed: {
         level: "5",
-        isPreReader: false,
+        readLevel: "reader",
         setAt: 1_700_000_000_000,
         setBy: "teacher",
         ...(over.confirmed ?? {}),
@@ -223,30 +223,30 @@ describe("the three level instruments", () => {
     expect(levelText("5")).toBe("Grade 5");
     expect(levelText("K")).toBe("K");
     expect(levelText("college")).toBe("College");
-    expect(levelText("pre-reader")).toBe("Pre-reader");
+    expect(levelText("pre-reader")).toBe("K"); // legacy value reads as talk K
     expect(levelText(null)).toBe("Not set");
   });
 
   it("names the confirmed value as a ratified setting", () => {
     const line = confirmedLevelLine(levels());
-    expect(line.headline).toBe("Reading level · Grade 5");
+    expect(line.headline).toBe("Talk level · Grade 5");
     expect(line.caption).toBe("Ratified by a teacher");
   });
 
   it("distinguishes an observer-set band from a ratified one", () => {
     const line = confirmedLevelLine(
       levels({
-        confirmed: { level: "5", isPreReader: false, setAt: 1, setBy: "observer" },
+        confirmed: { level: "5", readLevel: "reader", setAt: 1, setBy: "observer" },
       }),
     );
     expect(line.caption).toBe("Set by the observer — no teacher has ratified it");
   });
 
-  it("says a pre-reader triggers the voice-first register", () => {
+  it("says a listener triggers the voice-first register", () => {
     const line = confirmedLevelLine(
-      levels({ confirmed: { level: "K", isPreReader: true, setAt: null, setBy: null } }),
+      levels({ confirmed: { level: "K", readLevel: "listener", setAt: null, setBy: null } }),
     );
-    expect(line.headline).toBe("Pre-reader");
+    expect(line.headline).toBe("Listener · talk level K");
     expect(line.caption).toContain("voice first");
   });
 
@@ -284,7 +284,7 @@ describe("the three level instruments", () => {
   it("keeps a named band a name inside a sentence", () => {
     expect(levelPhrase("5")).toBe("grade 5");
     expect(levelPhrase("K")).toBe("K");
-    expect(levelPhrase("pre-reader")).toBe("Pre-reader");
+    expect(levelPhrase("pre-reader")).toBe("K");
   });
 
   it("offers to KEEP the confirmed value rather than to 'dismiss'", () => {

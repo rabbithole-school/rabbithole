@@ -16,6 +16,7 @@
  * calls.
  */
 import { v } from "convex/values";
+import { describeLevelsForPrompt } from "./lib/readingLevels";
 import type { ActivityKind } from "../lib/activityKinds";
 import { authedMutation, authedQuery } from "./lib/customFunctions";
 import { internalMutation, internalQuery } from "./_generated/server";
@@ -912,7 +913,7 @@ export const getGroundInput = internalQuery({
           sessionId: p._id,
           scholarId: p.userId,
           profileName: scholar?.name ?? "scholar",
-          readingLevel: scholar?.readingLevel ?? "(unset)",
+          readingLevel: describeLevelsForPrompt(scholar) ?? "(unset)",
           messages: conversational.map((m) => {
             const flagged = flagByMessageId.has(String(m._id));
             if (flagged) {

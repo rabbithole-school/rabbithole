@@ -16,6 +16,13 @@ export function stripMarkdownForSpeech(text: string): string {
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // links → label
     .replace(/^[-*+]\s/gm, "") // list bullets
     .replace(/^\d+\.\s/gm, "") // numbered lists
+    // Emoji are never read aloud ("Catch the ice cube ice"): drop them with
+    // their joiners, variation selectors and skin tones (TRA-504).
+    .replace(
+      /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\u{FE0F}\u{200D}\u{20E3}]/gu,
+      "",
+    )
+    .replace(/[ \t]{2,}/g, " ") // the gap an emoji leaves
     .replace(/\n{2,}/g, "\n") // collapse blank lines
     .replace(/\n/g, ". ") // newlines → sentence pause
     .replace(/\.\.\s/g, ". ") // collapse double periods

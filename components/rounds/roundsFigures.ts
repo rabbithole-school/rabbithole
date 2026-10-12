@@ -37,6 +37,8 @@
  * stored). Do not approximate any of them here.
  */
 
+import { talkLevelLabel } from "@/convex/lib/readingLevels";
+
 /** The friction floor is applied server-side; this is only for the caption. */
 export const FRICTION_MISS_FLOOR = 3;
 
@@ -279,8 +281,10 @@ export interface RoundsLevelSignals {
   /** Present on every row; the board keys its merged batches by it. */
   scholarId: string;
   confirmed: {
+    /** The TALK level. */
     level: string | null;
-    isPreReader: boolean;
+    /** The READ level (TRA-503); `listener` runs the tutor voice first. */
+    readLevel: "listener" | "beginner" | "reader";
     setAt: number | null;
     setBy: "teacher" | "observer" | null;
   };
@@ -297,17 +301,13 @@ export interface RoundsLevelSignals {
  * one canonical rendering, no second vocabulary.
  */
 export function levelText(level: string | null): string {
-  if (!level) return "Not set";
-  if (level === "pre-reader") return "Pre-reader";
-  if (level === "K") return "K";
-  if (level === "college") return "College";
-  return `Grade ${level}`;
+  // talkLevelLabel reads a legacy "pre-reader" as K (TRA-503).
+  return talkLevelLabel(level) ?? "Not set";
 }
 
 /**
- * The same band inside a sentence. Only a numbered grade lowercases; "K",
- * "College" and "Pre-reader" are names, and "keep k" reads like a typo on a
- * projected wall.
+ * The same band inside a sentence. Only a numbered grade lowercases; "K" and
+ * "College" are names, and "keep k" reads like a typo on a projected wall.
  */
 export function levelPhrase(level: string | null): string {
   const text = levelText(level);
@@ -315,28 +315,29 @@ export function levelPhrase(level: string | null): string {
 }
 
 /**
- * The confirmed setting, said plainly. This one IS legitimately about reading —
- * it is the level the tutor adapts its reading to, and a human ratified it.
+ * The confirmed setting, said plainly: the TALK level the tutor adapts its
+ * language to, which a human ratified — and, for a listener, that the tutor
+ * speaks first (TRA-503).
  */
 export function confirmedLevelLine(signals: RoundsLevelSignals): {
   headline: string;
   caption: string | null;
 } {
   const { confirmed } = signals;
-  if (confirmed.isPreReader) {
+  if (confirmed.readLevel === "listener") {
     return {
-      headline: "Pre-reader",
-      caption: "Tutor runs its K register, voice first",
+      headline: `Listener · talk level ${levelPhrase(confirmed.level)}`,
+      caption: "The tutor speaks its turns, voice first",
     };
   }
   if (!confirmed.level) {
     return {
-      headline: "Reading level not set",
+      headline: "Talk level not set",
       caption: "The tutor has no level to adapt to",
     };
   }
   return {
-    headline: `Reading level · ${levelText(confirmed.level)}`,
+    headline: `Talk level · ${levelText(confirmed.level)}`,
     caption:
       confirmed.setBy === "teacher"
         ? "Ratified by a teacher"

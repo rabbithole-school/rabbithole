@@ -15,6 +15,7 @@
  */
 
 import { v } from "convex/values";
+import { describeLevelsForPrompt } from "./lib/readingLevels";
 import { curriculumMutation, curriculumQuery } from "./lib/customFunctions";
 import { internalMutation, internalQuery } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
@@ -827,7 +828,9 @@ export const storyOpenContext = internalQuery({
       ...(fromNode?.label ? { fromLabel: fromNode.label } : {}),
       toLabel: toNode?.label ?? args.toKey,
       toDomain: toNode?.domain ?? storyEdge.domain,
-      ...(scholar?.readingLevel ? { readingLevel: scholar.readingLevel } : {}),
+      ...(describeLevelsForPrompt(scholar)
+        ? { readingLevel: describeLevelsForPrompt(scholar) ?? undefined }
+        : {}),
     };
   },
 });

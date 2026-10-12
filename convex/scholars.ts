@@ -13,9 +13,15 @@ import {
 } from "./lib/access";
 import {
   decideEstimateWrite,
-  isPreReader,
   isValidReadingLevel,
+  legacyPreReaderSplit,
+  readLevelOf,
+  readLevelValidator,
+  talkLevelOf,
+  writeModeOf,
+  writeModeValidator,
   type EstimateWriteDecision,
+  type ReadLevel,
 } from "./lib/readingLevels";
 import { scholarHasPasswordCredential } from "./lib/scholarCredential";
 import { underscoreUsername } from "./lib/username";
@@ -31,7 +37,7 @@ import {
 } from "./lib/rosterPulse";
 import { timeZoneForInstitution } from "./lib/institutionTime";
 import { dayStartForTimezone } from "../shared/institutionDay";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { hasScholarMembership } from "./lib/scholarEnrollment";
 
@@ -190,7 +196,15 @@ export const getProfile = authedQuery({
         // Which institution (school) the scholar belongs to. Roster info, not
         // a measurement — operations staff manage it. See convex/institutions.ts.
         institutionId: scholar.institutionId ?? null,
-        readingLevel: redactReadingLevel ? null : scholar.readingLevel ?? null,
+        // TALK level. A legacy "pre-reader" reads as K here (its listener half
+        // is `readLevel` below) so no client ever sees the retired value.
+        readingLevel: redactReadingLevel
+          ? null
+          : talkLevelOf(scholar.readingLevel),
+        // READ and WRITE levels (TRA-503), resolved with their defaults. Same
+        // sensitivity as the talk level, so the same redaction.
+        readLevel: redactReadingLevel ? null : readLevelOf(scholar),
+        writeMode: redactReadingLevel ? null : writeModeOf(scholar),
         readingLevelSuggestion: redactReadingLevel
           ? null
           : scholar.readingLevelSuggestion ?? null,
@@ -214,7 +228,15 @@ export const getProfile = authedQuery({
 });
 
 /**
- * Update a scholar's reading level (teachers only).
+ * Update a scholar's TALK level — `users.readingLevel` (teachers only).
+ *
+ * A scholar still carrying the legacy "pre-reader" value keeps its listener
+ * half: the read level is materialized as `listener` in the same write, so
+ * changing talk before the migration has run never drops voice-first. That
+ * implicit half gets NO history row, on purpose (same rule as
+ * `migrations:splitPreReaderLevels`): it is a change of representation, not a
+ * new human ruling, and the history row that set "pre-reader" already records
+ * it. A fresh row would date the listener as ratified today.
  */
 export const updateReadingLevel = teacherMutation({
   args: {
@@ -224,7 +246,9 @@ export const updateReadingLevel = teacherMutation({
   handler: async (ctx, args) => {
     await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
     if (args.readingLevel !== null && !isValidReadingLevel(args.readingLevel)) {
-      throw new Error("Invalid reading level");
+      throw new Error(
+        "Invalid talk level. Use K, a grade like 3 or 5.4, or college. For a scholar who can't read yet, set read to listener.",
+      );
     }
 
     const scholar = await ctx.db.get(args.scholarId);
@@ -232,7 +256,9 @@ export const updateReadingLevel = teacherMutation({
       throw new Error("Scholar not found");
     }
 
+    const legacy = legacyPreReaderSplit(scholar);
     await ctx.db.patch(args.scholarId, {
+      ...(legacy ? { readLevel: legacy.readLevel } : {}),
       readingLevel: args.readingLevel ?? undefined,
       // Clear the pending writing-derived estimate: the teacher has now ruled on
       // it, so any stored disagreement is superseded. Clearing the stamp too
@@ -244,11 +270,106 @@ export const updateReadingLevel = teacherMutation({
     if (args.readingLevel !== null) {
       await ctx.db.insert("readingLevelHistory", {
         scholarId: args.scholarId,
+        dimension: "talk",
         level: args.readingLevel,
         source: "teacher",
         changedBy: ctx.user._id,
       });
     }
+  },
+});
+
+/**
+ * Write a scholar's READ level and/or WRITE mode, recording each change in
+ * `readingLevelHistory` under its dimension. Shared by the teacher profile
+ * mutations below and the staff aide's tool (`teacherAide`), so every path
+ * records history the same way. `null` clears a level back to its default
+ * (reader / own). Callers have already checked access.
+ *
+ * Teacher-only by construction: there is no internal or observer variant. A
+ * machine may SUGGEST a read level (Mentava), never set one.
+ */
+export async function writeReadWriteLevels(
+  ctx: MutationCtx,
+  args: {
+    scholarId: Id<"users">;
+    changedBy: Id<"users">;
+    readLevel?: ReadLevel | null;
+    writeMode?: "own" | "voice" | null;
+  },
+): Promise<void> {
+  const scholar = await ctx.db.get(args.scholarId);
+  if (!scholar || !(await hasScholarMembership(ctx, args.scholarId))) {
+    throw new Error("Scholar not found");
+  }
+  const patch: Partial<Doc<"users">> = {};
+  const history: { dimension: "read" | "write"; level: string }[] = [];
+  if (args.readLevel !== undefined) {
+    // A legacy "pre-reader" talk value is the listener half being edited
+    // now — split it so the talk half survives as K. No talk history row for
+    // that implicit half: the row that set "pre-reader" already reads as
+    // talk K (`talkLevelOf`) and keeps its original ratification date.
+    const legacy = legacyPreReaderSplit(scholar);
+    if (legacy) patch.readingLevel = legacy.readingLevel;
+    patch.readLevel = args.readLevel ?? undefined;
+    if (args.readLevel !== null) {
+      history.push({ dimension: "read", level: args.readLevel });
+    }
+  }
+  if (args.writeMode !== undefined) {
+    patch.writeMode = args.writeMode ?? undefined;
+    if (args.writeMode !== null) {
+      history.push({ dimension: "write", level: args.writeMode });
+    }
+  }
+  if (Object.keys(patch).length === 0) return;
+  await ctx.db.patch(args.scholarId, patch);
+  for (const row of history) {
+    await ctx.db.insert("readingLevelHistory", {
+      scholarId: args.scholarId,
+      dimension: row.dimension,
+      level: row.level,
+      source: "teacher",
+      changedBy: args.changedBy,
+    });
+  }
+}
+
+/**
+ * Set a scholar's READ level — listener | beginner | reader (teachers only).
+ * `null` clears it back to the default, reader.
+ */
+export const updateReadLevel = teacherMutation({
+  args: {
+    scholarId: v.id("users"),
+    readLevel: v.union(readLevelValidator, v.null()),
+  },
+  handler: async (ctx, args) => {
+    await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
+    await writeReadWriteLevels(ctx, {
+      scholarId: args.scholarId,
+      changedBy: ctx.user._id,
+      readLevel: args.readLevel,
+    });
+  },
+});
+
+/**
+ * Set a scholar's WRITE mode — own | voice (teachers only). `null` clears it
+ * back to the default, own.
+ */
+export const updateWriteMode = teacherMutation({
+  args: {
+    scholarId: v.id("users"),
+    writeMode: v.union(writeModeValidator, v.null()),
+  },
+  handler: async (ctx, args) => {
+    await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
+    await writeReadWriteLevels(ctx, {
+      scholarId: args.scholarId,
+      changedBy: ctx.user._id,
+      writeMode: args.writeMode,
+    });
   },
 });
 
@@ -327,8 +448,10 @@ export interface LevelSignalRow {
   scholarId: Id<"users">;
   /** The human-ratified setting the tutor acts on. */
   confirmed: {
+    /** The TALK level (never the legacy "pre-reader"). */
     level: string | null;
-    isPreReader: boolean;
+    /** The READ level; `listener` runs the tutor voice first. */
+    readLevel: ReadLevel;
     /** When a human last ratified this exact value; null if unrecorded. */
     setAt: number | null;
     setBy: "teacher" | "observer" | null;
@@ -427,7 +550,10 @@ export const acceptReadingLevelSuggestion = teacherMutation({
     await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
     const scholar = await ctx.db.get(args.scholarId);
     if (!scholar || !scholar.readingLevelSuggestion) return;
+    // Keep a legacy pre-reader's listener half when its talk half is replaced.
+    const legacy = legacyPreReaderSplit(scholar);
     await ctx.db.patch(args.scholarId, {
+      ...(legacy ? { readLevel: legacy.readLevel } : {}),
       readingLevel: scholar.readingLevelSuggestion,
       readingLevelSuggestion: undefined,
       // DEPENDS ON pending schema addition users.readingLevelSuggestionAt.
@@ -435,6 +561,7 @@ export const acceptReadingLevelSuggestion = teacherMutation({
     });
     await ctx.db.insert("readingLevelHistory", {
       scholarId: args.scholarId,
+      dimension: "talk",
       level: scholar.readingLevelSuggestion,
       source: "observer",
       changedBy: ctx.user._id,
@@ -449,6 +576,10 @@ export const acceptReadingLevelSuggestion = teacherMutation({
  * a teacher accepting an estimate. Machine estimates are deliberately NOT written
  * to this table: it is the record of settings the system acted on, and mixing
  * unratified guesses in would make existing consumers plot guesses as decisions.
+ *
+ * TALK rows only (TRA-503): every consumer plots this as a grade trend, and a
+ * read or write row ("listener", "voice") is not a point on that line. The
+ * read/write rows stay in the table as the record of who set them.
  */
 export const getReadingLevelHistory = teacherQuery({
   args: { scholarId: v.id("users") },
@@ -459,9 +590,14 @@ export const getReadingLevelHistory = teacherQuery({
       .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
       .order("desc")
       .collect();
-    return history;
+    return history.filter(isTalkHistoryRow);
   },
 });
+
+/** A history row about the TALK level (rows written before TRA-503 have no dimension). */
+function isTalkHistoryRow(row: Doc<"readingLevelHistory">): boolean {
+  return row.dimension === undefined || row.dimension === "talk";
+}
 
 /**
  * Weekly board read model for a scholar's **level signals**, roster-shaped.
@@ -470,8 +606,8 @@ export const getReadingLevelHistory = teacherQuery({
  * on screen. They are not two measurements of one quantity:
  *
  *  • `confirmed` — the human-ratified SETTING the system acts on. It is rendered
- *    into the tutor's prompt, and `pre-reader` switches the tutor to a K register
- *    with voice-first defaults. A teacher owns it. `setAt` is when a human last
+ *    into the tutor's prompt as the TALK level; `readLevel: "listener"` switches
+ *    the tutor to voice-first delivery. A teacher owns both. `setAt` is when a human last
  *    ratified it (from `readingLevelHistory`), NOT when anything was measured.
  *
  *  • `estimate` — a WRITING-DERIVED grade-level estimate. Every input is the
@@ -519,13 +655,21 @@ export const levelSignalsForScholars = teacherQuery({
       const scholar = await ctx.db.get(scholarId);
       if (!scholar || !(await hasScholarMembership(ctx, scholarId))) continue;
 
-      const ratified = await ctx.db
-        .query("readingLevelHistory")
-        .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
-        .order("desc")
-        .first();
+      // The latest TALK ratification (read/write rows share the table). A
+      // scholar's history is a handful of rows, so filtering in memory is fine.
+      const ratified =
+        (
+          await ctx.db
+            .query("readingLevelHistory")
+            .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
+            .order("desc")
+            .collect()
+        ).find(isTalkHistoryRow) ?? null;
 
       const confirmedLevel = scholar.readingLevel ?? null;
+      const ratifiedMatches =
+        ratified !== null &&
+        talkLevelOf(ratified.level) === talkLevelOf(confirmedLevel);
       const estimateLevel = scholar.readingLevelSuggestion ?? null;
       // DEPENDS ON pending schema addition users.readingLevelSuggestionAt.
       const estimateAt = scholar.readingLevelSuggestionAt ?? null;
@@ -533,18 +677,14 @@ export const levelSignalsForScholars = teacherQuery({
       rows.push({
         scholarId,
         confirmed: {
-          level: confirmedLevel,
-          isPreReader: isPreReader(confirmedLevel),
+          level: talkLevelOf(confirmedLevel),
+          readLevel: readLevelOf(scholar),
           // Only meaningful when the latest history row matches the live value;
           // a level set before this table existed has no ratification record.
-          setAt:
-            ratified && ratified.level === confirmedLevel
-              ? ratified._creationTime
-              : null,
-          setBy:
-            ratified && ratified.level === confirmedLevel
-              ? ratified.source
-              : null,
+          // Compared as TALK levels, so a migrated scholar (live "K") keeps the
+          // date of the human ratification that set "pre-reader".
+          setAt: ratifiedMatches && ratified ? ratified._creationTime : null,
+          setBy: ratifiedMatches && ratified ? ratified.source : null,
         },
         estimate: {
           level: estimateLevel,

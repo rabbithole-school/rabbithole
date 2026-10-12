@@ -342,7 +342,7 @@ export function parseDeliverableArg(
  * verdict completes the activity and fires the closing line wherever the
  * conversation is. An aide-written habitat game planned "about 5–6
  * animals" plus a closing question but set its bar at "at least 4", so it
- * completed at animal 4 for two scholars (TRA-411).
+ * completed at animal 4 in live sessions (TRA-411).
  */
 export function advanceRubricSchemaFragment() {
   return {

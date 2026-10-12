@@ -250,6 +250,10 @@ export function useStreamingDictation(
     async (opts?: { latched?: boolean }) => {
       if (streamingDisabledRef.current) {
         emitDiagnostic("streaming-disabled");
+        // The legacy recorder has no voice-activity detection, so it can't
+        // honor a hands-free (latched) listen — it would hold the mic open
+        // until a tap. Leave the ordinary tap-to-talk state instead.
+        if (opts?.latched) return;
         await legacy.start();
         return;
       }
@@ -330,6 +334,9 @@ export function useStreamingDictation(
         // latching to a fresh legacy recording instead of promising replay.
         emitDiagnostic("fallback-whisper");
         setDictationState("idle");
+        // A hands-free listen nobody tapped for must not become an open-ended
+        // legacy recording (no VAD) — fall back to tap-to-talk.
+        if (latched) return;
         await legacy.start();
       };
       failCurrentTurnRef.current = failStreamingTurn;

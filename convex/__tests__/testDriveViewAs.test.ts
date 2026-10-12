@@ -299,6 +299,49 @@ describe("Test Drive — View as flows through getSessionContext", () => {
     expect(ctxData!.teacherDirectives).toEqual([]);
   });
 
+  test("a sim's Read level reaches the tutor as listener with its own talk level, and clears on switching view", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const { activityId } = await seedUnitWithActivity(t, teacherId);
+    const asTeacher = await withUser(t, teacherId);
+    const sessionId = await createTestDrive(asTeacher, activityId);
+
+    await asTeacher.mutation(api.sessions.setTestDriveViewAs, {
+      sessionId,
+      mode: "synthetic",
+      syntheticName: "Ana",
+      syntheticReadingLevel: "7",
+      syntheticReadLevel: "listener",
+    });
+    const ctxData = await getCtx(t, sessionId);
+    expect(ctxData).toMatchObject({ readingLevel: "7", readLevel: "listener" });
+
+    // "Reader" is the synthetic default, so it stores no override.
+    await asTeacher.mutation(api.sessions.setTestDriveViewAs, {
+      sessionId,
+      mode: "synthetic",
+      syntheticName: "Ana",
+      syntheticReadLevel: "reader",
+    });
+    expect(
+      (await t.run((ctx) => ctx.db.get(sessionId)))?.readLevelOverride,
+    ).toBeUndefined();
+
+    await asTeacher.mutation(api.sessions.setTestDriveViewAs, {
+      sessionId,
+      mode: "synthetic",
+      syntheticName: "Ana",
+      syntheticReadLevel: "listener",
+    });
+    await asTeacher.mutation(api.sessions.setTestDriveViewAs, {
+      sessionId,
+      mode: "self",
+    });
+    expect(
+      (await t.run((ctx) => ctx.db.get(sessionId)))?.readLevelOverride,
+    ).toBeUndefined();
+  });
+
   test("synthetic view-as: mastery written for the teacher is NOT pulled in", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");

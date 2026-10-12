@@ -10,6 +10,8 @@ import {
   activityRehearsalPath,
   assignmentPath,
   formattingGuidance,
+  schoolTimeLabel,
+  wallClockUtcIdentity,
 } from "../channels";
 
 describe("channels — path builders (relative, mirror app/ routes)", () => {
@@ -99,5 +101,56 @@ describe("channels — formattingGuidance is channel-conditional", () => {
     expect(web).not.toMatch(forbidsTables);
     // …while web affirmatively permits them.
     expect(web).toMatch(/tables? render/i);
+  });
+});
+
+describe("channels — school-time labels (TRA-486)", () => {
+  // The fixed -10h formatter every aide label used before labels took the
+  // institution's zone. Kept here as an independent oracle: the primary
+  // school's labels must not change by a single byte.
+  const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const MO = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  function legacyHstLabel(ms: number, withYear = false): string {
+    const d = new Date(ms - 10 * 60 * 60 * 1000);
+    let h = d.getUTCHours();
+    const ap = h < 12 ? "AM" : "PM";
+    h = h % 12 || 12;
+    const year = withYear ? `${d.getUTCFullYear()}, ` : "";
+    return `${WD[d.getUTCDay()]}, ${MO[d.getUTCMonth()]} ${d.getUTCDate()}, ${year}${h}:${String(d.getUTCMinutes()).padStart(2, "0")} ${ap} HST`;
+  }
+
+  test("Pacific/Honolulu is byte-identical to the legacy fixed-HST label", () => {
+    // Every ~2h across two years, offset so minutes, midnights and noons vary.
+    for (
+      let ms = Date.UTC(2026, 0, 1);
+      ms < Date.UTC(2028, 0, 1);
+      ms += 2 * 60 * 60 * 1000 + 7 * 60 * 1000
+    ) {
+      expect(schoolTimeLabel(ms, "Pacific/Honolulu")).toBe(legacyHstLabel(ms));
+      expect(schoolTimeLabel(ms, "Pacific/Honolulu", { withYear: true })).toBe(
+        legacyHstLabel(ms, true),
+      );
+    }
+    expect(schoolTimeLabel(null, "Pacific/Honolulu")).toBeNull();
+  });
+
+  test("two schools in different zones each get their own local date", () => {
+    // 05:30 UTC on Oct 13: Monday evening in Honolulu, Tuesday in New York.
+    const ms = Date.UTC(2026, 9, 13, 5, 30);
+    expect(schoolTimeLabel(ms, "Pacific/Honolulu")).toBe("Mon, Oct 12, 7:30 PM HST");
+    expect(schoolTimeLabel(ms, "America/New_York")).toBe("Tue, Oct 13, 1:30 AM EDT");
+  });
+
+  test("the 9am wall-clock anchor follows the zone's offset", () => {
+    const ms = Date.UTC(2026, 9, 13, 5, 30);
+    expect(wallClockUtcIdentity(ms, "Pacific/Honolulu")).toBe(
+      "9:00 AM HST on a date = that date at 19:00 UTC",
+    );
+    expect(wallClockUtcIdentity(ms, "America/New_York")).toBe(
+      "9:00 AM EDT on a date = that date at 13:00 UTC",
+    );
+    expect(wallClockUtcIdentity(ms, "Pacific/Auckland")).toBe(
+      "9:00 AM GMT+13 on a date = the day before at 20:00 UTC",
+    );
   });
 });

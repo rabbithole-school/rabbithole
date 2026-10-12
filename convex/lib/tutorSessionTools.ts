@@ -343,7 +343,11 @@ export async function makeTutorSessionTools(
   };
 
   const emitCompletionClosing = (key: string) => {
-    const closing = selectCompletionClosing(session.readingLevel, key);
+    const closing = selectCompletionClosing(
+      session.readingLevel,
+      key,
+      session.readLevel,
+    );
     state.fullContent = closing;
     state.lastPersistLength = closing.length;
     state.suppressCompletionFollowUp = true;

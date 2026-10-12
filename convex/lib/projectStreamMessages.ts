@@ -3,6 +3,7 @@ import {
   type AppTutorRequest,
 } from "../../shared/appTutorRequest";
 import type { AppSnapshotModelMessage } from "./appSnapshot";
+import { compareReading } from "../../shared/beginnerReading";
 import type { AppAiContextTurn } from "./appUpdateTools";
 import type { ImageContentPart, TextContentPart } from "./imageBytes";
 
@@ -17,6 +18,8 @@ export type ProjectStreamHistoryMessage = {
   magicRedraw?: boolean;
   imagePrompt?: string | null;
   inputModality?: "typed" | "spoken" | "app";
+  /** The "your turn" line this spoken turn reads aloud (TRA-504). */
+  readAloudOf?: string;
 };
 
 /**
@@ -33,6 +36,31 @@ export type ProjectStreamHistoryMessage = {
  */
 export const DICTATED_TURN_LABEL =
   "[Dictated — speech-to-text of what the scholar said out loud, not typed.]";
+
+/**
+ * Marks a beginner's READ-ALOUD of their "your turn" line (TRA-504), with a
+ * word-by-word check (`compareReading`) so the tutor doesn't have to diff a
+ * transcript itself. The check is done here, deterministically, so the marker
+ * is stable per message (no cache churn). Speech-to-text tidies what it hears,
+ * so the label says a full match means "sounded right", not proof.
+ */
+export function readAloudLabel(line: string, heard: string): string {
+  const check = compareReading(line, heard);
+  const result = !check.attempted
+    ? `no real attempt (they said they can't, or what they said barely matches the line). Respond as if they said "I can't read that"; don't praise any word as read`
+    : check.misses.length === 0
+      ? `all ${check.words} words matched`
+      : `${check.matched} of ${check.words} words matched; ` +
+        check.misses
+          .map((m) =>
+            m.heard ? `"${m.word}" came out as "${m.heard}"` : `"${m.word}" was not heard`,
+          )
+          .join("; ");
+  return (
+    `[Read aloud — the scholar tapped the mic on their "your turn" line and read it out loud. ` +
+    `The line: "${line}". Speech-to-text of their reading follows. Word check: ${result}.]`
+  );
+}
 
 const GENERATED_IMAGE_LABEL =
   "[You generated this illustration earlier with the generate_image tool. " +
@@ -246,11 +274,13 @@ export async function assembleProjectStreamApiMessages({
     // An empty dictated turn carries no words to attribute, so it stays empty
     // rather than becoming a bare marker.
     const modelVisibleContent =
-      message.role === "user" &&
-      message.inputModality === "spoken" &&
-      baseContent.trim() !== ""
-        ? `${DICTATED_TURN_LABEL} ${baseContent}`
-        : baseContent;
+      message.role === "user" && message.readAloudOf
+        ? `${readAloudLabel(message.readAloudOf, baseContent)} ${baseContent}`.trim()
+        : message.role === "user" &&
+            message.inputModality === "spoken" &&
+            baseContent.trim() !== ""
+          ? `${DICTATED_TURN_LABEL} ${baseContent}`
+          : baseContent;
 
     if (message.imageId && message.role === "user") {
       const resolved = resolvedImages.get(message.id);

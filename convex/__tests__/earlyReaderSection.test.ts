@@ -10,6 +10,8 @@ import {
   VALID_READING_LEVELS,
   isEarlyReader,
   needsYoungReaderTurnRules,
+  readLevelOf,
+  talkLevelOf,
 } from "../lib/readingLevels";
 
 // Selection logic for the early-reader register (reading levels K–2.9). These
@@ -79,15 +81,22 @@ describe("buildSystemPrompt — reading-level slot selection", () => {
   });
 });
 
-// The young-reader turn rules (TRA-501): WHO gets them is one helper, so the
-// talk/read/write split (TRA-503) can re-point it without touching callers.
+// The young-reader turn rules (TRA-501): WHO gets them is one helper, keyed on
+// the talk/read split (TRA-503). Here the input is a bare talk-field string, as
+// offline callers pass it: read is inferred (a legacy "pre-reader" → listener).
+// The read-level cases (talk 7 + beginner, …) are in preReaderSection.test.ts.
+const levelsOf = (level: string | null | undefined) => ({
+  talk: talkLevelOf(level),
+  read: readLevelOf({ readingLevel: level }),
+});
+
 describe("needsYoungReaderTurnRules — the one seam", () => {
   test.each(["pre-reader", "K", "1", "2.9"])("%s gets the turn rules", (level) => {
-    expect(needsYoungReaderTurnRules(level)).toBe(true);
+    expect(needsYoungReaderTurnRules(levelsOf(level))).toBe(true);
   });
 
   test.each(["3", "5", "college", "", null, undefined])("%s does not", (level) => {
-    expect(needsYoungReaderTurnRules(level)).toBe(false);
+    expect(needsYoungReaderTurnRules(levelsOf(level))).toBe(false);
   });
 
   test("the prompt carries the turn rules exactly when the helper says so", () => {
@@ -95,7 +104,7 @@ describe("needsYoungReaderTurnRules — the one seam", () => {
       buildSystemPrompt(null, readingLevel, "Kai", null, null, null);
     for (const level of [PRE_READER_LEVEL, ...VALID_READING_LEVELS, null]) {
       expect(build(level).includes(buildYoungReaderTurnRules())).toBe(
-        needsYoungReaderTurnRules(level),
+        needsYoungReaderTurnRules(levelsOf(level)),
       );
     }
   });

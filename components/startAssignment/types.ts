@@ -8,6 +8,9 @@ export interface StartAssignmentProgramTarget {
   groupName: string;
   periodId: Id<"reportingPeriods">;
   subject?: string;
+  /** The term's institution zone, for labelling `scheduleTarget` dates.
+   *  Absent → the deployment default zone. */
+  timeZone?: string;
   scheduleTarget:
     | {
         mode: "classFocus";
