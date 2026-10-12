@@ -876,6 +876,9 @@ export const getSessionContext = internalQuery({
       scholar,
     });
     const readingLevel = levels.talk;
+    // A beginner's Mentava-taught letters (TRA-507, first-party). The level
+    // itself never reaches the prompt; only the letters it implies.
+    let beginnerExtra: { letters: string; teams: string[] } | null = null;
 
     // Scholar session history — powers the SESSION CONTEXT prompt section and
     // the one-time non-human introduction. A "session" ≈ a project. Skipped in
@@ -1638,6 +1641,8 @@ export const getSessionContext = internalQuery({
       // The letter teams a beginner's "your turn" line may use (TRA-504): the
       // context scholar's grapheme inventory, every stage — a graduated team
       // is one they read without help. None in a synthetic view.
+      // What a linked Mentava level adds (TRA-507); null without one.
+      beginnerExtra,
       beginnerTeams:
         levels.read === "beginner" && !isSyntheticView
           ? normalizeTeams(
@@ -4114,6 +4119,7 @@ export function buildSystemPromptParts(
     read: ReadLevel;
     write: WriteMode;
     beginnerTeams?: readonly string[];
+    beginnerExtra?: { letters?: string; teams?: readonly string[] } | null;
   } | null = null,
 ): { stable: string; dynamic: string; turnContext: string } {
   const readLevel = readWrite?.read ?? readLevelOf({ readingLevel });
@@ -4153,7 +4159,7 @@ export function buildSystemPromptParts(
         talk: talkLevel,
         read: readLevel,
         write: writeMode,
-      }, readWrite?.beginnerTeams ?? []) || null,
+      }, readWrite?.beginnerTeams ?? [], readWrite?.beginnerExtra ?? null) || null,
     // DEPRECATED (anti-parasocial): the PERSONA block is intentionally omitted —
     // the tutor must never be instructed to act as a character. The
     // `personaContext` param above is retained only for call-site signature

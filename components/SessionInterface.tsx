@@ -426,8 +426,12 @@ export function SessionInterface({
     () =>
       graphemeInventory === undefined
         ? null
-        : beginnerAlphabet(graphemeInventory.map((t) => t.team)),
-    [graphemeInventory],
+        : beginnerAlphabet(
+            graphemeInventory.map((t) => t.team),
+            // what a linked Mentava level has taught (TRA-507); null = none
+            sessionData?.session?.beginnerSpellings,
+          ),
+    [graphemeInventory, sessionData?.session?.beginnerSpellings],
   );
   useEffect(() => {
     isBeginnerSessionRef.current = isBeginnerSession;

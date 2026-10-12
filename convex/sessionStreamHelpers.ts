@@ -434,6 +434,8 @@ export type TutorPromptContext = {
   writeMode?: WriteMode;
   /** Grapheme-inventory teams for a `beginner`'s your-turn line (TRA-504). */
   beginnerTeams?: string[];
+  /** Letters/teams a linked Mentava level adds for a beginner (TRA-507). */
+  beginnerExtra?: { letters: string; teams: string[] } | null;
   scholarName: string | null;
   sessionMode?: "conversation" | "workbench" | "vibecode" | null;
   vibecodeStarterUsedAt?: number | null;
@@ -624,6 +626,7 @@ export function buildTutorSystemPromptParts(ctx: TutorPromptContext): {
           read: ctx.readLevel,
           write: ctx.writeMode ?? "own",
           beginnerTeams: ctx.beginnerTeams ?? [],
+          beginnerExtra: ctx.beginnerExtra ?? null,
         }
       : null,
   );

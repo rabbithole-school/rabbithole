@@ -776,6 +776,9 @@ export const getWithMessages = authedQuery({
       session,
       scholar: contextScholar,
     });
+    // A beginner's Mentava-taught letters for the your-turn card (TRA-507):
+    // the derived set only, never the level.
+    let beginnerSpellings: { letters: string; teams: string[] } | null = null;
 
     return {
       session: {
@@ -790,6 +793,7 @@ export const getWithMessages = authedQuery({
         teacherEditOverride: opening.teacherEditOverride,
         freePlayEligible,
         readLevel: sessionReadLevel,
+        beginnerSpellings,
         ...(session.isTestDrive === true ? { teacherBuildKickoff } : {}),
       },
       messages: await Promise.all(
@@ -2490,7 +2494,8 @@ export const sendMessage = authedMutation({
       // else is not a reading to check (the client hides it too).
       if (line) {
         const teams = await readInventoryTeams(ctx, session.userId);
-        const alphabet = beginnerAlphabet(teams.map((t) => t.team));
+        let extra: { letters: string; teams: string[] } | null = null;
+        const alphabet = beginnerAlphabet(teams.map((t) => t.team), extra);
         if (checkDecodable(line, alphabet).ok) readAloudOf = line;
       }
     }

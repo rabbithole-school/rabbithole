@@ -232,16 +232,26 @@ export type DecodableAlphabet = {
   teams: string[];
 };
 
-/** The alphabet for a beginner: the known letters plus their inventory teams. */
-export function beginnerAlphabet(teams: readonly string[]): DecodableAlphabet {
+/**
+ * The alphabet for a beginner: the cautious floor of known letters plus their
+ * inventory teams, plus, when a scholar's phonics program says more
+ * (`extra`: e.g. what their Mentava level has taught, TRA-507), those letters
+ * and teams too. With no `extra` it is exactly the floor and the inventory.
+ */
+export function beginnerAlphabet(
+  teams: readonly string[],
+  extra?: { letters?: string; teams?: readonly string[] } | null,
+): DecodableAlphabet {
   const clean = Array.from(
     new Set(
-      teams
+      [...teams, ...(extra?.teams ?? [])]
         .map((t) => (typeof t === "string" ? t.trim().toLowerCase() : ""))
         .filter((t) => /^[a-z]{2,}$/.test(t)),
     ),
   );
-  return { letters: BEGINNER_KNOWN_LETTERS, teams: clean };
+  const extraLetters = (extra?.letters ?? "").toLowerCase().replace(/[^a-z]/g, "");
+  const letters = Array.from(new Set(BEGINNER_KNOWN_LETTERS + extraLetters)).join("");
+  return { letters, teams: clean };
 }
 
 /**

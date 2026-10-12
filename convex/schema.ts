@@ -1158,6 +1158,7 @@ export default defineSchema({
     .index("by_institution", ["institutionId"]),
 
   // Override the users table to include both auth fields and our custom fields
+
   users: defineTable({
     // Auth fields (from @convex-dev/auth)
     name: v.optional(v.string()),

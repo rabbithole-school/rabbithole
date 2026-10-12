@@ -381,8 +381,12 @@ export default function SessionScreen() {
     () =>
       graphemeInventory === undefined
         ? null
-        : beginnerAlphabet(graphemeInventory.map((t) => t.team)),
-    [graphemeInventory],
+        : beginnerAlphabet(
+            graphemeInventory.map((t) => t.team),
+            // what a linked Mentava level has taught (TRA-507); null = none
+            data?.session?.beginnerSpellings,
+          ),
+    [graphemeInventory, data?.session?.beginnerSpellings],
   );
   const preReaderVoice = usePreReaderVoice({
     enabled: preReaderVoiceEligible,

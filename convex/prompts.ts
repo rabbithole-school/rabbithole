@@ -1489,6 +1489,9 @@ export function buildGenericReadingLevelSection(talkLevel: string): string {
 export function buildLevelsSection(
   levels: EffectiveLevels,
   beginnerTeams: readonly string[] = [],
+  // What the scholar's phonics program has taught beyond the floor (TRA-507,
+  // a linked Mentava level); null/absent = the floor and inventory only.
+  beginnerExtra: { letters?: string; teams?: readonly string[] } | null = null,
 ): string {
   const picked = selectLevelSections(levels);
   const register =
@@ -1504,7 +1507,7 @@ export function buildLevelsSection(
     picked.youngReaderTurnRules ? buildYoungReaderTurnRules() : "",
     picked.listenerDelivery ? buildListenerDeliverySection() : "",
     picked.beginnerDelivery
-      ? buildBeginnerReaderSection(beginnerAlphabet(beginnerTeams))
+      ? buildBeginnerReaderSection(beginnerAlphabet(beginnerTeams, beginnerExtra))
       : "",
     picked.writeByVoice ? buildWriteByVoiceSection() : "",
   ].join("");

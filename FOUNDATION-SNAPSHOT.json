@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "7715e60b5b7fa40d7ecdc8c59639d59526efdef5",
+  "sourceCommit": "661cb79c1a27258d29ec9ceb20a3dff99b01f19e",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -2044,7 +2044,7 @@
     },
     {
       "path": "components/SessionInterface.tsx",
-      "sha256": "cdcda9933f84f0bf44e67bfdb1fc672a6e6ec43c34627d13b0f1560b0f6535be",
+      "sha256": "5eed39df2cfc0043b1de13f4b83933d93ec338c255cf436783a4adad12bb3dd5",
       "mode": "100644"
     },
     {
@@ -7509,7 +7509,7 @@
     },
     {
       "path": "convex/crons.ts",
-      "sha256": "2d0c34b360a2a15ef97325c3cc4a4b2ef5fc935a0a9d54d871eff91a5526fa4e",
+      "sha256": "d8d4ce9f68f63f6616da0ba4e63cbf2fa7ffe60e4508bcef4a805b1d51f878c4",
       "mode": "100644"
     },
     {
@@ -10329,7 +10329,7 @@
     },
     {
       "path": "convex/lib/toolLabels.ts",
-      "sha256": "b61205a7cf73684c2c584bfd8c80035250b02bace84ef2784530cec165d4c8a2",
+      "sha256": "ac3b04e338e0758422863eea6d33ef9b3ede62c3729ace6aa3080c6bdbea21cc",
       "mode": "100644"
     },
     {
@@ -10794,7 +10794,7 @@
     },
     {
       "path": "convex/prompts.ts",
-      "sha256": "d9764ed6056bd6ebb2bafa2a3fd69b73d7044e9c6bed47541c1ad29a7df96498",
+      "sha256": "fe6d2e86aa40379911503427b9e4165b441eb85e524ca3f833f60306525d3215",
       "mode": "100644"
     },
     {
@@ -10854,7 +10854,7 @@
     },
     {
       "path": "convex/schema.ts",
-      "sha256": "a202219054e1d85706486fd05559bc80541d5b551cf73874dd42f995372a4b7f",
+      "sha256": "76d6cbb8ef6989bb42d6ee22f2d56ea808b560196ae2ac81e138d6efa49bb19b",
       "mode": "100644"
     },
     {
@@ -11269,7 +11269,7 @@
     },
     {
       "path": "convex/sessionHelpers.ts",
-      "sha256": "ae487281d36c957e130ed7c83210ba177d588d8d1cd5a5e9cf6c0c3412ba6c1f",
+      "sha256": "8dab48a36b251950c0eba16d97af2dc01640aaaeb61dec24652d598319b321dc",
       "mode": "100644"
     },
     {
@@ -11279,7 +11279,7 @@
     },
     {
       "path": "convex/sessionStreamHelpers.ts",
-      "sha256": "8b918bf01b453a6bc06eac4dc06ecaf3721d09f33b67bb8bb75adf17f560b5e7",
+      "sha256": "82607b005645873548d17d3b71d3ef63716b4fbaf443d5feb7d6317854e52a62",
       "mode": "100644"
     },
     {
@@ -11289,7 +11289,7 @@
     },
     {
       "path": "convex/sessions.ts",
-      "sha256": "53807aa984a8e8c729cb075a2b64a1334837c55f746ade92f6d54bf061b377ed",
+      "sha256": "d81fbf21b0d90dfce75be1a36745ba7ac1c7e0d2ead3b9847a428ba5cb86f13e",
       "mode": "100644"
     },
     {
@@ -15989,7 +15989,7 @@
     },
     {
       "path": "native/src/app/session/[id].tsx",
-      "sha256": "7df54538af3cd0337de648900becc266bb646955b6a8b4030e752734d69b5cd7",
+      "sha256": "67b08bb7611df782acf22ef78550a6cff8166fa0fc2f43b8271d4c8eefbf1508",
       "mode": "100644"
     },
     {
@@ -18614,7 +18614,7 @@
     },
     {
       "path": "native/vendor/shared/beginnerReading.ts",
-      "sha256": "863647742d9b3ae9fe26dc319f1754cd1d8bbf50aba5b23ff790bfb301285f07",
+      "sha256": "fcb619cdfbe6392801e52b752c68f7d8fbd8b31fe3a374bcc18c9a928fac85a5",
       "mode": "100644"
     },
     {
@@ -19769,7 +19769,7 @@
     },
     {
       "path": "shared/beginnerReading.ts",
-      "sha256": "863647742d9b3ae9fe26dc319f1754cd1d8bbf50aba5b23ff790bfb301285f07",
+      "sha256": "fcb619cdfbe6392801e52b752c68f7d8fbd8b31fe3a374bcc18c9a928fac85a5",
       "mode": "100644"
     },
     {
@@ -21258,5 +21258,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "236234dc1a02ac3adf4a8201b5b89cf7940ca72568f95bd7aacccdb5348fcc49"
+  "treeHash": "288bf68c49c04045923f6c63ef86951f3e959a86377aa0e97b341e5a96a461af"
 }
