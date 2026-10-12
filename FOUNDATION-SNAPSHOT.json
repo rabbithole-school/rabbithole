@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "ae5dcbe9ecb03a7ea54ab8f0657c288c0a3700c4",
+  "sourceCommit": "eb13d886defd4fe7d20b11b5e898b0f590fa25fe",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -2039,7 +2039,7 @@
     },
     {
       "path": "components/SessionInterface.tsx",
-      "sha256": "6a290b3606bd5361cfb7b70004e6234ccb91c49bcf3482439fed4143f271ea78",
+      "sha256": "67c55d2c6bf3837bd240088a2844da1fb4e7120171102dc8599bd9951be88ebc",
       "mode": "100644"
     },
     {
@@ -6563,6 +6563,11 @@
       "mode": "100644"
     },
     {
+      "path": "convex/__tests__/sessionPreReaderFlag.test.ts",
+      "sha256": "dead1970a2f5011d6fdc721df7937a0b6a73b0730b8382d5d07dd7c696d6d4c1",
+      "mode": "100644"
+    },
+    {
       "path": "convex/__tests__/sessionRecap.test.ts",
       "sha256": "09be6eac10e8c79aa31a88c317a423e32820df3d48d8faf89b1ef14deb34881a",
       "mode": "100644"
@@ -10774,7 +10779,7 @@
     },
     {
       "path": "convex/prompts.ts",
-      "sha256": "77a84e78e49f6164dfbcfe58687a64551629ed967ac470d52d27540f11850d8e",
+      "sha256": "0d8064108c416d229f23874efc3a09e668bb5293d0a248617a4fdc7ecd23ae6a",
       "mode": "100644"
     },
     {
@@ -11269,7 +11274,7 @@
     },
     {
       "path": "convex/sessions.ts",
-      "sha256": "6ef094c798e53f0cb7fc9cd5c69de879427be0a49566ebbebbaac17a9275a2fa",
+      "sha256": "0133e739848e50b5d951df5e61772f26a06558a295727e6ecc378b5e3684d330",
       "mode": "100644"
     },
     {
@@ -15208,6 +15213,11 @@
       "mode": "100644"
     },
     {
+      "path": "native/assets/sfx/listen.wav",
+      "sha256": "9c19129c92eac865cc358b69228602dc7c60f3803c12beff5c0538df718a1714",
+      "mode": "100644"
+    },
+    {
       "path": "native/assets/sfx/success.wav",
       "sha256": "8cb658e1cace794eb34b1a265c38d66c0dbe8a838e4f5b3fd20dfe4c41e7fd07",
       "mode": "100644"
@@ -15713,6 +15723,31 @@
       "mode": "100644"
     },
     {
+      "path": "native/modules/output-volume/expo-module.config.json",
+      "sha256": "0eb1541feccfd0007a41752329ea804b8f3b1a64b1a9686229df06af82ebce84",
+      "mode": "100644"
+    },
+    {
+      "path": "native/modules/output-volume/index.ts",
+      "sha256": "448dacaa36abcd4836af11bed515bf3218fcbacd64b53142e5bbcd6a731f77b8",
+      "mode": "100644"
+    },
+    {
+      "path": "native/modules/output-volume/ios/OutputVolume.podspec",
+      "sha256": "a730d0c4eb0bb256c60a18182ec7fa1b3590ddd15298250ff5763154583ff3df",
+      "mode": "100644"
+    },
+    {
+      "path": "native/modules/output-volume/ios/OutputVolumeModule.swift",
+      "sha256": "61eadc6af6e1fc58612d10d6b0189e0666c08b2d9adb259dae1639226ce87e85",
+      "mode": "100644"
+    },
+    {
+      "path": "native/modules/output-volume/src/OutputVolume.types.ts",
+      "sha256": "3ef27c08e05fa53796c8080911f9c9d35997f862a74268e869c3f330ca1b2810",
+      "mode": "100644"
+    },
+    {
       "path": "native/modules/scene-dice/expo-module.config.json",
       "sha256": "5c46fe0c6b53b3c6d1f47b424cb01db60e807fa36c26d84415d92617563dc223",
       "mode": "100644"
@@ -15934,7 +15969,7 @@
     },
     {
       "path": "native/src/app/session/[id].tsx",
-      "sha256": "1911a8ee8f3b6905ad32974c8b83b6cd5e35c72fa145c8716b7225dac3e5ab03",
+      "sha256": "078547526dadca3732e70b34fd09822b6c145dd13f6de1dea3d2c690fd1a6a03",
       "mode": "100644"
     },
     {
@@ -17438,6 +17473,11 @@
       "mode": "100644"
     },
     {
+      "path": "native/src/hooks/usePreReaderVoice.ts",
+      "sha256": "f40669bec7aad4168561c8fcd9448f1878e9b9fe4f9c07c91a7b963227a927f2",
+      "mode": "100644"
+    },
+    {
       "path": "native/src/hooks/useReflectionChat.ts",
       "sha256": "f7572db0df37fc67555561ebfd9cda11b1c4bf311d5d3807d62e4a92254b62e6",
       "mode": "100644"
@@ -17459,7 +17499,7 @@
     },
     {
       "path": "native/src/hooks/useStreamingDictation.ts",
-      "sha256": "72eb2a546476a16c689a0974873066350324bb44810083be6bc5782e706695bd",
+      "sha256": "f7f3b6630c21a8008c392c36b488a638168644cab6ee27ddd3275db33b0817c5",
       "mode": "100644"
     },
     {
@@ -17634,7 +17674,7 @@
     },
     {
       "path": "native/src/lib/__tests__/nativeTTS.test.ts",
-      "sha256": "17037501155514bc53625924674fa01b826910b782ff7b2180345a4133cd2bfe",
+      "sha256": "6c6bf0269b540567f872926311025a12ffa1f542c9762b979dd20aea14d167f0",
       "mode": "100644"
     },
     {
@@ -17795,6 +17835,11 @@
     {
       "path": "native/src/lib/__tests__/vendoredSentenceStream.test.ts",
       "sha256": "0749303a2fa4ef7ce213c76b70ed2fbb347462d07610749858e0d11d72f762f4",
+      "mode": "100644"
+    },
+    {
+      "path": "native/src/lib/__tests__/voiceLoop.test.ts",
+      "sha256": "04de23f23c7f9a749d086e905da0ce57cfd198c46a8301d3e3a46a295789db5d",
       "mode": "100644"
     },
     {
@@ -18129,7 +18174,7 @@
     },
     {
       "path": "native/src/lib/nativeTTS.ts",
-      "sha256": "f19ea53bc85c9d997da7960f4259c6b666cc5196d1ae0f33c336dedf6593c7c0",
+      "sha256": "021313da5a1e2e48bbd68cc433ac0bb8ae32bdb26554c8b3546a9093dd38f2a3",
       "mode": "100644"
     },
     {
@@ -18290,6 +18335,11 @@
     {
       "path": "native/src/lib/useExpressionTemplateController.ts",
       "sha256": "babb2955bd6fb6b38540734f40b3b41ca8e72ca6371c19c6c374b7c328bbdb92",
+      "mode": "100644"
+    },
+    {
+      "path": "native/src/lib/voiceLoop.ts",
+      "sha256": "510b355c92970f0615685300c857ccd176bfd81f259047a693fc1f81e3f5eff4",
       "mode": "100644"
     },
     {
@@ -21163,5 +21213,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "6d149b5319ae0a7429116e0ac49863fc0cce54743d6b9ef618b4072f9ed9b8c4"
+  "treeHash": "4ce591432f9c4cc3a1fd7ff2931782290c2b72860f0eab4a7cce91f727b48d9b"
 }

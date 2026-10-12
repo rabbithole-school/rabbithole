@@ -56,6 +56,11 @@ import {
 } from "./lib/independentStudy";
 import { computePromptVersion } from "./lib/promptVersion";
 import {
+  resolveContextIdentity,
+  resolveReadingLevel,
+} from "./sessionContextHelpers";
+import { isPreReader } from "./lib/readingLevels";
+import {
   institutionPromptProfileForScholar,
   DEFAULT_INSTITUTION_PROMPT_PROFILE,
   type InstitutionPromptProfile,
@@ -747,6 +752,26 @@ export const getWithMessages = authedQuery({
     const freePlayEligible = (
       await resolveFreePlayEligibility(ctx, { session, caller: ctx.user })
     ).eligible;
+    // The EFFECTIVE reading level is pre-reader — resolved exactly as the tutor
+    // prompt resolves it (sessionHelpers.getSessionContext: view-as identity,
+    // then per-session override > synthetic/stored level). Web and iPad voice
+    // mode key on this, so a teacher rehearsing with a per-session pre-reader
+    // override gets the voice-first tutor too (TRA-492). A boolean, not the
+    // level: the clients only need the voice-mode decision.
+    const { isSyntheticView, contextUserId } = resolveContextIdentity(session);
+    const contextScholar = isSyntheticView
+      ? null
+      : contextUserId === ctx.user._id
+        ? ctx.user
+        : await ctx.db.get(contextUserId);
+    const sessionIsPreReader = isPreReader(
+      resolveReadingLevel({
+        isSyntheticView,
+        readingLevelOverride: session.readingLevelOverride,
+        syntheticReadingLevel: session.testDriveSyntheticReadingLevel,
+        scholarReadingLevel: contextScholar?.readingLevel,
+      }),
+    );
 
     return {
       session: {
@@ -760,6 +785,7 @@ export const getWithMessages = authedQuery({
         defaultWorkshopMode: opening.defaultMode,
         teacherEditOverride: opening.teacherEditOverride,
         freePlayEligible,
+        isPreReader: sessionIsPreReader,
         ...(session.isTestDrive === true ? { teacherBuildKickoff } : {}),
       },
       messages: await Promise.all(

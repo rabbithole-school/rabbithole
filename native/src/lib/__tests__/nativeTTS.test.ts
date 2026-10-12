@@ -150,3 +150,167 @@ describe("NativeTTSEngine state machine", () => {
     expect(engine.currentText).toBeNull();
   });
 });
+
+/** Let queued fetch/write promises settle. */
+async function flush(): Promise<void> {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+}
+
+describe("NativeTTSEngine sentence queue (pre-reader voice mode)", () => {
+  afterEach(() => {
+    getNativeTTS().onIdle = null;
+  });
+
+  it("plays enqueued sentences in order, then drains to idle and fires onIdle once", async () => {
+    const engine = getNativeTTS();
+    const onIdle = vi.fn();
+    engine.onIdle = onIdle;
+    engine.enqueue("First sentence here.");
+    engine.enqueue("Second sentence here.");
+    await flush();
+    expect(engine.state).toBe("speaking");
+    expect(engine.currentText).toBe("First sentence here.");
+    hoisted.state.last?.finish();
+    await flush();
+    expect(engine.currentText).toBe("Second sentence here.");
+    expect(engine.state).toBe("speaking"); // no loading flicker between sentences
+    expect(onIdle).not.toHaveBeenCalled();
+    hoisted.state.last?.finish();
+    await flush();
+    expect(engine.state).toBe("idle");
+    expect(onIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it("a sentence enqueued while one plays waits its turn", async () => {
+    const engine = getNativeTTS();
+    engine.enqueue("Playing right now.");
+    await flush();
+    const first = hoisted.state.last;
+    engine.enqueue("Arrives mid-play.");
+    await flush();
+    expect(hoisted.state.last).toBe(first); // no second player yet
+    first?.finish();
+    await flush();
+    expect(engine.currentText).toBe("Arrives mid-play.");
+  });
+
+  it("stop() mid-queue clears it and never fires onIdle (tap-to-stop)", async () => {
+    const engine = getNativeTTS();
+    const onIdle = vi.fn();
+    engine.onIdle = onIdle;
+    engine.enqueue("One sentence here.");
+    engine.enqueue("Two sentence here.");
+    await flush();
+    const first = hoisted.state.last;
+    engine.stop();
+    first?.finish(); // a late status event from the torn-down player
+    await flush();
+    expect(engine.state).toBe("idle");
+    expect(onIdle).not.toHaveBeenCalled();
+  });
+
+  it("skips a sentence whose /tts fetch fails rather than killing the reply", async () => {
+    const engine = getNativeTTS();
+    const onIdle = vi.fn();
+    engine.onIdle = onIdle;
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false, status: 500 })
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          arrayBuffer: async () => new Uint8Array([1]).buffer,
+        }),
+    );
+    engine.enqueue("This one fails.");
+    engine.enqueue("This one plays.");
+    await flush();
+    expect(engine.currentText).toBe("This one plays.");
+    hoisted.state.last?.finish();
+    await flush();
+    expect(onIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports the drained source: a voice reply drains as 'voice'", async () => {
+    const engine = getNativeTTS();
+    const onIdle = vi.fn();
+    engine.onIdle = onIdle;
+    engine.enqueue("A voice loop sentence.");
+    await flush();
+    hoisted.state.last?.finish();
+    await flush();
+    expect(onIdle).toHaveBeenCalledWith("voice");
+    expect(engine.lastDrainedSource).toBe("voice");
+  });
+
+  it("a speak() (tap-to-hear label) drain reports 'label', never 'voice'", async () => {
+    const engine = getNativeTTS();
+    const onIdle = vi.fn();
+    engine.onIdle = onIdle;
+    engine.enqueue("Voice loop sentence one.");
+    await flush();
+    // The child taps a label mid-reply: speak() stops the reply first.
+    await engine.speak("A label read aloud.");
+    hoisted.state.last?.finish();
+    await flush();
+    expect(onIdle).toHaveBeenCalledTimes(1);
+    expect(onIdle).toHaveBeenCalledWith("label");
+    expect(engine.lastDrainedSource).toBe("label");
+  });
+
+  it("stop() leaves no drained source, so a stopped reply can't reopen the mic", async () => {
+    const engine = getNativeTTS();
+    engine.enqueue("Voice loop sentence one.");
+    await flush();
+    hoisted.state.last?.finish();
+    await flush();
+    expect(engine.lastDrainedSource).toBe("voice");
+    engine.enqueue("Another voice sentence.");
+    expect(engine.lastDrainedSource).toBeNull(); // queued again → not drained
+    engine.stop();
+    expect(engine.lastDrainedSource).toBeNull();
+  });
+
+  it("cancelSource('voice') drops an old reply but leaves another source's audio alone", async () => {
+    const engine = getNativeTTS();
+    const onIdle = vi.fn();
+    engine.onIdle = onIdle;
+    engine.enqueue("A label someone tapped.", "label");
+    engine.enqueue("Old reply sentence one.");
+    engine.enqueue("Old reply sentence two.");
+    await flush();
+    expect(engine.currentText).toBe("A label someone tapped.");
+    engine.cancelSource("voice"); // a new reply starts
+    hoisted.state.last?.finish();
+    await flush();
+    expect(onIdle).toHaveBeenCalledWith("label"); // nothing of the old reply played
+  });
+
+  it("cancelSource('voice') on a playing reply stops it without firing onIdle", async () => {
+    const engine = getNativeTTS();
+    const onIdle = vi.fn();
+    engine.onIdle = onIdle;
+    engine.enqueue("Old reply sentence one.");
+    engine.enqueue("Old reply sentence two.");
+    await flush();
+    engine.cancelSource("voice");
+    await flush();
+    expect(engine.state).toBe("idle");
+    expect(onIdle).not.toHaveBeenCalled();
+    expect(engine.lastDrainedSource).toBeNull();
+  });
+
+  it("a paused reply never drains, so onIdle cannot reopen the mic", async () => {
+    const engine = getNativeTTS();
+    const onIdle = vi.fn();
+    engine.onIdle = onIdle;
+    engine.enqueue("Pause me please.");
+    await flush();
+    engine.pause();
+    await flush();
+    expect(engine.state).toBe("paused");
+    expect(onIdle).not.toHaveBeenCalled();
+  });
+});

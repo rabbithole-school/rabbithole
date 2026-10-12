@@ -80,7 +80,6 @@ import {
 } from "@/components/practice/InstructionChatCard";
 import { useSwipeDismiss } from "@/hooks/useSwipeGesture";
 import { MAX_FLAG_SNIPPET_LEN } from "@/lib/manualRehearsalFlags";
-import { isPreReader } from "@/convex/lib/readingLevels";
 import { pickAdmonishment } from "@/lib/admonishments";
 import { useNow } from "@/hooks/useNow";
 import { dueStatus } from "@/shared/institutionDay";
@@ -203,21 +202,6 @@ export function SessionInterface({
   const [voiceMode, setVoiceModeState] = useState(false);
   const voiceModeRef = useRef(false);
   const voiceAccRef = useRef(new SentenceAccumulator());
-  // Pre-readers (age ~4–6) can't work a toggle and roam devices, so voice mode
-  // defaults ON from the scholar record rather than localStorage. An explicit
-  // "off" ("0") still wins; an explicit "on" ("1") still forces it for anyone.
-  const isPreReaderScholar = isPreReader(currentUser?.readingLevel);
-  useEffect(() => {
-    // Hydrate the persisted preference (deferred past SSR).
-    const stored = localStorage.getItem("rabbithole.voiceMode");
-    const defaultOn =
-      ttsEnabled && (stored === "1" || (stored !== "0" && isPreReaderScholar));
-    if (defaultOn) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only preference hydration
-      setVoiceModeState(true);
-      voiceModeRef.current = true;
-    }
-  }, [ttsEnabled, isPreReaderScholar]);
 
   // Activity nav (eyebrow breadcrumb + Mark Complete button + modal). The
   // modal lives below the header; the eyebrow + button are slotted into
@@ -376,6 +360,27 @@ export function SessionInterface({
     api.sessions.getWithMessages,
     { id: sessionId as Id<"sessions"> }
   );
+
+  // Pre-readers (age ~4–6) can't work a toggle and roam devices, so voice mode
+  // defaults ON from the session's EFFECTIVE reading level (server-resolved the
+  // way the tutor prompt resolves it — a teacher's per-session pre-reader
+  // override counts, TRA-492; the iPad keys on the same flag) rather than
+  // localStorage. Never for a teacher watching a scholar's session remotely.
+  // An explicit "off" ("0") still wins; an explicit "on" ("1") still forces it
+  // for anyone.
+  const isPreReaderSession =
+    sessionData?.session?.isPreReader === true && !isRemoteMode;
+  useEffect(() => {
+    // Hydrate the persisted preference (deferred past SSR).
+    const stored = localStorage.getItem("rabbithole.voiceMode");
+    const defaultOn =
+      ttsEnabled && (stored === "1" || (stored !== "0" && isPreReaderSession));
+    if (defaultOn) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only preference hydration
+      setVoiceModeState(true);
+      voiceModeRef.current = true;
+    }
+  }, [ttsEnabled, isPreReaderSession]);
 
   const messages = useMemo(
     () => sessionData?.messages ?? [],

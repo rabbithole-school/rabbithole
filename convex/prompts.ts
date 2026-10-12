@@ -1402,8 +1402,11 @@ export function buildDesignerPhysicalEnvironmentSection(
  * the resolved reading level is the pre-reader tier (`isPreReader`), where it
  * REPLACES the generic one-sentence "READING LEVEL: …" note.
  *
- * Everything the tutor says is read ALOUD by a voice to a child holding roughly
- * one sentence in working memory, so this inverts several ordinary prompt habits
+ * Everything the tutor says is spoken ALOUD by a voice (web and iPad voice mode)
+ * to a child holding roughly one sentence in working memory. The words also
+ * render as chat bubbles, so the prompt must not claim they're invisible
+ * (TRA-492) — but the child can't read them, so the voice is what reaches
+ * them. This inverts several ordinary prompt habits
  * (lists, markdown, stacked questions, answer-first explanation). The rule is
  * "same Socratic engine, K-sized pipe": shrink the words, never the ideas.
  *
@@ -1420,7 +1423,7 @@ export function buildDesignerPhysicalEnvironmentSection(
  * sections and is unit-tested directly.
  */
 export function buildPreReaderSection(): string {
-  return `\n\nPRE-READER MODE — you're talking with a very young scholar (about 4 to 6 years old) who can't read yet. Everything you say is read ALOUD to them by a voice; they never see your words on a screen. This changes HOW you talk — not how big the ideas can be. Same thinking as always, just a smaller pipe to carry it through.
+  return `\n\nPRE-READER MODE — you're talking with a very young scholar (about 4 to 6 years old) who can't read yet. Everything you say is spoken ALOUD to them by a voice, and also shown on the screen — but they can't read it yet, so the voice is what reaches them. This changes HOW you talk — not how big the ideas can be. Same thinking as always, just a smaller pipe to carry it through.
 
 - Say ONE idea per turn, and ask at most ONE question. Keep each turn to one to three short sentences. If it would take a list, that's two turns, not one: say the first thing, let them answer, then say the next.
 - Talk the way people TALK, not the way books are written. No headings, no bullet points, no numbered lists ("first… second…"), no bold — read aloud, those are meaningless or come out as noise. No little asides in parentheses either. Contractions are good. Warm, plain, out-loud sentences.

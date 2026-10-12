@@ -48,6 +48,27 @@ async function ensureAudioMode(): Promise<void> {
   audioModeReady = true;
 }
 
+/** How many queued sentences fetch ahead of the one playing (web parity). */
+const FETCH_LOOKAHEAD = 2;
+
+/**
+ * Who queued a piece of speech. Pre-reader voice mode may only reopen the mic
+ * after audio IT spoke (`voice`), never after a tap-to-hear label (`label`) —
+ * the engine is an app-wide singleton, so ownership has to travel with the
+ * audio itself rather than live in a caller's flag (TRA-492 review).
+ */
+export type SpeechSource = "voice" | "label";
+
+type QueueItem = {
+  source: SpeechSource;
+  /** Speech-prepared text sent to `/tts`. */
+  text: string;
+  /** The caller's raw text — what `currentText` reports while this plays. */
+  display: string;
+  /** The MP3 written to the cache dir, or null if it couldn't be fetched. */
+  file?: Promise<string | null>;
+};
+
 class NativeTTSEngine {
   state: TTSState = "idle";
   /**
@@ -57,10 +78,29 @@ class NativeTTSEngine {
    * text match, so tapping it again stops playback instead of restarting it.
    */
   currentText: string | null = null;
+  /**
+   * Fires when playback drains NATURALLY — the last queued sentence finished
+   * (or failed to fetch). Never fires after stop(). Pre-reader voice mode hangs
+   * its hands-free "reopen the mic" step here, the same contract as web's
+   * TTSEngine.onIdle (hooks/useTTSQueue.ts). Reports the SOURCE of the item
+   * that drained, so a listener can tell its own audio from someone else's.
+   */
+  onIdle: ((drained: SpeechSource | null) => void) | null = null;
+  /**
+   * Source of the last NATURAL drain; null after stop() or while anything is
+   * queued/playing. Lets a caller that missed the onIdle (it fired while the
+   * reply was still streaming) ask afterwards whose audio finished.
+   */
+  lastDrainedSource: SpeechSource | null = null;
 
   private player: AudioPlayer | null = null;
   private sub: { remove: () => void } | null = null;
   private generation = 0;
+  private queue: QueueItem[] = [];
+  /** The item loading/playing now (null when idle). */
+  private current: QueueItem | null = null;
+  /** A queue item is loading or playing (so enqueue() must not start another). */
+  private active = false;
   private listeners = new Set<(s: TTSState) => void>();
 
   subscribe(fn: (s: TTSState) => void): () => void {
@@ -90,10 +130,30 @@ class NativeTTSEngine {
   }
 
   stop(): void {
-    this.generation++; // invalidate any in-flight fetch
+    this.generation++; // invalidate any in-flight fetch / queued playback
+    this.queue = [];
+    this.active = false;
+    this.current = null;
+    this.lastDrainedSource = null;
     this.teardownPlayer();
     this.currentText = null;
     this.setState("idle");
+  }
+
+  /**
+   * Drop everything ONE source queued — playing or waiting — and leave the
+   * rest. A new tutor reply cancels the old reply's voice this way without
+   * cutting off a tap-to-hear label someone else started. Never fires onIdle.
+   */
+  cancelSource(source: SpeechSource): void {
+    this.queue = this.queue.filter((item) => item.source !== source);
+    if (this.current?.source !== source) return;
+    if (this.queue.length === 0) {
+      this.stop();
+      return;
+    }
+    this.generation++;
+    void this.playNext(this.generation);
   }
 
   /**
@@ -101,7 +161,8 @@ class NativeTTSEngine {
    * valid while actually speaking; expo-audio's player pauses in place. The
    * generation token is untouched, so the in-flight audio stays "ours": a
    * later resume() continues it, while any new speak() calls stop() first and
-   * supersedes it cleanly.
+   * supersedes it cleanly. A paused player never reports didJustFinish, so a
+   * queued reply parks here and onIdle can't fire (web parity).
    */
   pause(): void {
     if (this.state !== "speaking") return;
@@ -124,18 +185,61 @@ class NativeTTSEngine {
     this.setState("speaking");
   }
 
+  /**
+   * Manual read-aloud: replace whatever is playing with this text. Resolves
+   * once playback has started (or failed).
+   */
   async speak(rawText: string): Promise<void> {
     const text = prepareSpeech(rawText);
     if (!text) return;
-
     this.stop();
-    const gen = this.generation;
-    this.currentText = rawText;
-    this.setState("loading");
+    this.queue.push({ text, display: rawText, source: "label" });
+    await this.playNext(this.generation);
+  }
 
+  /**
+   * Queue one sentence behind whatever is playing — the streamed voice-mode
+   * path (a tutor reply is spoken sentence by sentence as it arrives). The
+   * next sentences fetch ahead while the current one plays, so the gap
+   * between sentences is playback-to-playback, not a fresh `/tts` round trip.
+   */
+  enqueue(sentence: string, source: SpeechSource = "voice"): void {
+    const text = prepareSpeech(sentence);
+    if (!text) return;
+    this.lastDrainedSource = null;
+    this.queue.push({ text, display: sentence, source });
+    this.prefetch();
+    if (!this.active) void this.playNext(this.generation);
+  }
+
+  /**
+   * The eyes-free "your turn to talk" blip voice mode plays as the mic
+   * reopens (web: TTSEngine.playListeningCue). A pre-reader can't read the
+   * recording bar, so the mic opening must be audible. Fire-and-forget.
+   */
+  playListeningCue(): void {
+    try {
+      if (!cuePlayer) {
+        // Lazy require keeps the asset out of node-only unit tests.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        cuePlayer = createAudioPlayer(require("@/assets/sfx/listen.wav"));
+      }
+      void cuePlayer.seekTo(0);
+      cuePlayer.play();
+    } catch {
+      // A missing cue never blocks listening.
+    }
+  }
+
+  private prefetch(): void {
+    for (const item of this.queue.slice(0, FETCH_LOOKAHEAD)) {
+      if (!item.file) item.file = this.loadFile(item.text);
+    }
+  }
+
+  private async loadFile(text: string): Promise<string | null> {
     try {
       await ensureAudioMode();
-
       const res = await fetch(`${convexSiteUrl}/tts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -143,32 +247,68 @@ class NativeTTSEngine {
       });
       if (!res.ok) throw new Error(`tts ${res.status}`);
       const bytes = new Uint8Array(await res.arrayBuffer());
-      if (gen !== this.generation) return; // superseded/stopped while fetching
-
       if (!cacheDirectory) throw new Error("no cache directory");
       const uri = `${cacheDirectory}${ttsFileName(text)}`;
       await writeAsStringAsync(uri, bytesToBase64(bytes), {
         encoding: EncodingType.Base64,
       });
-      if (gen !== this.generation) return;
+      return uri;
+    } catch {
+      // Skip the sentence rather than kill the whole reply (web parity).
+      return null;
+    }
+  }
 
+  /**
+   * Play the head of the queue; when it finishes, recurse. An empty queue is
+   * a NATURAL drain → idle + onIdle. Every await re-checks the generation so a
+   * stop()/speak() mid-flight unwinds silently.
+   */
+  private async playNext(gen: number): Promise<void> {
+    if (gen !== this.generation) return;
+    this.teardownPlayer();
+    const item = this.queue.shift();
+    if (!item) {
+      const drained = this.current?.source ?? null;
+      this.active = false;
+      this.current = null;
+      this.currentText = null;
+      this.lastDrainedSource = drained;
+      this.setState("idle");
+      this.onIdle?.(drained);
+      return;
+    }
+    this.active = true;
+    this.current = item;
+    this.currentText = item.display;
+    // Between streamed sentences stay "speaking" — no loading flicker.
+    if (this.state !== "speaking") this.setState("loading");
+    if (!item.file) item.file = this.loadFile(item.text);
+    this.prefetch();
+    const uri = await item.file;
+    if (gen !== this.generation) return; // superseded/stopped while fetching
+    if (!uri) {
+      await this.playNext(gen);
+      return;
+    }
+    try {
       const player = createAudioPlayer({ uri });
       this.player = player;
       this.sub = player.addListener("playbackStatusUpdate", (status) => {
-        if (status.playing && gen === this.generation) {
-          voiceMark("firstAudio");
-        }
-        if (status.didJustFinish && gen === this.generation) this.stop();
+        if (gen !== this.generation || this.player !== player) return;
+        if (status.playing) voiceMark("firstAudio");
+        if (status.didJustFinish) void this.playNext(gen);
       });
       this.setState("speaking");
       player.play();
     } catch {
-      // Swallow: a label that can't speak should fail silently, not crash the
-      // screen. Reset so the affordance returns to its resting state.
+      // A player that can't start fails silently, not by crashing the screen.
       if (gen === this.generation) this.stop();
     }
   }
 }
+
+let cuePlayer: AudioPlayer | null = null;
 
 let engine: NativeTTSEngine | null = null;
 export function getNativeTTS(): NativeTTSEngine {
