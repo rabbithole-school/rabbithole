@@ -17,6 +17,7 @@ import {
   type ScholarAudienceContext,
 } from "../pushes";
 import type { Doc, Id } from "../../_generated/dataModel";
+import { dayKeyForTimezone } from "../../../shared/institutionDay";
 
 // ─────────────────────────────────────────────────────────────────────────
 // `pushes` replaces assignments.activitySchedule — see
@@ -35,6 +36,12 @@ import type { Doc, Id } from "../../_generated/dataModel";
 
 const NOW = 1_700_000_000_000;
 const MIN = 60_000;
+const TIME_ZONE = "Pacific/Honolulu";
+const clockAt = (nowMs: number) => ({
+  nowMs,
+  todayDayKey: dayKeyForTimezone(nowMs, TIME_ZONE),
+  timeZone: TIME_ZONE,
+});
 
 const INST = "inst1" as Id<"institutions">;
 const OTHER_INST = "inst2" as Id<"institutions">;
@@ -115,20 +122,23 @@ describe("showing vs. blocking", () => {
   // offered Extend / Wrap, so the focus is not over until a human says so.
 
   test("a planned push (no setAt) is agenda-only, never shown", () => {
-    expect(isPushShowing(push({ setAt: undefined }))).toBe(false);
-    expect(isPushBlocking(push({ setAt: undefined, blocking: true }), NOW)).toBe(
-      false,
-    );
+    expect(isPushShowing(push({ setAt: undefined }), clockAt(NOW))).toBe(false);
+    expect(
+      isPushBlocking(
+        push({ setAt: undefined, blocking: true }),
+        clockAt(NOW),
+      ),
+    ).toBe(false);
   });
 
   test("an open, unexpired focus is shown", () => {
-    expect(isPushShowing(push())).toBe(true);
+    expect(isPushShowing(push(), clockAt(NOW))).toBe(true);
   });
 
-  test("an overrun focus is still shown — it is running long, not gone", () => {
+  test("a same-day overrun focus is still shown", () => {
     const stale = push({ timing: { kind: "focus", endsAt: NOW - MIN } });
     expect(stale.clearedAt).toBeUndefined();
-    expect(isPushShowing(stale)).toBe(true);
+    expect(isPushShowing(stale, clockAt(NOW))).toBe(true);
     // Still worth retiring, just not urgent enough to lie about.
     expect(isPushDueForClear(stale, NOW)).toBe(true);
   });
@@ -141,18 +151,18 @@ describe("showing vs. blocking", () => {
       blocking: true,
       timing: { kind: "focus", endsAt: NOW - MIN },
     });
-    expect(isPushBlocking(stale, NOW)).toBe(false);
-    expect(isPushBlocking(stale, NOW - 2 * MIN)).toBe(true);
+    expect(isPushBlocking(stale, clockAt(NOW))).toBe(false);
+    expect(isPushBlocking(stale, clockAt(NOW - 2 * MIN))).toBe(true);
   });
 
   test("endsAt is exclusive at the wall's boundary", () => {
     const p = push({ blocking: true, timing: { kind: "focus", endsAt: NOW } });
-    expect(isPushBlocking(p, NOW)).toBe(false);
-    expect(isPushBlocking(p, NOW - 1)).toBe(true);
+    expect(isPushBlocking(p, clockAt(NOW))).toBe(false);
+    expect(isPushBlocking(p, clockAt(NOW - 1))).toBe(true);
   });
 
   test("a non-blocking push never walls anyone in, inside its window or not", () => {
-    expect(isPushBlocking(push({ blocking: false }), NOW)).toBe(false);
+    expect(isPushBlocking(push({ blocking: false }), clockAt(NOW))).toBe(false);
   });
 
   test("a cleared push stops showing but still exists as a record", () => {
@@ -161,8 +171,8 @@ describe("showing vs. blocking", () => {
       clearedAt: NOW - MIN,
       clearedReason: "teacher",
     });
-    expect(isPushShowing(cleared)).toBe(false);
-    expect(isPushBlocking(cleared, NOW)).toBe(false);
+    expect(isPushShowing(cleared, clockAt(NOW))).toBe(false);
+    expect(isPushBlocking(cleared, clockAt(NOW))).toBe(false);
     // The point of the redesign: the event survives its own expiry.
     expect(cleared.setAt).toBeDefined();
     expect(cleared.clearedReason).toBe("teacher");
@@ -171,31 +181,31 @@ describe("showing vs. blocking", () => {
 
   test("homework stays shown past its due date", () => {
     const overdue = push({ timing: { kind: "homework", dueAt: NOW - 5 * MIN } });
-    expect(isPushShowing(overdue)).toBe(true);
+    expect(isPushShowing(overdue, clockAt(NOW))).toBe(true);
     expect(isPushDueForClear(overdue, NOW)).toBe(false);
   });
 
-  test("an untilCleared push stays shown, and blocking, until cleared", () => {
+  test("an untilCleared push is a same-day focus", () => {
     const dispatch = push({
       blocking: true,
       timing: { kind: "untilCleared" },
-      setAt: NOW - 30 * 24 * 60 * MIN,
+      setAt: NOW - MIN,
     });
-    // A month later it is still there. Nothing but an explicit clear ends it.
-    // It keeps its wall too: an untilCleared push has no window to overrun,
-    // so this is a teacher deliberately holding the room, not a job that
-    // failed to fire.
-    expect(isPushShowing(dispatch)).toBe(true);
-    expect(isPushBlocking(dispatch, NOW)).toBe(true);
+    expect(isPushShowing(dispatch, clockAt(NOW))).toBe(true);
+    expect(isPushBlocking(dispatch, clockAt(NOW))).toBe(true);
     expect(isPushDueForClear(dispatch, NOW)).toBe(false);
+
+    const tomorrow = NOW + 36 * 60 * MIN;
+    expect(isPushShowing(dispatch, clockAt(tomorrow))).toBe(false);
+    expect(isPushBlocking(dispatch, clockAt(tomorrow))).toBe(false);
 
     const cleared = {
       ...dispatch,
       clearedAt: NOW - MIN,
       clearedReason: "teacher" as const,
     };
-    expect(isPushShowing(cleared)).toBe(false);
-    expect(isPushBlocking(cleared, NOW)).toBe(false);
+    expect(isPushShowing(cleared, clockAt(NOW))).toBe(false);
+    expect(isPushBlocking(cleared, clockAt(NOW))).toBe(false);
   });
 });
 
@@ -335,6 +345,7 @@ describe("livePushesForScholar", () => {
     const live = livePushesForScholar(
       [mine, theirs, overrun, planned, cleared],
       scholar,
+      clockAt(NOW),
     );
     expect(new Set(live.map((p) => p._id))).toEqual(
       new Set([mine._id, overrun._id]),

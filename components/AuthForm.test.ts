@@ -37,7 +37,7 @@ vi.mock("@/components/PasskeyRelatedOriginFallback", () => ({
   PasskeyRelatedOriginFallback: () => null,
 }));
 
-import { AuthCard } from "./AuthForm";
+import { AuthCard, safeNextPath } from "./AuthForm";
 
 function render() {
   stateIndex = 0;
@@ -103,5 +103,27 @@ describe("AuthCard sign-up", () => {
     expect(textContent(tree)).toContain(
       "Rabbithole is invite-only — open the invite link you were sent to join.",
     );
+  });
+});
+
+describe("safeNextPath", () => {
+  const origin = "https://app.example.test";
+  it("keeps a same-origin path with its query and hash", () => {
+    expect(safeNextPath("/oauth/authorize?x=1#y", origin)).toBe("/oauth/authorize?x=1#y");
+  });
+  it.each([
+    "/\\evil.example",
+    "/\\/evil.example",
+    "/\t/evil.example",
+    "//evil.example",
+    "https://evil.example/",
+    "javascript:alert(1)",
+    "evil.example",
+    "",
+  ])("falls back for %j", (next) => {
+    expect(safeNextPath(next, origin, "/home")).toBe("/home");
+  });
+  it("falls back when there is no next", () => {
+    expect(safeNextPath(null, origin)).toBe("/");
   });
 });

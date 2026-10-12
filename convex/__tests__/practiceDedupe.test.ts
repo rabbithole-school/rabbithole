@@ -8,8 +8,8 @@
  * a starvation gate).
  */
 
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -21,13 +21,33 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
+
 // A templated whole-number node with plenty of distinct rendered variants, so a
 // single recently-seen identity leaves many unseen alternatives to swap in.
 const SKILL = "add_within_5";
 
-async function seedScholar(t: ReturnType<typeof convexTest>) {
+let scholarCounter = 0;
+
+async function seedScholar(t: TestConvex<typeof schema>) {
+  const username = `dedupe_scholar_${++scholarCounter}`;
   const userId = await t.run((ctx) =>
-    ctx.db.insert("users", { name: "Dedupe Scholar", username: "dedupe_scholar", role: "scholar" }),
+    ctx.db.insert("users", { name: "Dedupe Scholar", username, role: "scholar" }),
   );
   const sessionId = await t.run((ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
@@ -45,8 +65,7 @@ async function seedScholar(t: ReturnType<typeof convexTest>) {
 
 describe("practiceSession — recent-serve dedupe threading", () => {
   test("a same-day attempt makes that exact template item drop out of the next session", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const { userId, asScholar } = await seedScholar(t);
 
     // Scope to one templated skill so every served item is a template item for
@@ -88,8 +107,7 @@ describe("practiceSession — recent-serve dedupe threading", () => {
   });
 
   test("an attempt OUTSIDE the recent-serve window does not perturb serving", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const { userId, asScholar } = await seedScholar(t);
     const args = { scholarId: userId, seed: 4242, size: 5, skillKeys: [SKILL] };
 
@@ -130,7 +148,7 @@ describe("practiceSession — stored conceptual-item consecutive-day dedupe", ()
   const STORED_SKILL = "partition_shapes";
   const DOMAIN = "fraction-arithmetic";
 
-  async function seedPool(t: ReturnType<typeof convexTest>, n: number): Promise<string[]> {
+  async function seedPool(t: TestConvex<typeof schema>, n: number): Promise<string[]> {
     // n distinct verified word problems for the skill (deterministic, no LLM).
     return t.run(async (ctx) => {
       const ids: string[] = [];
@@ -152,8 +170,7 @@ describe("practiceSession — stored conceptual-item consecutive-day dedupe", ()
   }
 
   test("a stored instance attempted ~30h ago (consecutive day) is NOT re-served", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const { userId, asScholar } = await seedScholar(t);
     await seedPool(t, 5);
 
@@ -198,8 +215,7 @@ describe("practiceSession — stored conceptual-item consecutive-day dedupe", ()
   });
 
   test("a stored instance attempted 4 days ago (outside the window) MAY recur", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const { userId, asScholar } = await seedScholar(t);
     await seedPool(t, 5);
     const args = {

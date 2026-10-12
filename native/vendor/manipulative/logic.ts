@@ -199,6 +199,10 @@ export interface AreaPerimeterState {
 }
 export interface DistributeState {
   column: number;
+  /** The product the scholar TYPED (see `derivedQuestion`). Absent when they
+   *  answered with the board alone — every attempt before the question-first
+   *  card is `{column}` only, and still grades. Null marks nonempty invalid input. */
+  value?: number | null;
 }
 export interface RekenrekState {
   /** How many beads are pushed to the LEFT across both rods (0..total); right = total-left. */
@@ -207,6 +211,8 @@ export interface RekenrekState {
 export interface DistributorState {
   /** Items dealt to EACH plate so far (0..floor(total/groups)). */
   perGroup: number;
+  /** The quotient the scholar TYPED; absent = board only, null = invalid input. */
+  value?: number | null;
 }
 export interface RiemannState {
   bars: number;
@@ -840,10 +846,132 @@ export function areaPerimeterSolved(spec: AreaPerimeterSpec, s: AreaPerimeterSta
   return area === maxAreaForPerimeter(spec.perimeter); // maxArea
 }
 
+// ── question first, strategy optional ────────────────────────────────────────
+// A manipulative whose spec fully determines ONE number (6 × 13 → 78) asks that
+// question FIRST and offers the board as the strategy, not the task. The
+// pedagogy: we test problem solving, not the regurgitation of a strategy — the
+// area model exists to show WHY splitting 13 into 10 + 3 makes 6 × 13 easy, and
+// a scholar who can already see 78 has nothing to prove by dragging a handle. So
+// the card always accepts a typed answer, and the board is graded only when no
+// number was typed.
+
+/**
+ * The single numeric question a spec determines, or null when the kind has no
+ * such number (a target that is NAMED by the goal is not a question — "place 7"
+ * has nothing to type — and a task whose answer is a pair, like a quotient with
+ * a remainder, is not one number). Per kind:
+ *   • distribute (splitAt)      — the product `height × width`.
+ *   • distributor (shareEqually) — the quotient, ONLY when it divides exactly;
+ *                                  with a remainder the answer is "3 r 1", two
+ *                                  numbers, so the board stays the task.
+ *   • every other kind           — null. `functionMachine` and `dice` already
+ *                                  commit a typed prediction through their own
+ *                                  state; `array`/`rekenrek`/`numberline`/… name
+ *                                  their target; `balance` (mystery block) and
+ *                                  `areaPerimeter` (maxArea) are candidates a
+ *                                  later pass may add.
+ * `value` is derivable from the same two visible numbers the board itself draws,
+ * so serving it to a client with an open attempt leaks nothing new.
+ */
+export interface DerivedQuestion {
+  /** Asked FIRST, as the card's headline ("What is 6 × 13?"). */
+  question: string;
+  /** The board's strategy, offered second and muted ("Use the area model to split the 13 into 10 and 3."). */
+  strategy: string;
+  /** The one number that answers `question`. */
+  value: number;
+}
+
+export function derivedQuestion(spec: ManipulativeSpec): DerivedQuestion | null {
+  switch (spec.kind) {
+    case "distribute": {
+      const g = spec.goal;
+      if (!g) return null;
+      return {
+        question: `What is ${spec.height} × ${spec.width}?`,
+        strategy: `Use the area model to split the ${spec.width} into ${g.column} and ${spec.width - g.column}.`,
+        value: spec.height * spec.width,
+      };
+    }
+    case "distributor": {
+      if (!spec.goal || spec.groups < 1) return null;
+      if (spec.total % spec.groups !== 0) return null;
+      return {
+        question: `What is ${spec.total} ÷ ${spec.groups}?`,
+        strategy: `Share the ${spec.total} counters equally onto the ${spec.groups} plates.`,
+        value: spec.total / spec.groups,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * The worked steps that reach a `derivedQuestion`'s answer BY the board's own
+ * strategy — what the teaching moment shows after "I haven't learned this yet",
+ * so the reveal teaches the intended split AND the product, not a bare number.
+ * Same `{text}` shape as a stored item's `workedSteps`; the last step asserts
+ * the answer after an `=` so the teaching step can fade it and derive its hint.
+ * Null when the kind has no question, or (distributor) when the single fact
+ * "7 × 6 = 42" would just be the answer in disguise — the reveal then shows the
+ * number alone.
+ */
+export function derivedWorkedSteps(spec: ManipulativeSpec): { text: string }[] | null {
+  if (spec.kind !== "distribute" || !spec.goal) return null;
+  const h = spec.height;
+  const a = spec.goal.column;
+  const b = spec.width - a;
+  return [
+    { text: `${h} × ${a} = ${h * a}` },
+    { text: `${h} × ${b} = ${h * b}` },
+    { text: `${h * a} + ${h * b} = ${h * spec.width}` },
+  ];
+}
+
+/**
+ * Fold the card's typed answer into a kind's runtime state so ONE submitted
+ * JSON carries both ("{column: 3, value: 78}") and the server re-grades both
+ * through the same `isSolved`. Empty input leaves the board as the answer;
+ * nonempty invalid input uses a JSON-safe null marker and must grade wrong.
+ * A null state (a kind that never reported one) still yields `{value}`.
+ */
+export function withTypedValue(state: unknown, typed: string | null | undefined): unknown {
+  const trimmed = typed?.trim() ?? "";
+  if (trimmed === "") return state;
+  const value = Number(trimmed);
+  const base = state && typeof state === "object" ? (state as Record<string, unknown>) : {};
+  return { ...base, value: Number.isFinite(value) ? value : null };
+}
+
+/**
+ * The verdict a TYPED answer decides on its own, or null when none was typed
+ * (or the kind asks no question, so a stray `value` is ignored). A typed number
+ * is the scholar's committed answer: right → solved regardless of the board;
+ * wrong → not solved even if the board happens to show the intended split.
+ */
+function typedAnswerVerdict(spec: ManipulativeSpec, value: unknown): boolean | null {
+  if (value === undefined) return null;
+  const q = derivedQuestion(spec);
+  if (!q) return null;
+  return typeof value === "number" && value === q.value;
+}
+
+/**
+ * Distribute — a typed product decides first (see `typedAnswerVerdict`).
+ * Otherwise the split must show the goal's two parts — on EITHER side. A 13-wide
+ * rectangle cut at column 3 shows 3 and 10 exactly as a cut at column 10 does
+ * (13 × 6 = 3 × 6 + 10 × 6 is the very identity the prompt asks for), and
+ * `rekenrekSolved` already accepts a number bond from either side. Before this,
+ * only `column === goal.column` passed, so a correct split on the "wrong" side
+ * was graded "Not quite" while the caption under the board read a true equation.
+ */
 export function distributeSolved(spec: DistributeSpec, s: DistributeState): boolean {
   const g = spec.goal;
   if (!g) return false;
-  return s.column === g.column;
+  const typed = typedAnswerVerdict(spec, s.value);
+  if (typed !== null) return typed;
+  return s.column === g.column || s.column === spec.width - g.column;
 }
 
 /**
@@ -917,10 +1045,14 @@ export function rekenrekGeometry(width: number, sizingCount: number): RekenrekGe
  * (total mod groups), so this single check enforces "groups equal + remainder
  * correct". Under-dealing leaves too big a pile (not solved); over-dealing past
  * an equal round is disallowed by the control's own max, never reachable here.
+ * When the division is exact the card asks "What is 42 ÷ 7?" first, and a typed
+ * quotient decides on its own (see `typedAnswerVerdict`).
  */
 export function distributorSolved(spec: DistributorSpec, s: DistributorState): boolean {
   if (!spec.goal) return false;
   if (spec.groups < 1) return false;
+  const typed = typedAnswerVerdict(spec, s.value);
+  if (typed !== null) return typed;
   return s.perGroup === distributorPerGroupMax(spec);
 }
 
@@ -1286,6 +1418,8 @@ export function isSolved(
       return liquidSolved(spec, state as LiquidState);
     case "money":
       return moneySolved(spec, state as MoneyState);
+    case "molecule":
+      return false;
   }
 }
 
@@ -1477,8 +1611,10 @@ export function goalText(spec: ManipulativeSpec): string {
     case "distribute": {
       const g = spec.goal;
       if (!g) return `Move the divider where the prompt asks.`;
-      // The split column IS the given task (the prompt states the two parts to show).
-      return `Move the divider so the ${spec.width}-wide rectangle is split at column ${g.column}, showing the two parts ${g.column} and ${spec.width - g.column}.`;
+      // COMPUTE-STYLE now: the card asks for the PRODUCT first (`derivedQuestion`),
+      // so it is the answer and is never named. The split IS the given strategy
+      // (the two parts are stated), so it may be.
+      return `Work out ${spec.height} × ${spec.width}. The area model can help: move the divider so the ${spec.width}-wide rectangle is split at column ${g.column}, showing the two parts ${g.column} and ${spec.width - g.column}, then add the two pieces.`;
     }
     case "rekenrek": {
       const g = spec.goal;
@@ -1489,7 +1625,11 @@ export function goalText(spec: ManipulativeSpec): string {
     case "distributor": {
       if (!spec.goal) return `Deal the ${spec.total} counters onto the ${spec.groups} plates.`;
       // COMPUTE-STYLE: state the dividend + divisor, NEVER the quotient/remainder.
-      return `Deal all ${spec.total} counters onto ${spec.groups} equal plates, dealing as many full rounds as you can so every plate holds the same amount.`;
+      // An exact division is asked as a question first ("What is 42 ÷ 7?"); the
+      // dealing is the strategy.
+      return derivedQuestion(spec)
+        ? `Work out ${spec.total} ÷ ${spec.groups}. Dealing helps: share all ${spec.total} counters onto ${spec.groups} equal plates and see how many each plate holds.`
+        : `Deal all ${spec.total} counters onto ${spec.groups} equal plates, dealing as many full rounds as you can so every plate holds the same amount.`;
     }
     case "riemann": {
       if (!spec.goal) return `Add or remove left-sum bars under the speed line.`;
@@ -1606,6 +1746,8 @@ export function goalText(spec: ManipulativeSpec): string {
       // is never named.
       return `Make exactly ${formatMoney(g.cents)} using as FEW ${piece}s as you possibly can. You have ${bank} to choose from.`;
     }
+    case "molecule":
+      return `Explore the structure of ${spec.resolvedName}.`;
     default: {
       const _exhaustive: never = spec;
       return _exhaustive;
@@ -1687,7 +1829,9 @@ function describeStateInner(spec: ManipulativeSpec, state: unknown): string {
     }
     case "distribute": {
       const s = state as DistributeState;
-      return `The divider is at column ${s.column}, splitting the ${spec.width}-wide rectangle into ${s.column} and ${spec.width - s.column}.`;
+      // The typed number is the scholar's own visible input (never the target).
+      const typed = typeof s.value === "number" ? ` They have typed ${s.value} as the answer.` : "";
+      return `The divider is at column ${s.column}, splitting the ${spec.width}-wide rectangle into ${s.column} and ${spec.width - s.column}.${typed}`;
     }
     case "rekenrek": {
       const s = state as RekenrekState;
@@ -1699,7 +1843,8 @@ function describeStateInner(spec: ManipulativeSpec, state: unknown): string {
       // The leftover pile is VISIBLE state (their current, possibly wrong, deal),
       // not the true remainder — safe to report.
       const leftover = distributorRemainder(spec, s);
-      return `Each of the ${spec.groups} plates holds ${s.perGroup} counter${s.perGroup === 1 ? "" : "s"} right now, and ${leftover} counter${leftover === 1 ? "" : "s"} are still in the leftover pile.`;
+      const typed = typeof s.value === "number" ? ` They have typed ${s.value} as the answer.` : "";
+      return `Each of the ${spec.groups} plates holds ${s.perGroup} counter${s.perGroup === 1 ? "" : "s"} right now, and ${leftover} counter${leftover === 1 ? "" : "s"} are still in the leftover pile.${typed}`;
     }
     case "riemann": {
       const s = state as RiemannState;
@@ -1791,6 +1936,8 @@ function describeStateInner(spec: ManipulativeSpec, state: unknown): string {
       // target amount and any minimum piece count never appear.
       return `The tray holds ${joinList(held)} right now, which comes to ${formatMoney(moneyTotalCents(spec, counts))}.`;
     }
+    case "molecule":
+      return `The structure shown is ${spec.resolvedName} (${spec.formula}).`;
     default: {
       const _exhaustive: never = spec;
       return _exhaustive;

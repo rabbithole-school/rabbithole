@@ -14,10 +14,9 @@ import {
   markSeedCompleted,
   pruneObserverSeeds,
   recentPendingObserverSeedCandidates,
-  recentSeedsForScholarByStatus,
+  seedListForScholar,
   selectDuplicatePendingObserverSeed,
   visitedSeedIdsForScholar,
-  SEED_READ_LIMIT,
   type SeedOrigin,
 } from "./lib/seeds";
 import { requireActiveScholarAccess } from "./lib/access";
@@ -370,9 +369,9 @@ export const skyForSelf = authedQuery({
 
 /**
  * Lightweight launch info for the "choose your path" menu: is this seed a
- * TOPIC seed (no unit yet → it will be baked, so the scholar picks a shape),
- * or already structured (a teacher offer / prior bake → start its unit
- * directly, no menu)? Returns the topic for the menu header. Scholar's own
+ * TOPIC seed (no unit and not a story → it will be baked, so the scholar picks
+ * a shape), or a direct launch (a structured teacher route / prior bake, or a
+ * grounded story thread)? Returns the topic for the menu header. Scholar's own
  * seeds only.
  */
 export const getBakeLaunchInfo = authedQuery({
@@ -382,7 +381,7 @@ export const getBakeLaunchInfo = authedQuery({
     if (!seed || seed.scholarId !== ctx.user._id) return null;
     if (seed.status === "completed") return null;
     return {
-      isTopicSeed: !seed.unitId,
+      isTopicSeed: !seed.unitId && seed.origin !== "story",
       topic: seed.topic,
       domain: seed.domain ?? null,
       // Scholar-facing only — prefer the invitation, never the teacher rationale.
@@ -419,6 +418,7 @@ export const skyForScholar = authedQuery({
  * the not-yet-started ones (a started quest spawns a session stamped with the
  * seed's id, and then lives in the in-progress plate instead). Newest first.
  */
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const suggestedQuestsForSelf = authedQuery({
   args: {},
   handler: async (ctx) => {
@@ -459,9 +459,12 @@ export const unlockedStoriesForSelf = authedQuery({
 });
 
 /**
- * Scholar-facing story invitations that are still waiting to be followed or
- * dismissed. Offered stories remain durable Sky seeds after this card retires.
+ * Scholar-facing standing invitations still waiting to be followed or
+ * dismissed: world-connection story threads AND cross-domain seed moments, both
+ * carded on the practice done screen. Offered stories remain durable Sky seeds
+ * after this card retires.
  */
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const standingStoryInvitationsForSelf = authedQuery({
   args: {},
   handler: async (ctx) =>
@@ -487,13 +490,7 @@ export const listByScholar = authedQuery({
     // throws. See convex/lib/access.ts.
     if (isTeacher) await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
 
-    const rows = await recentSeedsForScholarByStatus(ctx, args.scholarId, [
-      "active",
-      "pending",
-      "dismissed",
-      "completed",
-    ]);
-    const boundedRows = rows.slice(0, SEED_READ_LIMIT);
+    const boundedRows = await seedListForScholar(ctx, args.scholarId);
 
     if (isTeacher) return boundedRows;
 

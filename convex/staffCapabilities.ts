@@ -9,14 +9,24 @@ import {
   ROLES,
 } from "./lib/roles";
 import {
+  admissionsCapabilityForTier,
+  admissionsTierAtInstitution,
+  assertNever,
   authorizedGroupIds,
   ensureActiveStaffCapabilityGrant,
   hasActiveInstitutionCapability,
   hasHealthAccessAtInstitution,
   hasSchoolOperationsAccessAtInstitution,
   hasActiveStaffMembershipAtInstitution,
+  STAFF_CAPABILITIES,
   type StaffCapability,
 } from "./lib/staffCapabilities";
+
+const admissionsTierValidator = v.union(
+  v.literal("none"),
+  v.literal("scheduling"),
+  v.literal("full"),
+);
 
 const programGroupAccessValidator = v.object({
   groupId: v.id("scholarGroups"),
@@ -116,6 +126,47 @@ async function healthAccessIncludedInRole(
   );
 }
 
+/** Base `staff` standing at this school and no other staff role there. */
+async function isBaseStaffAtInstitution(
+  ctx: QueryCtx | MutationCtx,
+  userId: Id<"users">,
+  institutionId: Id<"institutions">,
+) {
+  const memberships = (
+    await ctx.db
+      .query("memberships")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect()
+  ).filter((membership) => membership.institutionId === institutionId);
+  return (
+    memberships.some((membership) => membership.role === ROLES.STAFF) &&
+    memberships.every(
+      (membership) =>
+        membership.role === ROLES.STAFF || membership.role === ROLES.PARENT,
+    )
+  );
+}
+
+/** An active institution-wide `scholars:mentor` grant at this school. */
+async function hasInstitutionMentorGrant(
+  ctx: QueryCtx | MutationCtx,
+  userId: Id<"users">,
+  institutionId: Id<"institutions">,
+) {
+  const grants = await ctx.db
+    .query("staffCapabilityGrants")
+    .withIndex("by_grantee_capability", (q) =>
+      q.eq("granteeUserId", userId).eq("capability", "scholars:mentor"),
+    )
+    .collect();
+  return grants.some(
+    (grant) =>
+      grant.institutionId === institutionId &&
+      grant.scholarGroupId === undefined &&
+      grant.revokedAt === undefined,
+  );
+}
+
 async function programGroupsForInstitution(
   ctx: QueryCtx | MutationCtx,
   institutionId: Id<"institutions">,
@@ -148,6 +199,8 @@ export const editorForStaff = schoolAdminQuery({
       publishingGroupIds,
       captureReviewGroupIds,
       groups,
+      canMentorScholars,
+      admissionsTier,
     ] = await Promise.all([
         hasActiveInstitutionCapability(
           ctx,
@@ -185,6 +238,12 @@ export const editorForStaff = schoolAdminQuery({
           "captures:review",
         ),
         programGroupsForInstitution(ctx, args.institutionId),
+        hasInstitutionMentorGrant(ctx, args.userId, args.institutionId),
+        admissionsTierAtInstitution(
+          ctx,
+          (await ctx.db.get(args.userId))!,
+          args.institutionId,
+        ),
       ]);
     return {
       canEditCurriculum,
@@ -193,6 +252,15 @@ export const editorForStaff = schoolAdminQuery({
       schoolOperationsIncludedInRole: schoolOperationsIncluded,
       canManageHealthRecords,
       healthAccessIncludedInRole: healthAccessIncluded,
+      // Mentor threads with every ENROLLED scholar at this school (never a
+      // role default — teachers already reach mentor threads by role).
+      canMentorScholars,
+      // "full" for a platform admin by role; otherwise from the explicit
+      // grant. Only a platform admin may change it (updateForStaff).
+      admissionsTier,
+      admissionsIncludedInRole: isPlatformAdminRole(
+        (await ctx.db.get(args.userId))!.role,
+      ),
       programGroups: groups.map((group) => ({
         groupId: group._id,
         name: group.name,
@@ -210,6 +278,15 @@ export const updateForStaff = schoolAdminMutation({
     canEditCurriculum: v.boolean(),
     canManageSchoolOperations: v.optional(v.boolean()),
     canManageHealthRecords: v.optional(v.boolean()),
+    // Institution-wide `scholars:mentor`. Omitted = leave every existing mentor
+    // grant (including a group-scoped one) exactly as it is, so an older client
+    // that doesn't know the field can never revoke it by accident.
+    canMentorScholars: v.optional(v.boolean()),
+    // Admissions tier. Omitted = leave the admissions grants exactly as they
+    // are (a school admin saving other toggles must never revoke them).
+    // Setting it is reserved to a platform admin; a tier replaces the other
+    // admissions grant, so a user holds at most one.
+    admissionsTier: v.optional(admissionsTierValidator),
     programGroupAccess: v.array(programGroupAccessValidator),
   },
   handler: async (ctx, args) => {
@@ -218,6 +295,21 @@ export const updateForStaff = schoolAdminMutation({
       throw new Error("You cannot grant yourself staff capabilities");
     }
     await requireStaffRecipient(ctx, args.userId, args.institutionId);
+    if (
+      args.admissionsTier !== undefined &&
+      !isPlatformAdminRole(ctx.user.role)
+    ) {
+      throw new Error("Only a platform admin can change admissions access");
+    }
+    if (
+      args.canMentorScholars === true &&
+      !(await isBaseStaffAtInstitution(ctx, args.userId, args.institutionId))
+    ) {
+      // Teachers and school admins already reach mentor threads by role, and
+      // other staff roles aren't routed to Messages — the grant is for base
+      // staff (an outside mentor) only. Revoking stays allowed for cleanup.
+      throw new Error("Only base staff can be made a mentor");
+    }
     const desiredSchoolOperations =
       args.canManageSchoolOperations ??
       (await hasSchoolOperationsAccessAtInstitution(
@@ -268,13 +360,7 @@ export const updateForStaff = schoolAdminMutation({
       );
     }
 
-    const capabilities: StaffCapability[] = [
-      "curriculum:edit",
-      "school:operations",
-      "health:manage",
-      "program:publish",
-      "captures:review",
-    ];
+    const capabilities: readonly StaffCapability[] = STAFF_CAPABILITIES;
     const activeGrants = (
       await Promise.all(
         capabilities.map((capability) =>
@@ -296,19 +382,37 @@ export const updateForStaff = schoolAdminMutation({
           grant.revokedAt === undefined,
       );
 
-    const desiredGrant = (capability: StaffCapability, groupId?: Id<"scholarGroups">) =>
-      capability === "curriculum:edit" ||
-      capability === "school:operations" ||
-      capability === "health:manage"
-        ? (capability === "curriculum:edit"
-            ? args.canEditCurriculum
-            : capability === "school:operations"
-              ? desiredSchoolOperations
-              : desiredHealthRecords) && groupId === undefined
-        : !!groupId &&
-          (capability === "program:publish"
-            ? desired.get(groupId)?.canPublish
-            : desired.get(groupId)?.canReviewCaptures);
+    // Exhaustive: a new capability fails typecheck here instead of falling
+    // through to a branch that silently revokes its grants on every save.
+    const desiredGrant = (
+      capability: StaffCapability,
+      groupId?: Id<"scholarGroups">,
+    ): boolean => {
+      switch (capability) {
+        case "scholars:mentor":
+          // The toggle is the INSTITUTION-WIDE grant only; a group-scoped
+          // mentor grant is never touched from here.
+          return groupId !== undefined || (args.canMentorScholars ?? true);
+        case "curriculum:edit":
+          return args.canEditCurriculum && groupId === undefined;
+        case "school:operations":
+          return desiredSchoolOperations && groupId === undefined;
+        case "health:manage":
+          return desiredHealthRecords && groupId === undefined;
+        case "program:publish":
+          return !!groupId && !!desired.get(groupId)?.canPublish;
+        case "captures:review":
+          return !!groupId && !!desired.get(groupId)?.canReviewCaptures;
+        case "admissions:full":
+        case "admissions:scheduling":
+          return args.admissionsTier === undefined
+            ? groupId === undefined
+            : groupId === undefined &&
+                admissionsCapabilityForTier(args.admissionsTier) === capability;
+        default:
+          return assertNever(capability);
+      }
+    };
 
     const retained = new Set<string>();
     for (const grant of activeGrants) {
@@ -358,6 +462,26 @@ export const updateForStaff = schoolAdminMutation({
         granteeUserId: args.userId,
         institutionId: args.institutionId,
         capability: "health:manage",
+        grantedBy: ctx.user._id,
+      });
+    }
+    const admissionsCapability =
+      args.admissionsTier === undefined
+        ? null
+        : admissionsCapabilityForTier(args.admissionsTier);
+    if (admissionsCapability) {
+      await ensureActiveStaffCapabilityGrant(ctx, {
+        granteeUserId: args.userId,
+        institutionId: args.institutionId,
+        capability: admissionsCapability,
+        grantedBy: ctx.user._id,
+      });
+    }
+    if (args.canMentorScholars === true) {
+      await ensureActiveStaffCapabilityGrant(ctx, {
+        granteeUserId: args.userId,
+        institutionId: args.institutionId,
+        capability: "scholars:mentor",
         grantedBy: ctx.user._id,
       });
     }

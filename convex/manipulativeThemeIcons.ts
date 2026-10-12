@@ -14,7 +14,11 @@ import { internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { authedQuery, authedMutation, teacherMutation } from "./lib/customFunctions";
 import { normalizeThemeLabel } from "../lib/manipulative/types";
-import { MAX_THEME_LABEL_LEN, themeIconSubject } from "./lib/themeIconArt";
+import {
+  isAppCharmThemeLabel,
+  MAX_THEME_LABEL_LEN,
+  themeIconSubject,
+} from "./lib/themeIconArt";
 
 // ── Read path (any signed-in user — renders happen in authed surfaces) ───────
 
@@ -76,13 +80,15 @@ export const ensure = authedMutation({
 
 // ── Staff override (teacher-gated) ───────────────────────────────────────────
 
-/** The whole cache, for the override surface (dev gallery). Newest first. Read
- *  is open (icon labels/URLs are non-sensitive curriculum decoration); the
- *  WRITE overrides below stay teacher-gated. */
+/** The governed manipulative cache, for the override surface (dev gallery).
+ *  App-only charm keys are omitted: they reuse this generation pipeline but
+ *  are not curriculum fill labels. Newest first. */
 export const listAll = authedQuery({
   args: {},
   handler: async (ctx) => {
-    const rows = await ctx.db.query("manipulativeThemeIcons").collect();
+    const rows = (await ctx.db.query("manipulativeThemeIcons").collect()).filter(
+      (row) => !isAppCharmThemeLabel(row.label),
+    );
     rows.sort((a, b) => b.createdAt - a.createdAt);
     return Promise.all(
       rows.map(async (r) => ({

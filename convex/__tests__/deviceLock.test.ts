@@ -607,7 +607,7 @@ describe("Rabbithole Lock timed disarm", () => {
     ).toBeUndefined();
   });
 
-  test("applyCommandToRows itself rejects a timed command with no minutes (the internal backstop, bypassing setRabbitholeLock/setFromSlack's own validation)", async () => {
+  test("applyCommandToRows itself rejects a timed command with no minutes (the internal backstop, bypassing setRabbitholeLock/setFromAgent's own validation)", async () => {
     const t = convexTest(schema, modules);
     const institutionId = await seedInstitution(t, "moli");
     const teacherId = await seedUser(t, "teacher", institutionId);
@@ -636,7 +636,7 @@ describe("Rabbithole Lock timed disarm", () => {
     ).rejects.toThrow();
 
     // No row was touched: the backstop throws before any db.patch/scheduler
-    // call, same as the outer setRabbitholeLock/setFromSlack validation does.
+    // call, same as the outer setRabbitholeLock/setFromAgent validation does.
     expect(
       (await t.run((ctx) => ctx.db.get(pairedDeviceId)))
         ?.rabbitholeLockDesiredState,
@@ -702,8 +702,9 @@ describe("Rabbithole Lock timed disarm", () => {
       "ipad-timed",
     );
 
-    const result = await t.mutation(internal.deviceLock.setFromSlack, {
+    const result = await t.mutation(internal.deviceLock.setFromAgent, {
       callerUserId: teacherId,
+      source: "slack" as const,
       pairedDeviceIds: [pairedDeviceId],
       state: "disarmed",
       disarmMode: "timed",
@@ -733,8 +734,9 @@ describe("Rabbithole Lock timed disarm", () => {
     );
 
     await expect(
-      t.mutation(internal.deviceLock.setFromSlack, {
+      t.mutation(internal.deviceLock.setFromAgent, {
         callerUserId: teacherId,
+        source: "slack" as const,
         pairedDeviceIds: [pairedDeviceId],
         state: "disarmed",
         disarmMode: "timed",
@@ -885,7 +887,7 @@ describe("Rabbithole Lock Slack boundary", () => {
       seedManagedClaim(t, institutionB, teacherId, "SERIAL-B-1", "ipad-b-1"),
     ]);
 
-    const listed = await t.query(internal.deviceLock.listForSlack, {
+    const listed = await t.query(internal.deviceLock.listForAgent, {
       callerUserId: teacherId,
     });
 
@@ -929,7 +931,7 @@ describe("Rabbithole Lock Slack boundary", () => {
       "ipad-lani",
     );
 
-    const listed = await t.query(internal.deviceLock.listForSlack, {
+    const listed = await t.query(internal.deviceLock.listForAgent, {
       callerUserId: teacherId,
       search: "Kai",
     });
@@ -940,8 +942,9 @@ describe("Rabbithole Lock Slack boundary", () => {
       ]);
     }
 
-    const updated = await t.mutation(internal.deviceLock.setFromSlack, {
+    const updated = await t.mutation(internal.deviceLock.setFromAgent, {
       callerUserId: teacherId,
+      source: "slack" as const,
       pairedDeviceIds: [first, second],
       state: "disarmed",
       disarmMode: "until_further_notice",
@@ -991,8 +994,9 @@ describe("Rabbithole Lock Slack boundary", () => {
       "ipad-b",
     );
 
-    const result = await t.mutation(internal.deviceLock.setFromSlack, {
+    const result = await t.mutation(internal.deviceLock.setFromAgent, {
       callerUserId: teacherA,
+      source: "slack" as const,
       pairedDeviceIds: [first, second],
       state: "disarmed",
       disarmMode: "until_midnight",
@@ -1008,7 +1012,7 @@ describe("Rabbithole Lock Slack boundary", () => {
     ).toBe(true);
   });
 
-  test("listForSlack tags an Extended Education scholar's row (annotate, never filter)", async () => {
+  test("listForAgent tags an Extended Education scholar's row (annotate, never filter)", async () => {
     const t = convexTest(schema, modules);
     const institutionId = await seedInstitution(t, "moli");
     const teacherId = await seedUser(t, "teacher", institutionId);
@@ -1020,7 +1024,7 @@ describe("Rabbithole Lock Slack boundary", () => {
     await seedDevice(t, institutionId, kai, teacherId, "ipad-kai");
     await seedDevice(t, institutionId, riley, teacherId, "ipad-riley");
 
-    const listed = await t.query(internal.deviceLock.listForSlack, {
+    const listed = await t.query(internal.deviceLock.listForAgent, {
       callerUserId: teacherId,
     });
     expect(listed.ok).toBe(true);

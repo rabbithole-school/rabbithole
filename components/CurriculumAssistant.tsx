@@ -23,6 +23,8 @@ import {
   Plus,
   Paperclip,
   Camera,
+  VideoCamera,
+  Microphone,
   X,
   DotsThreeVertical,
   PencilSimple,
@@ -38,7 +40,7 @@ import {
 import { MAX_FLAG_SNIPPET_LEN } from "@/lib/manualRehearsalFlags";
 import { UNIT_BOT_SUGGESTIONS } from "@/lib/curriculumBotPrompts";
 import ReactMarkdown from "react-markdown";
-import { useQuery, useMutation } from "convex/react";
+import { useQuery, useMutation, useAction } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -55,7 +57,8 @@ import AideModelPicker from "./AideModelPicker";
 import { GoogleAccountConnect } from "./GoogleAccountConnect";
 import { needsGoogleReconsent } from "./googleConsentStatus";
 import { GooglePickerButton } from "./GooglePickerButton";
-import { CameraCaptureDialog } from "./CameraCaptureDialog";
+import { CameraCaptureDialog, type CapturedMedia } from "./CameraCaptureDialog";
+import { AudioRecordDialog, type RecordedAudio } from "./AudioRecordDialog";
 import { aideMarkdownComponents, aideRemarkPlugins } from "./AideThread";
 import { formatTimeAgo } from "@/lib/relativeTime";
 import { openExternal } from "@/lib/native";
@@ -63,12 +66,18 @@ import { teacherChatHref } from "@/lib/teacherChat";
 import { convexSiteUrl } from "@/lib/convexUrls";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { toaster } from "@/lib/toaster";
-import { uploadMessageAttachment } from "@/lib/uploadMessageAttachment";
+import {
+  uploadMessageAttachment,
+  uploadToConvexStorage,
+} from "@/lib/uploadMessageAttachment";
 import {
   MESSAGE_ATTACHMENT_ACCEPT,
   MESSAGE_ATTACHMENT_MAX_BYTES,
+  messageAttachmentMediaKind,
+  safeMessageAttachmentFileName,
   type MessageAttachment,
 } from "@/shared/messageAttachments";
+import { formatCaptureDuration } from "@/shared/captureMedia";
 // markdown link rendering is shared via AideThread's aideMarkdownComponents.
 
 /** Extract the active chat id from a `/teacher/chat/<chatId>`
@@ -83,6 +92,20 @@ function chatIdFromPathname(pathname: string): string | null {
 // A file the teacher attaches to a chat message via the "+" button. Mirrors
 // the `attachments` shape on curriculumMessages / sendSessionMessage.
 type ChatAttachment = MessageAttachment<Id<"_storage">>;
+
+// Chip glyph by attachment kind: mic for a recorded voice memo, video camera
+// for a recorded clip, paperclip for every picked/Drive file. One canonical
+// rendering per kind, shared by the pending row and the sent-message bubbles.
+function attachmentKindIcon(mimeType?: string | null) {
+  const kind = messageAttachmentMediaKind(mimeType);
+  if (kind === "audio") return Microphone;
+  if (kind === "video") return VideoCamera;
+  return Paperclip;
+}
+
+function attachmentDurationLabel(durationMs?: number | null): string | null {
+  return durationMs && durationMs > 0 ? formatCaptureDuration(durationMs) : null;
+}
 
 type DriveAttachment = {
   driveFileId: string;
@@ -142,7 +165,13 @@ const assistantBubbleCss = {
   "& tr:nth-of-type(even)": { background: "var(--chakra-colors-gray-50)" },
 } as const;
 
-function AssistantMarkdownBubble({ content }: { content: string }) {
+function AssistantMarkdownBubble({
+  content,
+  stopped = false,
+}: {
+  content: string;
+  stopped?: boolean;
+}) {
   return (
     <Box alignSelf="flex-start">
       <Box
@@ -162,6 +191,12 @@ function AssistantMarkdownBubble({ content }: { content: string }) {
           </ReactMarkdown>
         </Text>
       </Box>
+      {/* The user cut this reply short — a quiet, iconless caption. */}
+      {stopped && (
+        <Text fontSize="xs" color="fg.muted" fontFamily="heading" mt={1}>
+          Stopped
+        </Text>
+      )}
     </Box>
   );
 }
@@ -356,10 +391,9 @@ function CurriculumAssistantInner({
   const sendUnitSessionMessage = useMutation(
     api.curriculumAssistant.sendUnitSessionMessage,
   );
-  const markMessageStopped = useMutation(
-    api.curriculumAssistant.markMessageStopped,
-  );
+  const requestStop = useMutation(api.curriculumAssistant.requestStop);
   const generateUploadUrl = useMutation(api.curriculumAssistant.generateUploadUrl);
+  const transcribeAttachment = useAction(api.audioActions.transcribeAttachment);
   const renameChat = useMutation(api.curriculumAssistant.renameChat);
   const togglePin = useMutation(api.curriculumAssistant.togglePin);
   const deleteSession = useMutation(api.curriculumAssistant.deleteSession);
@@ -377,6 +411,15 @@ function CurriculumAssistantInner({
   // Camera capture — the shared CameraCaptureDialog overlay routes its JPEG
   // through handleFilesSelected, exactly like a picked file.
   const [showCamera, setShowCamera] = useState(false);
+  // Recorded-clip capture — the same dialog in video mode, plus the mic-only
+  // audio dialog. Both stage through stageRecordedClip (upload → transcribe).
+  const [showVideoCapture, setShowVideoCapture] = useState(false);
+  const [showAudioRecord, setShowAudioRecord] = useState(false);
+  // Storage ids of staged clips whose transcription is still in flight — the
+  // chip shows a spinner + "Transcribing…" and Send waits (like `uploading`).
+  const [transcribingIds, setTranscribingIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
   // The Drive picker stays mounted (so its Google scripts preload) but is
   // triggered from the "+" menu; renderTrigger stashes its open handler here.
@@ -392,11 +435,22 @@ function CurriculumAssistantInner({
     Record<string, Array<{ index: number; scholarId: string | null; name: string }>>
   >({});
 
-  const { startStream, stopStream, getStreamState, streamingSessionIds } = useStreamRegistry();
+  const { startStream, stopStream, getStreamState, streamingSessionIds, releaseStopped } = useStreamRegistry();
 
   // Per-session stream state for the currently-viewed session
   const currentStreamState = getStreamState(sessionId ? String(sessionId) : "");
   const { isStreaming, streamingContent, streamingMsgId, toolActivity, thinkingActivity, isThinking } = currentStreamState;
+  // After a user Stop the registry keeps a "stopped" shell for this session
+  // until the server-finalized row lands (streamId cleared). Once no assistant
+  // row is still streaming, drop the shell so the persisted row stands alone.
+  const streamStopped = currentStreamState.stopped;
+  useEffect(() => {
+    if (!sessionId || !streamStopped) return;
+    const stillStreaming = messages.some(
+      (m) => m.role === "assistant" && !!(m as { streamId?: string }).streamId,
+    );
+    if (!stillStreaming) releaseStopped(String(sessionId));
+  }, [sessionId, streamStopped, messages, releaseStopped]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -510,18 +564,39 @@ function CurriculumAssistantInner({
     goToSession(String(newSessionId));
   }, [unitContext, createUnitSession, createChat, goToSession]);
 
+  // Stop the active stream (either scope) — abort the client read AND stamp the
+  // half-written assistant row server-side so the running action stops and
+  // finalizes the partial (it renders with a muted "Stopped" caption). The
+  // partial text stays on screen; the persisted row takes over.
+  const stopActiveStream = useCallback(() => {
+    if (!sessionId) return;
+    const stoppedMsgId = streamingMsgId;
+    stopStream(String(sessionId));
+    if (stoppedMsgId) {
+      void requestStop({
+        messageId: stoppedMsgId as Id<"curriculumMessages">,
+      }).catch((err) => {
+        console.error("Failed to request stop:", err);
+      });
+    }
+  }, [sessionId, streamingMsgId, stopStream, requestStop]);
+
   const handleSend = useCallback(async () => {
     const text = input.trim();
     // Allow an attachment-only turn (e.g. "here's the file") — send if there's
-    // text OR at least one attached file. Block if THIS session is streaming.
+    // text OR at least one attached file.
     if (
       (!text &&
         pendingAttachments.length === 0 &&
         pendingDriveAttachments.length === 0) ||
-      isStreaming ||
       !user
     )
       return;
+
+    // Steering: submitting while this session streams stops the current reply
+    // (server + local fetch) and replaces it with this turn — startStream then
+    // preempts cleanly. The typed text is never dropped.
+    if (isStreaming) stopActiveStream();
 
     setInput("");
     const attachments = pendingAttachments;
@@ -623,7 +698,7 @@ function CurriculumAssistantInner({
       setPendingAttachments((prev) => [...attachments, ...prev]);
       setPendingDriveAttachments((prev) => [...driveAttachments, ...prev]);
     }
-  }, [input, pendingAttachments, pendingDriveAttachments, isStreaming, user, sessionId, createChat, goToSession, sendSessionMessage, startStream, scopeParam, focusScholarId, activeSession?.scholarId, focusScholarName, messages.length, practiceContext]);
+  }, [input, pendingAttachments, pendingDriveAttachments, isStreaming, stopActiveStream, user, sessionId, createChat, goToSession, sendSessionMessage, startStream, scopeParam, focusScholarId, activeSession?.scholarId, focusScholarName, messages.length, practiceContext]);
 
   // ── Unit-designer scope send path ──────────────────────────────────────
   // Routes to sendUnitSessionMessage → the /aide-stream `unitId` branch
@@ -638,7 +713,6 @@ function CurriculumAssistantInner({
       const text = rawText.trim();
       if (
         (!text && attachments.length === 0 && driveAttachments.length === 0) ||
-        isStreaming ||
         !user ||
         !unitContext
       )
@@ -697,7 +771,6 @@ function CurriculumAssistantInner({
       }
     },
     [
-      isStreaming,
       user,
       unitContext,
       sessionId,
@@ -717,30 +790,17 @@ function CurriculumAssistantInner({
       pendingDriveAttachments.length === 0
     )
       return;
+    // Steering: stop the in-flight reply first (server + local fetch), then
+    // send. Reading the input BEFORE clearing means the typed text is never
+    // dropped — the old bug where the isStreaming guard fired after setInput("").
+    if (isStreaming) stopActiveStream();
     setInput("");
     const attachments = pendingAttachments;
     const driveAttachments = pendingDriveAttachments;
     setPendingAttachments([]);
     setPendingDriveAttachments([]);
     await sendUnit(text, attachments, driveAttachments);
-  }, [input, pendingAttachments, pendingDriveAttachments, sendUnit]);
-
-  // Stop the active stream (unit scope) — abort the client read AND mark the
-  // half-written assistant message stopped server-side (mirrors old UnitChat).
-  const handleStopUnit = useCallback(async () => {
-    if (!isStreaming || !sessionId) return;
-    const stoppedMsgId = streamingMsgId;
-    stopStream(String(sessionId));
-    if (stoppedMsgId) {
-      try {
-        await markMessageStopped({
-          messageId: stoppedMsgId as Id<"curriculumMessages">,
-        });
-      } catch (err) {
-        console.error("Failed to mark message stopped:", err);
-      }
-    }
-  }, [isStreaming, sessionId, streamingMsgId, stopStream, markMessageStopped]);
+  }, [input, pendingAttachments, pendingDriveAttachments, isStreaming, stopActiveStream, sendUnit]);
 
   // Imperative auto-send (unit scope) — the activity editor's "Generate slides"
   // button pushes a prompt via useAideDock().send(); consume it once per nonce,
@@ -806,8 +866,132 @@ function CurriculumAssistantInner({
     [generateUploadUrl],
   );
 
+  // Stage a recorded clip: upload it (chip appears immediately), upload its
+  // poster (video) alongside, then transcribe so the model can read what was
+  // said. Transcription runs in the background — the chip shows "Transcribing…"
+  // and Send waits on it (transcribingIds) — and a failure attaches the clip
+  // without a transcript rather than blocking the turn.
+  const stageRecordedClip = useCallback(
+    async (
+      kind: "audio" | "video",
+      file: File,
+      durationMs: number,
+      poster?: File,
+    ) => {
+      if (file.size > MESSAGE_ATTACHMENT_MAX_BYTES) {
+        toaster.error({
+          title: `Couldn't attach ${file.name}`,
+          description: "The recording is too large. Try a shorter clip.",
+        });
+        return;
+      }
+      setUploading(true);
+      let storageId: Id<"_storage">;
+      try {
+        storageId = await uploadToConvexStorage<Id<"_storage">>(
+          file,
+          generateUploadUrl,
+        );
+      } catch (error) {
+        console.error(`Failed to upload ${file.name}:`, error);
+        toaster.error({
+          title: `Couldn't attach ${file.name}`,
+          description: "Try recording again.",
+        });
+        setUploading(false);
+        return;
+      }
+      const staged: ChatAttachment = {
+        storageId,
+        fileName: safeMessageAttachmentFileName(file.name),
+        mimeType: file.type || undefined,
+        sizeBytes: file.size,
+        ...(durationMs > 0 ? { durationMs } : {}),
+      };
+      setPendingAttachments((prev) => [...prev, staged]);
+      setUploading(false);
+      setTranscribingIds((prev) => new Set(prev).add(storageId));
+
+      // Poster upload is independent of transcription — merge it whenever it
+      // lands so a video keeps its glance even if transcription fails.
+      if (kind === "video" && poster) {
+        try {
+          const posterStorageId = await uploadToConvexStorage<Id<"_storage">>(
+            poster,
+            generateUploadUrl,
+          );
+          setPendingAttachments((prev) =>
+            prev.map((a) =>
+              a.storageId === storageId ? { ...a, posterStorageId } : a,
+            ),
+          );
+        } catch (error) {
+          console.error(`Failed to upload poster for ${file.name}:`, error);
+        }
+      }
+
+      try {
+        const { transcript, durationSeconds } = await transcribeAttachment({
+          storageId,
+        });
+        setPendingAttachments((prev) =>
+          prev.map((a) =>
+            a.storageId === storageId
+              ? {
+                  ...a,
+                  transcript,
+                  durationMs:
+                    a.durationMs ??
+                    (durationSeconds !== undefined
+                      ? Math.round(durationSeconds * 1000)
+                      : undefined),
+                }
+              : a,
+          ),
+        );
+      } catch (error) {
+        console.error(`Failed to transcribe ${file.name}:`, error);
+        toaster.error({
+          title: `Couldn't transcribe ${staged.fileName} — it will be attached without a transcript`,
+        });
+      } finally {
+        setTranscribingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(storageId);
+          return next;
+        });
+      }
+    },
+    [generateUploadUrl, transcribeAttachment],
+  );
+
+  const handleCaptureMedia = useCallback(
+    (media: CapturedMedia) => {
+      void stageRecordedClip(
+        "video",
+        media.file,
+        media.durationMs,
+        media.poster,
+      );
+    },
+    [stageRecordedClip],
+  );
+
+  const handleRecordAudio = useCallback(
+    (audio: RecordedAudio) => {
+      void stageRecordedClip("audio", audio.file, audio.durationMs);
+    },
+    [stageRecordedClip],
+  );
+
   const removePendingAttachment = useCallback((storageId: string) => {
     setPendingAttachments((prev) => prev.filter((a) => a.storageId !== storageId));
+    setTranscribingIds((prev) => {
+      if (!prev.has(storageId)) return prev;
+      const next = new Set(prev);
+      next.delete(storageId);
+      return next;
+    });
   }, []);
 
   const removePendingDriveAttachment = useCallback((driveFileId: string) => {
@@ -832,8 +1016,18 @@ function CurriculumAssistantInner({
     [],
   );
 
+  // A staged clip whose transcript is still being produced — Send waits so the
+  // model never receives a recorded clip it cannot read (same gate as uploads).
+  const isTranscribing = transcribingIds.size > 0;
   // The active composer submit — unit scope routes to the unit-designer path.
-  const submit = isUnit ? handleSendUnit : handleSend;
+  const rawSubmit = isUnit ? handleSendUnit : handleSend;
+  const submit = useCallback(() => {
+    // Wait for a staged clip to finish uploading AND transcribing, so Enter
+    // never fires the text turn while the clip is still attaching (it would
+    // otherwise land on the next turn).
+    if (isTranscribing || uploading) return;
+    void rawSubmit();
+  }, [isTranscribing, uploading, rawSubmit]);
   const allowUploads = true;
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -1022,14 +1216,15 @@ function CurriculumAssistantInner({
                   {isThinking ? "Thinking deeply…" : "Thinking…"}
                 </Badge>
               )}
-              {isUnit && isStreaming && (
+              {isStreaming && (
                 <Button
                   size="xs"
                   variant="ghost"
                   fontFamily="heading"
                   color="charcoal.400"
                   _hover={{ color: "red.500", bg: "red.50" }}
-                  onClick={handleStopUnit}
+                  onClick={stopActiveStream}
+                  aria-label="Stop generating"
                   flexShrink={0}
                 >
                   <Stop size={12} weight="fill" style={{ marginRight: 4 }} />
@@ -1342,23 +1537,38 @@ function CurriculumAssistantInner({
                           )}
                           {m.attachments && m.attachments.length > 0 && (
                             <Flex mt={m.content ? 2 : 0} gap={1.5} wrap="wrap">
-                              {m.attachments.map((a) => (
-                                <Flex
-                                  key={a.storageId}
-                                  align="center"
-                                  gap={1}
-                                  bg="whiteAlpha.300"
-                                  borderRadius="md"
-                                  px={2}
-                                  py={1}
-                                  maxW="200px"
-                                >
-                                  <Paperclip size={12} weight="bold" />
-                                  <Text fontSize="xs" lineClamp={1} title={a.fileName}>
-                                    {a.fileName}
-                                  </Text>
-                                </Flex>
-                              ))}
+                              {m.attachments.map((a) => {
+                                const KindIcon = attachmentKindIcon(a.mimeType);
+                                const durationLabel = attachmentDurationLabel(
+                                  a.durationMs,
+                                );
+                                return (
+                                  <Flex
+                                    key={a.storageId}
+                                    align="center"
+                                    gap={1}
+                                    bg="whiteAlpha.300"
+                                    borderRadius="md"
+                                    px={2}
+                                    py={1}
+                                    maxW="200px"
+                                  >
+                                    <KindIcon size={12} weight="bold" />
+                                    <Text fontSize="xs" lineClamp={1} title={a.fileName}>
+                                      {a.fileName}
+                                    </Text>
+                                    {durationLabel && (
+                                      <Text
+                                        fontSize="xs"
+                                        css={{ fontVariantNumeric: "tabular-nums" }}
+                                        opacity={0.8}
+                                      >
+                                        {durationLabel}
+                                      </Text>
+                                    )}
+                                  </Flex>
+                                );
+                              })}
                             </Flex>
                           )}
                           {m.driveAttachments && m.driveAttachments.length > 0 && (
@@ -1415,7 +1625,10 @@ function CurriculumAssistantInner({
                   return (
                     <Fragment key={String(m._id)}>
                       {dividerEl}
-                      <AssistantMarkdownBubble content={m.content} />
+                      <AssistantMarkdownBubble
+                        content={m.content}
+                        stopped={m.stopRequestedAt != null}
+                      />
                     </Fragment>
                   );
                 })}
@@ -1509,36 +1722,56 @@ function CurriculumAssistantInner({
             pendingDriveAttachments.length > 0 ||
             uploading) && (
             <Flex maxW="3xl" mx="auto" mb={2} gap={2} wrap="wrap" align="center">
-              {pendingAttachments.map((a) => (
-                <Flex
-                  key={a.storageId}
-                  align="center"
-                  gap={1.5}
-                  bg="white"
-                  border="1px solid"
-                  borderColor="gray.300"
-                  borderRadius="lg"
-                  pl={2.5}
-                  pr={1.5}
-                  py={1}
-                  maxW="220px"
-                >
-                  <Paperclip size={14} weight="bold" color="var(--chakra-colors-charcoal-400)" />
-                  <Text fontSize="xs" color="charcoal.600" lineClamp={1} title={a.fileName}>
-                    {a.fileName}
-                  </Text>
-                  <IconButton
-                    aria-label={`Remove ${a.fileName}`}
-                    size="2xs"
-                    variant="ghost"
-                    color="charcoal.300"
-                    _hover={{ color: "charcoal.600" }}
-                    onClick={() => removePendingAttachment(a.storageId)}
+              {pendingAttachments.map((a) => {
+                const KindIcon = attachmentKindIcon(a.mimeType);
+                const durationLabel = attachmentDurationLabel(a.durationMs);
+                const transcribing = transcribingIds.has(a.storageId);
+                return (
+                  <Flex
+                    key={a.storageId}
+                    align="center"
+                    gap={1.5}
+                    bg="white"
+                    border="1px solid"
+                    borderColor="gray.300"
+                    borderRadius="lg"
+                    pl={2.5}
+                    pr={1.5}
+                    py={1}
+                    maxW="240px"
                   >
-                    <X size={12} weight="bold" />
-                  </IconButton>
-                </Flex>
-              ))}
+                    <KindIcon size={14} weight="bold" color="var(--chakra-colors-charcoal-400)" />
+                    <Text fontSize="xs" color="charcoal.600" lineClamp={1} title={a.fileName}>
+                      {a.fileName}
+                    </Text>
+                    {durationLabel && (
+                      <Text
+                        fontSize="xs"
+                        color="charcoal.400"
+                        css={{ fontVariantNumeric: "tabular-nums" }}
+                      >
+                        {durationLabel}
+                      </Text>
+                    )}
+                    {transcribing && (
+                      <Flex align="center" gap={1} color="charcoal.400">
+                        <Spinner size="xs" color="violet.500" />
+                        <Text fontSize="xs">Transcribing…</Text>
+                      </Flex>
+                    )}
+                    <IconButton
+                      aria-label={`Remove ${a.fileName}`}
+                      size="2xs"
+                      variant="ghost"
+                      color="charcoal.300"
+                      _hover={{ color: "charcoal.600" }}
+                      onClick={() => removePendingAttachment(a.storageId)}
+                    >
+                      <X size={12} weight="bold" />
+                    </IconButton>
+                  </Flex>
+                );
+              })}
               {pendingDriveAttachments.map((a, i) => (
                 <Flex
                   key={`${a.driveFileId}-${i}`}
@@ -1614,6 +1847,24 @@ function CurriculumAssistantInner({
               overlayPosition="fixed"
             />
           )}
+          {allowUploads && (
+            <CameraCaptureDialog
+              open={showVideoCapture}
+              mode="video"
+              onClose={() => setShowVideoCapture(false)}
+              onCapture={(file) => void handleFilesSelected([file])}
+              onCaptureMedia={handleCaptureMedia}
+              overlayPosition="fixed"
+            />
+          )}
+          {allowUploads && (
+            <AudioRecordDialog
+              open={showAudioRecord}
+              onClose={() => setShowAudioRecord(false)}
+              onCapture={handleRecordAudio}
+              overlayPosition="fixed"
+            />
+          )}
           <Flex maxW="3xl" mx="auto" gap={2} align="flex-end">
             {allowUploads && (
               <>
@@ -1643,7 +1894,7 @@ function CurriculumAssistantInner({
                       _hover={{ bg: "gray.100" }}
                       _disabled={{ opacity: 0.4, cursor: "not-allowed" }}
                       borderRadius="xl"
-                      disabled={isStreaming || uploading}
+                      disabled={uploading}
                     >
                       <Plus weight="bold" />
                     </IconButton>
@@ -1691,6 +1942,24 @@ function CurriculumAssistantInner({
                           <Camera size={16} style={{ marginRight: "8px" }} />
                           Capture Photo
                         </Menu.Item>
+                        <Menu.Item
+                          value="video"
+                          fontFamily="heading"
+                          fontSize="sm"
+                          onClick={() => setShowVideoCapture(true)}
+                        >
+                          <VideoCamera size={16} style={{ marginRight: "8px" }} />
+                          Capture Video
+                        </Menu.Item>
+                        <Menu.Item
+                          value="audio"
+                          fontFamily="heading"
+                          fontSize="sm"
+                          onClick={() => setShowAudioRecord(true)}
+                        >
+                          <Microphone size={16} style={{ marginRight: "8px" }} />
+                          Record Audio
+                        </Menu.Item>
                       </Menu.Content>
                     </Menu.Positioner>
                   </Portal>
@@ -1717,34 +1986,47 @@ function CurriculumAssistantInner({
               fontSize="sm"
               py={2.5}
               px={4}
-              disabled={isStreaming}
             />
             <DictationMicButton
               size="md"
               borderRadius="xl"
-              disabled={isStreaming}
               onTranscript={(text) =>
                 setInput((prev) => (prev ? `${prev.trimEnd()} ${text}` : text))
               }
             />
-            <IconButton
-              aria-label="Send message"
-              size="md"
-              bg="violet.500"
-              color="white"
-              _hover={{ bg: "violet.600" }}
-              _disabled={{ opacity: 0.4, cursor: "not-allowed" }}
-              borderRadius="xl"
-              onClick={() => submit()}
-              disabled={
-                (!input.trim() &&
-                  pendingAttachments.length === 0 &&
-                  pendingDriveAttachments.length === 0) ||
-                isStreaming
-              }
-            >
-              <PaperPlaneTilt />
-            </IconButton>
+            {isStreaming ? (
+              <IconButton
+                aria-label="Stop generating"
+                size="md"
+                variant="ghost"
+                color="charcoal.400"
+                _hover={{ color: "red.500", bg: "red.50" }}
+                borderRadius="xl"
+                onClick={stopActiveStream}
+              >
+                <Stop weight="fill" />
+              </IconButton>
+            ) : (
+              <IconButton
+                aria-label="Send message"
+                size="md"
+                bg="violet.500"
+                color="white"
+                _hover={{ bg: "violet.600" }}
+                _disabled={{ opacity: 0.4, cursor: "not-allowed" }}
+                borderRadius="xl"
+                onClick={() => submit()}
+                disabled={
+                  isTranscribing ||
+                  uploading ||
+                  (!input.trim() &&
+                    pendingAttachments.length === 0 &&
+                    pendingDriveAttachments.length === 0)
+                }
+              >
+                <PaperPlaneTilt />
+              </IconButton>
+            )}
           </Flex>
           <Dialog.Root
             open={driveConnectOpen}

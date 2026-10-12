@@ -102,7 +102,6 @@ export const WHOLE_NUMBER_ARITHMETIC_SKILLS: SeedSkill[] = [
   { skillKey: "mult_3digit_by_1digit", label: "Multiply a 3-digit number by a 1-digit number", grade: "4", ccCodes: ["4.NBT.B.5"], strand: "mult-divide", rationale: "Extend multi-digit multiplication to three-place numbers, carrying across two positions." },
   { skillKey: "order_of_operations", label: "Apply order of operations (parentheses, then × and ÷, then + and −)", grade: "5", ccCodes: ["5.OA.A.1"], strand: "mult-divide", rationale: "Evaluate numerical expressions by performing operations in the agreed-upon sequence." },
   { skillKey: "long_division_1digit_divisor", label: "Long division: multi-digit ÷ 1-digit divisor", grade: "4", ccCodes: ["4.NBT.B.6"], strand: "mult-divide", rationale: "Apply the divide-multiply-subtract-bring-down cycle to 3- and 4-digit dividends with a 1-digit divisor." },
-  { skillKey: "prime_composite", label: "Identify prime and composite numbers up to 100", grade: "4", ccCodes: ["4.OA.B.4"], strand: "number-theory", rationale: "Classify whole numbers by factor count: exactly one pair (prime) or more than one pair (composite)." },
   { skillKey: "mult_2digit_by_2digit", label: "Multiply a 2-digit number by a 2-digit number", grade: "5", ccCodes: ["5.NBT.B.5"], strand: "mult-divide", rationale: "Compute products like 36×47 using the full standard algorithm with four partial products." },
   { skillKey: "long_division_2digit_divisor", label: "Long division: multi-digit ÷ 2-digit divisor", grade: "5", ccCodes: ["5.NBT.B.6"], strand: "mult-divide", rationale: "Extend long division to 2-digit divisors, estimating each partial quotient using place-value reasoning." },
 
@@ -249,7 +248,6 @@ export const WHOLE_NUMBER_ARITHMETIC_EDGES: SeedEdge[] = [
   { fromKey: "mult_2digit_by_2digit", toKey: "long_division_2digit_divisor" },
   { fromKey: "mult_facts_7_8_9", toKey: "factors_and_multiples" },
   { fromKey: "division_facts_6_9", toKey: "factors_and_multiples" },
-  { fromKey: "factors_and_multiples", toKey: "prime_composite" },
   { fromKey: "add_subtract_properties", toKey: "order_of_operations" },
   { fromKey: "mult_commutative_associative", toKey: "order_of_operations" },
   { fromKey: "mult_2digit_by_1digit", toKey: "order_of_operations" },
@@ -261,7 +259,7 @@ export const WHOLE_NUMBER_ARITHMETIC_EDGES: SeedEdge[] = [
   //    factors/multiples concept; they are the fractions-domain on-ramp. ──
   { fromKey: "factors_and_multiples", toKey: "divisibility_rules_2_5_10" },
   { fromKey: "factors_and_multiples", toKey: "divisibility_rules_3_9" },
-  { fromKey: "prime_composite", toKey: "prime_factorization" },
+  { fromKey: "prime_or_composite", toKey: "prime_factorization" },
   { fromKey: "divisibility_rules_3_9", toKey: "prime_factorization" },
   { fromKey: "factors_and_multiples", toKey: "gcf" },
   { fromKey: "prime_factorization", toKey: "gcf" },
@@ -299,7 +297,6 @@ export const WHOLE_NUMBER_ARITHMETIC_EDGES: SeedEdge[] = [
   { fromKey: "factors_and_multiples", toKey: "is_multiple" },
   { fromKey: "mult_facts_7_8_9", toKey: "is_multiple" }, // ⭑ mult-divide → number-theory
   { fromKey: "factor_pairs", toKey: "prime_or_composite" },
-  { fromKey: "prime_composite", toKey: "prime_or_composite" },
   { fromKey: "factor_pairs", toKey: "common_factors" },
   { fromKey: "common_factors", toKey: "gcf" },
   { fromKey: "is_multiple", toKey: "common_multiples" },

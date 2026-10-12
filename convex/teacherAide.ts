@@ -1,5 +1,5 @@
-import { v } from "convex/values";
-import { internalMutation } from "./_generated/server";
+import { v, type ObjectType } from "convex/values";
+import { internalMutation, type MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import {
   deliverableValidator,
@@ -13,6 +13,9 @@ import { isValidReadingLevel } from "./lib/readingLevels";
 import { deleteUserCore } from "./users";
 import { moveLessonToUnitCore } from "./lessons";
 import type { Doc, Id } from "./_generated/dataModel";
+import { normalizeStoredTutorModel } from "./lib/tutorModel";
+import { buildContractValidator } from "./lib/buildContract";
+import { requirePeriodForScholar } from "./reportingPeriods";
 
 /**
  * Teacher Aide helpers — internal mutations invoked by the curriculum-designer
@@ -205,57 +208,68 @@ export const createScholarQuest = internalMutation({
  * container; follow up with create_scholar_lesson / the unit designer bot
  * to populate it.
  */
+const createCurriculumUnitArgs = {
+  authorId: v.id("users"),
+  title: v.string(),
+  emoji: v.optional(v.string()),
+  description: v.optional(v.string()),
+  bigIdea: v.optional(v.string()),
+  essentialQuestions: v.optional(v.array(v.string())),
+  enduringUnderstandings: v.optional(v.array(v.string())),
+  subject: v.optional(v.string()),
+  gradeLevel: v.optional(v.string()),
+};
+
+/** The body of `createCurriculumUnit`, shared with the app installer
+ *  (`appInstall.installAppAsActivity`) so there is one unit-creation path. */
+export async function createCurriculumUnitCore(
+  ctx: MutationCtx,
+  args: ObjectType<typeof createCurriculumUnitArgs>,
+) {
+  const title = args.title.trim();
+  if (!title) throw new Error("title must be a non-empty string");
+
+  // Idempotency: a general unit this author already created with the same
+  // (case-insensitive) title. Scoped to the author's own units so two
+  // teachers can independently have like-named units.
+  const existing = await ctx.db
+    .query("units")
+    .withIndex("by_teacher", (q) => q.eq("teacherId", args.authorId))
+    .collect();
+  const titleLower = title.toLowerCase();
+  const match = existing.find(
+    (u) => !u.authorScholarId && u.title.trim().toLowerCase() === titleLower,
+  );
+  if (match) {
+    return { unitId: match._id, existed: true as const };
+  }
+
+  const institutionId = await institutionIdForUnitAuthor(ctx, args.authorId);
+  const unitId = await ctx.db.insert("units", {
+    teacherId: args.authorId,
+    institutionId,
+    title,
+    emoji: args.emoji?.trim() || undefined,
+    description: args.description?.trim() || undefined,
+    bigIdea: args.bigIdea?.trim() || undefined,
+    essentialQuestions: args.essentialQuestions
+      ? toKeyedGranules(args.essentialQuestions, undefined, "eq")
+      : undefined,
+    enduringUnderstandings: args.enduringUnderstandings
+      ? toKeyedGranules(args.enduringUnderstandings, undefined, "eu")
+      : undefined,
+    subject: args.subject?.trim() || undefined,
+    gradeLevel: args.gradeLevel?.trim() || undefined,
+    isActive: true,
+    // Teachers only until published or assigned (TRA-490).
+    unpublished: true,
+  });
+  return { unitId, existed: false as const };
+}
+
 export const createCurriculumUnit = internalMutation({
-  args: {
-    authorId: v.id("users"),
-    title: v.string(),
-    emoji: v.optional(v.string()),
-    description: v.optional(v.string()),
-    bigIdea: v.optional(v.string()),
-    essentialQuestions: v.optional(v.array(v.string())),
-    enduringUnderstandings: v.optional(v.array(v.string())),
-    subject: v.optional(v.string()),
-    gradeLevel: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
-    const title = args.title.trim();
-    if (!title) throw new Error("title must be a non-empty string");
-
-    // Idempotency: a general unit this author already created with the same
-    // (case-insensitive) title. Scoped to the author's own units so two
-    // teachers can independently have like-named units.
-    const existing = await ctx.db
-      .query("units")
-      .withIndex("by_teacher", (q) => q.eq("teacherId", args.authorId))
-      .collect();
-    const titleLower = title.toLowerCase();
-    const match = existing.find(
-      (u) => !u.authorScholarId && u.title.trim().toLowerCase() === titleLower,
-    );
-    if (match) {
-      return { unitId: match._id, existed: true as const };
-    }
-
-    const institutionId = await institutionIdForUnitAuthor(ctx, args.authorId);
-    const unitId = await ctx.db.insert("units", {
-      teacherId: args.authorId,
-      institutionId,
-      title,
-      emoji: args.emoji?.trim() || undefined,
-      description: args.description?.trim() || undefined,
-      bigIdea: args.bigIdea?.trim() || undefined,
-      essentialQuestions: args.essentialQuestions
-        ? toKeyedGranules(args.essentialQuestions, undefined, "eq")
-        : undefined,
-      enduringUnderstandings: args.enduringUnderstandings
-        ? toKeyedGranules(args.enduringUnderstandings, undefined, "eu")
-        : undefined,
-      subject: args.subject?.trim() || undefined,
-      gradeLevel: args.gradeLevel?.trim() || undefined,
-      isActive: true,
-    });
-    return { unitId, existed: false as const };
-  },
+  args: createCurriculumUnitArgs,
+  handler: createCurriculumUnitCore,
 });
 
 /**
@@ -266,68 +280,76 @@ export const createCurriculumUnit = internalMutation({
  * title already exists under this unit, returns the existing lessonId with
  * `existed: true` instead of creating a duplicate.
  */
-export const createScholarLesson = internalMutation({
-  args: {
-    unitId: v.id("units"),
-    title: v.string(),
-    strand: v.optional(
-      v.union(
-        v.literal("core"),
-        v.literal("connections"),
-        v.literal("practice"),
-        v.literal("identity")
-      )
-    ),
-    systemPrompt: v.optional(v.string()),
-    durationMinutes: v.optional(v.number()),
-    position: v.optional(v.number()),
-  },
-  handler: async (ctx, args) => {
-    const title = args.title.trim();
-    if (!title) throw new Error("title must be a non-empty string");
-    if (
-      args.position !== undefined &&
-      (!Number.isInteger(args.position) || args.position < 0)
-    ) {
-      throw new Error("position must be a non-negative integer");
-    }
+const createScholarLessonArgs = {
+  unitId: v.id("units"),
+  title: v.string(),
+  strand: v.optional(
+    v.union(
+      v.literal("core"),
+      v.literal("connections"),
+      v.literal("practice"),
+      v.literal("identity")
+    )
+  ),
+  systemPrompt: v.optional(v.string()),
+  durationMinutes: v.optional(v.number()),
+  position: v.optional(v.number()),
+};
 
-    const existing = await ctx.db
-      .query("lessons")
-      .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
-      .collect();
+/** The body of `createScholarLesson`, shared with the app installer. */
+export async function createScholarLessonCore(
+  ctx: MutationCtx,
+  args: ObjectType<typeof createScholarLessonArgs>,
+) {
+  const title = args.title.trim();
+  if (!title) throw new Error("title must be a non-empty string");
+  if (
+    args.position !== undefined &&
+    (!Number.isInteger(args.position) || args.position < 0)
+  ) {
+    throw new Error("position must be a non-negative integer");
+  }
 
-    const titleLower = title.toLowerCase();
-    const match = existing.find(
-      (l) => l.title.trim().toLowerCase() === titleLower
-    );
-    if (match) {
-      return { lessonId: match._id, existed: true as const };
-    }
+  const existing = await ctx.db
+    .query("lessons")
+    .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
+    .collect();
 
-    const order =
-      args.position ??
-      existing.reduce((max, l) => Math.max(max, l.order), -1) + 1;
-    if (args.position !== undefined) {
-      const occupiedOrders = new Set(existing.map((sibling) => sibling.order));
-      let firstOpenOrder = order;
-      while (occupiedOrders.has(firstOpenOrder)) firstOpenOrder += 1;
-      for (const sibling of existing) {
-        if (sibling.order >= order && sibling.order < firstOpenOrder) {
-          await ctx.db.patch(sibling._id, { order: sibling.order + 1 });
-        }
+  const titleLower = title.toLowerCase();
+  const match = existing.find(
+    (l) => l.title.trim().toLowerCase() === titleLower
+  );
+  if (match) {
+    return { lessonId: match._id, existed: true as const };
+  }
+
+  const order =
+    args.position ??
+    existing.reduce((max, l) => Math.max(max, l.order), -1) + 1;
+  if (args.position !== undefined) {
+    const occupiedOrders = new Set(existing.map((sibling) => sibling.order));
+    let firstOpenOrder = order;
+    while (occupiedOrders.has(firstOpenOrder)) firstOpenOrder += 1;
+    for (const sibling of existing) {
+      if (sibling.order >= order && sibling.order < firstOpenOrder) {
+        await ctx.db.patch(sibling._id, { order: sibling.order + 1 });
       }
     }
-    const lessonId = await ctx.db.insert("lessons", {
-      unitId: args.unitId,
-      title,
-      strand: args.strand,
-      systemPrompt: args.systemPrompt?.trim() || undefined,
-      order,
-      durationMinutes: args.durationMinutes,
-    });
-    return { lessonId, existed: false as const };
-  },
+  }
+  const lessonId = await ctx.db.insert("lessons", {
+    unitId: args.unitId,
+    title,
+    strand: args.strand,
+    systemPrompt: args.systemPrompt?.trim() || undefined,
+    order,
+    durationMinutes: args.durationMinutes,
+  });
+  return { lessonId, existed: false as const };
+}
+
+export const createScholarLesson = internalMutation({
+  args: createScholarLessonArgs,
+  handler: createScholarLessonCore,
 });
 
 /**
@@ -399,6 +421,33 @@ export const createScholarActivity = internalMutation({
       ),
     ),
     systemPrompt: v.optional(v.string()),
+    tutorModel: v.optional(
+      v.union(v.literal("sonnet"), v.literal("fable")),
+    ),
+    // Starter validation lives in resolveStaticAppForCoachedActivity; create_scholar_activity must never expose these args.
+    starterAppId: v.optional(v.id("customApps")),
+    scholarsStartFrom: v.optional(
+      v.union(v.literal("blank"), v.literal("starter")),
+    ),
+    // Teacher build request carried in by the coached-activity hand-off; never
+    // scholar-facing. create_scholar_activity must never expose this arg.
+    appRequest: v.optional(v.string()),
+    // kind="vibecode" only: the model contract + allowSilence. Pass-through;
+    // upsertInternal validates (lib/buildContract.ts).
+    buildContract: v.optional(buildContractValidator),
+    allowSilence: v.optional(v.boolean()),
+    // Explicitly about spelling/typing (schema.ts); upsertInternal stores it.
+    assessesWritingMechanics: v.optional(v.boolean()),
+    // kind="vibecode" only: the scholar edit policy (TRA-301/TRA-477) — the
+    // tools' `scholarEdit` word, already mapped. upsertInternal rejects it on
+    // any other kind.
+    editAccess: v.optional(
+      v.union(
+        v.literal("always"),
+        v.literal("never"),
+        v.literal("afterCompletion"),
+      ),
+    ),
     durationMinutes: v.optional(v.number()),
     position: v.optional(v.number()),
     // Optional now that non-online kinds exist. `upsertInternal` still enforces
@@ -424,14 +473,26 @@ export const createScholarActivity = internalMutation({
     if (!title) throw new Error("title must be a non-empty string");
     const lesson = await ctx.db.get(args.lessonId);
     if (!lesson) throw new Error("Lesson not found");
+    const kind = args.kind ?? "online";
     const result = await ctx.runMutation(internal.activities.upsertInternal, {
       parent: { kind: "lesson" as const, lessonId: args.lessonId },
       match: { byTitle: title },
       title,
       description: args.description,
       scholarDescription: args.scholarDescription,
-      kind: args.kind ?? "online",
+      kind,
       systemPrompt: args.systemPrompt,
+      tutorModel:
+        kind === "vibecode"
+          ? normalizeStoredTutorModel(args.tutorModel)
+          : undefined,
+      starterAppId: args.starterAppId,
+      scholarsStartFrom: args.scholarsStartFrom,
+      appRequest: args.appRequest,
+      buildContract: args.buildContract,
+      allowSilence: args.allowSilence,
+      assessesWritingMechanics: args.assessesWritingMechanics,
+      editAccess: args.editAccess,
       durationMinutes: args.durationMinutes,
       position: args.position,
       deliverable: args.deliverable,
@@ -485,6 +546,8 @@ export const addScholarObservation = internalMutation({
     if (!scholar || scholar.role !== ROLES.SCHOLAR) {
       throw new Error("Scholar not found");
     }
+    if (args.category && args.periodId)
+      await requirePeriodForScholar(ctx, args.periodId, args.scholarId);
     const id = await ctx.db.insert("observations", {
       teacherId: args.teacherId,
       scholarId: args.scholarId,

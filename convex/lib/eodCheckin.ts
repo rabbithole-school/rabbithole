@@ -10,8 +10,8 @@ import {
   type InstitutionPromptProfile,
 } from "./institutionPromptProfile";
 import {
-  SCHOLAR_NAME_PRONOUN_HINT,
   SCHOLAR_PRONOUN_GUIDANCE,
+  scholarNamePronounHint,
 } from "./scholarPronouns";
 import type { Id } from "../_generated/dataModel";
 import type { SessionSignalType } from "../../shared/learningSignals";
@@ -20,6 +20,8 @@ import { scoreSignal } from "./momentInterestingness";
 
 export interface EodScholarDay {
   name: string;
+  /** Staff-only ground truth; null falls back to the they/them default. */
+  pronouns: string | null;
   scholarUrl: string;
   sessions: Array<{ title: string; unitTitle: string | null }>;
   completions: Array<{ activityTitle: string }>;
@@ -86,6 +88,26 @@ export interface EodScheduledActivity {
   missingScholarNames: string[];
 }
 
+/**
+ * Dated homework whose due date has passed while some of the channel's scholars
+ * still have no completion, so it keeps sitting on their Home. Grouped by
+ * teacher + activity title rather than by assignment: an ad-hoc push sends one
+ * one-scholar assignment per scholar, and the teacher should read ONE line for
+ * "the read-aloud", not six. Each scholar keeps the Run-page link of the
+ * assignment their copy lives on, so the aide can act on every underlying
+ * (assignment, activity) pair from the thread text alone.
+ */
+export interface EodOverdueHomework {
+  activityTitle: string;
+  teacherName: string | null;
+  /** The earliest due date among the grouped copies (orders the questions). */
+  earliestDueAt: number;
+  /** `dueStatus(earliestDueAt).phrase` — "was due Monday", the same words the
+   *  scholar's Home and the teacher's due chips use for this row. */
+  duePhrase: string;
+  incompleteScholars: Array<{ name: string; assignmentUrl: string }>;
+}
+
 export interface EodKeyMoment {
   kind:
     | "breakthrough"
@@ -94,6 +116,7 @@ export interface EodKeyMoment {
     | "insight"
     | "needsHelp";
   scholarName: string;
+  pronouns: string | null;
   scholarUrl: string;
   sessionUrl: string;
   headline: string;
@@ -106,6 +129,8 @@ export interface EodChannelInput {
   scholars: EodScholarDay[];
   keyMoments: EodKeyMoment[];
   scheduled: EodScheduledActivity[];
+  /** Asked about in the questions (oldest first), never in the wrap-up. */
+  overdueHomework: EodOverdueHomework[];
   queuedDigestIds: Id<"slackNotificationQueue">[];
   queuedDigestLines: string[];
 }
@@ -167,8 +192,82 @@ export function hasAnyActivity(input: EodChannelInput): boolean {
     input.queuedDigestLines.length > 0 ||
     input.keyMoments.length > 0 ||
     input.scheduled.length > 0 ||
+    input.overdueHomework.length > 0 ||
     input.scholars.some(scholarHasActivity)
   );
+}
+
+/** The order the teacher is asked in: oldest first, then most scholars. */
+export function compareOverdueHomework(
+  a: EodOverdueHomework,
+  b: EodOverdueHomework,
+): number {
+  return (
+    a.earliestDueAt - b.earliestDueAt ||
+    b.incompleteScholars.length - a.incompleteScholars.length ||
+    a.activityTitle.localeCompare(b.activityTitle)
+  );
+}
+
+/** Past-due questions per check-in. The thread carries at most 4 questions,
+ *  so this leaves room for today's own gaps; the next-oldest item surfaces on
+ *  a later day once the teacher resolves one of these. */
+export const MAX_OVERDUE_QUESTIONS = 2;
+/** Names shown per past-due question before "and N more". */
+export const OVERDUE_NAME_CAP = 6;
+
+/**
+ * The deterministic past-due question. Its links carry the assignment ids the
+ * aide needs to act (`mark_class_activity_done` / `clear_activity` take an
+ * assignmentId + activityId, and the aide reads the activityId off that
+ * assignment's schedule by title): one assignment → the title links to it;
+ * several one-scholar copies → each scholar's name links to their own copy.
+ */
+export function renderOverdueHomeworkQuestion(
+  item: EodOverdueHomework,
+): string {
+  const urls = new Set(item.incompleteScholars.map((s) => s.assignmentUrl));
+  const single = urls.size === 1;
+  const title = escapeSlackText(item.activityTitle);
+  const titleText = single ? `**<${[...urls][0]}|${title}>**` : `**${title}**`;
+  const shown = item.incompleteScholars.slice(0, OVERDUE_NAME_CAP);
+  const hidden = item.incompleteScholars.length - shown.length;
+  const names = shown.map((scholar) =>
+    single
+      ? escapeSlackText(scholar.name)
+      : `<${scholar.assignmentUrl}|${escapeSlackText(scholar.name)}>`,
+  );
+  const who =
+    hidden > 0
+      ? `${names.join(", ")} and ${hidden} more`
+      : names.length > 1
+        ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`
+        : names[0];
+  // Replies are scoped to the NAMED scholars: the aide marks exactly them
+  // (`scholarIds`, resolved from the assignment's roster), and removing the
+  // homework is offered as its own step because a cohort assignment's roster
+  // can reach past this channel (see the mark_class_activity_done and
+  // clear_activity tool descriptions).
+  return `${titleText} ${escapeSlackText(item.duePhrase)} and is still open for ${who}. Which of them did it? I'll mark just those scholars done, or I can take it off the assignment.`;
+}
+
+export function overdueHomeworkQuestions(input: EodChannelInput): string[] {
+  return [...input.overdueHomework]
+    .sort(compareOverdueHomework)
+    .slice(0, MAX_OVERDUE_QUESTIONS)
+    .map(renderOverdueHomeworkQuestion);
+}
+
+/**
+ * Past-due questions always lead, verbatim: they carry the links the aide acts
+ * on, so they are never left to a paraphrase that could drop one. The model's
+ * own questions (about today) fill the remaining slots.
+ */
+export function mergeCheckinQuestions(
+  input: EodChannelInput,
+  questions: string[],
+): string[] {
+  return [...overdueHomeworkQuestions(input), ...questions].slice(0, 4);
 }
 
 export function parentMessageText(hook: string, dateLabel: string): string {
@@ -216,7 +315,7 @@ export const EOD_CHECKIN_SYSTEM = (
     "",
     SCHOLAR_PRONOUN_GUIDANCE,
     "",
-    "Use Slack mrkdwn: light *bold*, bullets, and <url|Name> links. NEVER use markdown tables. Link each scholar's first mention with the exact scholar_url provided, using <url|Name>; do not invent or alter URLs.",
+    "Format with light **bold**, bullets, and <url|Name> links. Bold is TWO asterisks: this note is sent as `markdown_text`, which is CommonMark, so a single *asterisk* pair renders ITALIC, not bold. NEVER use markdown tables. Link each scholar's first mention with the exact scholar_url provided, using <url|Name>; do not invent or alter URLs.",
     "",
     "Use ONLY facts in the supplied data. Never infer that scheduled work happened without a completion, and never invent offline work. This is a portrait, not a report card: describe what scholars did and where they seem pulled next. Do not print numeric scores, rank scholars, compare one learner with another, or frame a learner as deficient.",
     "",
@@ -224,6 +323,8 @@ export const EOD_CHECKIN_SYSTEM = (
     "Use a session signal only when its description contains a concrete, observable learner action. Describe what the scholar did, what it responded to, or what changed. Suggest teacher follow-up only when the evidence warrants it; do not force a follow-up. Use supplied descriptions and links, but never print internal signal types, PCM labels, intensity labels, or permanent trait claims. The hook and wrap-up must not use grit, gritty, perseverance, persevering, resilience, resilient, persistence, persistent, or similar character labels — even as praise; narrate the observable action instead. Do not include or request transcript excerpts.",
     "",
     "Return three pieces: (1) hook — one lively, grounded sentence, at most 140 characters, that names the group and gives the teacher a reason to open the thread; no links, bullets, labels, emoji, or generic date-heading language; (2) a concise wrapUp; and (3) 2–4 questions. Questions must be concrete, answerable in one line, and useful for completing today's learning record: ask about scheduled activities with missing completions, scholars with nothing recorded, offline or unrecorded work, or an ambiguity explicitly present in the data. Never ask busywork questions whose answers are already in the data.",
+    "",
+    "Past-due homework questions are posted automatically, BEFORE yours. Do not repeat or rephrase them, and do not mention past-due or overdue homework in the hook or wrapUp. Your questions are about today only.",
     "",
     "Return your answer ONLY by calling the write_eod_checkin tool.",
   ].join("\n");
@@ -243,7 +344,7 @@ export function renderEodUserMessage(input: EodChannelInput): string {
   for (const scholar of input.scholars) {
     lines.push(
       "",
-      `## ${scholar.name} ${SCHOLAR_NAME_PRONOUN_HINT}`,
+      `## ${scholar.name} ${scholarNamePronounHint(scholar.pronouns)}`,
       `scholar_url: ${scholar.scholarUrl}`,
     );
     lines.push(
@@ -288,7 +389,7 @@ export function renderEodUserMessage(input: EodChannelInput): string {
   } else {
     for (const moment of input.keyMoments) {
       lines.push(
-        `- ${moment.kind} | scholar: ${moment.scholarName} ${SCHOLAR_NAME_PRONOUN_HINT} | scholar_url: ${moment.scholarUrl} | session_url: ${moment.sessionUrl} | ${moment.headline} — ${moment.detail}`,
+        `- ${moment.kind} | scholar: ${moment.scholarName} ${scholarNamePronounHint(moment.pronouns)} | scholar_url: ${moment.scholarUrl} | session_url: ${moment.sessionUrl} | ${moment.headline} — ${moment.detail}`,
       );
     }
   }
@@ -302,6 +403,17 @@ export function renderEodUserMessage(input: EodChannelInput): string {
         `- ${scheduled.activityTitle} [group: ${scheduled.scheduledForGroup}] — completed: ${renderNames(scheduled.doneScholarNames)}; missing completion: ${renderNames(scheduled.missingScholarNames)}`,
       );
     }
+  }
+
+  lines.push(
+    "",
+    "## Past-due homework (asked automatically — do not repeat)",
+  );
+  const overdue = overdueHomeworkQuestions(input);
+  if (overdue.length === 0) {
+    lines.push("none");
+  } else {
+    for (const question of overdue) lines.push(`- ${question}`);
   }
 
   lines.push("", "## Unsent digest lines");
@@ -344,7 +456,7 @@ export function renderThreadMessage(
   const numbered = questions
     .map((question, index) => `${index + 1}. ${question}`)
     .join("\n");
-  return `${wrapUp}\n\n*Questions for you*\n${numbered}\n\n_Answer here in the thread — I'll record it so today's record stays complete._`;
+  return `${wrapUp}\n\n**Questions for you**\n${numbered}\n\n_Answer here in the thread — I'll record it so today's record stays complete._`;
 }
 
 function countLabel(count: number, singular: string, plural = `${singular}s`): string {
@@ -387,7 +499,7 @@ export function renderMechanicalFallback(input: EodChannelInput): {
   }
   for (const moment of input.keyMoments.slice(0, 3)) {
     detailLines.push(
-      `• *Key moment — <${moment.sessionUrl}|${escapeSlackText(moment.scholarName)}>:* ${escapeSlackText(moment.headline)} — ${escapeSlackText(moment.detail)}`,
+      `• **Key moment — <${moment.sessionUrl}|${escapeSlackText(moment.scholarName)}>:** ${escapeSlackText(moment.headline)} — ${escapeSlackText(moment.detail)}`,
     );
   }
 
@@ -397,17 +509,19 @@ export function renderMechanicalFallback(input: EodChannelInput): {
     : `${groupLabel}'s`;
   const hook = `${groupPossessive} Rabbithole day is ready to unpack.`;
   const wrapUp = [
-    `*Today's Rabbithole record for ${escapeSlackText(groupLabel)}*`,
+    `**Today's Rabbithole record for ${escapeSlackText(groupLabel)}**`,
     ...detailLines,
   ].join("\n");
 
-  const questions: string[] = [];
+  const questions: string[] = overdueHomeworkQuestions(input);
+  let scheduledQuestions = 0;
   for (const scheduled of input.scheduled) {
     if (scheduled.missingScholarNames.length === 0) continue;
     questions.push(
-      `Did ${escapeSlackText(scheduled.missingScholarNames.join(", "))} complete *${escapeSlackText(scheduled.activityTitle)}* today, or should it remain unrecorded?`,
+      `Did ${escapeSlackText(scheduled.missingScholarNames.join(", "))} complete **${escapeSlackText(scheduled.activityTitle)}** today, or should it remain unrecorded?`,
     );
-    if (questions.length === 2) break;
+    scheduledQuestions += 1;
+    if (scheduledQuestions === 2) break;
   }
 
   const quietScholars = input.scholars

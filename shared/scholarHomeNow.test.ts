@@ -4,6 +4,7 @@ import {
   deriveHomeTabs,
   filterHomeworkForNow,
   filterRowsForTab,
+  focusSectionLabel,
   groupHomeRowsByUnit,
   isWithinScheduleWindow,
   matchRowsToFocusOrder,
@@ -356,7 +357,7 @@ describe("matchRowsToFocusOrder", () => {
     ]);
   });
 
-  test("appends unmatched rows so missing ids never drop live work", () => {
+  test("drops rows that do not match a showing focus entry", () => {
     const rows = [
       { id: "ordered", assignmentId: "assignment-a", activityId: "activity-a" },
       { id: "missing-assignment", assignmentId: null, activityId: null },
@@ -368,12 +369,14 @@ describe("matchRowsToFocusOrder", () => {
       rows,
     );
 
-    expect(result.map((row) => row.id)).toEqual([
-      "ordered",
-      "missing-assignment",
-      "missing-activity",
-    ]);
-    expect(result).toHaveLength(rows.length);
+    expect(result.map((row) => row.id)).toEqual(["ordered"]);
+  });
+});
+
+describe("focusSectionLabel", () => {
+  test("dates a same-day focus after the last bell", () => {
+    expect(focusSectionLabel(true)).toBe("Right now");
+    expect(focusSectionLabel(false)).toBe("From today");
   });
 });
 

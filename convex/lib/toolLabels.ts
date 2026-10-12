@@ -7,6 +7,7 @@ export const SCHOLAR_TOOL_LABELS = {
   create_code: "Writing some code",
   generate_image: "Making a picture",
   search_image: "Finding a picture",
+  charm_icon: "Making an icon",
   show_map: "Making a map",
   update_dossier: "Updating your profile",
   update_process_step: "Updating your progress",
@@ -16,7 +17,11 @@ export const SCHOLAR_TOOL_LABELS = {
   finish_teach_back: "Thanks for teaching me",
   share_resource: "Sharing a resource",
   run_app_action: "Setting up the app",
-  // Workshop Code Explorer (/meta-stream)
+  // App designer parking lot (lib/designerTools.ts). stay_silent has no label
+  // on purpose: the stream never announces it (http.ts skips its toolStart).
+  park_idea: "Parking an idea",
+  unpark_idea: "Taking an idea off the lot",
+  // Code Explorer (/meta-stream + /parent-chat-stream)
   list_rabbithole_files: "Looking through Rabbithole's code",
   read_rabbithole_file: "Reading Rabbithole's code",
   search_rabbithole_code: "Searching Rabbithole's code",
@@ -26,12 +31,14 @@ const STAFF_TOOL_LABELS: Record<string, string> = {
   // Curriculum / aide read tools
   list_scholars: "Looking up scholars",
   get_scholar_dossier: "Reading scholar profile",
+  get_scholar_interests: "Reading scholar interests",
   get_scholar_documents: "Reading scholar documents",
   get_mastery_data: "Fetching mastery data",
   get_scholar_mastery: "Fetching mastery data",
   get_session_signals: "Reading session signals",
   get_scholar_signals: "Reading session signals",
   get_seeds: "Loading exploration seeds",
+  get_mentava_progress: "Reading Mentava progress",
   get_scholar_seeds: "Loading exploration seeds",
   get_observations: "Reading observations",
   get_scholar_observations: "Reading observations",
@@ -40,6 +47,8 @@ const STAFF_TOOL_LABELS: Record<string, string> = {
   get_scholar_web_activity: "Reading external practice activity",
   get_scholar_practice: "Reading practice progress",
   get_scholar_math_checkin: "Reading the math check-in",
+  get_scholar_math_plan: "Reading the Math plan",
+  set_scholar_math_plan: "Updating the Math plan",
   get_attendance: "Reading attendance",
   set_attendance: "Updating attendance",
   list_units: "Loading units",
@@ -64,6 +73,7 @@ const STAFF_TOOL_LABELS: Record<string, string> = {
   // External-Apps tools (add/configure launchable apps + grant/revoke access)
   list_external_apps: "Listing external apps",
   get_external_app_access: "Reading app access",
+  get_audit_log: "Reading the audit log",
   create_external_app: "Creating external app",
   update_external_app: "Updating external app",
   archive_external_app: "Archiving external app",
@@ -74,6 +84,7 @@ const STAFF_TOOL_LABELS: Record<string, string> = {
   disable_app_for_institution: "Revoking app from school",
   enable_app_for_scholar: "Granting app to scholar",
   disable_app_for_scholar: "Revoking app from scholar",
+  set_external_app_login: "Saving app login",
   // Unit designer tools
   read_unit_structure: "Reading unit structure",
   update_unit: "Updating unit",

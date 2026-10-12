@@ -35,7 +35,7 @@ import {
   scheduleUnlockRevocationCheck,
   scheduleUnlockRevocationCheckForKey,
 } from "./lib/deviceAppUnlockScheduling";
-import { managedNativeAppKeyForScheme } from "./lib/managedNativeApps";
+import { managedNativeAppKeyForApp } from "./lib/managedNativeApps";
 import { resolveAppIconUrl } from "./lib/externalAppIconUrl";
 
 // The catalog fields an app can be created/updated with (shared by the public
@@ -67,6 +67,24 @@ function normalizeNativeUrlScheme(
     throw new Error(
       'Enter a native app URL scheme like "googlesheets://"',
     );
+  }
+  return trimmed;
+}
+
+const NATIVE_BUNDLE_ID_RE = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
+
+/**
+ * The bundle id a scheme-less managed native app is identified by. Same shape
+ * as `normalizeNativeUrlScheme`: undefined passes through, empty clears, and a
+ * malformed value throws rather than silently storing an id that can never
+ * match `MANAGED_NATIVE_APPS`.
+ */
+function normalizeNativeBundleId(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (!NATIVE_BUNDLE_ID_RE.test(trimmed)) {
+    throw new Error('Enter a native app bundle id like "com.mentava.learn2read"');
   }
   return trimmed;
 }
@@ -103,6 +121,36 @@ export const PRESSREADER = {
   // which lives at the SCHOLAR level (users.libraryCredential) — shared by every
   // library-backed app — not on the per-app scholarApps link.
   credentialSource: "libraryCard",
+} as const;
+
+// Scratch — MIT's block-based programming environment, as a plain web app.
+//
+// Delivered as the WEB editor (scratch.mit.edu), not a native app, and that is
+// forced rather than chosen: the Scratch build Apple School Manager licenses
+// (`edu.mit.scratch.scratch-desktop`, iTunes 1446785996) is **mac-software**,
+// and this fleet is entirely iPads (mdm/README.md). There is no iPadOS Scratch
+// to install, so there is no `nativeUrlScheme` and no MANAGED_NATIVE_APPS key
+// here — the locked webview IS the app on both frontends.
+//
+// Registered in code rather than typed into the teacher Apps tab because that
+// form takes only name + URL + emoji, and its host allowlist is DERIVED by
+// `registrableHost`, which widens "scratch.mit.edu" to its registrable domain
+// "mit.edu" — a webview locked to all of MIT instead of to Scratch. Naming the
+// host explicitly is the reason this constant exists; the logo and tint come
+// along because the form cannot express them either.
+export const SCRATCH = {
+  name: "Scratch",
+  // Straight into the editor. The community home (scratch.mit.edu) is a
+  // browsable feed of user-generated projects; the editor is the tool, opens
+  // signed-out with no account, and is where an assigned scholar belongs.
+  webUrl: "https://scratch.mit.edu/projects/editor/",
+  // Bare host matches subdomains, so this covers the editor's asset/API hosts
+  // (cdn.assets.scratch.mit.edu, api.scratch.mit.edu, …) while keeping the
+  // webview off the rest of mit.edu.
+  webAllowedHosts: ["scratch.mit.edu"],
+  iconUrl: "/external-apps/scratch.png",
+  // Scratch's brand orange, behind the mark's own transparent background.
+  color: "#ff8c1a",
 } as const;
 
 
@@ -145,6 +193,47 @@ export const seedPressReader = internalMutation({
       passwordSelector: PRESSREADER.passwordSelector,
       loginFlow: PRESSREADER.loginFlow,
       credentialSource: PRESSREADER.credentialSource,
+    });
+  },
+});
+
+/**
+ * Idempotently ensure the Scratch catalog row exists. Returns its id.
+ * Internal — run once per deployment, and re-runnable safely.
+ *
+ * Creates the TILE only; it is never `defaultForNewScholars`. Who gets Scratch
+ * is a teacher decision, made in the Apps tab (per-scholar, per-group, or
+ * school-wide via `appAudiences`) like every other catalog app.
+ *
+ * Self-heals a row that was added ad hoc from the teacher form before this
+ * registration existed: such a row carries the derived "mit.edu" allowlist,
+ * which this re-points to "scratch.mit.edu". Staff-chosen name and tint are
+ * preserved — the allowlist and start URL are not, because those are the
+ * safety-relevant fields this constant exists to own.
+ */
+export const seedScratch = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const all = await ctx.db.query("externalApps").collect();
+    const existing = all.find((a) => a.webUrl.includes("scratch.mit.edu"));
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        defaultForNewScholars: undefined,
+        archived: undefined,
+        name: existing.name ?? SCRATCH.name,
+        webUrl: SCRATCH.webUrl,
+        webAllowedHosts: [...SCRATCH.webAllowedHosts],
+        iconUrl: existing.iconUrl ?? SCRATCH.iconUrl,
+        color: existing.color ?? SCRATCH.color,
+      });
+      return existing._id;
+    }
+    return await ctx.db.insert("externalApps", {
+      name: SCRATCH.name,
+      webUrl: SCRATCH.webUrl,
+      webAllowedHosts: [...SCRATCH.webAllowedHosts],
+      iconUrl: SCRATCH.iconUrl,
+      color: SCRATCH.color,
     });
   },
 });
@@ -251,6 +340,7 @@ export const createCatalogApp = scholarAdminMutation({
     defaultForNewScholars: v.optional(v.boolean()),
     credentialSource: v.optional(credentialSourceValidator),
     nativeUrlScheme: v.optional(v.string()),
+    nativeBundleId: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<Id<"externalApps">> =>
     coreCreateApp(ctx, args, ctx.user._id),
@@ -268,6 +358,7 @@ type CreateAppInput = {
   defaultForNewScholars?: boolean;
   credentialSource?: "scholarApp" | "libraryCard";
   nativeUrlScheme?: string;
+  nativeBundleId?: string;
 };
 
 async function coreCreateApp(
@@ -294,6 +385,7 @@ async function coreCreateApp(
     defaultForNewScholars: args.defaultForNewScholars || undefined,
     credentialSource: args.credentialSource,
     nativeUrlScheme: normalizeNativeUrlScheme(args.nativeUrlScheme),
+    nativeBundleId: normalizeNativeBundleId(args.nativeBundleId),
     createdBy,
   });
 }
@@ -314,6 +406,7 @@ const catalogPatchArgs = {
   passwordSelector: v.optional(v.string()),
   loginFlow: v.optional(v.string()),
   nativeUrlScheme: v.optional(v.string()),
+  nativeBundleId: v.optional(v.string()),
 } as const;
 
 type UpdateAppInput = {
@@ -330,6 +423,7 @@ type UpdateAppInput = {
   passwordSelector?: string;
   loginFlow?: string;
   nativeUrlScheme?: string;
+  nativeBundleId?: string;
 };
 
 /** Patch only the provided fields of a catalog app. Empty string clears an
@@ -363,15 +457,21 @@ async function coreUpdateApp(
   // OLD identity's device unlocks need the same force-close, even though
   // authorization itself doesn't flip to false (a different app now owns
   // that reach — the tile just points somewhere else).
-  const oldManagedKey = managedNativeAppKeyForScheme(app.nativeUrlScheme);
+  const oldManagedKey = managedNativeAppKeyForApp(app);
   // Reach is resolved for ANY scheme change, not only for an app that was
   // already managed. The closing edge below needs it when the OLD scheme was
   // managed; the opening edge needs it when the NEW one is — a plain web app
   // repointed at a managed native scheme newly belongs in every reachable
   // scholar's device allowlist, which the lease model had no reason to notice
   // because gaining a scheme could not open anything.
+  // EITHER identity field can swap the managed app this tile stands for, so
+  // both must open this edge. Gating on the scheme alone was correct only
+  // while the scheme WAS the identity; a bundle-id change would otherwise
+  // repoint a managed tile without force-closing the old app's device
+  // unlocks, leaving a scholar holding an iPad unlocked for an app the tile
+  // no longer names.
   const affectedScholarIds =
-    patch.nativeUrlScheme !== undefined
+    patch.nativeUrlScheme !== undefined || patch.nativeBundleId !== undefined
       ? Array.from(await liveReachOfExternalApp(ctx, appId))
       : [];
   const updates: Partial<Doc<"externalApps">> = {};
@@ -413,10 +513,12 @@ async function coreUpdateApp(
     updates.loginFlow = patch.loginFlow.trim() || undefined;
   if (patch.nativeUrlScheme !== undefined)
     updates.nativeUrlScheme = normalizeNativeUrlScheme(patch.nativeUrlScheme);
+  if (patch.nativeBundleId !== undefined)
+    updates.nativeBundleId = normalizeNativeBundleId(patch.nativeBundleId);
   if (Object.keys(updates).length > 0) await ctx.db.patch(appId, updates);
   const updated = (await ctx.db.get(appId))!;
   if (oldManagedKey && affectedScholarIds.length > 0) {
-    const newManagedKey = managedNativeAppKeyForScheme(updated.nativeUrlScheme);
+    const newManagedKey = managedNativeAppKeyForApp(updated);
     if (newManagedKey !== oldManagedKey) {
       // The catalog entry no longer maps to the OLD managed app (swapped to a
       // different one, or dropped back to plain web) — that old app's device
@@ -439,7 +541,7 @@ async function coreUpdateApp(
   // a non-managed app, so this is a single guarded call rather than a second
   // scheme classification.
   if (affectedScholarIds.length > 0) {
-    const newManagedKey = managedNativeAppKeyForScheme(updated.nativeUrlScheme);
+    const newManagedKey = managedNativeAppKeyForApp(updated);
     if (newManagedKey && newManagedKey !== oldManagedKey) {
       await scheduleUnlockRevocationCheckForKey(ctx, {
         appKey: newManagedKey,
@@ -578,6 +680,7 @@ export const aideCreateApp = internalMutation({
     defaultForNewScholars: v.optional(v.boolean()),
     credentialSource: v.optional(credentialSourceValidator),
     nativeUrlScheme: v.optional(v.string()),
+    nativeBundleId: v.optional(v.string()),
   },
   handler: async (ctx, { callerUserId, ...args }) => {
     await requireScholarAdminScope(ctx, callerUserId);

@@ -11,10 +11,10 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { useQuery } from "convex/react";
 import { SymbolView } from "expo-symbols";
 
 import { api } from "@/lib/convex";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { fonts, useColors } from "@/theme";
 import {
   formatComingUpDayHeading,
@@ -99,7 +99,9 @@ export function ComingUpCard() {
     const id = setInterval(() => setNow(floorToMinute(Date.now())), MINUTE_MS);
     return () => clearInterval(id);
   }, []);
-  const result = useQuery(api.assignments.comingUpForSelf, {
+  // Smoothed so each minute's re-subscription keeps the card on screen instead
+  // of dropping to `undefined` and vanishing for a round-trip.
+  const result = useSmoothedQuery(api.assignments.comingUpForSelf, {
     now,
     includeWebActivities: true,
   });

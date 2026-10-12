@@ -39,6 +39,7 @@
     "node_modules",
     "mcp-server",
     "native",
+    "marshal-ui",
     "foundation/templates"
   ]
 }

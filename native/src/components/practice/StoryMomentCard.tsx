@@ -8,7 +8,8 @@
  *
  * THE REVEAL (Reanimated). On mount, a field of small stars twinkles onto the
  * night surface, ONE brightens where the art will land, the story's baked art
- * (or authored `visualEmoji` fallback) springs in there, then the eyebrow + hook
+ * (or authored `visualEmoji` fallback; a preview seed's authored `visualEmoji`)
+ * springs in there, then the eyebrow + hook
  * + teaser fade up — ~0.5s, once, no loop — settling to a calm night card. A
  * DECLARED charm layer on a kid-facing celebratory surface
  * (visual-design.md's charm exception); the visual is the story's real referent
@@ -69,28 +70,11 @@ import {
   STORY_FIELD_SETTLED_OPACITY,
   STORY_HINT_MS,
   STORY_REVEAL_MS,
+  type StoryMoment as SharedStoryMoment,
 } from "../../../vendor/shared/storyReveal";
 import { fonts, palette } from "@/theme";
 
-export type StoryMoment = {
-  fromKey: string;
-  toKey: string;
-  skillLabel: string;
-  hook: string;
-  // Short card teaser (hook + surprise). The card shows THIS in place of the
-  // full narrative so the moment reads as a teaser, not a wall of text; the
-  // full narrative still feeds the "Find out more" tutor thread (storyOpen).
-  // Optional: falls back to narrative until stories are re-seeded with teasers.
-  teaser?: string;
-  /** Optional authored curiosity cue; legacy stories stay text-only. */
-  visualEmoji?: string;
-  /** Pre-baked far-end-node art. visualEmoji remains the fallback. */
-  artUrl?: string;
-  narrative: string;
-  probe?: string;
-  kindLabel: string;
-  hasApplication: boolean;
-};
+export type StoryMoment = SharedStoryMoment<Id<"seeds">>;
 
 type CardPhase = "offer" | "dismissed";
 
@@ -124,7 +108,7 @@ export function StoryMomentCard({
   /** Lets the parent record terminal "tried" when the scholar starts THIS
    *  story's own linked application. Mirrors the web card. No dismissed-settle:
    *  walking away records nothing (the moment stays `offered`), and the story
-   *  waits in the Quests tab's "New stories" section. No-ops once settled. */
+   *  waits in the Quests tab's "New quests" section. No-ops once settled. */
   settleRef?: React.Ref<StoryMomentCardHandle>;
 }) {
   const recordOffered = useMutation(api.practiceMoments.recordMomentOffered);
@@ -134,10 +118,9 @@ export function StoryMomentCard({
   const [phase, setPhase] = useState<CardPhase>("offer");
   const [initialOffer] = useState(() => ({
     clientEventId,
-    fromKey: moment.fromKey,
+    moment,
     recordOffered,
     scholarId,
-    toKey: moment.toKey,
   }));
 
   // Holds the in-flight offer so an outcome recorded BEFORE it resolves (a fast
@@ -150,12 +133,22 @@ export function StoryMomentCard({
   // guard would orphan the second (live) invocation's offer promise. Relying
   // instead on the mutation's OWN idempotency (the stable `clientEventId`).
   useEffect(() => {
+    const momentArgs =
+      initialOffer.moment.kind === "seed"
+        ? {
+            kind: "seed" as const,
+            seedId: initialOffer.moment.seedId,
+          }
+        : {
+            kind: "story" as const,
+            fromKey: initialOffer.moment.fromKey,
+            toKey: initialOffer.moment.toKey,
+          };
     offerRef.current = initialOffer
       .recordOffered({
         scholarId: initialOffer.scholarId,
-        fromKey: initialOffer.fromKey,
-        toKey: initialOffer.toKey,
         clientEventId: initialOffer.clientEventId,
+        ...momentArgs,
       })
       .then((res) => res.eventId)
       .catch(() => {
@@ -201,6 +194,9 @@ export function StoryMomentCard({
   useImperativeHandle(settleRef, () => ({ markTried: () => settleWith("tried") }), [
     settleWith,
   ]);
+
+  // Seeds carry no baked art; their hero is the authored emoji alone.
+  const artUrl = moment.kind === "story" ? moment.artUrl : undefined;
 
   // ── The reveal (Reanimated) ────────────────────────────────────────────────
   // Base values = the hidden START; the effect drives each to its settled END.
@@ -341,29 +337,34 @@ export function StoryMomentCard({
         {STORY_CARD_COPY.eyebrow}
       </Animated.Text>
 
-      {/* Hero cell — the shine blooms here, behind the art/emoji. */}
-      <View style={[styles.emojiCell, moment.artUrl && styles.artCell]}>
-        <Animated.View style={[styles.shine, shineStyle]} pointerEvents="none" />
-        {moment.artUrl ? (
-          <Animated.View style={[styles.artHero, emojiStyle]}>
-            <Image
-              source={{ uri: moment.artUrl }}
-              alt=""
-              style={styles.artImage}
-              contentFit="contain"
-              accessible={false}
-            />
-          </Animated.View>
-        ) : moment.visualEmoji ? (
-          <Animated.Text accessible={false} style={[styles.visualEmoji, emojiStyle]}>
-            {moment.visualEmoji}
-          </Animated.Text>
-        ) : null}
-      </View>
+      {moment.kind === "story" || moment.visualEmoji ? (
+        /* Hero cell — the shine blooms here, behind the art/emoji. A preview
+           seed uses the same slot for its authored emoji (seeds have no art). */
+        <View style={[styles.emojiCell, artUrl && styles.artCell]}>
+          <Animated.View style={[styles.shine, shineStyle]} pointerEvents="none" />
+          {artUrl ? (
+            <Animated.View style={[styles.artHero, emojiStyle]}>
+              <Image
+                source={{ uri: artUrl }}
+                alt=""
+                style={styles.artImage}
+                contentFit="contain"
+                accessible={false}
+              />
+            </Animated.View>
+          ) : moment.visualEmoji ? (
+            <Animated.Text accessible={false} style={[styles.visualEmoji, emojiStyle]}>
+              {moment.visualEmoji}
+            </Animated.Text>
+          ) : null}
+        </View>
+      ) : null}
 
       <Animated.Text style={[styles.hook, textStyle]}>{moment.hook}</Animated.Text>
       <Animated.Text style={[styles.teaser, textStyle]}>
-        {moment.teaser ?? moment.narrative}
+        {moment.kind === "seed"
+          ? moment.teaser
+          : (moment.teaser ?? moment.narrative)}
       </Animated.Text>
 
       {hintShown ? (

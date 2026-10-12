@@ -16,7 +16,6 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -42,12 +41,11 @@ import {
 } from "@/shared/institutionDay";
 import type { Id } from "@/convex/_generated/dataModel";
 import type { ExploreSeedOptions } from "@/lib/bakePaths";
-import { useInstitutionDay } from "@/hooks/useInstitutionDay";
+import { useContainedQuery } from "@/hooks/useContainedQuery";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { useRemote } from "@/hooks/useRemote";
 import { PeerTrails } from "@/components/PeerTrails";
-import { SuggestedQuests } from "@/components/SuggestedQuests";
-import { TakeHomePinButton } from "@/components/TakeHomePinButton";
-import { StoryInvitations } from "@/components/StoryInvitations";
+import { QuestionQueueList } from "@/components/QuestionQueue";
 import { CreateQuestDialog } from "@/components/CreateQuestDialog";
 import { ActivityCard, ActivityCardCta, ActivityCardMeta, ActivityCardTitle } from "@/components/ui/ActivityCard";
 import { DueChip } from "@/components/ui/DueChip";
@@ -164,9 +162,14 @@ export function ScholarPlate({
     const t = setInterval(() => setPlateNowMs(Date.now()), 60_000);
     return () => clearInterval(t);
   }, []);
+  const minuteNow = Math.floor(plateNowMs / 60_000) * 60_000;
 
-  const result = useQuery(api.scholarPlate.activeForMe, {
+  // Smoothed, not plain: the minute bucket re-arms this subscription every
+  // 60s, and the initial-load gate below must not fire on each re-arm (it sits
+  // above CreateQuestDialog, whose typed text would be lost).
+  const result = useSmoothedQuery(api.scholarPlate.activeForMe, {
     userId,
+    now: minuteNow,
     // Uncapped: the home shows EVERY active quest. Overflow is handled by
     // archiving, not by hiding rows behind a "show more" (a hidden quest made
     // "what's on my home?" ambiguous — see scholarPlate.ts cap rule).
@@ -174,24 +177,6 @@ export function ScholarPlate({
     ...(isRemoteMode ? { includeWebActivities: true } : {}),
   });
   const activeSessions = useQuery(api.sessions.list, { userId });
-  const pinningServerDay = useQuery(
-    api.institutions.currentDayForScholar,
-    !isRemoteMode && isQuestTab ? {} : "skip",
-  );
-  const pinningDay = useInstitutionDay(pinningServerDay);
-  const pinning = useQuery(
-    api.takeHomePlans.pinningForSelf,
-    !isRemoteMode && isQuestTab && pinningDay
-      ? { now: pinningDay.dayStart }
-      : "skip",
-  );
-  const addSuggestion = useMutation(api.takeHomePlans.addSuggestion);
-  const removePlanItem = useMutation(api.takeHomePlans.removeItem);
-  const startSeedInPlan = useMutation(api.takeHomePlans.startSeedInPlan);
-  const [pendingPinKeys, setPendingPinKeys] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  const pinMutationsInFlight = useRef(new Set<string>());
 
   // The scholar's own IS units that have no live project yet. These
   // don't appear in the project-driven plate above (it only knows about
@@ -246,49 +231,9 @@ export function ScholarPlate({
   // null). This is the ONLY gate on these actions now — a live class focus no
   // longer locks them (lib/focusLock.ts).
   const welcomeGate = isWelcomeGated(result?.onboarding);
-  const pinForUnit = (unitId: Id<"units">) =>
-    pinning?.pins.find((pin) => pin.unitId === unitId) ?? null;
-  const runPinMutation = async (
-    key: string,
-    action: () => Promise<unknown>,
-  ) => {
-    if (pinMutationsInFlight.current.has(key)) return;
-    pinMutationsInFlight.current.add(key);
-    setPendingPinKeys(new Set(pinMutationsInFlight.current));
-    try {
-      await action();
-    } catch (error) {
-      console.error("Error updating take-home Quest:", error);
-      toaster.error({
-        title: "Couldn't update your take-home list",
-        description: "Please try again.",
-      });
-    } finally {
-      pinMutationsInFlight.current.delete(key);
-      setPendingPinKeys(new Set(pinMutationsInFlight.current));
-    }
-  };
-  const toggleUnitPin = async (unitId: Id<"units">) => {
-    const pin = pinForUnit(unitId);
-    await runPinMutation(`unit:${unitId}`, () => {
-      if (pin) return removePlanItem({ itemId: pin.itemId });
-      return addSuggestion({ suggestion: { kind: "quest", unitId } });
-    });
-  };
-  const unitPinAction = (
-    unitId: Id<"units">,
-    title: string,
-  ) =>
-    pinning?.dayKey ? (
-      <TakeHomePinButton
-        pinned={pinForUnit(unitId) !== null}
-        subject={title}
-        busy={pendingPinKeys.has(`unit:${unitId}`)}
-        onToggle={() => toggleUnitPin(unitId)}
-      />
-    ) : null;
-
-  // Initial load: show spinner before we have any data.
+  // Initial load only: show spinner before we have any data. Later minute
+  // re-arms keep the previous result (useSmoothedQuery), so this never
+  // unmounts the plate — or the quest dialog inside it — once it has rendered.
   if (result === undefined) {
     return <Flex justify="center" py={6}><Spinner size="sm" color="violet.500" /></Flex>;
   }
@@ -326,28 +271,6 @@ export function ScholarPlate({
               exploringSeedId={exploringSeedId}
               focusLock={focusLock}
               welcomeGate={welcomeGate}
-              unitPinAction={isQuestTab ? unitPinAction : undefined}
-              suggestedQuestPinAction={
-                isQuestTab && pinning?.dayKey
-                  ? (seedId, unitId, title) => {
-                      const pin = pinForUnit(unitId);
-                      return (
-                        <TakeHomePinButton
-                          pinned={pin !== null}
-                          subject={title}
-                          busy={pendingPinKeys.has(`unit:${unitId}`)}
-                          onToggle={() =>
-                            runPinMutation(`unit:${unitId}`, () =>
-                              pin
-                                ? removePlanItem({ itemId: pin.itemId })
-                                : startSeedInPlan({ seedId }),
-                            )
-                          }
-                        />
-                      );
-                    }
-                  : undefined
-              }
             />
           );
         })}
@@ -459,8 +382,6 @@ function PlateSection({
   exploringSeedId,
   focusLock,
   welcomeGate = false,
-  unitPinAction,
-  suggestedQuestPinAction,
 }: {
   section: Section;
   rows: PlateRow[];
@@ -481,15 +402,6 @@ function PlateSection({
    *  extras. The only gate left on them since the class-focus lock was removed
    *  (lib/focusLock.ts). */
   welcomeGate?: boolean;
-  unitPinAction?: (
-    unitId: Id<"units">,
-    title: string,
-  ) => React.ReactNode;
-  suggestedQuestPinAction?: (
-    seedId: Id<"seeds">,
-    unitId: Id<"units">,
-    title: string,
-  ) => React.ReactNode;
 }) {
   const [customQuestOpen, setCustomQuestOpen] = useState(false);
   // A not-yet-completed first Welcome beat gates NEW independent work — a
@@ -628,10 +540,7 @@ function PlateSection({
       )}
 
       {section.origin === "is" && showExplore && !hasQuestContent && (
-        <EmptyState
-          title="No Quests yet"
-          hint="Quests you start will show up here."
-        />
+        <QuestsEmptyState queueShown={!welcomeGate} />
       )}
 
       {rows.length > 0 && (
@@ -643,7 +552,6 @@ function PlateSection({
               onOpenUnitProgress={onOpenUnitProgress}
               activeSessions={activeSessions}
               focusLock={focusLock}
-              unitPinAction={unitPinAction}
             />
           ))}
         </Stack>
@@ -664,30 +572,42 @@ function PlateSection({
         </Stack>
       )}
 
-      {/* Suggested destinations (seeds) + social-proof peer trails sit under
-          the quests in progress. Self view only (hidden from the teacher
-          remote view). Hidden before the first Welcome beat is done (H1: a
-          zero-history scholar shouldn't be nudged into exploring before
-          finishing even one beat); a live class focus no longer hides them.
-          The full star map now lives on its own screen — /scholar/map. */}
+      {/* The ONE list of open items (questionQueue.forSelf): open questions
+          (story threads + cross-domain seeds, answerable right here) and
+          "From your teacher" quests. It replaced the separate "New quests",
+          "Suggested by your teacher" sections (T1). Peer trails don't map onto
+          a question row, so they stay below, unchanged. Self view only; hidden
+          before the first Welcome beat is done (H1). */}
       {section.origin === "is" && showExplore && !welcomeGate && (
         <>
-          <SuggestedQuests
-            onStart={onExploreSeed}
+          <QuestionQueueList
+            onStartTeacherQuest={onExploreSeed}
             startingSeedId={exploringSeedId}
-            pinAction={
-              suggestedQuestPinAction
-                ? (quest) =>
-                    suggestedQuestPinAction(quest.seedId, quest.unitId, quest.title)
-                : undefined
-            }
           />
-          <StoryInvitations />
           <PeerTrails />
         </>
       )}
 
     </Stack>
+  );
+}
+
+/** "No Quests yet" — but never above a list of open questions, which the
+ *  question queue renders right below this section (it would contradict it).
+ *  Same subscription the queue already holds, so no extra read. */
+function QuestsEmptyState({ queueShown }: { queueShown: boolean }) {
+  // Contained: an older backend (deploy skew) lacks this query; an error
+  // just shows the empty state.
+  const { data: queue } = useContainedQuery(
+    api.questionQueue.forSelf,
+    queueShown ? {} : "skip",
+  );
+  if (queueShown && queue !== undefined && queue.length > 0) return null;
+  return (
+    <EmptyState
+      title="No Quests yet"
+      hint="Quests you start will show up here."
+    />
   );
 }
 
@@ -1220,6 +1140,7 @@ function PlateRowCard({
     try {
       const existing = activeSessions.find(
         (s) =>
+          !s.freePlay &&
           s.activityId &&
           String(s.activityId) === String(activityId) &&
           (row.assignmentId

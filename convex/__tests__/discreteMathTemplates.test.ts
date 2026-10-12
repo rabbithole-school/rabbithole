@@ -345,4 +345,37 @@ describe("discrete-math deterministic templates", () => {
       }
     }
   });
+
+  // Lane B: the discrete-math break-nodes now carry a repair-rung scaffold. This
+  // guards that the worked steps attach (integer + multiple-choice via the
+  // spread pattern) and that the final step names the answer/verdict, without
+  // re-checking grading — the round-trip test above already covers that.
+  test("break-node discrete-math templates carry answer-terminal worked steps", () => {
+    const intKeys = [
+      "permutations_r_from_n",
+      "pigeonhole_generalized",
+      "count_list_outcomes",
+      "nt_prime_gaps",
+      "nt_twin_primes",
+      "common_factors",
+    ];
+    const mcKeys = ["gt_bipartite", "gt_degree_sequence", "lg_negate", "nt_parity_proof"];
+    for (let seed = 1; seed <= 60; seed++) {
+      for (const key of intKeys) {
+        const item = requiredItem(key, seed);
+        expect(item.workedSteps?.length ?? 0, `${key} seed=${seed}`).toBeGreaterThanOrEqual(2);
+        const finalText = item.workedSteps!.at(-1)!.text;
+        expect(finalText.includes(formatAnswer(item.answer)), `${key} seed=${seed}`).toBe(true);
+      }
+      for (const key of mcKeys) {
+        const item = requiredItem(key, seed);
+        expect(item.answer.type).toBe("multipleChoice");
+        expect(item.workedSteps?.length ?? 0, `${key} seed=${seed}`).toBeGreaterThanOrEqual(2);
+        if (item.answer.type !== "multipleChoice") continue;
+        const label = item.choices![item.answer.choiceIndex];
+        const finalText = item.workedSteps!.at(-1)!.text;
+        expect(finalText.includes(label), `${key} seed=${seed}: final names "${label}"`).toBe(true);
+      }
+    }
+  });
 });

@@ -12,10 +12,11 @@
  */
 
 import { Box, SimpleGrid, Text, Spinner } from "@chakra-ui/react";
-import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useExternalApp } from "@/hooks/useExternalApp";
+import { useNow } from "@/hooks/useNow";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { ScholarHomeSectionHeader } from "@/components/ui/ScholarHomeSectionHeader";
 import { AppTileIcon } from "@/components/ui/AppTileIcon";
 
@@ -32,10 +33,27 @@ type LauncherTile = {
   color: string | null;
 };
 
-export function AppLauncher({ scholarId }: { scholarId?: Id<"users"> }) {
-  const apps = useQuery(
+export function AppLauncher({
+  scholarId,
+  minuteNow: minuteNowProp,
+}: {
+  scholarId?: Id<"users">;
+  /**
+   * The parent's minute bucket. The scholar home runs `listForLauncher`
+   * itself (for the Apps tab), so if this component ticked its OWN clock the
+   * two would drift by up to a minute and Convex would hold TWO subscriptions
+   * to identical data. Passing the parent's bucket keeps it to one. Optional
+   * so the component still stands alone.
+   */
+  minuteNow?: number;
+}) {
+  // Re-arms the subscription across institution-local midnight, when a live
+  // push stops showing with no database write — see `listForLauncher`.
+  const ownMinuteNow = Math.floor(useNow(60_000) / 60_000) * 60_000;
+  const minuteNow = minuteNowProp ?? ownMinuteNow;
+  const apps = useSmoothedQuery(
     api.scholarApps.listForLauncher,
-    scholarId ? { scholarId } : {},
+    scholarId ? { scholarId, now: minuteNow } : { now: minuteNow },
   ) as LauncherTile[] | undefined;
   const { launch, launchingId } = useExternalApp();
 

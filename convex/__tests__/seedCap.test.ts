@@ -471,8 +471,12 @@ describe("observer seed cap", () => {
       }),
     );
 
+    const { submittedAt: assessedSubmittedAt } = (await t.run((ctx) =>
+      ctx.db.get(deliverableId),
+    ))!;
     await t.mutation(internal.deliverables.applyCheckResult, {
       deliverableId,
+      assessedSubmittedAt,
       verdicts: [{ criterionId: "c1", level: "full" }],
       overall: "full",
       feedback: "Meets the criterion.",

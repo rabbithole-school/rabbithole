@@ -40,6 +40,7 @@ describe("scholarReadPolicy", () => {
 
   test("parent and scholar get exactly tier-1 (mastery/signals/seeds/practice + the public school calendar)", () => {
     const tier1 = [
+      "get_scholar_interests",
       "get_scholar_mastery",
       "get_scholar_signals",
       "get_scholar_seeds",

@@ -1,24 +1,22 @@
 /**
- * The two pure decisions behind the scholar's take-home lane, kept out of the
- * components so they have a truth table instead of a screenshot:
+ * The pure placement decision behind the scholar's evening Home, kept out of
+ * the page so it has a truth table instead of a screenshot.
  *
- * 1. WHO renders tonight's homework on Home (the duplicate-render guard), and
- * 2. WHAT the take-home header says about how much is left.
- *
- * See components/TakeHomePlanCard.tsx and app/scholar/page.tsx.
+ * See app/scholar/page.tsx (and native/src/app/index.tsx).
  */
 
 /**
- * True when the take-home card owns the current plan's homework on the
- * Home Now tab — and therefore when the Now digest must stand down.
+ * True for the after-Prep evening on the Home Now tab: the Now tab shows the
+ * homework digest AND we are past the Prep window. That window is where the
+ * dated "Coming up" forecast joins the Now tab (inside Prep it lives on the
+ * Prep tab; during school hours `shouldShowHomeworkInNow` keeps homework off
+ * Now altogether).
  *
- * Inside the Prep window the card lives on the Prep tab, so Now keeps its own
- * homework groups; during school hours the digest's deadline policy
- * (`shouldShowHomeworkInNow`) already hides homework and the card stays away
- * rather than reintroducing it early. That leaves exactly one window — after
- * Prep — where the card renders on Home and the digest yields.
+ * This used to decide that the retired "To do tonight" plan card owned the
+ * homework on Now. That card is gone, so the digest always renders homework
+ * itself; only the forecast placement still keys off the evening.
  */
-export function takeHomePlanOwnsNow({
+export function afterPrepEvening({
   isRemoteMode,
   showHomeworkInNow,
   isPrepTime,
@@ -28,24 +26,4 @@ export function takeHomePlanOwnsNow({
   isPrepTime: boolean;
 }): boolean {
   return !isRemoteMode && showHomeworkInNow && !isPrepTime;
-}
-
-/**
- * The header's count reads as what is LEFT, never as a standing debt: assigned
- * homework plus the chosen items still unchecked. An empty list says nothing at
- * all (the empty state carries the message), and a finished list says "All
- * done" rather than "0 left".
- */
-export function remainingLabel({
-  assignedCount,
-  selected,
-}: {
-  assignedCount: number;
-  selected: readonly { checked: boolean }[];
-}): string | null {
-  const total = assignedCount + selected.length;
-  if (total === 0) return null;
-  const remaining =
-    assignedCount + selected.filter((item) => !item.checked).length;
-  return remaining === 0 ? "All done" : `${remaining} left`;
 }

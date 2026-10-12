@@ -320,4 +320,112 @@ describe("story-thread in-session application serving", () => {
     expect(payload?.itemId).not.toBe(`gen#${scenario.otherEdgeItemId}`);
     expect(JSON.stringify(payload)).not.toContain("answerCanonical");
   });
+
+  test("the widget's serve→submit flow routes to the feedback-only grader", async () => {
+    const t = convexTest(schema, modules);
+    const scenario = await setup(t);
+
+    // Serve the item exactly as the tutor tool does, then submit through the
+    // SAME payload.itemId the chat widget reads — proving the served
+    // storyThread item is answerable via submitStoryThreadApplication.
+    await t.mutation(internal.chatPractice.serveStoryThreadApplicationItem, {
+      sessionId: scenario.sessionId,
+      currentMessageId: scenario.assistantMessageId,
+      contentSoFar: "We have been wondering about the rhythm together.",
+    });
+    const payload = await t.run(async (ctx) => {
+      const messages = await ctx.db
+        .query("messages")
+        .withIndex("by_session", (q) => q.eq("sessionId", scenario.sessionId))
+        .collect();
+      return messages.find(
+        (message) => message.role === "tool" && message.chatPractice,
+      )?.chatPractice;
+    });
+    expect(payload?.mode).toBe("storyThread");
+
+    const before = await practiceState(t, scenario.scholarId);
+    const miss = await scenario.scholarClient.mutation(
+      api.practiceSkills.submitStoryThreadApplication,
+      { sessionId: scenario.sessionId, itemId: payload!.itemId, answer: "3" },
+    );
+    expect(miss.correct).toBe(false);
+    expect(miss.correctAnswer).toBeUndefined();
+
+    const correct = await scenario.scholarClient.mutation(
+      api.practiceSkills.submitStoryThreadApplication,
+      { sessionId: scenario.sessionId, itemId: payload!.itemId, answer: "4" },
+    );
+    expect(correct.correct).toBe(true);
+    expect(correct.correctAnswer).toBe("4");
+
+    // Feedback-only: no mastery moved, no practice attempt recorded.
+    const after = await practiceState(t, scenario.scholarId);
+    expect(after.mastery).toEqual(before.mastery);
+    expect(after.attempts).toEqual([]);
+
+    // …but the unassisted correct still leaves application_success evidence.
+    const evidence = await applicationEvidence(t, scenario.scholarId);
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]).toMatchObject({
+      evidenceType: "application_success",
+      nodeKey: FROM_KEY,
+    });
+  });
+
+  test("a resubmit of an already-correct card is idempotent, not a throw", async () => {
+    const t = convexTest(schema, modules);
+    const scenario = await setup(t);
+    const itemId = `gen#${scenario.targetItemId}`;
+
+    const first = await scenario.scholarClient.mutation(
+      api.practiceSkills.submitStoryThreadApplication,
+      { sessionId: scenario.sessionId, itemId, answer: "4" },
+    );
+    expect(first.correct).toBe(true);
+    expect(first.correctAnswer).toBe("4");
+    expect(await applicationEvidence(t, scenario.scholarId)).toHaveLength(1);
+
+    // The card is durable: reload/reopen re-renders it interactive, and a rapid
+    // double-submit races. A second submit of the SAME id (which is no longer
+    // "offer-eligible" now that evidence exists) must return the same verdict —
+    // not throw "not available for this story thread".
+    const second = await scenario.scholarClient.mutation(
+      api.practiceSkills.submitStoryThreadApplication,
+      { sessionId: scenario.sessionId, itemId, answer: "4" },
+    );
+    expect(second.correct).toBe(true);
+    expect(second.correctAnswer).toBe("4");
+
+    // No duplicate evidence, and still no mastery/attempt write.
+    expect(await applicationEvidence(t, scenario.scholarId)).toHaveLength(1);
+    expect((await practiceState(t, scenario.scholarId)).attempts).toEqual([]);
+  });
+
+  test("a foreign itemId is refused even after the real one succeeds", async () => {
+    const t = convexTest(schema, modules);
+    const scenario = await setup(t);
+
+    await scenario.scholarClient.mutation(
+      api.practiceSkills.submitStoryThreadApplication,
+      {
+        sessionId: scenario.sessionId,
+        itemId: `gen#${scenario.targetItemId}`,
+        answer: "4",
+      },
+    );
+
+    // A different edge's application item is NOT this thread's — the seed is the
+    // authority for WHICH edge, so grading it here would be an oracle leak.
+    await expect(
+      scenario.scholarClient.mutation(
+        api.practiceSkills.submitStoryThreadApplication,
+        {
+          sessionId: scenario.sessionId,
+          itemId: `gen#${scenario.otherEdgeItemId}`,
+          answer: "8",
+        },
+      ),
+    ).rejects.toThrow("not available for this story thread");
+  });
 });

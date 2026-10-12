@@ -42,6 +42,22 @@ export function assignedSessionIsCurrent({
   );
 }
 
+/** Wall-clock time in the capture station's compact style: "4:40pm". */
+export function formatCaptureStationClock(
+  timestamp: number,
+  timeZone?: string,
+): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  })
+    .format(timestamp)
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
 /**
  * Compact, scholar-facing expiry for the capture-station header:
  *   same day → "ends 4:40pm"
@@ -63,15 +79,7 @@ export function formatCaptureStationExpiryShort(
       month: "2-digit",
       day: "2-digit",
     }).format(ts);
-  const time = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-  })
-    .format(expiresAt)
-    .replace(/\s+/g, "")
-    .toLowerCase(); // "4:40pm"
+  const time = formatCaptureStationClock(expiresAt, timeZone);
 
   const expiryKey = dayKey(expiresAt);
   if (expiryKey === dayKey(now)) return `ends ${time}`;

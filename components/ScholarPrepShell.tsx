@@ -13,9 +13,10 @@ import { ROLES } from "@/convex/lib/roles";
 import { VIEWPORT_SHELL_HEIGHT } from "@/lib/viewportShell";
 
 /**
- * Shared chrome for the three Scholar's-Prep surfaces (the chooser, the
- * reflection chat, the Workshop board). Mirrors /me: the logo acts as Back, the
- * header names the section, the account menu sits on the right. Scholars only;
+ * Shared chrome for the Scholar's-Prep surfaces (the chooser, the reflection
+ * chat, the Workshop board) and the scholar's Messages. Mirrors /me: the logo
+ * acts as Back, the header names the section, the account menu sits on the
+ * right. Scholars only;
  * everyone else is routed to their home. Honors the scholar's accessible font
  * exactly as the tutor view does (no remote mode here).
  */

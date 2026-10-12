@@ -62,7 +62,7 @@ export const IDEA_CONVOS_MAX_ITERATIONS = 5;
  * The /meta-stream loop knobs, derived from the flag. Pure so a test can prove
  * the OFF path is a behavioral no-op — no tool wired and no iteration cap, i.e.
  * exactly today's tool-less behavior. ON → wire the idea tool + the cost cap.
- * Mirrors codeExplorerLoopConfig; the caller merges the two.
+ * The caller merges it with the always-on Code Explorer cap.
  */
 export function ideaConvosLoopConfig(enabled: boolean): {
   withTools: boolean;

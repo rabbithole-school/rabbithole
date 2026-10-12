@@ -24,6 +24,7 @@ import {
   RosterInstitutionError,
 } from "./scholarGroups";
 import { recheckUnlocksForRemovedMembers } from "./lib/scholarGroupUnlocks";
+import { deleteScholarConversationThreads } from "./lib/cascade";
 import { scheduleClaimDecommissionLocksForScholar } from "./lib/deviceAppUnlockScheduling";
 import { isBreakerCountedAttempt } from "./lib/practice/spiralBreaker";
 
@@ -382,12 +383,6 @@ export const cloneScholar = internalMutation({
         scholarId: targetUserId,
       });
     }
-    for (const row of sourceRows.momentEvents) {
-      await ctx.db.insert("momentEvents", {
-        ...withoutSystemFields(row),
-        scholarId: targetUserId,
-      });
-    }
     for (const row of sourceRows.instructionEvents) {
       await ctx.db.insert("instructionEvents", {
         ...withoutSystemFields(row),
@@ -488,11 +483,34 @@ export const cloneScholar = internalMutation({
       });
     }
 
+    const seedIds = new Map<Id<"seeds">, Id<"seeds">>();
     for (const row of sourceRows.seeds) {
-      await ctx.db.insert("seeds", {
+      const clonedId = await ctx.db.insert("seeds", {
         ...withoutSystemFields(row),
         scholarId: targetUserId,
         sessionId: undefined,
+      });
+      seedIds.set(row._id, clonedId);
+    }
+    // momentEvents clone runs AFTER seeds so a kind:"seed" row can re-point its
+    // seedId at the cloned seed. A seed row whose seed was not cloned is
+    // skipped rather than minted with no seedId, which would break the
+    // reserve/eligibility semantics that key off (kind:"seed", seedId).
+    for (const row of sourceRows.momentEvents) {
+      if (row.kind === "seed") {
+        const seedId = row.seedId ? seedIds.get(row.seedId) : undefined;
+        if (!seedId) continue;
+        await ctx.db.insert("momentEvents", {
+          ...withoutSystemFields(row),
+          scholarId: targetUserId,
+          seedId,
+        });
+        continue;
+      }
+      await ctx.db.insert("momentEvents", {
+        ...withoutSystemFields(row),
+        scholarId: targetUserId,
+        seedId: undefined,
       });
     }
     for (const row of sourceRows.observations) {
@@ -607,6 +625,9 @@ export const purgeCloneScholar = internalMutation({
 
     const counts: Record<string, number> = {};
     const rows = await collectScholarRows(ctx, args.userId);
+    // A clone can be messaged like any scholar; its mentor/workshop threads
+    // are about it and go with it.
+    await deleteScholarConversationThreads(ctx, counts, args.userId);
 
     /**
      * Schema ownership inventory:
@@ -618,8 +639,9 @@ export const purgeCloneScholar = internalMutation({
      *   the accessed document and user.
      * - `chats`/`curriculumMessages` are teacher-owned conversation history;
      *   their optional `scholarId` is thread scope, not ownership.
-     * - `parentThreads` are parent-owned conversation history; `scholarId` is
-     *   the subject and explicitly not an access grant.
+     * - FAMILY `parentThreads` are parent-owned conversation history;
+     *   `scholarId` is the subject and explicitly not an access grant. The
+     *   scholar's own mentor/workshop threads are purged above.
      */
     const [
       webauthnChallenges,
@@ -660,7 +682,6 @@ export const purgeCloneScholar = internalMutation({
       practiceHintReveals,
       practiceGameOffers,
       practiceWorkImages,
-      practicePadHints,
       graphemeInventories,
       graphemeHistory,
     ] = await Promise.all([
@@ -689,12 +710,6 @@ export const purgeCloneScholar = internalMutation({
         )
         .collect(),
       ctx.db
-        .query("practicePadHints")
-        .withIndex("by_scholar_item_createdAt", (q) =>
-          q.eq("scholarId", args.userId),
-        )
-        .collect(),
-      ctx.db
         .query("graphemeInventories")
         .withIndex("by_scholar", (q) => q.eq("scholarId", args.userId))
         .collect(),
@@ -713,6 +728,7 @@ export const purgeCloneScholar = internalMutation({
       portfolioItems,
       courseNarratives,
       wholeChildNarratives,
+      interimCheckins,
       scholarHealthRecords,
       scholarHealthRecordDrafts,
       healthRecordFiles,
@@ -757,6 +773,10 @@ export const purgeCloneScholar = internalMutation({
         .withIndex("by_scholar", (q) => q.eq("scholarId", args.userId))
         .collect(),
       ctx.db
+        .query("interimCheckins")
+        .withIndex("by_scholar", (q) => q.eq("scholarId", args.userId))
+        .collect(),
+      ctx.db
         .query("scholarHealthRecords")
         .withIndex("by_scholar", (q) => q.eq("scholarId", args.userId))
         .collect(),
@@ -789,7 +809,6 @@ export const purgeCloneScholar = internalMutation({
     );
     await deleteRows(ctx, "practiceGameOffers", practiceGameOffers, counts);
     await deleteRows(ctx, "practiceWorkImages", practiceWorkImages, counts);
-    await deleteRows(ctx, "practicePadHints", practicePadHints, counts);
     await deleteRows(ctx, "graphemeInventories", graphemeInventories, counts);
     await deleteRows(ctx, "graphemeHistory", graphemeHistory, counts);
 
@@ -816,6 +835,7 @@ export const purgeCloneScholar = internalMutation({
     await deleteRows(ctx, "gameSessions", gameSessions, counts);
     await deleteRows(ctx, "courseNarratives", courseNarratives, counts);
     await deleteRows(ctx, "wholeChildNarratives", wholeChildNarratives, counts);
+    await deleteRows(ctx, "interimCheckins", interimCheckins, counts);
     await deleteRows(ctx, "documentProposals", documentProposals, counts);
     await deleteRows(ctx, "scholarDocuments", scholarDocuments, counts);
     await deleteRows(ctx, "portfolioItems", portfolioItems, counts);

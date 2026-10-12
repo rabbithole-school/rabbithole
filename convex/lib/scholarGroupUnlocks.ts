@@ -29,6 +29,8 @@ import {
 } from "./deviceAppUnlockScheduling";
 import { isPushShowing } from "./pushes";
 import { primaryInstitutionId } from "./primaryInstitution";
+import { effectiveInstitutionTimeZone } from "./institutionTime";
+import { dayKeyForTimezone } from "../../shared/institutionDay";
 
 /**
  * Every catalog app this group currently puts on its members' devices —
@@ -68,6 +70,14 @@ async function appIdsReachingGroup(
     group?.institutionId ??
     (group ? await primaryInstitutionId(ctx) : undefined);
   if (groupInstitutionId) {
+    const nowMs = Date.now();
+    const institution = await ctx.db.get(groupInstitutionId);
+    const timeZone = effectiveInstitutionTimeZone(institution?.timeZone);
+    const clock = {
+      nowMs,
+      todayDayKey: dayKeyForTimezone(nowMs, timeZone),
+      timeZone,
+    };
     const open = await ctx.db
       .query("pushes")
       .withIndex("by_institution_cleared", (q) =>
@@ -78,7 +88,7 @@ async function appIdsReachingGroup(
       if (push.target.kind !== "app") continue;
       if (push.audience.kind !== "group") continue;
       if (push.audience.groupId !== groupId) continue;
-      if (!isPushShowing(push)) continue;
+      if (!isPushShowing(push, clock)) continue;
       appIds.add(push.target.externalAppId);
     }
   }

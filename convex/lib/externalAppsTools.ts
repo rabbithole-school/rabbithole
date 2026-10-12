@@ -30,6 +30,39 @@ import type { AideEmit } from "./aideStream";
 // element type instead of 12 (otherwise the inferred union overflows TS2590).
 import type { BetaRunnableTool } from "@anthropic-ai/sdk/lib/tools/BetaRunnableTool";
 
+/**
+ * Strip every submitted secret out of a message before it goes back to the
+ * model (and from there into the transcript). Exact-substring replacement:
+ * a short secret may over-redact unrelated text, which is the right failure.
+ */
+export function redactSecrets(
+  message: string,
+  secrets: readonly (string | undefined)[],
+): string {
+  let out = message;
+  for (const secret of secrets) {
+    if (secret) out = out.split(secret).join("[redacted]");
+  }
+  return out;
+}
+
+/**
+ * Who gets the External-Apps tools: the same audience as the underlying
+ * scholarAdminMutation gate on these mutations — teacher / school_admin /
+ * platform_admin, or a staffer holding school-operations access. Shared with
+ * the audit-log reader (lib/auditLogTools.ts), which is exposed exactly where
+ * `get_external_app_access` is.
+ */
+export function canUseExternalAppsTools(opts: {
+  role: Role | null | undefined;
+  hasSchoolOperationsAccess?: boolean;
+}): boolean {
+  return (
+    isScholarAdminRole(opts.role) ||
+    (opts.role === "staff" && !!opts.hasSchoolOperationsAccess)
+  );
+}
+
 export async function makeExternalAppsTools(
   ctx: ActionCtx,
   emit: AideEmit,
@@ -37,17 +70,19 @@ export async function makeExternalAppsTools(
     role: Role | null | undefined;
     callerUserId: Id<"users">;
     hasSchoolOperationsAccess?: boolean;
+    surface?: "private" | "channel";
+    via?: "aide" | "slack";
   },
 ): Promise<BetaRunnableTool[]> {
-  // Same audience as the underlying scholarAdminMutation gate on these
-  // mutations: teacher / school_admin / platform_admin / operations staff.
-  if (
-    !isScholarAdminRole(opts.role) &&
-    !(opts.role === "staff" && opts.hasSchoolOperationsAccess)
-  ) {
-    return [];
-  }
+  if (!canUseExternalAppsTools(opts)) return [];
   const { callerUserId } = opts;
+  const via = opts.via ?? "aide";
+  // Fail CLOSED, like the password/passkey resets in scholarWriteTools: a
+  // caller that never says which surface it is on (the MCP connector, whose
+  // service accounts can be one identity shared by a whole Claude-in-Slack
+  // channel) gets no credential-bearing tool. `!== "channel"` shipped first
+  // and handed exactly that caller the tool.
+  const isPrivate = opts.surface === "private";
 
   const { betaTool } = await import(
     "@anthropic-ai/sdk/helpers/beta/json-schema"
@@ -58,7 +93,7 @@ export async function makeExternalAppsTools(
   const listAppsTool = betaTool({
     name: "list_external_apps",
     description:
-      "List the org's External Apps (the launchable web-app tiles scholars open from their home screen) with a WHO-CAN-USE-IT summary for each: name, URL, whether it's a default for new scholars, its credential source, whether it's archived, and how many audiences (groups/schools) + individual scholars it's granted to. Group/school memberCount and directScholarCount are complete counts (they include Extended Education scholars). Call this first to see what exists before creating/updating or granting. Includes archived apps (flagged) so you can un-archive one.",
+      "List the org's External Apps (the launchable web-app tiles scholars open from their home screen) with a WHO-CAN-USE-IT summary for each: name, URL, appKind (web website / custom Rabbithole app / native iPad app), whether it's a default for new scholars, its credential source, whether it's archived, and how many audiences (groups/schools) + individual scholars it's granted to. Group/school memberCount and directScholarCount are complete counts (they include Extended Education scholars). Call this first to see what exists before creating/updating or granting. Includes archived apps (flagged) so you can un-archive one.",
     inputSchema: { type: "object" as const, properties: {}, required: [] as const },
     run: async () => {
       let rows;
@@ -72,6 +107,10 @@ export async function makeExternalAppsTools(
       const apps = rows.map((r) => ({
         name: r.name,
         webUrl: r.webUrl,
+        // web website / Rabbithole custom app / native iPad app — the one
+        // canonical KIND signal (shared/appKind.ts), so the aide can answer
+        // "which apps are native iPad apps" instead of re-parsing the URL.
+        appKind: r.appKind,
         defaultForNewScholars: r.defaultForNewScholars,
         credentialSource: r.credentialSource,
         archived: r.archived,
@@ -96,7 +135,22 @@ export async function makeExternalAppsTools(
   const getAccessTool = betaTool({
     name: "get_external_app_access",
     description:
-      "For ONE External App (named), show the complete list of who can use it: every scholar GROUP it's granted to, every INSTITUTION (school) it's granted to (each with a live member count + whether the grant is enabled), and every INDIVIDUAL scholar who has it directly. The individual-scholar list defaults to enrolled scholars only; group/school member counts are complete (they include Extended Education scholars). The app name is resolved server-side; an unknown or ambiguous name returns a helpful error listing candidates.",
+      "For ONE External App (named), show who can use it. An app reaches a scholar by THREE independent routes and this returns all three, so read all three before drawing any conclusion:\n" +
+      "1. STANDING grants, which have NO clock and apply around the clock: `groups` (scholar groups), `institutions` (whole schools, each with a live member count + whether the grant is enabled), and `scholars` (individuals granted it directly).\n" +
+      "2. `blockScoped` — schedule placements that grant the app only during a class block, with the day, the block, and the exact window including the lead-in before the bell and the grace after it. This is the PREFERRED way to grant a class app (see place_class).\n" +
+      "3. `pushes` — the pushes themselves: a block placement's window (`source: \"schedule\"`) or a teacher pushing the app to a class (`source: \"teacher\"`), each with who it covers (`group`), its window in school-local time, and `live` saying whether it is putting the app on scholars' tiles at this instant (the tiles' own rule, so an archived app is never live). A live push has `liveUntilLocal`, normally the end of its window, when a scheduled clear retires it. `overrun: true` means that window has already ended but nothing has cleared the push yet, so it is still on scholars' tiles: a clear normally lands within minutes, and `liveUntilLocal` is then midnight, the latest it can last. Every live push is listed; one that is not live is listed only when its window is within ±2 hours of now (e.g. about to open). For a push to a list of scholars or to an assignment's roster, `group` is only a COUNT (e.g. \"3 scholars\"): it does not say who, so it cannot tell you whether a particular scholar is covered.\n" +
+      "CRITICAL: empty `groups`/`institutions`/`scholars` does NOT mean nobody can use the app. A block-scoped app has zero standing grants BY DESIGN. Never report an app as ungranted, broken, or accidentally revoked on the strength of those three being empty — check `blockScoped` and `pushes` first, and check `recentGrantChanges` (recent grant edits for this app, with who and via which surface) before suggesting a grant was lost.\n" +
+      "ONE SCHOLAR: to answer \"can this scholar open it?\", pass `scholar` instead of working it out from the lists above. The result then also has `forScholar`, with `summary`, a sentence to relay:\n" +
+      "- `canOpen`: right now, by the same rule as that scholar's own tile and launch checks.\n" +
+      "- `via`: every route that lets them, each with a `name` to say and its `route` kind: `direct` (their own app row: added for them, or one of the default apps every new scholar gets), `group grant`, `school grant`, `schedule push` or `teacher push`.\n" +
+      "- `untilLocal`: null when nothing ends the access on a clock (a direct row or a grant lasts until someone removes it). For a push it is the EXPECTED end, the close of its window, when a scheduled clear retires it. That is not guaranteed: if the clear is late, the push stays on the scholar's tile past its window, and a later call shows `overrun: true` with midnight, the latest it can last.\n" +
+      "- When `canOpen` is false: `whyNot` (`no-route`: nothing opens it for them at this moment; or `archived`), and `when`, which states rows that already exist and never forecasts:\n" +
+      "  - `when.opens`: pushes already planned for them, soonest first, each with `atLocal`. These are the scheduler's (or a teacher's) own rows, so they are the ONLY authority on when the app opens. The scheduler plans only about a week ahead, so the soonest is the soonest ALREADY PLANNED; do not call it the next opening.\n" +
+      "  - `when.wrappedToday`: today's sessions covering them that a teacher wrapped up (`opened: true`) or called off before they opened (`opened: false`). A deleted class, or a class whose app was removed, is not listed here, and a session a newer push covers again is not either.\n" +
+      "  - `when.scheduled`: CONFIGURATION, not a promise. These are the class placements for a group they are in, each with its window, its term (`termStatus` current, ended or upcoming, with dates) and, for a one-week placement, `weekOver`. Whether and when a placement opens the app is the scheduler's decision: it opens nothing outside the placement's term, after a teacher's wrap-up or on a no-school day. Never say a placement \"will open\" the app; say it is scheduled, and take the time from `when.opens`.\n" +
+      "  - All three empty means no class they are in is on their school's schedule for the app and nothing is planned; say so plainly. `scheduled` covers only their own school's terms. It does not mean anything is broken, and a block-scoped app is not missing a grant.\n" +
+      "A group you cannot see (another school's, or a legacy group whose roster reaches beyond your scholars) still counts toward `canOpen` but is never named (\"a group not visible to you\"). A scholar outside your school is an error, exactly as if no scholar had that name.\n" +
+      "The individual-scholar list defaults to enrolled scholars only; group/school member counts are complete (they include Extended Education scholars). The app name is resolved server-side; an unknown or ambiguous name returns a helpful error listing candidates.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -104,19 +158,34 @@ export async function makeExternalAppsTools(
           type: "string" as const,
           description: "The External App's name (e.g. 'Acme Practice').",
         },
+        scholar: {
+          type: "string" as const,
+          description:
+            "Optional: ONE scholar's name or (preferably) exact username, to ask whether THEY can open the app right now, through what, and until when (adds `forScholar`).",
+        },
         ...INCLUDE_EXTENDED_EDUCATION_PROP,
       },
       required: ["appName"] as const,
     },
     run: async (input: {
       appName: string;
+      scholar?: string;
       includeExtendedEducation?: boolean;
     }) => {
+      const scholar = input.scholar?.trim() || undefined;
+      // The SERVER's clock (this runs in an action), exact: the one instant
+      // the query judges every push at, and the named scholar's answer too, so
+      // the two halves of the answer cannot disagree about a push that ended
+      // seconds ago. A one-shot call from an action has no subscription, so
+      // no minute bucket is needed to keep it fresh.
+      const now = Date.now();
       let access;
       try {
         access = await ctx.runQuery(internal.appAudiences.aideGetAppAccess, {
           callerUserId,
           appName: input.appName,
+          now,
+          ...(scholar ? { scholar } : {}),
         });
       } catch (e) {
         return `Could not read access: ${errMsg(e)}`;
@@ -131,10 +200,51 @@ export async function makeExternalAppsTools(
           input.includeExtendedEducation === true,
         );
       const note = extendedEducationOmittedNote(extendedEducationOmitted);
+      // This one line is what a human reads in Slack. Its previous form —
+      // "Scratch: 0 group(s), 0 school(s), 0 scholar(s)" — is literally the
+      // sentence that convinced two people a working app was broken, so it
+      // carries the block-scoped half and every live push too (a teacher's
+      // push has no block to hang off), and says "standing" out loud so the
+      // zeros cannot be read as "no access".
+      const blockText = access.blockScoped.length
+        ? `${access.blockScoped.length} block-scoped (${access.blockScoped
+            .map((b) => `${b.group} ${b.block} ${b.day} ${b.windowLocal}`)
+            .join(", ")})`
+        : "";
+      const live = access.pushes.filter((p) => p.live);
+      const liveText = live.length
+        ? `LIVE now for ${live
+            .map((p) =>
+              !p.liveUntilLocal
+                ? p.group
+                : p.overrun
+                  ? `${p.group} until ${p.liveUntilLocal} at the latest (window over, not cleared yet)`
+                  : `${p.group} until ${p.liveUntilLocal}`,
+            )
+            .join(", ")}`
+        : "";
+      const appWideLine = `${access.app.name}: standing — ${access.groups.length} group(s), ${access.institutions.length} school(s), ${scholars.length} scholar(s)${
+        blockText ? `; ${blockText}` : ""
+      }${liveText ? `; ${liveText}` : ""}`;
+      // Asked about one scholar, the line leads with their answer and keeps
+      // the app-wide clocked parts, including pushes about to open, so a
+      // "can't open right now" never stands alone the way the 2026-09-21
+      // zeros did. (An archived app opens for no one, so nothing is pending.)
+      const pending = access.app.archived
+        ? []
+        : access.pushes.filter((p) => !p.live && p.startsAt > now);
+      const pendingText = pending.length
+        ? `not open yet for ${pending.map((p) => `${p.group} ${p.windowLocal}`).join(", ")}`
+        : "";
+      const appWide = [blockText, liveText, pendingText].filter(Boolean);
       emit({
         toolComplete: {
           name: "get_external_app_access",
-          result: `${access.app.name}: ${access.groups.length} group(s), ${access.institutions.length} school(s), ${scholars.length} scholar(s)`,
+          result: access.forScholar
+            ? `${access.forScholar.summary}${
+                appWide.length ? ` App-wide: ${appWide.join("; ")}.` : ""
+              }`
+            : appWideLine,
         },
       });
       return JSON.stringify({
@@ -179,6 +289,11 @@ export async function makeExternalAppsTools(
           description:
             "Optional native iOS app URL scheme, e.g. 'googlesheets://'. When set, managed iPads open the INSTALLED native app instead of the web view; must be a scheme-URL prefix like 'name://'.",
         },
+        nativeBundleId: {
+          type: "string" as const,
+          description:
+            "Optional native iOS app BUNDLE ID, e.g. 'com.mentava.learn2read'. Use this instead of nativeUrlScheme for a managed iPad app that registers NO custom URL scheme: nothing can open such an app programmatically, so its tile does the readiness and lock work and then points the scholar at the Home Screen. Never invent a scheme for one — a made-up scheme produces a tile that fails when tapped.",
+        },
       },
       required: ["name", "webUrl"] as const,
     },
@@ -191,6 +306,7 @@ export async function makeExternalAppsTools(
       defaultForNewScholars?: boolean;
       credentialSource?: "scholarApp" | "libraryCard";
       nativeUrlScheme?: string;
+      nativeBundleId?: string;
     }) => {
       let res;
       try {
@@ -204,6 +320,7 @@ export async function makeExternalAppsTools(
           defaultForNewScholars: input.defaultForNewScholars,
           credentialSource: input.credentialSource,
           nativeUrlScheme: input.nativeUrlScheme,
+          nativeBundleId: input.nativeBundleId,
         });
       } catch (e) {
         return `Could not create the app: ${errMsg(e)}`;
@@ -372,6 +489,7 @@ export async function makeExternalAppsTools(
             appName: input.appName,
             groupName: input.groupName,
             enabled,
+            via,
           });
         } catch (e) {
           return `Could not ${enabled ? "enable" : "disable"} the app for that group: ${errMsg(e)}`;
@@ -416,6 +534,7 @@ export async function makeExternalAppsTools(
               appName: input.appName,
               institutionName: input.institutionName,
               enabled,
+              via,
             },
           );
         } catch (e) {
@@ -461,6 +580,7 @@ export async function makeExternalAppsTools(
             appName: input.appName,
             scholarQuery: input.scholar,
             enabled,
+            via,
           });
         } catch (e) {
           return `Could not ${enabled ? "enable" : "disable"} the app for that scholar: ${errMsg(e)}`;
@@ -478,6 +598,67 @@ export async function makeExternalAppsTools(
       },
     });
 
+  const setCredentialsTool = betaTool({
+    name: "set_external_app_login",
+    description:
+      "Set or update ONE scholar's saved login for an External App. This is credential-bearing and is available only in a private chat. ALWAYS confirm the resolved scholar and app with the staff member before calling it; never repeat a username or password in your confirmation or response. Pass at least one of username or password. An empty string clears that field; omitting it leaves the saved value unchanged. App + scholar are resolved server-side; prefer the scholar's exact username when their name is ambiguous.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        appName: { type: "string" as const, description: "The External App, by name." },
+        scholar: {
+          type: "string" as const,
+          description: "The scholar's name or (preferably) exact username.",
+        },
+        username: {
+          type: "string" as const,
+          description: "The site's username. Empty clears it; omit to leave unchanged.",
+        },
+        password: {
+          type: "string" as const,
+          description: "The site's password. Empty clears it; omit to leave unchanged. Never return it.",
+        },
+      },
+      required: ["appName", "scholar"] as const,
+    },
+    run: async (input: {
+      appName: string;
+      scholar: string;
+      username?: string | number;
+      password?: string | number;
+    }) => {
+      // A model will happily pass an all-digit PIN as a JSON number despite
+      // the string schema. Coerce rather than let the mutation's argument
+      // validator reject it — that error message quotes the rejected value,
+      // which would put the secret into the tool result and the transcript.
+      const username =
+        input.username === undefined ? undefined : String(input.username);
+      const password =
+        input.password === undefined ? undefined : String(input.password);
+      if (username === undefined && password === undefined) {
+        return "Provide a username, password, or both to update the saved login.";
+      }
+      let res;
+      try {
+        res = await ctx.runMutation(internal.scholarApps.aideSetCredentials, {
+          callerUserId,
+          appName: input.appName,
+          scholarQuery: input.scholar,
+          username,
+          password,
+        });
+      } catch (e) {
+        // Belt and braces: no failure path may echo the secret back.
+        return `Could not save that External App login: ${redactSecrets(errMsg(e), [username, password])}`;
+      }
+      const result = res.cleared
+        ? `Cleared login for ${res.scholar} in ${res.app}`
+        : `Saved login for ${res.scholar} in ${res.app}`;
+      emit({ toolComplete: { name: "set_external_app_login", result } });
+      return JSON.stringify(res);
+    },
+  });
+
   return [
     listAppsTool,
     getAccessTool,
@@ -491,5 +672,6 @@ export async function makeExternalAppsTools(
     setInstitutionAccess(false),
     setScholarAccess(true),
     setScholarAccess(false),
+    ...(isPrivate ? [setCredentialsTool] : []),
   ];
 }

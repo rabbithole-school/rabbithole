@@ -300,6 +300,53 @@ export function breakerRecovered(flow: BreakerFlow): boolean {
 }
 
 /**
+ * Whether a live breaker episode belongs to the run THIS screen is about to
+ * serve.
+ *
+ * `activeBreakerEpisode` is deliberately scholar-wide: the miss streak that
+ * trips the breaker is counted across every lane and domain, because a mixed
+ * playlist can spiral a scholar through several domains in one sitting. But a
+ * LIVE episode also outranks loading an ordinary run (both clients hydrate the
+ * breaker and return without ever dispatching `run:inputsChanged`), so without
+ * this predicate an episode opened in one domain froze practice in EVERY
+ * domain for the whole 30-minute `SPIRAL_GAP_MS` window — a domain switch, a
+ * targeted `?skill=` set and a Fast-math round all re-mounted the same breaker
+ * card with no items behind it, and the only ways out were "Easy one, then
+ * stop" or waiting the window out. Observed in class 2026-09-17 on a grade-4
+ * scholar whose fraction misses froze all seven of their domains.
+ *
+ * Matching is done on exactly the axes the run itself requests, so the answer
+ * can never disagree with what `practiceSession` will serve:
+ *   • Quick Facts is its own scheduling mode with its own scope sentinel
+ *     (`QUICK_FACTS_SCOPE_KEY`) and already refuses to OPEN a breaker
+ *     (`suppressBreaker`), so it must never resume one either.
+ *   • A mixed run requests `domains`, so the episode applies when its domain
+ *     is one of them.
+ *   • A single-domain run (including a targeted `?skill=` run, whose domain is
+ *     the target node's) applies only to its own domain.
+ *   • The ambient default entry resolves its domain SERVER-side, so there is
+ *     nothing to compare and the episode is assumed to belong to it — the
+ *     conservative reading, and the pre-existing behaviour.
+ */
+export function breakerEpisodeAppliesToRun(args: {
+  /** `activeBreakerEpisode.domain` — where the streak was counted. */
+  episodeDomain: string;
+  /** The single domain this run will request, or null/undefined for the
+   *  ambient default entry (the server picks). */
+  domain?: string | null;
+  /** The blended set a MIXED run will request; undefined for a single-domain
+   *  run. */
+  mixedDomains?: readonly string[];
+  /** True on a Fast-math (Quick Facts) entry. */
+  quickFacts?: boolean;
+}): boolean {
+  if (args.quickFacts) return false;
+  if (args.mixedDomains) return args.mixedDomains.includes(args.episodeDomain);
+  if (args.domain) return args.domain === args.episodeDomain;
+  return true;
+}
+
+/**
  * Whether the server will issue a fresh same-node item yet. `breakerRecoverySession`
  * refuses until the lifecycle records support (`repair_completed` OR
  * `coach_escalated`) and refuses again once the episode is terminal, so the
@@ -636,7 +683,11 @@ export type TimingInput = {
   nowMs: number;
   /** `Date.now()` when the current item rendered. */
   renderAtMs: number;
-  /** `Date.now()` of the first keystroke on this item, or null if none observed. */
+  /**
+   * `Date.now()` of the scholar's first interaction with this item — the first
+   * keystroke on a typed item, or the first tap/drag on a manipulative's stage
+   * (TRA-221) — or null if none was observed.
+   */
   firstKeyAtMs: number | null;
 };
 
@@ -648,7 +699,10 @@ export type TimingReading = { firstKeyMs?: number; elapsedMs?: number };
  * Silent timing instrument (raise-the-ceiling §5). Meaningful ONLY on the first
  * attempt — a retry's clocks are stale from the earlier attempt on the same item.
  * `elapsedMs` covers every measured submit, including tap/drag manipulatives and
- * Don't-Know; `firstKeyMs` is omitted whenever no keystroke was observed.
+ * Don't-Know; `firstKeyMs` is the render→first-interaction latency (keystroke or
+ * pointer-down) and is omitted whenever no interaction was observed. The field
+ * keeps its historical `firstKey` name — it is the stored `practiceAttempts`
+ * column — even though a manipulative's reading comes from a drag, not a key.
  */
 export function computeTiming({
   firstAttempt,
@@ -722,7 +776,7 @@ export function mappingPretestProgress(idx: number): {
  * Placement is adaptive, so it cannot promise a fixed question count. These
  * bounds let both scholar surfaces show honest "up to" progress instead.
  */
-export const PLACEMENT_MAX_PROBES_PER_STRAND = 5;
+export const PLACEMENT_MAX_PROBES_PER_STRAND = 6;
 export const PLACEMENT_GLOBAL_CAP = 25;
 
 /**
@@ -991,11 +1045,18 @@ export function comesBackLine(phrase: string): string {
  *  move, never a failure. */
 export const DONT_KNOW_LABEL = "I haven't learned this yet";
 
+/** The corner-stamp for an honest don't-know — placement's probe and the
+ *  "Can you already do this?" framed item. A don't-know is honesty, not a wrong
+ *  guess, so it never reads "Not quite". */
+export const DONT_KNOW_STAMP_LABEL = "Noted";
+/** Screen-reader companion to `DONT_KNOW_STAMP_LABEL`. */
+export const DONT_KNOW_STAMP_ANNOUNCEMENT = "That's okay — good to know.";
+
 // ── "Confirm before you cap" — the post-miss slip/concede choice ────────────
 // A single wrong answer during a check-in used to permanently lower the ceiling,
 // finalizing the scholar AT a slipped skill and locking away everything above it.
 // A wrong answer now offers a two-way choice, modeled on a common
-// external-practice-app distinction between "I just made a silly mistake" and "I don't understand this
+// external-practice-app distinction between "I just made a mistake" and "I don't understand this
 // yet": the first re-serves a FRESH item on the SAME skill (a slip is superseded
 // by a correct confirm; a second miss still caps), the second caps immediately
 // like a don't-know. Honest self-report stays first-class AND is the fast path.
@@ -1006,7 +1067,7 @@ export const DONT_KNOW_LABEL = "I haven't learned this yet";
 export const PLACEMENT_SLIP_PROMPT = "Not quite. What happened?";
 /** The RETRY choice: treat the miss as a slip and get a fresh item on the same
  *  skill. Sentence case. */
-export const PLACEMENT_SLIP_RETRY_LABEL = "I just made a silly mistake";
+export const PLACEMENT_SLIP_RETRY_LABEL = "I just made a mistake";
 /** The CONCEDE choice: an honest "I don't understand this yet", which caps
  *  immediately (same as the don't-know path) and costs no extra question. */
 export const PLACEMENT_SLIP_CONCEDE_LABEL = "I don't understand this yet";
@@ -1071,14 +1132,14 @@ export function placementFeedback(
   if (outcome === "unknown") {
     return {
       tone: "miss",
-      stampLabel: "Noted",
+      stampLabel: DONT_KNOW_STAMP_LABEL,
       // No "work through one step here" — placement renders no interactive
       // step (probes are template/manipulative items), so the copy must not
       // promise an action that doesn't exist. Reveal-only, honestly. (The
       // deterministic warmth-floor reveal line renders in the slot below —
       // never a copy promise, so it can never be a broken one.)
       body: `${reveal}Telling us what you haven't learned yet helps us start you in the right place.`,
-      srAnnouncement: "That's okay — good to know.",
+      srAnnouncement: DONT_KNOW_STAMP_ANNOUNCEMENT,
     };
   }
   return {

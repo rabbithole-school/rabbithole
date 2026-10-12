@@ -6,6 +6,7 @@ import {
   CalendarBlank,
   ChatsCircle,
   Files,
+  GraduationCap,
   ImageSquare,
   TreeStructure,
 } from "@phosphor-icons/react";
@@ -14,6 +15,7 @@ import { Avatar } from "@/components/Avatar";
 import {
   parentVisibleTabs,
   PARENT_TAB_LABELS,
+  type ParentPortalMode,
   type ParentTab,
 } from "@/components/parent/parentTabs";
 import {
@@ -29,7 +31,7 @@ export interface ParentChild {
 }
 
 const PARENT_TAB_ICONS: Record<
-  "records" | "portfolio" | "math" | "calendar" | "messages",
+  "records" | "portfolio" | "math" | "calendar" | "messages" | "admissions",
   ReactNode
 > = {
   records: <Files size={16} />,
@@ -37,24 +39,31 @@ const PARENT_TAB_ICONS: Record<
   math: <TreeStructure size={16} />,
   calendar: <CalendarBlank size={16} />,
   messages: <ChatsCircle size={16} />,
+  admissions: <GraduationCap size={16} />,
 };
 
 export function ParentNavTabs({
   activeKey,
   messagesUnread,
-  programGuest,
+  mode,
   childId,
+  hrefQuery,
   onNavigate,
   onHomeNavigate,
 }: {
   activeKey: ParentTab;
   messagesUnread: boolean;
-  programGuest: boolean;
+  mode: ParentPortalMode;
   childId: Id<"users"> | null;
+  /**
+   * The query string every tab href carries (`?child=…`, or `?remote=…` in a
+   * staff preview). Defaults to `?child=<childId>` when a child is active.
+   */
+  hrefQuery?: string;
   onNavigate: (key: ParentTab) => void;
   onHomeNavigate: () => void;
 }) {
-  const items: TopNavItem<ParentTab>[] = parentVisibleTabs(programGuest).map(
+  const items: TopNavItem<ParentTab>[] = parentVisibleTabs(mode).map(
     (key) => ({
       key,
       label: PARENT_TAB_LABELS[key] ?? `${key[0].toUpperCase()}${key.slice(1)}`,
@@ -75,10 +84,12 @@ export function ParentNavTabs({
         ) : undefined,
     }),
   );
-  if (items.length === 0 || (items.length === 1 && !programGuest)) return null;
+  // A single tab needs no strip. The applicant header already reads
+  // "Admissions", so their one tab is not repeated here.
+  if (items.length <= 1) return null;
 
-  const hrefForKey = (key: ParentTab) =>
-    `/parent/${key}${childId ? `?child=${childId}` : ""}`;
+  const query = hrefQuery ?? (childId ? `?child=${childId}` : "");
+  const hrefForKey = (key: ParentTab) => `/parent/${key}${query}`;
 
   return (
     <TopNavTabs
@@ -87,7 +98,7 @@ export function ParentNavTabs({
       ariaLabel="Parent sections"
       hrefForKey={hrefForKey}
       onNavigate={onNavigate}
-      homeHref="/parent"
+      homeHref={`/parent${query}`}
       onHomeNavigate={onHomeNavigate}
     />
   );

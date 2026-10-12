@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { convexTest } from "convex-test";
 
+import schema from "../schema";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import type { ActionCtx } from "../_generated/server";
 import {
   makeTutorSessionTools,
+  numberDocumentLines,
+  VIEW_LINE_NUMBER_NOTE,
   type TutorToolSessionState,
 } from "../lib/tutorSessionTools";
 import { EXAMPLE_ECOSYSTEM_AUTHOR_INPUT } from "../lib/simulatorTemplatesCatalog";
@@ -12,8 +16,39 @@ import { RUBRIC_SCORE_TOOL_NAME } from "../lib/rubricScoreTool";
 import {
   completionClosingPool,
 } from "../lib/tutorClosingGuidance";
-import { isWatermarkedStockHost } from "../lib/imageSearch";
+// search_image talks to Brave and then to whatever host the result names —
+// mock only those two seams so the tool's own picking logic runs for real.
+vi.mock("../lib/imageSearch", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../lib/imageSearch")>();
+  return {
+    ...actual,
+    braveImageSearch: vi.fn(),
+    downloadWithProxyFallback: vi.fn(),
+  };
+});
+import {
+  braveImageSearch,
+  downloadWithProxyFallback,
+  isWatermarkedStockHost,
+} from "../lib/imageSearch";
 import { MAX_MODEL_IMAGE_BYTES } from "../lib/imageBytes";
+import type { AideEmit } from "../lib/aideStream";
+import { emptyDeck } from "../../shared/slidesScene";
+import { getFunctionName, type FunctionReturnType } from "convex/server";
+import { toolsForWorkshopMode } from "../sessionStreamHelpers";
+
+type DirectableCharacter = NonNullable<
+  FunctionReturnType<
+    typeof internal.appAiDirector.directableCharacterForSession
+  >
+>;
+
+const modules = (
+  import.meta as ImportMeta & {
+    glob: (pattern: string) => Record<string, () => Promise<unknown>>;
+  }
+).glob("../**/*.ts");
 
 // generate_image calls the real Gemini endpoint via geminiGenerateImage
 // (convex/lib/gemini.ts) — mock the module so tests control what "the image
@@ -48,9 +83,23 @@ async function toolsFor(
   actions: Array<{ name: string; description: string }> = [],
   overrides: Partial<Parameters<typeof makeTutorSessionTools>[2]> = {},
   emit: (data: Record<string, unknown>) => void = () => {},
+  character: DirectableCharacter | null = null,
+  sessionExtras: { isTestDrive?: boolean } = {},
 ) {
+  // The factory looks up the app's character for a vibecode owner; answer that
+  // one query here and pass every other call through to the test's own ctx.
+  const lookup = getFunctionName(
+    internal.appAiDirector.directableCharacterForSession,
+  );
+  const withCharacter = {
+    ...ctx,
+    runQuery: (ref: Parameters<ActionCtx["runQuery"]>[0], args: never) =>
+      getFunctionName(ref) === lookup
+        ? Promise.resolve(character)
+        : ctx.runQuery(ref, args),
+  } as ActionCtx;
   return await makeTutorSessionTools(
-    ctx,
+    withCharacter,
     emit,
     {
       session: {
@@ -68,6 +117,7 @@ async function toolsFor(
                 updatedAt: 1,
               }
             : null,
+        ...sessionExtras,
       } as Parameters<typeof makeTutorSessionTools>[2]["session"],
       projId: SESSION_ID,
       callerUserId,
@@ -769,7 +819,7 @@ describe("edit_document cross-session guard error contract", () => {
   test("preflight guard throw becomes a structured tool error, not a stream crash", async () => {
     // A cross-session document_id trips the membership guard in the
     // preflight aiGetContent query. The tool must return an error string
-    // rather than let the throw escape and abort the /project-stream turn.
+    // rather than let the throw escape and abort the /session-stream turn.
     const runQuery = vi.fn().mockRejectedValue(new Error(GUARD_ERROR));
     const runMutation = vi.fn();
     const tool = await editDocumentTool(
@@ -795,7 +845,7 @@ describe("edit_document cross-session guard error contract", () => {
       _id: ARTIFACT_ID,
       title: "Doc",
       content: "hello",
-      type: "text",
+      type: "code",
       revision: 2,
     });
     const runMutation = vi.fn().mockResolvedValue({
@@ -820,6 +870,32 @@ describe("edit_document cross-session guard error contract", () => {
       internal.artifacts.aiStrReplace,
       expect.objectContaining({ baseRevision: 2 }),
     );
+  });
+
+  test("view tells the model what the line-number prefix is, inside the tool result", async () => {
+    // A model left to guess whether `N: ` is code narrated its guess to the
+    // scholar ("Lines start with one space." landed in a vibecode transcript).
+    const runQuery = vi.fn().mockResolvedValue({
+      _id: ARTIFACT_ID,
+      title: "Game",
+      content: "<div>\n  hi",
+      type: "code",
+      revision: 4,
+    });
+    const tool = await editDocumentTool(
+      { runQuery, runMutation: vi.fn() } as unknown as ActionCtx,
+    );
+
+    const result = String(
+      await tool.run({ command: "view", document_id: ARTIFACT_ID } as never),
+    );
+
+    expect(result).toContain(VIEW_LINE_NUMBER_NOTE);
+    expect(result).toContain("1: <div>\n2:   hi");
+    expect(numberDocumentLines("a\nb")).toEqual({
+      lineCount: 2,
+      numbered: "1: a\n2: b",
+    });
   });
 
   test("rename mutation guard throw becomes a structured tool error", async () => {
@@ -850,7 +926,7 @@ describe("edit_document cross-session guard error contract", () => {
       _id: CROSS_SESSION_DOC,
       title: "Doc",
       content: "hello",
-      type: "text",
+      type: "code",
     });
     const runMutation = vi.fn().mockRejectedValue(new Error(GUARD_ERROR));
     const tool = await editDocumentTool(
@@ -865,6 +941,80 @@ describe("edit_document cross-session guard error contract", () => {
     } as never);
 
     expect(result).toContain("does not belong to this session");
+  });
+
+  test("refuses a text edit when document_id is omitted", async () => {
+    const runQuery = vi.fn().mockResolvedValue([
+      {
+        _id: ARTIFACT_ID,
+        title: "Doc",
+        content: "hello",
+        type: "text",
+      },
+    ]);
+    const runMutation = vi.fn();
+    const splitAfterTool = vi.fn();
+    const emit = vi.fn();
+    const tools = await toolsFor(
+      "conversation",
+      OWNER,
+      { runQuery, runMutation } as unknown as ActionCtx,
+      [],
+      { splitAfterTool },
+      emit,
+    );
+    const tool = tools.find((candidate) => candidate.name === "edit_document")!;
+
+    const result = await tool.run({
+      command: "insert",
+      insert_line: 0,
+      insert_text: "Tutor words",
+    } as never);
+
+    expect(result).toBe(
+      "This is the scholar's writing. You can't write in it — they type or dictate into the box themselves. Point them to the box once, then keep the conversation going.",
+    );
+    expect(runMutation).not.toHaveBeenCalled();
+    expect(splitAfterTool).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  test("create exposes no content parameter and always creates an empty document", async () => {
+    const runMutation = vi
+      .fn()
+      .mockResolvedValueOnce(ARTIFACT_ID)
+      .mockResolvedValueOnce("next-message");
+    const tools = await toolsFor(
+      "conversation",
+      OWNER,
+      { runMutation } as unknown as ActionCtx,
+    );
+    const tool = tools.find((candidate) => candidate.name === "edit_document")!;
+    const authored = tool as unknown as {
+      input_schema: {
+        properties: {
+          command: { enum: string[] };
+        } & Record<string, unknown>;
+      };
+    };
+
+    expect(authored.input_schema.properties).not.toHaveProperty("file_text");
+    expect(authored.input_schema.properties).not.toHaveProperty("transcribe_text");
+    expect(authored.input_schema.properties.command.enum).not.toContain(
+      "transcribe",
+    );
+
+    await tool.run({
+      command: "create",
+      title: "Essay",
+      file_text: "Legacy caller text",
+    } as never);
+
+    expect(runMutation).toHaveBeenNthCalledWith(
+      1,
+      internal.artifacts.aiCreate,
+      expect.objectContaining({ content: "" }),
+    );
   });
 
   test("a non-guard error surfaces as a generic edit error string", async () => {
@@ -910,35 +1060,23 @@ describe("choosing between the two image tools", () => {
     expect(names).toContain("search_image");
   });
 
-  test("the same selection rule appears in BOTH descriptions", async () => {
-    // The model reads one tool's description at a time when deciding. If the
-    // rule lived only on search_image, a model reaching for generate_image
-    // would never encounter the reason not to.
+  test("vibecode adds charm_icon and advertises pasteable app asset refs", async () => {
+    const tools = (await toolsFor("vibecode", OWNER)) as unknown as AuthoredTool[];
+    const generate = tools.find((tool) => tool.name === "generate_image");
+    const search = tools.find((tool) => tool.name === "search_image");
+    expect(tools.map((tool) => tool.name)).toContain("charm_icon");
+    expect(generate?.description).toContain("/app-assets/");
+    expect(search?.description).toContain("/app-assets/");
+    expect(await toolNames("conversation", OWNER)).not.toContain("charm_icon");
+  });
+
+  test("the tools reference each other, so the shared selection rule reaches both", async () => {
+    // The model reads one tool's description at a time when deciding. If
+    // either tool never referenced the other, a model reaching for it would
+    // never encounter the reason to consider its counterpart.
     const { generate, search } = await imageTools();
-    const rule = "could an expert look at the result and call it *incorrect*";
-    expect(generate.description).toContain(rule);
-    expect(search.description).toContain(rule);
     expect(generate.description).toContain("search_image");
     expect(search.description).toContain("generate_image");
-  });
-
-  test("the rule names the failure mode, not just a preference", async () => {
-    // A diagram that is confidently wrong is the harm this tool pair exists to
-    // avoid: a nine-year-old cannot tell a false structure from a true one.
-    // Copy that only said "prefer search" would lose the reason and would be
-    // the first thing edited away.
-    const { search } = await imageTools();
-    expect(search.description).toContain("confidently");
-  });
-
-  test("generate_image is scoped to things that are not real", async () => {
-    // It used to advertise itself for "diagrams, scientific illustrations …
-    // maps" — exactly the subjects with one true structure that it gets wrong.
-    const { generate } = await imageTools();
-    expect(generate.description).toMatch(/do not exist to be found/i);
-    expect(generate.description).not.toMatch(
-      /^Generate an educational illustration or visualization/,
-    );
   });
 
   test("search_image asks for a query, not an image prompt", async () => {
@@ -956,9 +1094,12 @@ describe("choosing between the two image tools", () => {
 });
 
 describe("generate_image sees its own output before describing it", () => {
-  // 4 bytes is enough for detectImageMime to sniff a PNG signature; the run
-  // callback never inspects pixels beyond what imageBytesToContentPart needs.
-  const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+  // A real 2x2 PNG: imageBytesToContentPart checks the chunks are intact, so a
+  // bare signature is refused like any other corrupt image.
+  const PNG_BYTES = Uint8Array.from(Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGM8EaDBwMDAxAAGAA/KAUR0s/I7AAAAAElFTkSuQmCC",
+    "base64",
+  ));
 
   // run() short-circuits to a text-only "not available" string with no key
   // configured — set one so these tests exercise the actual vision path.
@@ -986,6 +1127,100 @@ describe("generate_image sees its own output before describing it", () => {
     if (!tool) throw new Error("generate_image tool missing");
     return tool;
   }
+
+  test("returns the normalized storage id as a pasteable asset ref in vibecode", async () => {
+    mockGeminiGenerateImage.mockResolvedValueOnce({
+      bytes: PNG_BYTES,
+      mimeType: "image/png",
+      model: "gemini-3-pro-image-preview",
+    });
+    const runMutation = vi.fn().mockResolvedValue("newMsg");
+    const runAction = vi.fn().mockResolvedValue({
+      storageId: "normalized-id",
+      mimeType: "image/webp",
+      sizeBytes: 123,
+      width: 512,
+      height: 512,
+    });
+    const ctx = {
+      runMutation,
+      runAction,
+      storage: { store: vi.fn().mockResolvedValue("temporary-id") },
+    } as unknown as ActionCtx;
+    const tools = await toolsFor("vibecode", OWNER, ctx);
+    const tool = tools.find((candidate) => candidate.name === "generate_image")!;
+
+    const result = (await tool.run({
+      prompt: "a reef explorer badge",
+      alt_text: "Reef explorer",
+    } as never)) as Array<{ type: string; text?: string }>;
+
+    expect(runAction).toHaveBeenCalledWith(
+      internal.appAssetActions.normalizeStoredImage,
+      { storageId: "temporary-id" },
+    );
+    expect(result.find((block) => block.type === "text")?.text).toContain(
+      '/app-assets/normalized-id',
+    );
+    expect(runMutation).toHaveBeenCalledWith(
+      internal.sessionHelpers.splitStream,
+      expect.objectContaining({ imageId: "normalized-id" }),
+    );
+  });
+
+  test("copies a charm cache image into session ownership before returning its ref", async () => {
+    const runMutation = vi.fn(async (_reference: unknown, args: unknown) => {
+      if (args && typeof args === "object" && "label" in args) {
+        return { id: "charm-row", preserveExisting: true };
+      }
+      if (args && typeof args === "object" && "storageId" in args) return true;
+      throw new Error("Unexpected mutation");
+    });
+    const runQuery = vi.fn().mockResolvedValue({
+      _id: "charm-row",
+      label: "app:flat:parrotfish",
+      displayLabel: "parrotfish",
+      status: "ready",
+      imageStorageId: "cache-image",
+      createdAt: 1,
+    });
+    const ctx = {
+      runMutation,
+      runQuery,
+      runAction: vi.fn(),
+      storage: {
+        get: vi.fn().mockResolvedValue(
+          new Blob([PNG_BYTES as BlobPart], { type: "image/png" }),
+        ),
+        store: vi.fn().mockResolvedValue("session-copy"),
+        delete: vi.fn(),
+      },
+    } as unknown as ActionCtx;
+    const tools = await toolsFor("vibecode", OWNER, ctx);
+    const charm = tools.find((candidate) => candidate.name === "charm_icon")!;
+
+    const result = (await charm.run({
+      name: "parrotfish",
+      style: "flat",
+    } as never)) as Array<{ type: string; text?: string }>;
+
+    const registerCall = runMutation.mock.calls.find(
+      ([, args]) =>
+        args !== null &&
+        typeof args === "object" &&
+        "storageId" in args,
+    );
+    expect(registerCall?.[1]).toEqual({
+      sessionId: SESSION_ID,
+      storageId: "session-copy",
+    });
+    expect(result.find((block) => block.type === "text")?.text).toContain(
+      "/app-assets/session-copy",
+    );
+    expect(result.find((block) => block.type === "text")?.text).not.toContain(
+      "/app-assets/cache-image",
+    );
+  });
 
   test("hands the model an image content block, not just a success string", async () => {
     // Before this change the tool returned a bare success string — the model
@@ -1161,6 +1396,125 @@ describe("generate_image sees its own output before describing it", () => {
   });
 });
 
+describe("search_image only shows a picture the device can draw", () => {
+  const mockBraveImageSearch = vi.mocked(braveImageSearch);
+  const mockDownload = vi.mocked(downloadWithProxyFallback);
+
+  // A real 2x2 PNG: imageBytesToContentPart refuses a bare signature as corrupt.
+  const PNG_BYTES = Uint8Array.from(Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGM8EaDBwMDAxAAGAA/KAUR0s/I7AAAAAElFTkSuQmCC",
+    "base64",
+  ));
+  const SVG_BYTES = new TextEncoder().encode(
+    '<svg xmlns="http://www.w3.org/2000/svg"/>',
+  );
+
+  function result(host: string, path: string) {
+    return {
+      resultId: host,
+      thumbnailUrl: `https://${host}/${path}-thumb`,
+      imageUrl: `https://${host}/${path}`,
+      title: `${host} picture`,
+      sourceHost: host,
+      pickToken: "token",
+    };
+  }
+
+  /** A ctx whose only real jobs are granting the search budget and recording
+   * the split — everything else the tool touches is storage. */
+  function mockCtx() {
+    const runMutation = vi.fn(async (_reference: unknown, args: unknown) => {
+      if (args && typeof args === "object" && "uploaderId" in args) {
+        return {
+          claimed: true,
+          count: 1,
+          allowed: true,
+          role: "scholar",
+          institutionId: null,
+        };
+      }
+      return "newMsg";
+    });
+    const store = vi.fn().mockResolvedValue("storage-id");
+    const ctx = { runMutation, storage: { store } } as unknown as ActionCtx;
+    return { ctx, runMutation, store };
+  }
+
+  async function searchImageTool(ctx: ActionCtx) {
+    const tools = await toolsFor("conversation", OWNER, ctx);
+    const tool = tools.find((candidate) => candidate.name === "search_image");
+    if (!tool) throw new Error("search_image tool missing");
+    return tool;
+  }
+
+  beforeEach(() => {
+    mockBraveImageSearch.mockReset();
+    mockDownload.mockReset();
+  });
+
+  test("skips a result whose bytes no device can decode and takes the next one", async () => {
+    // `downloadImage` passes any type the response claims is image/* unless
+    // it is a corrupt PNG/WebP/GIF, and web results for scientific diagrams
+    // are routinely SVG. Storing one put a
+    // permanently blank frame in the native iPad transcript under a
+    // "Found image · host" caption that no retry could refill, because the
+    // unreadable bytes were already in storage.
+    mockBraveImageSearch.mockResolvedValue({
+      status: "results",
+      results: [result("svg.example.org", "diagram"), result("png.example.org", "diagram")],
+    });
+    mockDownload
+      .mockResolvedValueOnce(new Blob([SVG_BYTES as BlobPart], { type: "image/svg+xml" }))
+      .mockResolvedValueOnce(new Blob([PNG_BYTES as BlobPart], { type: "image/png" }));
+    const { ctx, runMutation } = mockCtx();
+    const tool = await searchImageTool(ctx);
+
+    const output = await tool.run({
+      query: "sucrose molecule structural diagram",
+      alt_text: "Sucrose diagram",
+    } as never);
+
+    expect(mockDownload).toHaveBeenCalledTimes(2);
+    const split = runMutation.mock.calls.find(
+      ([, args]) => args !== null && typeof args === "object" && "imageId" in args,
+    );
+    expect(split?.[1]).toMatchObject({
+      toolAction: "Found image",
+      imageSourceHost: "png.example.org",
+    });
+    // The model is handed the same pixels the scholar got, so it never
+    // describes a picture it could not see.
+    const blocks = output as Array<{ type: string }>;
+    expect(Array.isArray(blocks)).toBe(true);
+    expect(blocks.some((block) => block.type === "image")).toBe(true);
+  });
+
+  test("shows nothing at all when every candidate is undecodable", async () => {
+    mockBraveImageSearch.mockResolvedValue({
+      status: "results",
+      results: [result("svg.example.org", "one"), result("svg2.example.org", "two")],
+    });
+    mockDownload.mockResolvedValue(
+      new Blob([SVG_BYTES as BlobPart], { type: "image/svg+xml" }),
+    );
+    const { ctx, runMutation, store } = mockCtx();
+    const tool = await searchImageTool(ctx);
+
+    const output = await tool.run({
+      query: "sucrose molecule structural diagram",
+      alt_text: "Sucrose diagram",
+    } as never);
+
+    expect(output).toContain("No usable image was found");
+    expect(store).not.toHaveBeenCalled();
+    expect(
+      runMutation.mock.calls.some(
+        ([, args]) => args !== null && typeof args === "object" && "imageId" in args,
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("watermarked stock hosts", () => {
   // These vendors rank well for exactly the queries a tutor asks — clean
   // labeled scientific diagrams — and serve a preview with the vendor's
@@ -1186,5 +1540,393 @@ describe("watermarked stock hosts", () => {
   test("does not match a lookalike domain by suffix accident", () => {
     // notdreamstime.com is a different site; only a real subdomain counts.
     expect(isWatermarkedStockHost("notdreamstime.com")).toBe(false);
+  });
+});
+
+const SLIDES_TEXT_ELEMENT = {
+  type: "text",
+  frame: { x: 10, y: 10, w: 300, h: 90 },
+  text: "",
+};
+
+type ConvexTest = ReturnType<typeof convexTest>;
+
+async function seedSlidesScholarSession(t: ConvexTest) {
+  return await t.run(async (ctx) => {
+    const scholarId = await ctx.db.insert("users", {
+      name: "Kai Kahale",
+      username: "kai-slides-tool-test",
+      role: "scholar",
+    });
+    const sessionId = await ctx.db.insert("sessions", {
+      userId: scholarId,
+      title: "Volcanoes",
+      isArchived: false,
+    });
+    return { scholarId, sessionId };
+  });
+}
+
+async function makeEditSlides(
+  t: ConvexTest,
+  scholarId: string,
+  sessionId: string,
+) {
+  const events: Record<string, unknown>[] = [];
+  const emit: AideEmit = (data) => {
+    events.push(data);
+  };
+  const ctx = {
+    runQuery: (ref: unknown, args: unknown) =>
+      (t.query as (reference: unknown, input: unknown) => Promise<unknown>)(
+        ref,
+        args,
+      ),
+    runMutation: (ref: unknown, args: unknown) =>
+      (t.mutation as (reference: unknown, input: unknown) => Promise<unknown>)(
+        ref,
+        args,
+      ),
+  } as unknown as ActionCtx;
+
+  const tools = await makeTutorSessionTools(ctx, emit, {
+    session: { sessionMode: "chat", scholarId } as never,
+    projId: sessionId as never,
+    callerUserId: scholarId as never,
+    state: state(),
+    splitAfterTool: async () => {},
+    hasProcess: false,
+    hasRubric: false,
+    activityWasAlreadyComplete: false,
+    hasConversationCompletion: false,
+    hasActivityResources: false,
+    hasPhysicalEnv: false,
+    isAngleKickoff: false,
+    isOwnIsUnit: false,
+    ownIsUnitId: null,
+    instructionPlatform: "web",
+    chatPracticeOn: false,
+    teachBackOn: false,
+  });
+
+  const tool = tools.find((candidate) => candidate.name === "edit_slides");
+  if (!tool) throw new Error("edit_slides tool was not registered");
+  const run = (input: Record<string, unknown>) =>
+    (tool.run as (value: unknown) => Promise<string>)(input);
+  return { run, events };
+}
+
+describe("edit_slides tutor tool", () => {
+  test("create then read returns a summary containing the minted ids", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId } = await seedSlidesScholarSession(t);
+    const { run, events } = await makeEditSlides(t, scholarId, sessionId);
+
+    const createMsg = await run({
+      op: "create",
+      deck: emptyDeck("", "sl1"),
+    });
+    expect(createMsg).toContain("revision 0");
+    const focus = events.find((event) => "newArtifactId" in event);
+    expect(focus).toBeTruthy();
+    expect(focus).toMatchObject({ artifactUpdate: true });
+
+    await run({
+      op: "patch",
+      ops: [
+        {
+          op: "addElement",
+          slideId: "sl1",
+          element: SLIDES_TEXT_ELEMENT,
+        },
+      ],
+    });
+
+    const summary = await run({ op: "read" });
+    expect(summary).toContain("sl1");
+    expect(summary).toContain("el1");
+    expect(summary).toContain("revision");
+  });
+
+  test("read emits no stream events (silent lookup)", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId } = await seedSlidesScholarSession(t);
+    const { run } = await makeEditSlides(t, scholarId, sessionId);
+    await run({ op: "create", deck: emptyDeck("", "sl1") });
+
+    const { run: run2, events: events2 } = await makeEditSlides(
+      t,
+      scholarId,
+      sessionId,
+    );
+    await run2({ op: "read" });
+    expect(events2).toHaveLength(0);
+  });
+
+  test("patch updates in place WITHOUT stealing focus (no newArtifactId)", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId } = await seedSlidesScholarSession(t);
+    const { run, events } = await makeEditSlides(t, scholarId, sessionId);
+    await run({ op: "create", deck: emptyDeck("", "sl1") });
+    events.length = 0;
+
+    const message = await run({
+      op: "patch",
+      ops: [
+        {
+          op: "addElement",
+          slideId: "sl1",
+          element: SLIDES_TEXT_ELEMENT,
+        },
+      ],
+    });
+    expect(message).toContain("revision 1");
+    expect(events.some((event) => "artifactUpdate" in event)).toBe(true);
+    expect(events.some((event) => "newArtifactId" in event)).toBe(false);
+  });
+
+  test("patch refuses new words without changing the deck or emitting events", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId } = await seedSlidesScholarSession(t);
+    const { run } = await makeEditSlides(t, scholarId, sessionId);
+    await run({ op: "create", deck: emptyDeck("", "sl1") });
+
+    const { run: run2, events } = await makeEditSlides(
+      t,
+      scholarId,
+      sessionId,
+    );
+    const message = await run2({
+      op: "patch",
+      ops: [
+        {
+          op: "addElement",
+          slideId: "sl1",
+          element: { ...SLIDES_TEXT_ELEMENT, text: "Tutor words" },
+        },
+      ],
+      baseRevision: 0,
+    });
+
+    expect(message).toBe(
+      "You can arrange the scholar's slides — move, resize, restyle, add an empty text box, or move their existing words — but you can't write the words. They type those themselves.",
+    );
+    expect(events).toHaveLength(0);
+    const read = await t.query(internal.artifacts.aiReadDeck, { sessionId });
+    if ("error" in read) throw new Error(read.error);
+    expect(read.revision).toBe(0);
+    expect(read.textStrings).toEqual([]);
+  });
+
+  test("a stale baseRevision surfaces the recovery text to the model", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId } = await seedSlidesScholarSession(t);
+    const { run } = await makeEditSlides(t, scholarId, sessionId);
+    await run({ op: "create", deck: emptyDeck("", "sl1") });
+    await run({
+      op: "patch",
+      ops: [
+        {
+          op: "addElement",
+          slideId: "sl1",
+          element: SLIDES_TEXT_ELEMENT,
+        },
+      ],
+    });
+
+    const stale = await run({
+      op: "patch",
+      ops: [
+        {
+          op: "addElement",
+          slideId: "sl1",
+          element: SLIDES_TEXT_ELEMENT,
+        },
+      ],
+      baseRevision: 0,
+    });
+    expect(stale.toLowerCase()).toContain("stale");
+    expect(stale.toLowerCase()).toContain("read the deck again");
+
+    const read = await t.query(internal.artifacts.aiReadDeck, { sessionId });
+    if ("error" in read) throw new Error(read.error);
+    expect(read.revision).toBe(1);
+  });
+
+  test("patch on a nonexistent deck returns a helpful error", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId } = await seedSlidesScholarSession(t);
+    const { run } = await makeEditSlides(t, scholarId, sessionId);
+
+    const message = await run({
+      op: "patch",
+      ops: [{ op: "setTitle", title: "x" }],
+    });
+    expect(message).toContain("No deck exists");
+    expect(message.toLowerCase()).toContain("create one first");
+  });
+
+  test("read on a nonexistent deck returns a helpful error, emits nothing", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId } = await seedSlidesScholarSession(t);
+    const { run, events } = await makeEditSlides(t, scholarId, sessionId);
+
+    const message = await run({ op: "read" });
+    expect(message).toContain("No deck exists");
+    expect(events).toHaveLength(0);
+  });
+
+  test("create with an invalid deck returns the validation error verbatim", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId } = await seedSlidesScholarSession(t);
+    const { run } = await makeEditSlides(t, scholarId, sessionId);
+
+    const message = await run({ op: "create", deck: { slides: [] } });
+    expect(message.toLowerCase()).toContain("slide");
+  });
+});
+
+describe("app character tools", () => {
+  const character: DirectableCharacter = {
+    artifactId: ARTIFACT_ID,
+    name: "Bolt",
+    moods: ["puzzled", "delighted"],
+    verdicts: ["understood"],
+  };
+
+  test("the build tools ride with charm_icon in a teacher build and Play drops them", async () => {
+    const vibecode = await toolsFor(
+      "vibecode",
+      OWNER,
+      undefined,
+      [],
+      {},
+      undefined,
+      null,
+      { isTestDrive: true },
+    );
+    const names = vibecode.map((tool) => tool.name);
+    expect(names).toEqual(
+      expect.arrayContaining(["charm_icon", "define_character", "define_judge"]),
+    );
+    // A scholar's own build session does not author characters.
+    expect(await toolNames("vibecode", OWNER)).not.toContain("define_character");
+    expect(await toolNames("conversation", OWNER)).not.toContain(
+      "define_character",
+    );
+    const play = toolsForWorkshopMode(vibecode, "play").map((tool) => tool.name);
+    expect(play).not.toContain("define_character");
+    expect(play).not.toContain("define_judge");
+  });
+
+  test("director tools are offered only to the owner of an app with a character", async () => {
+    expect(await toolNames("vibecode", OWNER)).not.toContain("direct_character");
+    const withCharacter = await toolsFor(
+      "vibecode",
+      OWNER,
+      {} as ActionCtx,
+      [],
+      {},
+      () => {},
+      character,
+    );
+    const names = withCharacter.map((tool) => tool.name);
+    expect(names).toContain("direct_character");
+    expect(names).toContain("speak_as_character");
+    // Play keeps them: directing is what the tutor does while the app runs.
+    const play = toolsForWorkshopMode(withCharacter, "play").map((t) => t.name);
+    expect(play).toContain("speak_as_character");
+
+    const nonOwner = await toolsFor(
+      "vibecode",
+      OTHER,
+      {} as ActionCtx,
+      [],
+      {},
+      () => {},
+      character,
+    );
+    expect(nonOwner.map((tool) => tool.name)).not.toContain("direct_character");
+  });
+
+  test("speak_as_character writes through the director and emits nothing to the scholar", async () => {
+    const runMutation = vi
+      .fn()
+      .mockResolvedValue({ turnId: "turn", overrodeVerdict: true });
+    const splitAfterTool = vi.fn();
+    const events: Record<string, unknown>[] = [];
+    const tools = await toolsFor(
+      "vibecode",
+      OWNER,
+      { runMutation } as unknown as ActionCtx,
+      [],
+      { splitAfterTool },
+      (event) => events.push(event),
+      character,
+    );
+    const speak = tools.find((tool) => tool.name === "speak_as_character")!;
+    const direct = tools.find((tool) => tool.name === "direct_character")!;
+
+    await speak.run({
+      line: "Oh, I see!",
+      mood: "delighted",
+      verdict: "understood",
+    } as never);
+    await direct.run({ direction: "Hold out one more round." } as never);
+
+    expect(runMutation).toHaveBeenCalledWith(
+      internal.appAiDirector.speakAsCharacter,
+      {
+        sessionId: SESSION_ID,
+        artifactId: ARTIFACT_ID,
+        callerUserId: OWNER,
+        line: "Oh, I see!",
+        mood: "delighted",
+        verdict: "understood",
+      },
+    );
+    expect(runMutation).toHaveBeenCalledWith(
+      internal.appAiDirector.recordDirection,
+      {
+        sessionId: SESSION_ID,
+        artifactId: ARTIFACT_ID,
+        callerUserId: OWNER,
+        direction: "Hold out one more round.",
+      },
+    );
+    expect(events).toEqual([]);
+    expect(splitAfterTool).not.toHaveBeenCalled();
+  });
+
+  test("define_character relays names, moods and verdicts but never the persona", async () => {
+    const runMutation = vi.fn().mockResolvedValue({
+      ok: true,
+      artifactId: ARTIFACT_ID,
+      starterSynced: false,
+    });
+    const tools = await toolsFor(
+      "vibecode",
+      OWNER,
+      { runMutation } as unknown as ActionCtx,
+      [],
+      {},
+      undefined,
+      null,
+      { isTestDrive: true },
+    );
+    const define = tools.find((tool) => tool.name === "define_character")!;
+    const persona = "SECRET-PERSONA-BRIEF";
+    const result = await define.run({
+      name: "Bolt",
+      persona,
+      moods: ["puzzled", "delighted"],
+      verdicts: ["understood"],
+    } as never);
+
+    expect(runMutation).toHaveBeenCalledWith(
+      internal.appAiDirector.defineCharacter,
+      expect.objectContaining({ sessionId: SESSION_ID, callerUserId: OWNER }),
+    );
+    expect(String(result)).not.toContain(persona);
   });
 });

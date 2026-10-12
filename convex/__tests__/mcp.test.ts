@@ -525,17 +525,43 @@ describe("mcp per-scholar reads — role policy", () => {
   test("teacher can read tier-2 (dossier/observations/documents/sessions)", async () => {
     const t = convexTest(schema, modules);
     const { teacher, kai } = await seedWorld(t);
-    await t.run(async (ctx) => {
-      await ctx.db.insert("scholarDocuments", {
-        scholarId: kai,
-        kind: "assessment",
-        title: "Cognitive assessment",
-        summary: "Strong verbal and visual reasoning.",
-        keyFindings: ["Benefits from open-ended conceptual work"],
-        uploadedBy: teacher,
-        processingStatus: "ready",
-      });
-    });
+    const { sessionId, typedMessage, spokenMessage } = await t.run(
+      async (ctx) => {
+        await ctx.db.insert("scholarDocuments", {
+          scholarId: kai,
+          kind: "assessment",
+          title: "Cognitive assessment",
+          summary: "Strong verbal and visual reasoning.",
+          keyFindings: ["Benefits from open-ended conceptual work"],
+          uploadedBy: teacher,
+          processingStatus: "ready",
+        });
+        const sessionId = await ctx.db.insert("sessions", {
+          userId: kai,
+          title: "Volcano acoustics",
+          isArchived: false,
+        });
+        const typedMessageId = await ctx.db.insert("messages", {
+          sessionId,
+          role: "assistant",
+          content: "What changes when the vent narrows?",
+          flagged: false,
+        });
+        const spokenMessageId = await ctx.db.insert("messages", {
+          sessionId,
+          role: "user",
+          content: "the pitch gets higher",
+          flagged: false,
+          inputModality: "spoken",
+        });
+        const typedMessage = await ctx.db.get(typedMessageId);
+        const spokenMessage = await ctx.db.get(spokenMessageId);
+        if (!typedMessage || !spokenMessage) {
+          throw new Error("Failed to seed transcript messages");
+        }
+        return { sessionId, typedMessage, spokenMessage };
+      },
+    );
     const asTeacher = await withUser(t, teacher);
 
     const dossier = await asTeacher.query(api.mcp.getScholarDossier, {
@@ -554,7 +580,25 @@ describe("mcp per-scholar reads — role policy", () => {
     const sessions = await asTeacher.query(api.mcp.getScholarSessions, {
       scholarName: "Kai",
     });
-    expect(sessions?.sessions).toEqual([]);
+    expect(sessions?.sessions).toHaveLength(1);
+
+    const transcript = await asTeacher.query(api.mcp.getSessionTranscript, {
+      scholarName: "Kai",
+      sessionId,
+    });
+    expect(transcript?.messages).toEqual([
+      {
+        role: "assistant",
+        content: "What changes when the vent narrows?",
+        createdAt: typedMessage._creationTime,
+      },
+      {
+        role: "user",
+        content: "the pitch gets higher",
+        inputModality: "spoken",
+        createdAt: spokenMessage._creationTime,
+      },
+    ]);
 
     const docs = await asTeacher.query(api.mcp.getScholarDocuments, {
       scholarName: "kai nak",
@@ -717,6 +761,49 @@ describe("mcp curriculum surface — proxied through assembleCurriculumTools", (
   ): Promise<string[]> =>
     (await as.action(api.mcp.listCurriculumTools, {})).map((t) => t.name);
 
+  /**
+   * The MCP connector passes each tool's `input_schema` through from
+   * assembleCurriculumTools VERBATIM and filters only by NAME, so a new
+   * argument added to a shared aide tool is supposed to reach this transport
+   * for free. That is an invariant of the proxy, not a property of any one
+   * tool — and it is invisible from either side on its own (the factory's own
+   * tests stop one layer below this boundary). `externalAppId` is the case
+   * that matters most: a catalog app placed on a schedule block is the only
+   * CLOCK-BOUNDED way to grant a managed app, and the alternative the model
+   * reaches for otherwise (enable_app_for_group) has no clock at all, which is
+   * what the 2026-09-15 Stop Motion incident was. If the proxy ever starts
+   * re-declaring schemas, this is the test that says so.
+   */
+  test("a shared tool's new argument reaches the MCP surface, schema and all", async () => {
+    const t = convexTest(schema, modules);
+    const { teacher } = await seedWorld(t);
+    const asTeacher = await withUser(t, teacher);
+    const tools = await asTeacher.action(api.mcp.listCurriculumTools, {});
+
+    for (const name of ["place_class", "update_class"]) {
+      const tool = tools.find((x) => x.name === name);
+      expect(tool, `${name} is missing from the MCP surface`).toBeTruthy();
+      const props = (tool!.inputSchema as { properties?: Record<string, unknown> })
+        .properties;
+      expect(
+        props && "externalAppId" in props,
+        `${name} reached MCP without externalAppId`,
+      ).toBe(true);
+    }
+
+    // The clock-bounded path must also be the one the description recommends —
+    // the prose is the only thing steering the model at the moment it picks.
+    const placeClass = tools.find((x) => x.name === "place_class")!;
+    const appDesc = String(
+      (
+        (placeClass.inputSchema as {
+          properties: Record<string, { description?: string }>;
+        }).properties.externalAppId ?? {}
+      ).description ?? "",
+    );
+    expect(appDesc).toMatch(/enable_app_for_group/);
+  });
+
   test("the WRITE toolset is lens-scoped for a plain teacher, not just ROLES.STAFF", async () => {
     // Regression: the MCP curriculum surface resolved a scholar lens only for
     // `role === ROLES.STAFF`, while the gate above it admits every staff-class
@@ -746,6 +833,51 @@ describe("mcp curriculum surface — proxied through assembleCurriculumTools", (
         .collect(),
     );
     expect(installed).toHaveLength(0);
+  });
+
+  test("a shared service account is a channel surface: no credential, reset, or upload tools", async () => {
+    // A service account (mcpServiceAccounts.ts) is ONE teacher identity a whole
+    // Claude-in-Slack channel acts as. Until 2026-09 every MCP caller inherited
+    // assembleCurriculumTools' private default, so the shared identity was
+    // offered the same password/passkey resets and External App login tool a
+    // teacher gets in their own 1:1 chat.
+    const t = convexTest(schema, modules);
+    const { teacher, institutionId } = await seedWorld(t);
+    const service = await seedUser(t, "teacher", "svc-teacher");
+    await t.run(async (ctx) => {
+      await ctx.db.patch(service, { isSystem: true });
+      await ctx.db.insert("memberships", {
+        userId: service,
+        role: "teacher",
+        institutionId,
+      });
+    });
+    const asTeacher = await withUser(t, teacher);
+    const asService = await withUser(t, service);
+
+    const teacherNames = await toolNames(asTeacher);
+    const serviceNames = await toolNames(asService);
+    const privateOnly = [
+      "set_external_app_login",
+      "reset_scholar_password",
+      "reset_scholar_passkeys",
+      "upload_scholar_document",
+    ];
+    for (const n of privateOnly) {
+      expect(teacherNames).toContain(n);
+      expect(serviceNames).not.toContain(n);
+    }
+    // The shared identity still gets the ordinary staff toolset.
+    for (const n of ["list_external_apps", "enable_app_for_scholar"]) {
+      expect(serviceNames).toContain(n);
+    }
+    // And cannot reach a withheld tool by name.
+    await expect(
+      asService.action(api.mcp.callCurriculumTool, {
+        name: "set_external_app_login",
+        input: { appName: "Scratch", scholar: "Kai Nakamura", password: "x" },
+      }),
+    ).rejects.toThrow("Forbidden: set_external_app_login");
   });
 
   test("listCurriculumTools exposes the staff toolset, never the scholar-detail reads or web tools", async () => {
@@ -856,7 +988,12 @@ describe("mcp curriculum surface — proxied through assembleCurriculumTools", (
       name: "push_activity_now",
       input: { assignmentId, activityId, mode: "classFocus" },
     });
-    expect(JSON.parse(pushRaw)).toMatchObject({ ok: true, live: true });
+    expect(JSON.parse(pushRaw)).toMatchObject({
+      ok: true,
+      live: true,
+      confirmation:
+        'Live now · fades from their screen after today. Say "make it homework" or give a lifetime to keep it.',
+    });
 
     const progRaw = await asTeacher.action(api.mcp.callCurriculumTool, {
       name: "get_assignment_progress",

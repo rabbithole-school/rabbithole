@@ -15,6 +15,7 @@ import type { Role } from "../lib/roles";
 const EXPECTED_NAMES = [
   "list_scholar_suggestions",
   "respond_to_suggestion",
+  "start_workshop_thread",
   "create_whats_new_entry",
 ];
 

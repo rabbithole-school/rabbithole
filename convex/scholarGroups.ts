@@ -12,7 +12,7 @@ import {
   scholarInstitutionId as resolveScholarInstitutionId,
 } from "./lib/scholarEnrollment";
 import {
-  institutionIdInLens,
+  scholarInstitutionReadableInLens,
   resolveInstitutionLens,
 } from "./lib/institutionLens";
 import {
@@ -118,7 +118,7 @@ export const list = scholarAdminQuery({
       args.institutionScope,
     );
     const groups = (await ctx.db.query("scholarGroups").collect()).filter((group) =>
-      institutionIdInLens(lens, group.institutionId),
+      scholarInstitutionReadableInLens(lens, group.institutionId),
     );
     groups.sort((a, b) => a.name.localeCompare(b.name));
     return groups.map((g) => ({
@@ -511,14 +511,16 @@ export const remove = scholarAdminMutation({
 /**
  * Groups are roster-wide within an institution, never across institutions.
  * Mutations do not carry a URL scope, so accept any institution where the
- * caller has staff membership; platform admins retain their global reach.
+ * caller may read scholars (teacher, school_admin, operations staff) — not
+ * curriculum-only or other non-read standing (TRA-386); platform admins
+ * retain their global reach.
  */
 async function requireGroupInstitutionAccess(
   ctx: MutationCtx & { user: Doc<"users"> },
   group: Doc<"scholarGroups">,
 ): Promise<void> {
   const lens = await resolveInstitutionLens(ctx, ctx.user, "all");
-  if (!institutionIdInLens(lens, group.institutionId)) {
+  if (!scholarInstitutionReadableInLens(lens, group.institutionId)) {
     throw new Error("Forbidden: group is not in your institution");
   }
 }

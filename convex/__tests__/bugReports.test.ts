@@ -14,6 +14,7 @@ import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import type { ActionCtx } from "../_generated/server";
 import { makeSlackTools } from "../lib/slackTools";
+import { fileBugReportCard } from "../scholarSuggestions";
 import {
   grantStaffAccessToScholars,
   seedScholarInInstitution,
@@ -698,4 +699,224 @@ describe("durable bug-report pipeline", () => {
       true,
     );
   });
+});
+
+describe("scholar-filed reports on the Workshop board", () => {
+  async function cardFor(t: T, reportId: Id<"bugReports">) {
+    const rows = await t.run((ctx) => ctx.db.query("scholarSuggestions").collect());
+    return rows.find((row) => row.bugReportId === reportId) ?? null;
+  }
+
+  test("a scholar's own report becomes a card; staff and view-as reports do not", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedTestInstitution(t, { slug: "card-school" });
+    const scholar = await seedScholarInInstitution(t, {
+      institutionId,
+      username: "kai",
+    });
+    const teacher = await seedUser(t, "teacher", "ms_l", institutionId);
+    const admin = await seedUser(t, "platform_admin", "avery");
+
+    const own = await (await withUser(t, scholar)).mutation(
+      api.bugReports.submit,
+      {
+        surface: "web",
+        url: "/scholar",
+        description: "The mic button froze. It never came back.",
+      },
+    );
+    const byTeacher = await (await withUser(t, teacher)).mutation(
+      api.bugReports.submit,
+      { surface: "web", url: "/teacher", description: "Roster blank" },
+    );
+    const impersonating = await withUserSession(t, admin);
+    await impersonating.as.mutation(api.impersonation.startImpersonation, {
+      targetUserId: scholar,
+    });
+    const viewAs = await impersonating.as.mutation(api.bugReports.submit, {
+      surface: "web",
+      url: "/scholar",
+      description: "Seen while viewing as Kai",
+    });
+    if (!own.ok || !byTeacher.ok || !viewAs.ok) throw new Error("submit failed");
+
+    expect(await cardFor(t, own.reportId)).toMatchObject({
+      scholarId: scholar,
+      title: "The mic button froze",
+      scholarWords: "The mic button froze. It never came back.",
+    });
+    expect(await cardFor(t, byTeacher.reportId)).toBeNull();
+    expect(await cardFor(t, viewAs.reportId)).toBeNull();
+
+    const board = await (await withUser(t, scholar)).query(
+      api.scholarSuggestions.listMine,
+      {},
+    );
+    expect(board.map((row) => row.bugReportId)).toEqual([own.reportId]);
+  });
+
+  test("a card never counts toward the open-ideas cap", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedTestInstitution(t, { slug: "cap-school" });
+    const scholar = await seedScholarInInstitution(t, {
+      institutionId,
+      username: "lani",
+    });
+    const asScholar = await withUser(t, scholar);
+    for (let i = 0; i < 4; i++) {
+      await asScholar.mutation(api.scholarSuggestions.createMine, {
+        text: `Idea ${i}`,
+      });
+    }
+    const report = await asScholar.mutation(api.bugReports.submit, {
+      surface: "web",
+      url: "/scholar",
+      description: "Slides went blank",
+    });
+    if (!report.ok) throw new Error("submit failed");
+
+    // Four ideas + one bug card: the fifth idea still fits, the sixth does not.
+    await asScholar.mutation(api.scholarSuggestions.createMine, {
+      text: "Idea 5",
+    });
+    await expect(
+      asScholar.mutation(api.scholarSuggestions.createMine, { text: "Idea 6" }),
+    ).rejects.toThrow(/5 ideas open/);
+
+    // Archive + restore of the card is never blocked by the idea cap.
+    const card = await cardFor(t, report.reportId);
+    await asScholar.mutation(api.scholarSuggestions.setArchivedMine, {
+      suggestionId: card!._id,
+      archived: true,
+    });
+    await asScholar.mutation(api.scholarSuggestions.setArchivedMine, {
+      suggestionId: card!._id,
+      archived: false,
+    });
+
+  });
+
+  test("a voice-only report's card picks up the transcript", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedTestInstitution(t, { slug: "voice-school" });
+    const scholar = await seedScholarInInstitution(t, {
+      institutionId,
+      username: "noa",
+    });
+    // convex-test storage drops content types, so submit's audio validation
+    // can't pass here; insert the report as submit would and file its card.
+    const audioStorageId = await t.run((ctx) =>
+      ctx.storage.store(new Blob(["audio"], { type: "audio/mp4" })),
+    );
+    const reportId = await t.run(async (ctx) => {
+      const id = await ctx.db.insert("bugReports", {
+        actorUserId: scholar,
+        actorRole: "scholar",
+        surface: "native",
+        url: "/scholar",
+        audioStorageId,
+        attempts: 0,
+        status: "waiting_for_channel",
+      });
+      await fileBugReportCard(ctx, {
+        scholarId: scholar,
+        bugReportId: id,
+        description: undefined,
+        awaitingTranscript: true,
+      });
+      return id;
+    });
+    const report = { reportId };
+    expect(await cardFor(t, report.reportId)).toMatchObject({
+      title: "A bug you reported",
+      scholarWords: "",
+    });
+    const workshopPosts = async () =>
+      (
+        await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect())
+      ).filter((job) => job.name === "scholarSuggestions:postWorkshopIdea");
+    expect(await workshopPosts()).toHaveLength(0);
+
+    await t.mutation(internal.bugReports.markTranscribed, {
+      reportId: report.reportId,
+      transcript: "The keyboard covers the answer box",
+    });
+    expect(await cardFor(t, report.reportId)).toMatchObject({
+      title: "The keyboard covers the answer box",
+      scholarWords: "The keyboard covers the answer box",
+    });
+    expect(await workshopPosts()).toHaveLength(1);
+  });
+
+  test("a report with no words or audio posts to #workshop right away", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedTestInstitution(t, { slug: "quiet-school" });
+    const scholar = await seedScholarInInstitution(t, {
+      institutionId,
+      username: "malia",
+    });
+    const report = await (await withUser(t, scholar)).mutation(
+      api.bugReports.submit,
+      { surface: "native", url: "/scholar" },
+    );
+    if (!report.ok) throw new Error("submit failed");
+    const scheduled = await t.run((ctx) =>
+      ctx.db.system.query("_scheduled_functions").collect(),
+    );
+    expect(
+      scheduled.filter(
+        (job) => job.name === "scholarSuggestions:postWorkshopIdea",
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("the card rides the Workshop reply loop: a #workshop thread reply reaches the scholar", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedTestInstitution(t, {
+      slug: "thread-school",
+      isPrimary: true,
+    });
+    const scholar = await seedScholarInInstitution(t, {
+      institutionId,
+      username: "keoni",
+    });
+    const admin = await seedUser(t, "platform_admin", "andy");
+    const report = await (await withUser(t, scholar)).mutation(
+      api.bugReports.submit,
+      { surface: "web", url: "/scholar", description: "Timer skipped" },
+    );
+    if (!report.ok) throw new Error("submit failed");
+    const card = await cardFor(t, report.reportId);
+
+    // Same #workshop fan-out an idea gets, bug-flavored.
+    const scheduled = await t.run((ctx) =>
+      ctx.db.system.query("_scheduled_functions").collect(),
+    );
+    expect(
+      scheduled.filter(
+        (job) => job.name === "scholarSuggestions:postWorkshopIdea",
+      ).map((job) => job.args[0]),
+    ).toEqual([{ suggestionId: card!._id }]);
+    const delivery = await t.query(
+      internal.scholarSuggestions.workshopDeliveryContext,
+      { suggestionId: card!._id },
+    );
+    expect(delivery?.text).toMatch(/^🐛 .*reported a bug/);
+
+    const reply = await t.mutation(
+      internal.scholarSuggestions.respondFromSlackThread,
+      { suggestionId: card!._id, authorId: admin, body: "Fixed it — thanks!" },
+    );
+    expect(reply.status).toBe("recorded");
+    const [mine] = await (await withUser(t, scholar)).query(
+      api.scholarSuggestions.listMine,
+      {},
+    );
+    expect(mine.answered).toBe(true);
+    expect(mine.lastMessage).toMatchObject({
+      body: "Fixed it — thanks!",
+      mine: false,
+    });
+  });
+
 });

@@ -18,9 +18,8 @@ import {
   Dialog,
   Portal,
   SimpleGrid,
-  chakra,
 } from "@chakra-ui/react";
-import { Plus, Trash, FileText, Upload, ArrowSquareOut, Sparkle } from "@phosphor-icons/react";
+import { Plus, Trash, FileText, Upload, ArrowSquareOut } from "@phosphor-icons/react";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { formatTimeAgo } from "@/lib/relativeTime";
 import { openExternal } from "@/lib/native";
@@ -238,35 +237,10 @@ function PortfolioCard({
     pageRange?: { start: number; end: number };
     thumbUrl?: string | null;
     thumbStatus?: "pending" | "ready" | "error";
-    hasMagic?: boolean;
-    magicInstruction?: string | null;
-    magicThumbUrl?: string | null;
   };
 }) {
   const removeItem = useMutation(api.portfolio.deleteItem);
   const fileUrl = useQuery(api.portfolio.getFileUrl, { itemId: item._id });
-  // Magic Annotations: the full Gemini-redrawn file (for "open"), fetched only
-  // when present.
-  const magicUrl = useQuery(
-    api.portfolio.getMagicFileUrl,
-    item.hasMagic ? { itemId: item._id } : "skip"
-  );
-  // Magic is ON by default: the card previews the redraw, and the badge toggles
-  // back to the original.
-  const [showMagic, setShowMagic] = useState(true);
-  // Inline preview of the magic version: the magic THUMBNAIL, or — for items
-  // processed before magic thumbnails existed — the full redraw image, which
-  // only renders inline for an IMAGE item (a magic PDF's redraw is a PDF).
-  const isImageItem = (item.fileMimeType ?? "").startsWith("image/");
-  const magicInlineUrl =
-    item.magicThumbUrl ?? (isImageItem ? (magicUrl ?? null) : null);
-  const canToggleInline = !!item.hasMagic && !!magicInlineUrl;
-  const showingMagic = canToggleInline && showMagic;
-  const previewUrl = showingMagic ? magicInlineUrl : item.thumbUrl;
-  // When the magic version can't be shown inline (a magic PDF with no
-  // thumbnail), the badge OPENS the full magic file instead of toggling — so
-  // it's never a dead button. magicUrl is undefined only while it loads.
-  const magicOpenUrl = item.hasMagic && !canToggleInline ? (magicUrl ?? null) : null;
   // A thumbnail is still rendering if the file pipeline is done but the thumb
   // hasn't landed yet (covers both images and PDFs).
   const thumbPending =
@@ -294,10 +268,10 @@ function PortfolioCard({
         alignItems="center"
         justifyContent="center"
       >
-        {previewUrl ? (
+        {item.thumbUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
-            src={previewUrl}
+            src={item.thumbUrl}
             alt={item.title}
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
@@ -309,51 +283,6 @@ function PortfolioCard({
         <Box position="absolute" top={2} left={2}>
           <StatusPill status={item.processingStatus} />
         </Box>
-        {item.hasMagic && (() => {
-          // Filled violet = the magic version is what you'd see (either shown
-          // inline, or one click away to open). Outline = currently showing the
-          // original (only possible when an inline toggle exists).
-          const filled = showingMagic || !canToggleInline;
-          // Enabled when we can toggle, or when the open-url has loaded.
-          const enabled = canToggleInline || !!magicOpenUrl;
-          return (
-            <chakra.button
-              type="button"
-              onClick={() => {
-                if (canToggleInline) setShowMagic((v) => !v);
-                else if (magicOpenUrl) openExternal(magicOpenUrl);
-              }}
-              disabled={!enabled}
-              position="absolute"
-              top={2}
-              right={2}
-              display="flex"
-              alignItems="center"
-              gap={1}
-              bg={filled ? "violet.500" : "whiteAlpha.900"}
-              color={filled ? "white" : "violet.600"}
-              borderWidth="1px"
-              borderColor="violet.500"
-              borderRadius="full"
-              px={2}
-              py={0.5}
-              cursor={enabled ? "pointer" : "default"}
-              _hover={enabled ? { bg: filled ? "violet.600" : "violet.50" } : {}}
-              title={
-                canToggleInline
-                  ? showingMagic
-                    ? "Showing the magic version — click to see the original"
-                    : "Showing the original — click to see the magic version"
-                  : "Open the magic version"
-              }
-            >
-              <Sparkle size={12} weight={filled ? "fill" : "regular"} />
-              <Text fontSize="2xs" fontFamily="heading" fontWeight="600">
-                {canToggleInline && !showingMagic ? "Original" : "Magic"}
-              </Text>
-            </chakra.button>
-          );
-        })()}
       </Box>
 
       <Box p={3}>
@@ -400,15 +329,13 @@ function PortfolioCard({
           <HStack gap={1}>
             {fileUrl && (
               <IconButton
-                aria-label={showingMagic ? "Open magic version" : "Open file"}
-                title={showingMagic ? "Open the magic version" : "Open the file"}
+                aria-label="Open file"
+                title="Open the file"
                 size="2xs"
                 variant="ghost"
-                color={showingMagic ? "violet.500" : "charcoal.400"}
-                _hover={{ bg: showingMagic ? "violet.50" : "gray.100", color: showingMagic ? "violet.600" : "navy.500" }}
-                onClick={() =>
-                  openExternal(showingMagic && magicUrl ? magicUrl : fileUrl)
-                }
+                color="charcoal.400"
+                _hover={{ bg: "gray.100", color: "navy.500" }}
+                onClick={() => openExternal(fileUrl)}
               >
                 <ArrowSquareOut />
               </IconButton>

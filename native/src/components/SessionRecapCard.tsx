@@ -12,7 +12,8 @@ import { fonts, useColors } from "@/theme";
  * Shows a short portrait of growth moments from this session, drawn from
  * the scholar's own thinking (never a score or a praise dump).
  * Completed activities render immediately; conversational sessions can request
- * the same observer-backed recap without changing completion state.
+ * the same observer-backed recap via Wrap up, which also moves the open
+ * exploration to Finished (masteryObservations.requestRecap, TRA-371).
  */
 export function SessionRecapCard({
   sessionId,
@@ -125,6 +126,11 @@ export function SessionRecapCard({
           </View>
         ))}
       </View>
+      {requested ? (
+        <Text style={styles.finishedNote}>
+          Moved to Finished — you can pick it back up any time.
+        </Text>
+      ) : null}
     </Animated.View>
   );
 }
@@ -209,6 +215,12 @@ function makeStyles(c: ReturnType<typeof useColors>) {
       fontFamily: fonts.semibold,
       fontSize: 14,
       color: c.navy,
+    },
+    finishedNote: {
+      fontFamily: fonts.regular,
+      fontSize: 13,
+      color: c.charcoalMuted,
+      marginTop: 12,
     },
     excerpt: {
       fontFamily: fonts.regular,

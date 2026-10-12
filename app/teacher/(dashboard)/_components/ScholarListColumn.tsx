@@ -10,7 +10,7 @@ import {
   type ScholarParticipationSelection,
 } from "@/components/ScholarParticipationFilter";
 import { groupMatchesParticipation } from "@/shared/scholarGroupRouting";
-import { buildScopeRows } from "./scopeRows";
+import { buildScopeRows } from "@/components/scopeRows";
 import { type Scholar } from "./types";
 
 // ── Scholar List Column ───────────────────────────────────────────────────

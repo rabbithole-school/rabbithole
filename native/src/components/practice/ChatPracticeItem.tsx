@@ -46,14 +46,22 @@ function parseSpec(json: string): ManipulativeSpec | null {
 /** Native parity renderer for the full problems-in-chat item union. */
 export function ChatPracticeItem({
   scholarId,
+  sessionId,
   item,
 }: {
   scholarId: Id<"users">;
+  /** The durable session the item was served in — routes a storyThread item to
+   *  its feedback-only grader. Always present: the item is only ever rendered
+   *  inside a session transcript. */
+  sessionId: Id<"sessions">;
   item: ChatPracticePayload;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const submitAnswer = useMutation(api.practiceSkills.submitAnswer);
+  const submitStory = useMutation(
+    api.practiceSkills.submitStoryThreadApplication,
+  );
   const [value, setValue] = useState("");
   const [manipulativeState, setManipulativeState] = useState<unknown>(null);
   const [attempts, setAttempts] = useState(0);
@@ -77,6 +85,11 @@ export function ChatPracticeItem({
     firstKeyAtRef.current = null;
   }, [item.itemId]);
 
+  // A manipulative's first touch starts the same clock a keystroke does (TRA-221).
+  const onManipulativeTouchStart = useCallback(() => {
+    if (firstKeyAtRef.current === null) firstKeyAtRef.current = Date.now();
+  }, []);
+
   const submit = useCallback(
     async (answer: string) => {
       const normalized = answer.trim();
@@ -90,20 +103,30 @@ export function ChatPracticeItem({
           renderAtMs: itemRenderAtRef.current,
           firstKeyAtMs: firstKeyAtRef.current,
         });
-        const result = await submitAnswer({
-          scholarId,
-          itemId: item.itemId,
-          answer: normalized,
-          record: attempts === 0,
-          clientEventId:
-            clientEventIdRef.current?.answer === normalized
-              ? clientEventIdRef.current.id
-              : (clientEventIdRef.current = {
-                  answer: normalized,
-                  id: makeClientEventId("practice-answer"),
-                }).id,
-          ...timing,
-        });
+        const result =
+          item.mode === "storyThread"
+            ? // The one application on a durable story thread grades through the
+              // feedback-only path (no mastery, no attempt row); it still
+              // returns correct/unitOutcome so the UI behaves identically.
+              await submitStory({
+                sessionId,
+                itemId: item.itemId,
+                answer: normalized,
+              })
+            : await submitAnswer({
+                scholarId,
+                itemId: item.itemId,
+                answer: normalized,
+                record: attempts === 0,
+                clientEventId:
+                  clientEventIdRef.current?.answer === normalized
+                    ? clientEventIdRef.current.id
+                    : (clientEventIdRef.current = {
+                        answer: normalized,
+                        id: makeClientEventId("practice-answer"),
+                      }).id,
+                ...timing,
+              });
         clientEventIdRef.current = null;
         setAttempts((count) => count + 1);
         setStatus(result.correct ? "correct" : "miss");
@@ -115,7 +138,7 @@ export function ChatPracticeItem({
         setBusy(false);
       }
     },
-    [attempts, busy, item.itemId, scholarId, status, submitAnswer],
+    [attempts, busy, item.itemId, item.mode, scholarId, sessionId, status, submitAnswer, submitStory],
   );
 
   // A unit-bearing item ("…in cubic centimeters") is answered by value AND
@@ -195,6 +218,7 @@ export function ChatPracticeItem({
           <View
             style={[styles.manipulative, status === "correct" && styles.disabled]}
             pointerEvents={status === "correct" ? "none" : "auto"}
+            onTouchStart={onManipulativeTouchStart}
           >
             <NativeManipulative
               spec={spec}

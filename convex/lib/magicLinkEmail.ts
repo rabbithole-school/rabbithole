@@ -21,17 +21,50 @@ import { authEmailFrom } from "./deploymentConfig";
 
 const RESEND_ENDPOINT = "https://api.resend.com/emails";
 
-function renderHtml(url: string): string {
-  return `
+/**
+ * An institution-branded variant of the sign-in email, for people who know the
+ * institution but not the app (e.g. a family that has applied to the school).
+ * The institution's name leads; Rabbithole drops to a footer line. `from`
+ * overrides the deployment's default From identity when set.
+ */
+export interface MagicLinkBrand {
+  name: string;
+  from?: string;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * Subject + HTML for the sign-in email. Pure, so the variant choice is
+ * unit-testable without a Resend call.
+ */
+export function renderMagicLinkEmail(
+  url: string,
+  brand?: MagicLinkBrand,
+): { subject: string; html: string } {
+  const name = brand ? escapeHtml(brand.name) : "Rabbithole";
+  const footer = brand
+    ? `
+      <p style="font-size: 12px; color: #9ca3af; margin-top: 24px;">
+        Powered by Rabbithole.
+      </p>`
+    : "";
+  const html = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; color: #222656;">
-      <h1 style="font-size: 20px; margin: 0 0 16px;">Sign in to Rabbithole</h1>
+      <h1 style="font-size: 20px; margin: 0 0 16px;">Sign in to ${name}</h1>
       <p style="font-size: 15px; line-height: 1.5; color: #364153;">
         Click the button below to sign in. This link expires in 15 minutes
         and can only be used once.
       </p>
       <p style="margin: 24px 0;">
         <a href="${url}" style="display: inline-block; background: #AD60BF; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; font-size: 15px;">
-          Sign in to Rabbithole
+          Sign in to ${name}
         </a>
       </p>
       <p style="font-size: 13px; line-height: 1.5; color: #6b7280;">
@@ -39,17 +72,25 @@ function renderHtml(url: string): string {
       </p>
       <p style="font-size: 12px; color: #9ca3af; word-break: break-all;">
         Or paste this link into your browser:<br />${url}
-      </p>
+      </p>${footer}
     </div>
   `;
+  return {
+    subject: brand
+      ? `Your ${brand.name} sign-in link`
+      : "Your Rabbithole sign-in link",
+    html,
+  };
 }
 
 export async function sendMagicLinkEmail({
   to,
   url,
+  brand,
 }: {
   to: string;
   url: string;
+  brand?: MagicLinkBrand;
 }): Promise<void> {
   const apiKey = process.env.AUTH_RESEND_KEY;
 
@@ -62,7 +103,8 @@ export async function sendMagicLinkEmail({
     );
     return;
   }
-  const from = authEmailFrom();
+  const from = brand?.from ?? authEmailFrom();
+  const { subject, html } = renderMagicLinkEmail(url, brand);
 
   const res = await fetch(RESEND_ENDPOINT, {
     method: "POST",
@@ -73,8 +115,8 @@ export async function sendMagicLinkEmail({
     body: JSON.stringify({
       from,
       to,
-      subject: "Your Rabbithole sign-in link",
-      html: renderHtml(url),
+      subject,
+      html,
     }),
   });
 

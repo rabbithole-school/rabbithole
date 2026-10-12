@@ -277,8 +277,8 @@ describe("alerts.raise", () => {
     const texts = scheduled.map(
       (row) => (row.args[0] as { text: string }).text,
     );
-    expect(texts).toContain("🧗 *Practice struggle*\nDetails");
-    expect(texts).toContain("⚠️ *Device battery low*\nDetails");
+    expect(texts).toContain("🧗 **Practice struggle**\nDetails");
+    expect(texts).toContain("⚠️ **Device battery low**\nDetails");
   });
 
   test("records an alert row even when no channel is linked", async () => {

@@ -85,7 +85,6 @@ const ALLOWED_EVIDENCE_TYPES = new Set([
   "direct_demonstration",
   "indirect_inference",
   "misconception_signal",
-  "interest_signal",
 ]);
 
 type GameObservation = {
@@ -231,7 +230,6 @@ const GAME_OBSERVER_TOOL = {
                 "direct_demonstration",
                 "indirect_inference",
                 "misconception_signal",
-                "interest_signal",
               ],
             },
             evidenceSummary: { type: "string" as const },

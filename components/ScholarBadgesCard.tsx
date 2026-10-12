@@ -10,6 +10,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { Box, Flex, HStack, Text, Spinner } from "@chakra-ui/react";
 import { Medal } from "@phosphor-icons/react";
 import { BadgeArt } from "@/components/BadgeArt";
+import { isLicenseCardBadge } from "@/shared/calculatorLicense";
 import { formatTimeAgo } from "@/lib/relativeTime";
 
 export function ScholarBadgesCard({ scholarId }: { scholarId: Id<"users"> }) {
@@ -61,9 +62,11 @@ export function ScholarBadgesCard({ scholarId }: { scholarId: Id<"users"> }) {
                 imageUrl={b.imageUrl}
                 emoji={b.unitEmoji ?? "🏅"}
                 status={b.artStatus}
-                size="72px"
+                // A license card is landscape: give it the cell's width.
+                size={isLicenseCardBadge(b.kind) ? "92px" : "72px"}
                 alt={`${b.unitTitle} badge`}
                 showGeneratingOverlay={false}
+                kind={b.kind}
               />
               <Text
                 fontFamily="heading"

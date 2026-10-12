@@ -1,16 +1,14 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
   Box,
   Button,
-  chakra,
   Container,
   Flex,
-  Grid,
   HStack,
   Heading,
   Input,
@@ -20,12 +18,7 @@ import {
   VStack,
 } from "@chakra-ui/react";
 import { Avatar } from "@/components/Avatar";
-import {
-  ArrowSquareOut,
-  Camera,
-  FileText,
-  MapTrifold,
-} from "@phosphor-icons/react";
+import { Camera } from "@phosphor-icons/react";
 import { ScholarPhotoDialog } from "@/components/ScholarPhotoDialog";
 import { formatRelative } from "@/lib/relativeTime";
 import { ParentMessages } from "@/components/ParentMessages";
@@ -42,11 +35,8 @@ import {
 } from "@/components/parent/parentMathQuestions";
 import { MathSkillsPortrait } from "@/components/practice/MathSkillsPortrait";
 import { useAideDockOptional } from "@/components/aide/AideDockProvider";
-import {
-  ParentPortfolioViewer,
-  type ParentPortfolioItem,
-} from "@/components/parent/ParentPortfolioViewer";
-import { pageCountForRange } from "@/components/parent/parentPortfolioViewerLogic";
+import { ParentPortfolioTab } from "@/components/parent/ParentPortfolioTab";
+import { ParentCourseView } from "@/components/parent/ParentCourseView";
 
 /**
  * The parent portal: a guardian sees ONLY their own linked children's
@@ -57,11 +47,32 @@ export function ParentDashboard({
   childOptions,
   activeChild,
   tab,
+  courseId = null,
+  hrefQuery = "",
+  preview = false,
+  applicantOnly = false,
 }: {
   childOptions: ParentChild[];
   activeChild: Id<"users"> | null;
   tab: ParentTab;
+  /** Third path segment under Portfolio: a scholarGroup id, or "other". */
+  courseId?: string | null;
+  /** The query string every in-portal link carries (`?child=` / `?remote=`). */
+  hrefQuery?: string;
+  /**
+   * Staff "View as parent" preview: the viewer is NOT a guardian, so every
+   * write affordance and every family-only surface (health forms, library
+   * card, messages) is replaced by a placeholder; the non-sensitive reads
+   * render exactly as the family sees them.
+   */
+  preview?: boolean;
+  /**
+   * Applicant-only family (server-derived, parents.applicantContext): no
+   * linked child yet, so the portal shows only their application.
+   */
+  applicantOnly?: boolean;
 }) {
+
   if (childOptions.length === 0) {
     return (
       <Container maxW="lg" py={16}>
@@ -83,6 +94,16 @@ export function ParentDashboard({
     const activeChildOption = childOptions.find(
       (child) => child._id === activeChild,
     );
+    if (preview) {
+      return (
+        <Container maxW="4xl" py={6}>
+          <PreviewPlaceholder>
+            Messages are between {activeChildOption?.name ?? "the scholar"}
+            &apos;s family and staff — they aren&apos;t part of this preview.
+          </PreviewPlaceholder>
+        </Container>
+      );
+    }
     return (
       <Box h="full" minH={0}>
         {activeChild && (
@@ -100,8 +121,9 @@ export function ParentDashboard({
   return (
     <Container maxW="4xl" py={6}>
       {/* Post-login nudge to add a passkey (faster sign-in next time).
-          Self-hides once the parent has one or dismisses it. */}
-      <PasskeyUpsell />
+          Self-hides once the parent has one or dismisses it. Not part of a
+          staff preview — it's about the viewer's own account. */}
+      {!preview && !applicantOnly && <PasskeyUpsell />}
 
       {activeChild && (
         <ChildView
@@ -117,9 +139,30 @@ export function ParentDashboard({
               ?.enrollmentStanding === "program_guest"
           }
           tab={tab}
+          courseId={courseId}
+          hrefQuery={hrefQuery}
+          preview={preview}
         />
       )}
     </Container>
+  );
+}
+
+/** The "not shown in preview" stand-in for a family-only surface. */
+function PreviewPlaceholder({ children }: { children: React.ReactNode }) {
+  return (
+    <Box
+      bg="gray.50"
+      borderRadius="xl"
+      borderWidth="1px"
+      borderStyle="dashed"
+      borderColor="gray.300"
+      p={5}
+    >
+      <Text fontFamily="body" fontSize="sm" color="charcoal.400">
+        {children}
+      </Text>
+    </Box>
   );
 }
 
@@ -129,12 +172,18 @@ function ChildView({
   childImage,
   programGuest,
   tab,
+  courseId,
+  hrefQuery,
+  preview,
 }: {
   scholarId: Id<"users">;
   childName: string;
   childImage: string | null;
   programGuest: boolean;
   tab: ParentTab;
+  courseId: string | null;
+  hrefQuery: string;
+  preview: boolean;
 }) {
   const summary = useQuery(
     api.parents.childSummary,
@@ -155,13 +204,15 @@ function ChildView({
           >
             <HStack gap={4} align="center">
               <Box
-                as="button"
+                as={preview ? "div" : "button"}
                 position="relative"
                 flexShrink={0}
-                cursor="pointer"
+                cursor={preview ? "default" : "pointer"}
                 borderRadius="full"
-                aria-label={`Change ${childName || "your child"}'s photo`}
-                onClick={() => setPhotoDialogOpen(true)}
+                aria-label={
+                  preview ? undefined : `Change ${childName || "your child"}'s photo`
+                }
+                onClick={preview ? undefined : () => setPhotoDialogOpen(true)}
               >
                 <Avatar
                   name={childName || summary?.name}
@@ -169,21 +220,23 @@ function ChildView({
                   size="lg"
                   colorKey={scholarId}
                 />
-                <Box
-                  position="absolute"
-                  bottom={0}
-                  right={0}
-                  bg="violet.500"
-                  borderRadius="full"
-                  w={7}
-                  h={7}
-                  display="flex"
-                  alignItems="center"
-                  justifyContent="center"
-                  border="2px solid white"
-                >
-                  <Camera size={14} color="white" />
-                </Box>
+                {!preview && (
+                  <Box
+                    position="absolute"
+                    bottom={0}
+                    right={0}
+                    bg="violet.500"
+                    borderRadius="full"
+                    w={7}
+                    h={7}
+                    display="flex"
+                    alignItems="center"
+                    justifyContent="center"
+                    border="2px solid white"
+                  >
+                    <Camera size={14} color="white" />
+                  </Box>
+                )}
               </Box>
               <Box flex={1} minW={0}>
                 <Heading
@@ -241,10 +294,29 @@ function ChildView({
           <SharedNarratives scholarId={scholarId} />
         </>
       )}
-      {tab === "portfolio" && !programGuest && (
-        <PortfolioGrid scholarId={scholarId} />
+      {tab === "portfolio" &&
+        (courseId ? (
+          <ParentCourseView
+            scholarId={scholarId}
+            groupId={courseId}
+            hrefQuery={hrefQuery}
+            preview={preview}
+          />
+        ) : (
+          <ParentPortfolioTab
+            scholarId={scholarId}
+            hrefQuery={hrefQuery}
+            preview={preview}
+          />
+        ))}
+      {tab === "records" && preview && (
+        <PreviewPlaceholder>
+          Forms, health records and the library card are for{" "}
+          {childName || "the scholar"}&apos;s family only — they aren&apos;t
+          part of this preview.
+        </PreviewPlaceholder>
       )}
-      {tab === "records" && (
+      {tab === "records" && !preview && (
         <VStack align="stretch" gap={4}>
           {!programGuest && (
             <ParentLibraryCard key={scholarId} scholarId={scholarId} />
@@ -264,10 +336,10 @@ function ChildView({
 }
 
 /**
- * An Extended Education child has no school record — no sessions, mastery,
- * portfolio or school calendar — so the portal shows their guardian a
- * deliberately limited view. This explains what IS here (forms and messages)
- * instead of leaving the missing surfaces unexplained.
+ * An Extended Education child has no school record — no sessions, mastery or
+ * school calendar — so the portal shows their guardian a deliberately limited
+ * view. Their programs ARE here, under Portfolio, so this explains what the
+ * account covers instead of leaving the missing surfaces unexplained.
  */
 function ExtendedEducationNotice({ childName }: { childName: string }) {
   return (
@@ -283,9 +355,10 @@ function ExtendedEducationNotice({ childName }: { childName: string }) {
       </Heading>
       <Text fontFamily="body" fontSize="sm" color="charcoal.500">
         {childName || "Your child"} joins us as a visiting student, so school
-        record pages — learning sessions, mastery, portfolio and the school
-        calendar — aren&apos;t part of this account. You can still complete the
-        forms below and message the program team.
+        record pages — learning sessions, mastery and the school calendar
+        — aren&apos;t part of this account. Portfolio holds the work and
+        resources from their programs, and you can complete the forms below and
+        message the program team.
       </Text>
     </Box>
   );
@@ -299,8 +372,9 @@ function ExtendedEducationNotice({ childName }: { childName: string }) {
  * exactly like the teacher Curriculum landing's "Ask the bot" door. No second
  * inline chat; the tab stays a calm portrait.
  *
- * Below the portrait sits a row of CANNED QUESTIONS focused narrowly on ways
- * parents can enrich math at home, not skill tracking or progress reporting.
+ * Below the portrait sits a row of CANNED QUESTIONS: ways parents can enrich
+ * math at home, plus one about how the engine picks skills — never skill
+ * tracking or progress reporting.
  * Because each is complete as written, a tap sends it
  * immediately via `seedComposer(q, { send: true })` rather than prefilling.
  * The chips render only when the aide dock is present.
@@ -723,244 +797,5 @@ function ProgressTab({ scholarId }: { scholarId: Id<"users"> }) {
         )}
       </Card>
     </VStack>
-  );
-}
-
-function PortfolioGrid({ scholarId }: { scholarId: Id<"users"> }) {
-  const items = useQuery(api.portfolio.listForGuardian, { scholarId });
-  const [openIndex, setOpenIndex] = useState<number | null>(null);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-
-  if (items === undefined) {
-    return <Spinner size="sm" color="violet.400" />;
-  }
-  if (items.length === 0) {
-    return <Empty>No family-visible work samples yet.</Empty>;
-  }
-  const modalItems = items.filter(
-    (item) => item.kind !== "file" || item.fileMimeType !== "application/pdf",
-  );
-  const closeViewer = () => {
-    setOpenIndex(null);
-    requestAnimationFrame(() => triggerRef.current?.focus());
-  };
-
-  return (
-    <>
-      {openIndex !== null && (
-        <ParentPortfolioViewer
-          activeIndex={openIndex}
-          fileUrl={modalItems[openIndex]?.fileUrl}
-          items={modalItems as ParentPortfolioItem[]}
-          onClose={closeViewer}
-          onIndexChange={setOpenIndex}
-        />
-      )}
-
-      <Grid templateColumns={{ base: "1fr", md: "repeat(2, 1fr)" }} gap={4}>
-        {items.map((item, index) => {
-          const isPdf =
-            item.kind === "file" &&
-            item.fileMimeType === "application/pdf";
-          const pageCount = pageCountForRange(
-            item.kind === "file" ? item.pageRange : undefined,
-          );
-          const viewable = item.kind !== "file" || item.hasFile;
-          const content = (
-            <>
-              {item.kind === "map" && (
-                <Flex
-                  align="center"
-                  bg="violet.50"
-                  borderRadius="lg"
-                  color="violet.600"
-                  direction="column"
-                  gap={2}
-                  h={{ base: "180px", md: "220px" }}
-                  justify="center"
-                  mb={3}
-                >
-                  <MapTrifold size={44} weight="duotone" />
-                  <Text fontFamily="heading" fontSize="sm" fontWeight="600">
-                    View map
-                  </Text>
-                </Flex>
-              )}
-              {item.kind === "text" && (
-                <Box
-                  bg="gray.50"
-                  borderRadius="lg"
-                  h={{ base: "180px", md: "220px" }}
-                  mb={3}
-                  overflow="hidden"
-                  p={5}
-                  position="relative"
-                >
-                  <FileText size={24} color="#805AD5" />
-                  <Text
-                    color="charcoal.500"
-                    fontFamily="body"
-                    fontSize="sm"
-                    lineClamp={6}
-                    mt={3}
-                    whiteSpace="pre-wrap"
-                  >
-                    {item.content}
-                  </Text>
-                </Box>
-              )}
-              {item.thumbUrl && (
-                <Box
-                  bg="gray.50"
-                  borderRadius="lg"
-                  h={{ base: "180px", md: "220px" }}
-                  mb={3}
-                  overflow="hidden"
-                  position="relative"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element -- Convex signed storage URL is dynamic. */}
-                  <img
-                    src={item.thumbUrl}
-                    alt=""
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "cover",
-                    }}
-                  />
-                  {pageCount !== null && (
-                    <Text
-                      bg="blackAlpha.700"
-                      borderRadius="full"
-                      bottom={2}
-                      color="white"
-                      fontFamily="heading"
-                      fontSize="xs"
-                      left={2}
-                      lineHeight="1"
-                      position="absolute"
-                      px={2.5}
-                      py={1.5}
-                    >
-                      {pageCount} {pageCount === 1 ? "page" : "pages"}
-                    </Text>
-                  )}
-                  {isPdf && item.fileUrl && (
-                    <Flex
-                      data-new-tab-hint
-                      align="center"
-                      bg="whiteAlpha.900"
-                      borderRadius="full"
-                      color="charcoal.700"
-                      fontFamily="heading"
-                      fontSize="xs"
-                      gap={1.5}
-                      opacity={0}
-                      position="absolute"
-                      px={2.5}
-                      py={1.5}
-                      right={2}
-                      top={2}
-                      transform="translateY(-4px)"
-                      transition="opacity 120ms ease, transform 120ms ease"
-                    >
-                      Open in new tab <ArrowSquareOut weight="bold" />
-                    </Flex>
-                  )}
-                </Box>
-              )}
-              <Text fontFamily="heading" fontWeight="600" fontSize="sm" color="charcoal.600">
-                {item.title}
-              </Text>
-              {item.attributionCount > 1 && (
-                <Text color="violet.600" fontFamily="heading" fontSize="xs" mt={1}>
-                  Shared work · {item.attributionCount} scholars
-                </Text>
-              )}
-              {item.kind === "file" && item.aiCaption && (
-                <Text fontFamily="body" fontSize="sm" color="charcoal.400" mt={1}>
-                  {item.aiCaption}
-                </Text>
-              )}
-              <Text fontFamily="body" fontSize="xs" color="charcoal.300" mt={2}>
-                {formatRelative(item._creationTime)}
-                {item.activityTitle ? ` · ${item.activityTitle}` : ""}
-                {viewable
-                  ? isPdf
-                    ? " · Opens in new tab"
-                    : item.kind === "map"
-                      ? " · View map"
-                      : " · View work"
-                  : ""}
-              </Text>
-            </>
-          );
-          const interactionStyles = viewable
-            ? {
-                borderColor: "violet.300",
-                "& [data-new-tab-hint]": {
-                  opacity: 1,
-                  transform: "translateY(0)",
-                },
-              }
-            : undefined;
-
-          if (isPdf && item.fileUrl) {
-            return (
-              <chakra.a
-                key={item._id}
-                bg="white"
-                borderColor="gray.200"
-                borderRadius="xl"
-                borderWidth="1px"
-                cursor="pointer"
-                href={item.fileUrl}
-                p={4}
-                rel="noopener noreferrer"
-                role="group"
-                target="_blank"
-                textAlign="left"
-                _focusVisible={{
-                  outline: "2px solid",
-                  outlineColor: "violet.400",
-                  outlineOffset: "2px",
-                  ...interactionStyles,
-                }}
-                _hover={interactionStyles}
-              >
-                {content}
-              </chakra.a>
-            );
-          }
-
-          return (
-            <chakra.button
-              key={item._id}
-              bg="white"
-              borderColor="gray.200"
-              borderRadius="xl"
-              borderWidth="1px"
-              cursor={viewable ? "pointer" : "default"}
-              disabled={!viewable}
-              onClick={(event) => {
-                if (!viewable) return;
-                triggerRef.current = event.currentTarget;
-                setOpenIndex(
-                  modalItems.findIndex(
-                    (modalItem) => modalItem._id === items[index]._id,
-                  ),
-                );
-              }}
-              p={4}
-              role="group"
-              textAlign="left"
-              _hover={interactionStyles}
-            >
-              {content}
-            </chakra.button>
-          );
-        })}
-      </Grid>
-    </>
   );
 }

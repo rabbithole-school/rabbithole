@@ -23,9 +23,12 @@ import type { PracticeEvent } from "../../vendor/shared/practiceMachine";
  */
 export function breakerHydrationEvent(
   episode: NonNullable<FunctionReturnType<typeof api.practiceSkills.activeBreakerEpisode>>,
+  /** The run input key this screen is serving the episode on. */
+  inputKey?: string,
 ): Extract<PracticeEvent, { type: "hydrate:breaker" }> {
   return {
     type: "hydrate:breaker",
+    ...(inputKey !== undefined ? { inputKey } : {}),
     episode: {
       triggerAttemptId: String(episode.triggerAttemptId),
       recoveryAvailable: true,

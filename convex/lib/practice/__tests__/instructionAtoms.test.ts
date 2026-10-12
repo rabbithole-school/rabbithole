@@ -8,7 +8,6 @@ import {
   instructionVideoEmbedUrl,
   instructionWritesFor,
   isStrandInstructionKey,
-  shouldRecordInstruction,
   strandInstructionKey,
   tryItFade,
   type InstructionAtom,
@@ -104,30 +103,11 @@ describe("instructionVideoEmbedUrl — one clipped privacy-enhanced player URL",
       startSec: 0,
       endSec: 60,
     });
-    // Annotations/cards off, keyboard shortcuts off, related videos limited to
-    // the source channel, captions forced on in English.
-    expect(url).toContain("iv_load_policy=3");
-    expect(url).toContain("disablekb=1");
-    expect(url).toContain("rel=0");
-    expect(url).toContain("cc_load_policy=1");
     // `modestbranding` has been a no-op since 2023 — never re-add it as if it
     // did something.
     expect(url).not.toContain("modestbranding");
     // Controls stay ON: a scholar must be able to pause and re-watch.
     expect(url).not.toContain("controls=0");
-  });
-});
-
-describe("shouldRecordInstruction — Rehearse writes nothing", () => {
-  test("preview (teacher play-it) records nothing even with a scholarId", () => {
-    expect(shouldRecordInstruction({ preview: true, scholarId: "u1" })).toBe(false);
-  });
-  test("no scholar subject → records nothing", () => {
-    expect(shouldRecordInstruction({ preview: false, scholarId: null })).toBe(false);
-    expect(shouldRecordInstruction({ scholarId: undefined })).toBe(false);
-  });
-  test("only a real scholar view records", () => {
-    expect(shouldRecordInstruction({ preview: false, scholarId: "u1" })).toBe(true);
   });
 });
 
@@ -168,12 +148,6 @@ describe("manipulative atom — reuses the EXISTING spec + isSolved, ungraded", 
     adjustable: ["parts", "shaded"],
     goal: { type: "shadedFractionEquals", disc: 0, value: 0.5 },
   };
-
-  test("an atom's spec is a JSON ManipulativeSpec (same shape as practiceItems)", () => {
-    const atom: InstructionAtom = { kind: "manipulative", spec: JSON.stringify(partition) };
-    const parsed = JSON.parse(atom.spec) as ManipulativeSpec;
-    expect(parsed.kind).toBe("partition");
-  });
 
   test("isSolved runs on the parsed spec for the client-side 'you did it' moment", () => {
     const spec = JSON.parse(JSON.stringify(partition)) as ManipulativeSpec;

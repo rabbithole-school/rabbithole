@@ -60,6 +60,10 @@ type CommonProps = {
   autoFocusSearch?: boolean;
   sort?: ScholarSortMode;
   maxH?: string;
+  /** Stretch to the parent's height (parent must be a flex column with a
+   *  definite height) and let the list take the remaining space instead of
+   *  capping it at `maxH`. */
+  fill?: boolean;
   emptyHint?: string;
   /** Empty-state text for an ACTIVE-QUERY / group-filter miss (defaults to
    *  "No matches."). Callers pass scope-aware copy (see shared/scholarSearchCopy)
@@ -136,7 +140,7 @@ export function ScholarPicker(props: ScholarPickerProps) {
   };
 
   return (
-    <Stack gap={3}>
+    <Stack gap={3} flex={props.fill ? 1 : undefined} minH={props.fill ? 0 : undefined}>
       {props.showParticipationFilter && (
         <ScholarParticipationFilter
           selection={participation}
@@ -205,6 +209,7 @@ function ScholarPickerContentInner({
     autoFocusSearch = false,
     sort = "auto",
     maxH = "320px",
+    fill = false,
     emptyHint = "No scholars.",
     searchMissHint = "No matches.",
     onSelect,
@@ -418,7 +423,7 @@ function ScholarPickerContentInner({
   const showSelectAll = mode === "multi" && (props.showSelectAll ?? true);
 
   return (
-    <Stack gap={3}>
+    <Stack gap={3} flex={fill ? 1 : undefined} minH={fill ? 0 : undefined}>
       {/* Search + select-all/none */}
       {(searchable || showSelectAll) && (
         <Flex align="center" gap={2}>
@@ -538,7 +543,12 @@ function ScholarPickerContentInner({
 
       {/* Scholar rows */}
       {resultsVisible && (
-        <Box maxH={maxH} overflowY="auto">
+        <Box
+          maxH={fill ? undefined : maxH}
+          flex={fill ? 1 : undefined}
+          minH={fill ? 0 : undefined}
+          overflowY="auto"
+        >
           <Stack gap={1} role="listbox" id={listboxId} aria-label="Scholars">
             {visible.length === 0 ? (
               <Text fontSize="sm" color="charcoal.400" py={4} textAlign="center">

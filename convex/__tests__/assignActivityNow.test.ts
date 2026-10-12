@@ -3,7 +3,13 @@ import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { grantInstitutionMembership, seedTestInstitution } from "./institutionTestHelpers";
 import { internal } from "../_generated/api";
+import type { ActionCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
+import {
+  classFocusLifetimeConfirmation,
+  makeAssignmentTools,
+} from "../lib/assignmentTools";
+import type { Role } from "../lib/roles";
 
 /**
  * The teacher Aide's `assign_activity_now` tool (convex/lib/aideTools.ts) has
@@ -21,6 +27,15 @@ const modules = (
     glob: (pattern: string) => Record<string, () => Promise<unknown>>;
   }
 ).glob("../**/*.ts");
+
+function actionCtxFor(t: ReturnType<typeof convexTest>): ActionCtx {
+  return {
+    runQuery: (ref: unknown, args: unknown) =>
+      (t as unknown as { query: (r: unknown, a: unknown) => Promise<unknown> }).query(ref, args),
+    runMutation: (ref: unknown, args: unknown) =>
+      (t as unknown as { mutation: (r: unknown, a: unknown) => Promise<unknown> }).mutation(ref, args),
+  } as unknown as ActionCtx;
+}
 
 async function seedUser(
   t: ReturnType<typeof convexTest>,
@@ -70,7 +85,59 @@ async function seedUnitWithActivity(
 
 const HOUR = 3_600_000;
 
+async function toolsFor(
+  t: ReturnType<typeof convexTest>,
+  callerUserId: Id<"users">,
+  role: Role = "teacher",
+) {
+  const tools = await makeAssignmentTools(actionCtxFor(t), () => {}, {
+    role,
+    callerUserId,
+  });
+  return Object.fromEntries(tools.map((tool) => [tool.name, tool])) as Record<
+    string,
+    { run: (input: unknown) => Promise<string> }
+  >;
+}
+
 describe("assign_activity_now composition", () => {
+  test("tool result states the class-focus lifetime", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    await seedUser(t, "scholar", {
+      name: "Avery Example",
+      username: "avery-example",
+    });
+    await seedUnitWithActivity(t, teacher);
+    const tools = await toolsFor(t, teacher);
+
+    const withoutEnd = JSON.parse(
+      await tools.assign_activity_now.run({
+        unitTitle: "Test Unit",
+        activityTitle: "Test Activity",
+        scholarNames: ["Avery Example"],
+        mode: "classFocus",
+      }),
+    ) as Record<string, unknown>;
+    expect(withoutEnd.confirmation).toBe(
+      classFocusLifetimeConfirmation(undefined),
+    );
+
+    const endsAtMs = Date.now() + HOUR;
+    const withEnd = JSON.parse(
+      await tools.assign_activity_now.run({
+        unitTitle: "Test Unit",
+        activityTitle: "Test Activity",
+        scholarNames: ["Avery Example"],
+        mode: "classFocus",
+        endsAtMs,
+      }),
+    ) as Record<string, unknown>;
+    expect(withEnd.confirmation).toBe(
+      classFocusLifetimeConfirmation(endsAtMs),
+    );
+  });
+
   test("assignWork(activity) plans it, then pushActivityNow makes it live", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");

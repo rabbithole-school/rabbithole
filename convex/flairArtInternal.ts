@@ -2,6 +2,7 @@ import { v } from "convex/values";
 
 import { internal } from "./_generated/api";
 import { internalMutation, internalQuery } from "./_generated/server";
+import { MAX_GENERATION_ATTEMPTS, RETRY_DELAY_MS } from "./flairArt";
 
 export const getById = internalQuery({
   args: { id: v.id("flairArt") },
@@ -98,6 +99,37 @@ export const retryFailed = internalMutation({
     await ctx.scheduler.runAfter(0, internal.flairArtActions.generateFlairArt, {
       id,
     });
+    return true;
+  },
+});
+
+/**
+ * The watchdog `ensureCriteria` schedules with every generation. A row still
+ * pending a full retry delay later had its action killed (a deploy or the
+ * 10-minute cap) before it could reach markReady/markFailed; re-drive it,
+ * with another watchdog, within the same attempt budget. A row that finished
+ * is left alone.
+ */
+export const retryIfStalled = internalMutation({
+  args: { id: v.id("flairArt") },
+  handler: async (ctx, { id }) => {
+    const existing = await ctx.db.get(id);
+    if (!existing || existing.status !== "pending") return false;
+    const now = Date.now();
+    if (now - existing.lastAttemptAt < RETRY_DELAY_MS) return false;
+    if (existing.attemptCount >= MAX_GENERATION_ATTEMPTS) return false;
+    await ctx.db.patch(id, {
+      attemptCount: existing.attemptCount + 1,
+      lastAttemptAt: now,
+    });
+    await ctx.scheduler.runAfter(0, internal.flairArtActions.generateFlairArt, {
+      id,
+    });
+    await ctx.scheduler.runAfter(
+      RETRY_DELAY_MS,
+      internal.flairArtInternal.retryIfStalled,
+      { id },
+    );
     return true;
   },
 });

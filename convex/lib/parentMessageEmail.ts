@@ -8,7 +8,7 @@
 // configured, with the teacher's own inbox as a fallback.
 
 import { parentMessageFromAddress } from "./deploymentConfig";
-import { tokenizeMessageLinks } from "../../lib/messageLinks";
+import { messagePlainText, tokenizeMessageLinks } from "../../lib/messageLinks";
 
 const RESEND_ENDPOINT = "https://api.resend.com/emails";
 
@@ -42,15 +42,19 @@ function renderBodyHtml(body: string): string {
   // query strings and make href values diverge from the visible URL.
   return tokenizeMessageLinks(body)
     .map((token) =>
-      token.type === "url"
-        ? `<a href="${escAttr(token.value)}" style="color:#1155cc;text-decoration:underline;">${esc(token.value)}</a>`
-        : esc(token.value).replace(/\n/g, "<br />"),
+      token.type === "text"
+        ? esc(token.value).replace(/\n/g, "<br />")
+        : token.type === "link"
+          ? `<a href="${escAttr(token.url)}" style="color:#1155cc;text-decoration:underline;">${esc(token.label)}</a>`
+          : `<a href="${escAttr(token.value)}" style="color:#1155cc;text-decoration:underline;">${esc(token.value)}</a>`,
     )
     .join("");
 }
 
 function subjectFromFirstMessage(body: string, teacherName: string): string {
-  const normalized = body.replace(/\s+/g, " ").trim();
+  const normalized = messagePlainText(body, { labelsOnly: true })
+    .replace(/\s+/g, " ")
+    .trim();
   if (!normalized) return `Message from ${teacherName}`;
   const characters = Array.from(normalized);
   if (characters.length <= 60) return normalized;
@@ -86,7 +90,7 @@ export function renderParentMessage(p: ParentEmailParts): {
   </div>`;
 
   const textLines = [
-    p.body,
+    messagePlainText(p.body),
     ...(p.attachmentNames && p.attachmentNames.length > 0
       ? [`Attached: ${p.attachmentNames.join(", ")}`]
       : []),
@@ -172,9 +176,71 @@ export function fromHeader(teacherName: string): string {
   return `${clean} via Rabbithole <${addr}>`;
 }
 
+/** "Rabbithole" <from-address> — for a message with no single author. */
+export function neutralFromHeader(): string {
+  return `Rabbithole <${parentMessageFromAddress()}>`;
+}
+
 /** The per-thread Reply-To address routed through Resend receiving. */
 export function replyAddressForThread(threadId: string): string | null {
   const domain = process.env.PARENT_INBOUND_DOMAIN?.trim();
   if (!domain) return null;
   return `reply+${threadId}@${domain}`;
+}
+
+/**
+ * The batched "a scholar wrote" email to a named mentor (scholarMessages.ts).
+ * Carries only the new message(s) and the scholar's FIRST name — the same PII
+ * stance as the family email; the conversation history stays in the app.
+ */
+export function renderMentorDigest(p: {
+  scholarFirstName: string;
+  /** `authorName` absent = the scholar. A staff author appears when an adult
+   *  was newly NAMED on the conversation (a teacher's introduction). */
+  messages: { body: string; attachmentNames: string[]; authorName?: string }[];
+  portalUrl: string;
+  canReplyByEmail: boolean;
+}): { subject: string; html: string; text: string } {
+  const name = p.scholarFirstName.trim() || "A scholar";
+  const allFromScholar = p.messages.every((message) => !message.authorName);
+  const subject = !allFromScholar
+    ? `You're in a conversation with ${name}`
+    : p.messages.length > 1
+      ? `${name} sent you ${p.messages.length} messages`
+      : `${name} sent you a message`;
+  const lines = p.messages.map((message) => ({
+    author: message.authorName?.trim() || name,
+    body: message.body,
+    attached:
+      message.attachmentNames.length > 0
+        ? `Attached: ${message.attachmentNames.join(", ")}`
+        : "",
+  }));
+  const footer = p.canReplyByEmail
+    ? `Reply to this email to answer. Your reply shows up in Rabbithole, and ${name}'s teachers can read the conversation.`
+    : `${name}'s teachers can read this conversation.`;
+  const html = `
+  <div>
+    ${lines
+      .map(
+        (line) =>
+          `<p><strong>${esc(line.author)}:</strong> ${renderBodyHtml(line.body)}${
+            line.attached ? `<br /><em>${esc(line.attached)}</em>` : ""
+          }</p>`,
+      )
+      .join("\n")}
+  </div>
+  <div style="color:#666;margin-top:24px;">
+    ${esc(footer)}<br /><a href="${escAttr(p.portalUrl)}" style="color:#666;"><em>Open in Rabbithole</em></a>
+  </div>`;
+  const text = [
+    ...lines.flatMap((line) => [
+      `${line.author}: ${messagePlainText(line.body)}`,
+      ...(line.attached ? [line.attached] : []),
+      "",
+    ]),
+    footer,
+    `Open in Rabbithole: ${p.portalUrl}`,
+  ].join("\n");
+  return { subject, html, text };
 }

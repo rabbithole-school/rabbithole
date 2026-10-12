@@ -1,0 +1,253 @@
+/*
+ * rh-expression-editor.css — the vanilla-DOM expression editor widget's brand
+ * skin, for sandboxed apps. Bundled first-party into
+ * public/app-kit/v2/rh-expression-editor.css (see scripts/vendor-app-kit.mjs)
+ * and inlined by the host under the strict, network-less custom-app CSP.
+ *
+ * It NEVER sets a font-family: Hanken Grotesk is already injected by the host
+ * (shared/rabbitholeAppStyles.ts) and inherits into the widget. Colors, radii,
+ * focus, and touch targets all read from the host's --rh-* tokens so the widget
+ * looks like the rest of Rabbithole inside an app; buttons opt into the shared
+ * .rh-btn-secondary vocabulary.
+ */
+
+.rh-expr {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--rh-fg, #364153);
+}
+
+.rh-expr:focus {
+  outline: none;
+}
+
+/* ── The 2-D answer field ─────────────────────────────────────────────── */
+.rh-expr-field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  min-height: 64px;
+  padding: 8px;
+  border-radius: var(--rh-radius-lg, 12px);
+  background: var(--rh-bg-subtle, #f9fafa);
+  border: 1px solid var(--rh-border, #e6e8ea);
+  cursor: text;
+  color: inherit;
+}
+
+.rh-expr-slot {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* A leaf answer box (empty or a plain number/variable run). */
+.rh-expr-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border-style: dashed;
+  border-color: var(--rh-border-strong, #d0d4d9);
+  border-radius: var(--rh-radius-md, 8px);
+  background: transparent;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.rh-expr-box.is-filled {
+  border-style: solid;
+}
+
+.rh-expr-box.is-active {
+  border-color: var(--rh-cyan-fg, #24a3b3);
+  background: var(--rh-cyan-subtle, #f0fbfc);
+}
+
+.rh-expr-box.is-index {
+  border-style: dotted;
+  border-radius: var(--rh-radius-sm, 4px);
+}
+
+.rh-expr-box.is-invalid {
+  border-color: #c53030;
+  background: #fff5f5;
+}
+
+.rh-expr-glyph {
+  font-weight: 600;
+  line-height: 1.1;
+  white-space: pre;
+  cursor: text;
+}
+
+/* Zero-size caret overlay so becoming active never shifts the box. */
+.rh-expr-caret {
+  position: relative;
+  display: inline-block;
+  width: 0;
+  height: 0;
+  flex: 0 0 0;
+  align-self: center;
+}
+
+.rh-expr-caret > i {
+  position: absolute;
+  left: -1px;
+  top: 0;
+  transform: translateY(-50%);
+  width: 2px;
+  background: var(--rh-cyan-fg, #24a3b3);
+  border-radius: 1px;
+  animation: rh-expr-caret-blink 1.05s step-end infinite;
+}
+
+@keyframes rh-expr-caret-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.rh-expr-inline {
+  display: inline-flex;
+  align-items: center;
+}
+
+.rh-expr-fraction {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 0 3px;
+  padding: 0 2px;
+}
+
+.rh-expr-frac-bar {
+  align-self: stretch;
+  margin: 3px 0;
+  background: currentColor;
+}
+
+.rh-expr-power {
+  display: inline-flex;
+  align-items: flex-start;
+}
+
+.rh-expr-exp {
+  margin-left: 1px;
+}
+
+.rh-expr-root {
+  display: inline-flex;
+  align-items: flex-start;
+  margin: 0 2px;
+}
+
+.rh-expr-root-inner {
+  display: inline-flex;
+  align-items: flex-start;
+  position: relative;
+}
+
+.rh-expr-root-mark {
+  display: block;
+  position: absolute;
+  left: 0;
+  pointer-events: none;
+}
+
+.rh-expr-root-index {
+  display: flex;
+  position: absolute;
+  z-index: 1;
+}
+
+.rh-expr-root-radicand {
+  display: flex;
+}
+
+/* ── The keypad ───────────────────────────────────────────────────────── */
+.rh-expr-keypad {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.rh-expr-digits {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.rh-expr-glyphs {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.rh-expr-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 52px;
+  padding: 0 10px;
+  font-size: 1.25rem;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.rh-expr-key:active {
+  transform: scale(0.96);
+}
+
+.rh-expr-key.is-wide {
+  grid-column: 1 / -1;
+}
+
+.rh-expr-key[hidden] {
+  display: none;
+}
+
+/* Keypad glyph icons — a tiny echo of the answer box motif. */
+.rh-expr-mini {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.rh-expr-mini-box {
+  display: inline-block;
+  width: 12px;
+  height: 14px;
+  border: 1.6px solid currentColor;
+  border-radius: 3px;
+  opacity: 0.85;
+}
+
+.rh-expr-mini-bar {
+  width: 16px;
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
+.rh-expr-mini-power {
+  display: inline-flex;
+  align-items: flex-start;
+}
+
+.rh-expr-mini-power > .rh-expr-mini-box:last-child {
+  width: 9px;
+  height: 11px;
+  margin-top: -6px;
+  margin-left: 1px;
+}

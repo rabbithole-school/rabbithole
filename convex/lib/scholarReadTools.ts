@@ -10,7 +10,7 @@
 // none, so it couldn't see who it was designing for).
 //
 // These are READ-only and cross-scholar, so they are TEACHER-ONLY.
-// Do NOT wire them into the scholar tutor (/project-stream): a scholar
+// Do NOT wire them into the scholar tutor (/session-stream): a scholar
 // reading another scholar's dossier/mastery/etc. is a privacy break.
 // The streams that import this are already teacher-gated.
 //
@@ -218,6 +218,10 @@ export async function makeScholarReadTools(
   // Parents get the coarsest practice view (trend altitude — no due backlog,
   // no misconceptions; see redactScholarPractice) and a matching description.
   const isParent = role === ROLES.PARENT;
+  const interestAudience =
+    role && (role === ROLES.PARENT || role === ROLES.SCHOLAR || role === ROLES.LIFELONG_LEARNER)
+      ? ("parent" as const)
+      : ("teacher" as const);
 
   // Identity-scoped roles (parent/scholar) never receive this tool — the role
   // policy (lib/scholarReadPolicy.ts) withholds enumerations from them — so
@@ -292,9 +296,13 @@ export async function makeScholarReadTools(
       const scholar = await resolveScholar(input.scholarName);
       if (!scholar) return notFound(input.scholarName);
       const scholarId = scholar.id as Id<"users">;
-      const [dossier, sourceDocuments] = await Promise.all([
+      const [dossier, interests, sourceDocuments] = await Promise.all([
         ctx.runQuery(internal.curriculumAssistant.getScholarDossier, {
           scholarId,
+        }),
+        ctx.runQuery(internal.curriculumAssistant.getScholarInterests, {
+          scholarId,
+          audience: "teacher",
         }),
         ctx.runQuery(internal.scholarDocuments.aiListForScholar, {
           scholarId,
@@ -318,8 +326,34 @@ export async function makeScholarReadTools(
           readingLevel: scholar.readingLevel,
         },
         dossier,
+        interests,
         sourceDocuments,
       });
+    },
+  });
+
+  const getScholarInterestsTool = betaTool({
+    name: "get_scholar_interests",
+    description:
+      "What the scholar is INTO, with how we know it: 'said' = in their own words; 'picked' = they chose the topic themselves; 'menu' = chosen from options inside an assigned activity (engagement, not ownership); 'teacher' = a teacher added it. Use this — never seeds, never mastery — to answer what a scholar is interested in or curious about. Seeds are suggestions we made TO them.",
+    inputSchema: scholarNameSchema,
+    run: async (input) => {
+      const scholar = await resolveScholar(input.scholarName);
+      if (!scholar) return notFound(input.scholarName);
+      const interests = await ctx.runQuery(
+        internal.curriculumAssistant.getScholarInterests,
+        {
+          scholarId: scholar.id as Id<"users">,
+          audience: interestAudience,
+        },
+      );
+      emit({
+        toolComplete: {
+          name: "get_scholar_interests",
+          result: `Loaded ${scholar.name}'s interests`,
+        },
+      });
+      return JSON.stringify({ scholar: scholar.name, ...interests });
     },
   });
 
@@ -361,7 +395,7 @@ export async function makeScholarReadTools(
   const getScholarSignalsTool = betaTool({
     name: "get_scholar_signals",
     description:
-      "Get a scholar's learning signal profile: curiosity, persistence, collaboration, etc. with counts and high-intensity counts.",
+      "Get a scholar's learning signal profile: Task commitment, Creative approach, Self-direction, Intellectual intensity, Emotional engagement, Cross-domain thinking, Productive struggle, and Metacognition, with counts and high-intensity counts. Not interests — use get_scholar_interests for that.",
     inputSchema: scholarNameSchema,
     run: async (input) => {
       const scholar = await resolveScholar(input.scholarName);
@@ -378,7 +412,7 @@ export async function makeScholarReadTools(
   const getScholarSeedsTool = betaTool({
     name: "get_scholar_seeds",
     description:
-      "Get a scholar's active and pending exploration seeds: suggested topics for deepening learning.",
+      "Get a scholar's active and pending exploration seeds: suggested topics for deepening learning. These are suggestions Rabbithole or a teacher made TO the scholar — not the scholar's stated interests (use get_scholar_interests).",
     inputSchema: scholarNameSchema,
     run: async (input) => {
       const scholar = await resolveScholar(input.scholarName);
@@ -547,7 +581,7 @@ export async function makeScholarReadTools(
   const getSessionTranscriptTool = betaTool({
     name: "get_session_transcript",
     description:
-      "Read the actual back-and-forth TRANSCRIPT of one scholar session (their tutor conversation), plus the context to judge it: its ORIGIN (teacher-assigned vs self-initiated — a Quest, meaning independent study, the scholar chose), the activity's deliverable prompt + rubric criteria, whether the activity is complete, and any observer analysis summary. Use this whenever you're asked how a session/activity is GOING or PERFORMING, whether a scholar is getting VALUE out of it, what they're actually talking about, or to assess depth/engagement — get_scholar_sessions only gives you titles + a 120-char preview; this gives you the real conversation. Pass `scholarName` (required). Optionally pass `sessionId` (from get_scholar_sessions' `id`) to pick a specific session; omit it to read their MOST RECENT session. CRITICAL: check the `origin` first — a self-initiated Quest is NOT graded against an assignment bar; assess it on its own terms (is the scholar following genuine curiosity, going deep, getting real value?). Teacher/admin only. Returns origin, context, and the chronological user/assistant messages (most recent " +
+      "Read the actual back-and-forth TRANSCRIPT of one scholar session (their tutor conversation), plus the context to judge it: its ORIGIN (teacher-assigned vs self-initiated — a Quest, meaning independent study, the scholar chose), the activity's deliverable prompt + rubric criteria, whether the activity is complete, and any observer analysis summary. Use this whenever you're asked how a session/activity is GOING or PERFORMING, whether a scholar is getting VALUE out of it, what they're actually talking about, or to assess depth/engagement — get_scholar_sessions only gives you titles + a 120-char preview; this gives you the real conversation. Pass `scholarName` (required). Optionally pass `sessionId` (from get_scholar_sessions' `id`) to pick a specific session; omit it to read their MOST RECENT session. CRITICAL: check the `origin` first — a self-initiated Quest is NOT graded against an assignment bar; assess it on its own terms (is the scholar following genuine curiosity, going deep, getting real value?). Messages carry `inputModality` (`spoken` means speech-to-text dictation sent without editing) when known and `createdAt`. Teacher/admin only. Returns origin, context, and the chronological user/assistant messages (most recent " +
       "turns if very long).",
     inputSchema: {
       type: "object" as const,
@@ -782,6 +816,7 @@ export async function makeScholarReadTools(
   const all = [
     listScholarsTool,
     getScholarDossierTool,
+    getScholarInterestsTool,
     getScholarMasteryTool,
     getScholarSignalsTool,
     getScholarSeedsTool,

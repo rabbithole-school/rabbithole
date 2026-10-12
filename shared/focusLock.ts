@@ -17,7 +17,7 @@
  * The "lock" vocabulary (`PlateFocusLock`, the `focusLock` prop threaded
  * through both plates) is deliberately kept for now: it is the same value on
  * the same wires, and keeping the names makes re-enabling the gate a clean
- * revert. Rename them once the gate has stayed off — TODO.html#class-focus-gate-followup.
+ * revert. Rename them once the gate has stayed off — Linear TRA-14.
  */
 
 /** The live class-focus signal passed down to plate surfaces. `unitId` is the

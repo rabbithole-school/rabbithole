@@ -1,3 +1,8 @@
+import {
+  activityResourceEmbedUrl,
+  youtubeVideoId,
+} from "../../vendor/shared/activityResourceEmbed";
+
 const YOUTUBE_ESCAPE_PATH =
   /^\/(watch|channel|user|results|playlist|shorts|feed|account|@|embed\/videoseries)/i;
 
@@ -153,4 +158,36 @@ export function buildYouTubeResourceDocument(embedUrl: string): string {
 </script>
 </body>
 </html>`;
+}
+
+/** The exact host-locked embed fields the sandboxed YouTube player is built from. */
+export type YouTubePlayerContent = {
+  url: string;
+  documentHtml: string;
+  documentBaseUrl: string;
+  allowedHosts: string[];
+  navigationPolicy: "youtube";
+  gestureMode: "page";
+};
+
+/**
+ * Build the sandboxed, locked-down player embed for a YouTube link — the
+ * youtube-nocookie embed document, the player host allowlist, and the "youtube"
+ * navigation policy. Returns the field set to merge into whichever embed the
+ * caller opens (an interactive resource OR a web activity), or null when the URL
+ * is not a playable YouTube video. Single source of truth so the resource
+ * player and the web-activity host stay byte-identical.
+ */
+export function youTubePlayerContent(url: string): YouTubePlayerContent | null {
+  if (!youtubeVideoId(url)) return null;
+  const embedUrl = activityResourceEmbedUrl({ kind: "video", url });
+  if (!embedUrl) return null;
+  return {
+    url: embedUrl,
+    documentHtml: buildYouTubeResourceDocument(embedUrl),
+    documentBaseUrl: YOUTUBE_RESOURCE_BASE_URL,
+    allowedHosts: [...YOUTUBE_RESOURCE_ALLOWED_HOSTS],
+    navigationPolicy: "youtube",
+    gestureMode: "page",
+  };
 }

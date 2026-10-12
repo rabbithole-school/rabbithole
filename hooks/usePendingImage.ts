@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
+import { capPhotoForUpload } from "@/lib/downscalePhoto";
 
 /** A locally-staged image awaiting send: the File plus an object-URL preview. */
 export type PendingImage = { file: File; preview: string };
@@ -30,11 +31,13 @@ export function usePendingImage() {
    */
   const upload = useCallback(async (): Promise<Id<"_storage"> | null> => {
     if (!pendingImage) return null;
+    // Capped at the size the tutor model can use; the original if it can't be.
+    const photo = await capPhotoForUpload(pendingImage.file);
     const uploadUrl = await generateUploadUrl();
     const res = await fetch(uploadUrl, {
       method: "POST",
-      headers: { "Content-Type": pendingImage.file.type },
-      body: pendingImage.file,
+      headers: { "Content-Type": photo.type || pendingImage.file.type },
+      body: photo,
     });
     const { storageId } = await res.json();
     return storageId as Id<"_storage">;

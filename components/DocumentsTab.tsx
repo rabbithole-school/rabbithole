@@ -76,6 +76,10 @@ type DocumentKind =
   | "identity_document"
   | "parent_email"
   | "observation"
+  | "incident_report"
+  | "transfer_record"
+  | "conference_notes"
+  | "doctor_note"
   | "other";
 // Kinds valid for an UPLOAD (the redaction pipeline's sensitive-source list);
 // excludes teacher_report, which is only reachable via "Write text".
@@ -99,6 +103,10 @@ const KIND_COLOR: Record<DocumentKind, { bg: string; color: string }> = {
   identity_document: { bg: "gray.100", color: "gray.700" },
   parent_email: { bg: "cyan.100", color: "cyan.700" },
   observation: { bg: "green.100", color: "green.700" },
+  incident_report: { bg: "red.100", color: "red.700" },
+  transfer_record: { bg: "teal.100", color: "teal.700" },
+  conference_notes: { bg: "yellow.100", color: "yellow.800" },
+  doctor_note: { bg: "pink.100", color: "pink.700" },
   other: { bg: "gray.100", color: "gray.700" },
 };
 
@@ -385,6 +393,7 @@ function DocumentDetail({
   onClose,
   onDeleted,
   onEdit,
+  fullAccess,
 }: {
   documentId: Id<"scholarDocuments">;
   onClose: () => void;
@@ -395,9 +404,18 @@ function DocumentDetail({
     bodyText: string;
     kind: DocumentKind;
   }) => void;
+  /**
+   * Teacher roles. Operations staff open this detail for the administrative
+   * kinds they filed (see `listDocumentsForStaff`) but have no proposal /
+   * tutor-facing affordances, and the proposal query would refuse them.
+   */
+  fullAccess: boolean;
 }) {
   const doc = useQuery(api.scholarDocuments.get, { documentId });
-  const proposal = useQuery(api.scholarDocumentProposals.getLatestProposal, { documentId });
+  const proposal = useQuery(
+    api.scholarDocumentProposals.getLatestProposal,
+    fullAccess ? { documentId } : "skip",
+  );
 
   const logSummaryView = useMutation(api.scholarDocuments.logSummaryView);
   const logExtractedView = useMutation(api.scholarDocuments.logExtractedView);
@@ -654,7 +672,7 @@ function DocumentDetail({
               </a>
             </Button>
           )}
-          {format === "file" && isReady && usesExtraction &&
+          {fullAccess && format === "file" && isReady && usesExtraction &&
             (hasProposal ? (
               <Button
                 size="sm"
@@ -1039,7 +1057,7 @@ export function DocumentsTab({
   } = staffView;
   const isEmpty = docs.length === 0 && healthDocuments.length === 0;
 
-  if (!canReadScholarDocuments && !healthFormsAvailable) {
+  if (!canReadScholarDocuments && !healthFormsAvailable && docs.length === 0) {
     return (
       <VStack gap={4} align="stretch" maxW="800px">
         <Text fontWeight="600" fontFamily="heading" color="navy.500" fontSize="sm">
@@ -1084,12 +1102,17 @@ export function DocumentsTab({
           </>
         ) : (
           <>
-            Documents attached to the family&apos;s Medical &amp; Emergency
-            record. Nothing here is read by AI. Add one from the{" "}
+            Administrative records for this scholar — incident reports,
+            transfer records, conference notes, doctor&apos;s notes, report
+            cards — plus documents attached to the family&apos;s Medical &amp;
+            Emergency record. Transfer records, conference notes and report
+            cards are summarized for teachers; incident reports, doctor&apos;s
+            notes and health record documents are never read by AI. Add one
+            from the{" "}
             <Text as="span" fontWeight="600" color="violet.600">
               + Add
             </Text>{" "}
-            menu up top.
+            menu up top, or file a scan from the scanner.
           </>
         )}
       </Text>
@@ -1137,6 +1160,7 @@ export function DocumentsTab({
               <DocumentDetail
                 key={d._id}
                 documentId={d._id}
+                fullAccess={canReadScholarDocuments}
                 onClose={() => setSelectedDocId(null)}
                 onDeleted={() => setSelectedDocId(null)}
                 onEdit={(ed) => {

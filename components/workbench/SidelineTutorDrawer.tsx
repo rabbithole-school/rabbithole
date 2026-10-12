@@ -2,7 +2,7 @@
 
 /**
  * The demoted sideline tutor. The bench IS a session, so this reuses the exact
- * streaming chassis the chat uses — `useAgentStream` posting to `/project-stream`
+ * streaming chassis the chat uses — `useAgentStream` posting to `/session-stream`
  * — which brings whispers, teacher visibility, and observer wiring for free.
  *
  * ANTI-OFFLOADING (plan §7.1, §4.1): the tutor can question and stream, but has
@@ -14,7 +14,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { useMutation } from "convex/react";
 import { Box, Button, Flex, HStack, Text, Textarea } from "@chakra-ui/react";
-import { X } from "@phosphor-icons/react";
+import { Square, X } from "@phosphor-icons/react";
 
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -24,10 +24,20 @@ import { useCachedQuery } from "@/hooks/useCachedQuery";
 import { MarkdownBlock, StreamingMarkdown } from "@/components/StreamingMarkdown";
 import { ToolActivityIndicator } from "@/components/ToolActivityIndicator";
 
-function Bubble({ role, content, streaming }: { role: string; content: string; streaming?: boolean }) {
+function Bubble({
+  role,
+  content,
+  streaming,
+  stopRequestedAt,
+}: {
+  role: string;
+  content: string;
+  streaming?: boolean;
+  stopRequestedAt?: number;
+}) {
   const isUser = role === "user";
   return (
-    <Flex justify={isUser ? "flex-end" : "flex-start"}>
+    <Flex flexDir="column" align={isUser ? "flex-end" : "flex-start"}>
       <Box
         maxW="85%"
         px={3}
@@ -48,6 +58,12 @@ function Bubble({ role, content, streaming }: { role: string; content: string; s
           <MarkdownBlock content={content} />
         )}
       </Box>
+      {/* A finalized assistant reply the user cut short shows a muted caption. */}
+      {!isUser && !streaming && stopRequestedAt !== undefined ? (
+        <Text fontSize="xs" color="fg.muted" fontFamily="heading" mt={1}>
+          Stopped
+        </Text>
+      ) : null}
     </Flex>
   );
 }
@@ -64,6 +80,7 @@ export const SidelineTutorDrawer = memo(function SidelineTutorDrawer({
   const [input, setInput] = useState("");
   const stream = useAgentStream();
   const sendMsg = useMutation(api.sessions.sendMessage);
+  const requestStop = useMutation(api.sessions.requestStop);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const sessionData = useCachedQuery(
@@ -83,8 +100,14 @@ export const SidelineTutorDrawer = memo(function SidelineTutorDrawer({
 
   const handleSend = async () => {
     const text = input.trim();
-    if (!text || stream.isStreaming) return;
+    if (!text) return;
     setInput("");
+    // Steering: sending while the tutor streams stops the current reply
+    // (server loop + local fetch) and replaces it with this turn.
+    if (stream.isStreaming) {
+      void requestStop({ sessionId });
+      void stream.stop();
+    }
     try {
       const result = await sendMsg({
         sessionId,
@@ -92,7 +115,7 @@ export const SidelineTutorDrawer = memo(function SidelineTutorDrawer({
         inputModality: "typed",
       });
       await stream.send(
-        `${convexSiteUrl()}/project-stream`,
+        `${convexSiteUrl()}/session-stream`,
         {
           sessionId: result.sessionId,
           streamId: result.streamId,
@@ -103,6 +126,13 @@ export const SidelineTutorDrawer = memo(function SidelineTutorDrawer({
     } catch (error) {
       console.error("tutor send failed", error);
     }
+  };
+
+  // The composer's Stop control: stop the server loop AND abort the local
+  // fetch, keeping the partial text on screen.
+  const handleStop = () => {
+    void requestStop({ sessionId });
+    void stream.stop();
   };
 
   if (!open) {
@@ -148,8 +178,13 @@ export const SidelineTutorDrawer = memo(function SidelineTutorDrawer({
               ask the tutor about what you saw — it won&apos;t touch your deck.
             </Text>
           ) : (
-            messages.map((message: { id: string; role: string; content: string }) => (
-              <Bubble key={message.id} role={message.role} content={message.content} />
+            messages.map((message: { id: string; role: string; content: string; stopRequestedAt?: number }) => (
+              <Bubble
+                key={message.id}
+                role={message.role}
+                content={message.content}
+                stopRequestedAt={message.stopRequestedAt}
+              />
             ))
           )}
           {/* Tool activity — the tutor's actions are visible, not silently
@@ -185,9 +220,21 @@ export const SidelineTutorDrawer = memo(function SidelineTutorDrawer({
           resize="none"
           aria-label="Reply to the tutor"
         />
-        <Button size="sm" colorPalette="violet" onClick={handleSend} loading={stream.isStreaming}>
-          Send
-        </Button>
+        {stream.isStreaming ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            color="charcoal.400"
+            onClick={handleStop}
+            aria-label="Stop generating"
+          >
+            <Square weight="fill" />
+          </Button>
+        ) : (
+          <Button size="sm" colorPalette="violet" onClick={handleSend} disabled={!input.trim()}>
+            Send
+          </Button>
+        )}
       </HStack>
     </Flex>
   );

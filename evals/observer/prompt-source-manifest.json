@@ -21,6 +21,7 @@
   "observerAssemblySources": [
     "convex/prompts.ts",
     "convex/lib/institutionPromptProfile.ts",
+    "convex/lib/observerOrigin.ts",
     "convex/lib/observerShared.ts"
   ],
   "observerRuntimeAssemblySources": [

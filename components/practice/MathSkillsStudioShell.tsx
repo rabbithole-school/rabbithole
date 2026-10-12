@@ -15,9 +15,11 @@
  * so its scope controls are hidden — but it shares the rail.
  */
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useQuery } from "convex/react";
 import { Box, Flex, HStack, Text } from "@chakra-ui/react";
-import { MathSkillsScopeButton } from "@/components/practice/MathSkillsScopeButton";
+import { api } from "@/convex/_generated/api";
+import { ScholarScopePicker } from "@/components/ScholarScopePicker";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { CollapsibleRailLayout } from "@/components/ui/CollapsibleRailLayout";
 import { COLUMN_HEADER_HEIGHT } from "@/components/hierarchy";
@@ -37,6 +39,11 @@ import {
   type ScholarParticipationSelection,
 } from "@/shared/scholarParticipation";
 import { groupMatchesParticipation } from "@/shared/scholarGroupRouting";
+import {
+  decideDeepLinkParticipation,
+  resolvedEnrollmentStanding,
+  useDeepLinkParticipation,
+} from "@/hooks/useDeepLinkParticipation";
 import { ChartDonut, PencilSimple, Shapes } from "@phosphor-icons/react";
 
 type PracticeDomain = { domain: string; label: string };
@@ -99,6 +106,7 @@ export function MathSkillsStudioShell({
     groups,
     myScholarIds,
     isLoading: rosterLoading,
+    isWidening: rosterWidening,
   } = useScholarRoster({
     includeProgramGuests: participation.extendedEducation,
   });
@@ -114,17 +122,71 @@ export function MathSkillsStudioShell({
   const scopeGroup = groups.find((group) => group.id === scopeKey);
   const hasMine = scholars.some((candidate) => myScholarIds.has(candidate.id));
 
+  // Resolve `?scholar=` (a username) to its enrollment standing with the same
+  // indexed, institution-scoped query the Scholars tab uses. It deliberately
+  // does NOT read the roster: the roster is enrolled-only until the widen
+  // below lands, so a program guest is exactly the scholar it cannot see.
+  const scholarSlugResolution = useQuery(
+    api.scholars.resolveSlug,
+    scholar ? { slug: scholar } : "skip",
+  );
+  const widenParticipation = useCallback(
+    () =>
+      setParticipation((prev) =>
+        prev.extendedEducation ? prev : { ...prev, extendedEducation: true },
+      ),
+    [],
+  );
+  // A shared link that names program guests — `?scope=` on a guest-inclusive
+  // group (Robotics, Photography) or `?scholar=` on an Extended-Education
+  // scholar — arrives against the enrolled-only default, which hides the very
+  // people it named. Widen once, from the URL, exactly as the Scholars tab
+  // does; a later manual toggle still wins for the session.
+  const deepLinkInputs = {
+    scholarSlugPresent: !!scholar,
+    // `null` (resolved miss) must stay distinct from `undefined` (in flight),
+    // or a stale scholar slug reads as "still loading" and blocks the widen
+    // its `?scope=` had already earned.
+    scholarEnrollmentStanding: resolvedEnrollmentStanding(scholarSlugResolution),
+    groupId: scopeKey || null,
+    groups,
+    rosterLoading,
+  };
+  useDeepLinkParticipation({ ...deepLinkInputs, apply: widenParticipation });
+  // Is the URL still asking for a widen that has not been applied? Derived
+  // from the SAME pure decision the hook drives, so the two cannot disagree —
+  // and derived in render rather than latched in state, because a latch would
+  // mean calling setState from an effect.
+  //
+  // It clears itself without a latch: once the widen lands
+  // `extendedEducation` is true, and if the teacher later switches the filter
+  // back off, `onParticipationChange` pre-clears the guest-dependent scope and
+  // scholar first, which drops this decision to "settle" on its own.
+  const pendingDeepLinkWiden =
+    decideDeepLinkParticipation({ ...deepLinkInputs, enabled: true }) ===
+      "widen" && !participation.extendedEducation;
+
   // Scope is URL state but participation is component state, so a reload or
   // deep link can restore a scope the current filter hides (blank matrix, no
   // pill lit). Reconcile once the roster settles, with the same predicates
   // onParticipationChange applies at switch time. An automatic correction is
   // not an undoable navigation step, so it clears with { replace: true }.
-  // NOTE: `rosterLoading` stays false during the enrolled→extended widening
-  // window (the roster hook retains the enrolled fallback); this effect never
-  // false-clears there only because onParticipationChange pre-clears anything
-  // guest-dependent before setParticipation, leaving scopeKey === "".
+  // Two windows where the roster is not yet the one this effect judges
+  // against, and clearing in either loses a scope that was always legal:
+  //
+  //  - `pendingDeepLinkWiden` — the deep-link widen above and this effect fire
+  //    in the SAME commit once the roster settles, and `setParticipation` is
+  //    not visible until the next render. Without this gate a guest-inclusive
+  //    `?scope=` gets cleared one commit before the widen makes it legal.
+  //  - `rosterWidening` — after the widen, `rosterLoading` stays false (the
+  //    roster hook keeps the enrolled fallback on purpose) while the rows are
+  //    still enrolled-only, so an all-program-guest group reads as a group
+  //    with no visible members. Interactive switching dodges this because
+  //    onParticipationChange pre-clears anything guest-dependent, leaving
+  //    scopeKey === ""; a deep link has nothing to pre-clear.
   useEffect(() => {
     if (rosterLoading || scopeKey === "") return;
+    if (pendingDeepLinkWiden || rosterWidening) return;
     if (scopeKey === "mine") {
       if (!hasMine) onSelectScope("", { replace: true });
       return;
@@ -139,10 +201,12 @@ export function MathSkillsStudioShell({
       onSelectScope("", { replace: true });
     }
   }, [
+    pendingDeepLinkWiden,
     hasMine,
     onSelectScope,
     participation.extendedEducation,
     rosterLoading,
+    rosterWidening,
     scholars,
     scopeGroup,
     scopeKey,
@@ -182,14 +246,15 @@ export function MathSkillsStudioShell({
       : (domains.find((entry) => entry.domain === selectedDomain)?.label ?? "");
 
   // The consolidated "who am I looking at" control — ONE button in the studio
-  // header band (below), beside the domain title. It scopes to a group (the
-  // matrix's column pool) OR drills into a single scholar, all from one popover.
-  // Only the Mastery lens is scholar-scoped; Content and Manipulatives are
-  // cohort-agnostic, so they expose no scope control. The former in-body
-  // `scopeControls` slot is gone — Mastery no longer renders a second control
-  // row (Lane C), so we pass `null` through the existing plumbing.
+  // header band (below), beside the domain title: the shared ScholarScopePicker,
+  // the compact form of the same scope rows the Scholars rail renders. It scopes
+  // to a group (the matrix's column pool) OR drills into a single scholar, all
+  // from one popover. Only the Mastery lens is scholar-scoped; Content and
+  // Manipulatives are cohort-agnostic, so they expose no scope control. The
+  // former in-body `scopeControls` slot is gone — Mastery no longer renders a
+  // second control row (Lane C), so we pass `null` through the existing plumbing.
   const scopeButton: ReactNode = isMastery ? (
-    <MathSkillsScopeButton
+    <ScholarScopePicker
       groups={groups}
       scopeKey={scopeKey}
       hasMine={hasMine}
@@ -207,8 +272,17 @@ export function MathSkillsStudioShell({
       }}
       visibleScholarIds={scholars.map((candidate) => candidate.id)}
       scopedScholarIds={scopedScholars.map((s) => s.id)}
-      effectiveScholar={effectiveScholar}
-      onSelectScholar={onSelectScholar}
+      focusScholar={effectiveScholar}
+      // The picker deals in scholar ids; this surface's URL slug is the
+      // username, so the mapping stays here with the roster that owns it.
+      onFocusScholar={(scholarId) => {
+        if (!scholarId) {
+          onSelectScholar("");
+          return;
+        }
+        const picked = rosterScholars.find((s) => s.id === scholarId);
+        onSelectScholar(picked?.username ?? scholarId);
+      }}
       participation={participation}
       onParticipationChange={(next) => {
         const nextVisibleScholarIds = new Set(

@@ -83,6 +83,7 @@ import { EmptyState as PrimitiveEmptyState } from "@/components/ui/EmptyState";
 import { CreatePeriodDialog } from "@/components/narrative/NarrativeQueue";
 import { StartAssignmentDialog } from "@/components/StartAssignmentDialog";
 import { computeScheduleLoadingState } from "@/components/MasterSchedule/scheduleLoadingState";
+import { BirthdayRosterDialog } from "@/components/MasterSchedule/BirthdayRosterDialog";
 import {
   clampToWeekday,
   initialAnchorMs,
@@ -285,11 +286,11 @@ export function MasterScheduleView({
   const { scopeParam } = useActiveInstitution();
   const teacherTerms = useQuery(
     api.reportingPeriods.list,
-    programScoped ? "skip" : {},
+    programScoped ? "skip" : { scope: scopeParam },
   );
   const teacherCurrentTerm = useQuery(
     api.reportingPeriods.current,
-    programScoped ? "skip" : {},
+    programScoped ? "skip" : { scope: scopeParam },
   );
   const programPeriodState = useQuery(
     api.masterSchedule.programPeriods,
@@ -1074,6 +1075,10 @@ export function MasterScheduleView({
         <Box flex={1} />
 
         {!programScoped && (
+          <BirthdayRosterDialog institutionScope={scopeParam} />
+        )}
+
+        {!programScoped && (
           <Button
             size="xs"
             variant="outline"
@@ -1516,7 +1521,6 @@ export function MasterScheduleView({
             ? {
                 groupId: programDialogGroup.id as Id<"scholarGroups">,
                 groupName: programDialogGroup.name,
-                institutionScope: scopeParam,
                 periodId: termId,
                 subject:
                   programDialogTarget?.subject ?? programDialogGroup.name,

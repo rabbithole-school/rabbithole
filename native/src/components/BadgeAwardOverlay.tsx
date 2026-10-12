@@ -14,6 +14,9 @@
  * customization stays a delight, never a distraction. Mirrors the web
  * BadgeCelebration + BadgeRemixStrip. On-brand navy/violet palette;
  * anti-parasocial — no AI character involved, just the scholar's achievement.
+ *
+ * A Calculator License badge is the exception: its image is the license card
+ * itself (LicenseCardImage), shown as a landscape ID card with no remix strip.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -24,6 +27,7 @@ import {
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
   type ViewStyle,
 } from "react-native";
 import Animated, {
@@ -47,6 +51,8 @@ import { useMutation } from "convex/react";
 import { colors, fonts, palette } from "@/theme";
 import { api } from "@/lib/convex";
 import { useBadgeAward, type EarnedBadge } from "@/hooks/useBadgeAward";
+import { LicenseCardImage } from "@/components/LicenseCardImage";
+import { isLicenseCardBadge } from "../../vendor/shared/calculatorLicense";
 import {
   BADGE_STYLES,
   BADGE_COLORWAYS,
@@ -142,9 +148,17 @@ type BadgeCardProps = {
   icon: string | null;
   title: string;
   generating: boolean;
+  /** A Calculator License badge: the art is the license card. */
+  licenseCard: boolean;
 };
 
-function BadgeCard({ imageUrl, icon, title, generating }: BadgeCardProps) {
+/** The license card's widest reveal: the 620pt panel less its 40pt gutters.
+ * Narrower screens cap it at the window width less the same gutters. */
+const LICENSE_CARD_REVEAL_MAX_WIDTH = 540;
+const LICENSE_CARD_REVEAL_GUTTER = 80;
+
+function BadgeCard({ imageUrl, icon, title, generating, licenseCard }: BadgeCardProps) {
+  const { width: windowWidth } = useWindowDimensions();
   const scale = useSharedValue(0);
   const opacity = useSharedValue(0);
 
@@ -172,6 +186,30 @@ function BadgeCard({ imageUrl, icon, title, generating }: BadgeCardProps) {
   ];
 
   const PARTICLE_COUNT = 12;
+
+  if (licenseCard) {
+    // The license is an ID card, not a medallion: no circular halo or radial
+    // particle burst framing it — just the card, lifted on a soft gold glow,
+    // with its title below.
+    const cardWidth = Math.min(
+      LICENSE_CARD_REVEAL_MAX_WIDTH,
+      windowWidth - LICENSE_CARD_REVEAL_GUTTER,
+    );
+    return (
+      <Animated.View style={[styles.licenseCardContainer, cardStyle]}>
+        <View style={styles.licenseCardGlow}>
+          <LicenseCardImage
+            imageUrl={imageUrl}
+            width={cardWidth}
+            generating={generating}
+            icon={icon}
+            alt={`${title} card`}
+          />
+        </View>
+        <Text style={styles.badgeTitle}>{title}</Text>
+      </Animated.View>
+    );
+  }
 
   return (
     <Animated.View style={[styles.cardContainer, cardStyle]}>
@@ -392,6 +430,7 @@ export function BadgeAwardOverlay() {
   if (!badge) return null;
 
   const generating = badge.artStatus === "generating";
+  const licenseCard = isLicenseCardBadge(badge.kind);
 
   return (
     <Modal
@@ -421,6 +460,7 @@ export function BadgeAwardOverlay() {
             icon={badge.badge.icon ?? badge.unitEmoji ?? null}
             title={badge.badge.title}
             generating={generating}
+            licenseCard={licenseCard}
           />
 
           {badge.badge.description ? (
@@ -428,17 +468,20 @@ export function BadgeAwardOverlay() {
           ) : null}
           <Text style={styles.subtitle}>
             {generating
-              ? "Designing your badge — this can take a few seconds…"
-              : badge.kind === "calculator_license"
-                ? "You passed the Calculator License Test. This badge is yours."
+              ? licenseCard
+                ? "Making your license card — this takes a few seconds…"
+                : "Designing your badge — this can take a few seconds…"
+              : licenseCard
+                ? "You passed the Calculator License Test. This license is yours."
                 : badge.isQuestUnit
                 ? "You finished the whole quest. This badge is yours."
                 : "You finished the whole unit. This badge is yours."}
           </Text>
           <Text style={styles.subtitle}>Find it anytime in My Learning.</Text>
 
-          {/* Make-it-yours strip — preset choices only, capped remix budget. */}
-          <BadgeRemixStrip badge={badge} />
+          {/* Make-it-yours strip — preset choices only, capped remix budget.
+              Not for the license card: there is no art to remix. */}
+          {licenseCard ? null : <BadgeRemixStrip badge={badge} />}
 
           <Pressable
             style={({ pressed }) => [
@@ -545,6 +588,21 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     zIndex: 1,
+  } as ViewStyle,
+
+  // The license card reveal: the card on its own, title below — no halo.
+  licenseCardContainer: {
+    alignItems: "center",
+    gap: 22,
+    paddingVertical: 12,
+  } as ViewStyle,
+
+  // A soft gold glow behind the card (its own shadow sits on top of this).
+  licenseCardGlow: {
+    shadowColor: GOLD,
+    shadowOpacity: 0.35,
+    shadowRadius: 28,
+    shadowOffset: { width: 0, height: 0 },
   } as ViewStyle,
 
   artImage: {

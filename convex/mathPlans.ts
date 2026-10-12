@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
+import { internalMutation, internalQuery } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { authedQuery, teacherMutation, teacherQuery } from "./lib/customFunctions";
 import { filterToAccessibleScholars, requireActiveScholarAccess } from "./lib/access";
@@ -20,6 +21,7 @@ import {
 import { PRACTICE_DOMAINS } from "./lib/practice/domains";
 import { gradeRank } from "../shared/gradeRange";
 import { humanizeStrand } from "../shared/practiceDomainLabels";
+import { isTeacherRole } from "./lib/roles";
 
 const targetValidator = v.object({
   domain: v.string(),
@@ -35,7 +37,6 @@ const scopeValidator = v.union(
 );
 
 type DbCtx = Pick<QueryCtx | MutationCtx, "db">;
-type MathPlanMutationCtx = MutationCtx & { user: Doc<"users"> };
 
 async function migrationIssueForScholar(ctx: DbCtx, scholarId: Id<"users">) {
   const issue = await ctx.db
@@ -71,9 +72,10 @@ function sortGrades(grades: Iterable<string>): string[] {
 }
 
 async function savePlan(
-  ctx: MathPlanMutationCtx,
+  ctx: MutationCtx,
   scholarId: Id<"users">,
   practiceScope: PracticeScope,
+  updatedBy: Id<"users">,
   checkpointSuppressed?: boolean,
 ) {
   const rows = await ctx.db
@@ -81,13 +83,24 @@ async function savePlan(
     .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
     .collect();
   rows.sort((a, b) => b.updatedAt - a.updatedAt);
-  const data = { practiceScope, checkpointSuppressed, updatedBy: ctx.user._id, updatedAt: Date.now() };
+  const data = { practiceScope, checkpointSuppressed, updatedBy, updatedAt: Date.now() };
   if (rows[0]) {
     await ctx.db.patch(rows[0]._id, data);
     for (const duplicate of rows.slice(1)) await ctx.db.delete(duplicate._id);
     return rows[0]._id;
   }
   return await ctx.db.insert("scholarMathPlans", { scholarId, ...data });
+}
+
+async function requireAideTeacher(
+  ctx: QueryCtx | MutationCtx,
+  callerUserId: Id<"users">,
+) {
+  const caller = await ctx.db.get(callerUserId);
+  if (!caller || !isTeacherRole(caller.role)) {
+    throw new Error("Forbidden");
+  }
+  return caller;
 }
 
 export const forScholars = teacherQuery({
@@ -135,69 +148,85 @@ export const forScholars = teacherQuery({
  * domain × strand × grade tree the scope checkboxes and the checkpoint selects
  * both draw from. Read-model only — no serving behaviour lives here.
  */
+async function planEditorCore(ctx: QueryCtx, scholarId: Id<"users">) {
+  const { practiceScope, source: scopeSource } = await resolvePracticeScope(
+    ctx,
+    scholarId,
+  );
+  const migrationIssue =
+    scopeSource === "math_plan"
+      ? null
+      : await migrationIssueForScholar(ctx, scholarId);
+  const checkpoint = await resolveStoredCheckpoint(ctx, scholarId);
+  const groupCheckpoint = await resolveRawGroupCheckpoint(ctx, scholarId);
+  const conflict =
+    checkpoint !== null &&
+    !practiceScopeAllowsCheckpoint(practiceScope, checkpoint);
+
+  const domains: {
+    domain: string;
+    label: string;
+    grades: string[];
+    strands: { strand: string; label: string; grades: string[] }[];
+  }[] = [];
+  for (const { domain, label } of PRACTICE_DOMAINS) {
+    const nodes = await ctx.db
+      .query("knowledgeNodes")
+      .withIndex("by_domain", (q) => q.eq("domain", domain))
+      .collect();
+    if (nodes.length === 0) continue;
+    const domainGrades = new Set<string>();
+    const strandGrades = new Map<string, Set<string>>();
+    for (const node of nodes) {
+      if (node.grade) domainGrades.add(node.grade);
+      if (!node.strand) continue;
+      const grades = strandGrades.get(node.strand) ?? new Set<string>();
+      if (node.grade) grades.add(node.grade);
+      strandGrades.set(node.strand, grades);
+    }
+    domains.push({
+      domain,
+      label,
+      grades: sortGrades(domainGrades),
+      strands: [...strandGrades.entries()]
+        .map(([strand, grades]) => ({
+          strand,
+          label: humanizeStrand(strand),
+          grades: sortGrades(grades),
+        }))
+        .sort((a, b) => a.label.localeCompare(b.label)),
+    });
+  }
+
+  return {
+    scholarId,
+    practiceScope,
+    scopeSource,
+    migrationIssue,
+    checkpoint,
+    groupCheckpoint,
+    conflict,
+    domains,
+  };
+}
+
 export const planEditor = teacherQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args) => {
     await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
-    const { practiceScope, source: scopeSource } = await resolvePracticeScope(
-      ctx,
-      args.scholarId,
-    );
-    const migrationIssue =
-      scopeSource === "math_plan"
-        ? null
-        : await migrationIssueForScholar(ctx, args.scholarId);
-    const checkpoint = await resolveStoredCheckpoint(ctx, args.scholarId);
-    const groupCheckpoint = await resolveRawGroupCheckpoint(ctx, args.scholarId);
-    const conflict =
-      checkpoint !== null &&
-      !practiceScopeAllowsCheckpoint(practiceScope, checkpoint);
+    return await planEditorCore(ctx, args.scholarId);
+  },
+});
 
-    const domains: {
-      domain: string;
-      label: string;
-      grades: string[];
-      strands: { strand: string; label: string; grades: string[] }[];
-    }[] = [];
-    for (const { domain, label } of PRACTICE_DOMAINS) {
-      const nodes = await ctx.db
-        .query("knowledgeNodes")
-        .withIndex("by_domain", (q) => q.eq("domain", domain))
-        .collect();
-      if (nodes.length === 0) continue;
-      const domainGrades = new Set<string>();
-      const strandGrades = new Map<string, Set<string>>();
-      for (const node of nodes) {
-        if (node.grade) domainGrades.add(node.grade);
-        if (!node.strand) continue;
-        const grades = strandGrades.get(node.strand) ?? new Set<string>();
-        if (node.grade) grades.add(node.grade);
-        strandGrades.set(node.strand, grades);
-      }
-      domains.push({
-        domain,
-        label,
-        grades: sortGrades(domainGrades),
-        strands: [...strandGrades.entries()]
-          .map(([strand, grades]) => ({
-            strand,
-            label: humanizeStrand(strand),
-            grades: sortGrades(grades),
-          }))
-          .sort((a, b) => a.label.localeCompare(b.label)),
-      });
-    }
-
-    return {
-      scholarId: args.scholarId,
-      practiceScope,
-      scopeSource,
-      migrationIssue,
-      checkpoint,
-      groupCheckpoint,
-      conflict,
-      domains,
-    };
+export const aidePlanEditor = internalQuery({
+  args: {
+    callerUserId: v.id("users"),
+    scholarId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
+    const caller = await requireAideTeacher(ctx, args.callerUserId);
+    await requireActiveScholarAccess(ctx, caller, args.scholarId);
+    return await planEditorCore(ctx, args.scholarId);
   },
 });
 
@@ -223,36 +252,73 @@ export const myPlan = authedQuery({
   },
 });
 
+async function saveForScholarCore(
+  ctx: MutationCtx,
+  caller: Doc<"users">,
+  args: {
+    scholarId: Id<"users">;
+    practiceScope: PracticeScope;
+    checkpoint: CheckpointTarget | null;
+  },
+) {
+  const practiceScope = await validatePracticeScope(ctx, args.practiceScope);
+  if (args.checkpoint && !practiceScopeAllowsCheckpoint(practiceScope, args.checkpoint)) {
+    throw new Error("Checkpoint must be inside the Practice scope.");
+  }
+  if (args.checkpoint) await validateCheckpoint(ctx, args.checkpoint);
+  const rawGroup = await resolveRawGroupCheckpoint(ctx, args.scholarId);
+  const overrides = await overrideRowsForScholar(ctx, args.scholarId);
+  const sameTarget = !!rawGroup && !!args.checkpoint &&
+    rawGroup.domain === args.checkpoint.domain && rawGroup.strand === args.checkpoint.strand && rawGroup.grade === args.checkpoint.grade;
+  if (args.checkpoint === null || sameTarget) {
+    for (const row of overrides) await ctx.db.delete(row._id);
+  } else {
+    const rows = [...overrides].sort((a, b) => b.updatedAt - a.updatedAt);
+    const data = {
+      ...args.checkpoint,
+      nodeKey: undefined,
+      source: "teacher" as const,
+      updatedBy: caller._id,
+      updatedAt: Date.now(),
+    };
+    if (rows[0]) {
+      await ctx.db.patch(rows[0]._id, data);
+      for (const duplicate of rows.slice(1)) await ctx.db.delete(duplicate._id);
+    } else {
+      await ctx.db.insert("scholarCheckpointOverride", {
+        scholarId: args.scholarId,
+        ...data,
+      });
+    }
+  }
+  await savePlan(
+    ctx,
+    args.scholarId,
+    practiceScope,
+    caller._id,
+    args.checkpoint === null ? !!rawGroup : false,
+  );
+  return { practiceScope, checkpoint: args.checkpoint };
+}
+
 export const saveForScholar = teacherMutation({
   args: { scholarId: v.id("users"), practiceScope: scopeValidator, checkpoint: v.union(targetValidator, v.null()) },
   handler: async (ctx, args) => {
     await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
-    const practiceScope = await validatePracticeScope(ctx, args.practiceScope);
-    if (args.checkpoint && !practiceScopeAllowsCheckpoint(practiceScope, args.checkpoint)) {
-      throw new Error("Checkpoint must be inside the Practice scope.");
-    }
-    if (args.checkpoint) await validateCheckpoint(ctx, args.checkpoint);
-    const rawGroup = await resolveRawGroupCheckpoint(ctx, args.scholarId);
-    const overrides = await overrideRowsForScholar(ctx, args.scholarId);
-    const sameTarget = !!rawGroup && !!args.checkpoint &&
-      rawGroup.domain === args.checkpoint.domain && rawGroup.strand === args.checkpoint.strand && rawGroup.grade === args.checkpoint.grade;
-    if (args.checkpoint === null || sameTarget) {
-      for (const row of overrides) await ctx.db.delete(row._id);
-    } else {
-      const rows = [...overrides].sort((a, b) => b.updatedAt - a.updatedAt);
-      const data = {
-        ...args.checkpoint,
-        nodeKey: undefined,
-        source: "teacher" as const,
-        updatedBy: ctx.user._id,
-        updatedAt: Date.now(),
-      };
-      if (rows[0]) {
-        await ctx.db.patch(rows[0]._id, data);
-        for (const duplicate of rows.slice(1)) await ctx.db.delete(duplicate._id);
-      } else await ctx.db.insert("scholarCheckpointOverride", { scholarId: args.scholarId, ...data });
-    }
-    await savePlan(ctx, args.scholarId, practiceScope, args.checkpoint === null ? !!rawGroup : false);
-    return { practiceScope, checkpoint: args.checkpoint };
+    return await saveForScholarCore(ctx, ctx.user, args);
+  },
+});
+
+export const aideSaveForScholar = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    scholarId: v.id("users"),
+    practiceScope: scopeValidator,
+    checkpoint: v.union(targetValidator, v.null()),
+  },
+  handler: async (ctx, { callerUserId, ...args }) => {
+    const caller = await requireAideTeacher(ctx, callerUserId);
+    await requireActiveScholarAccess(ctx, caller, args.scholarId);
+    return await saveForScholarCore(ctx, caller, args);
   },
 });

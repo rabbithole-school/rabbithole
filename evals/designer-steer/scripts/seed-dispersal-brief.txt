@@ -1,0 +1,25 @@
+BUILD BRIEF: Seed Travel App
+
+Context: The scholar has spent two sessions studying how plants move their seeds away from the parent plant (wind, animals, water, bursting pods, hitchhiking burrs). They picked one plant and wrote down how its seed is shaped and why they think that shape helps it travel. Now they direct the AI builder to turn THEIR plant into a small interactive app. The scholar is the designer and director; the builder writes the code. The scholar owns every design decision.
+
+(a) What the app must let the scholar demonstrate
+- Which plant they chose and how its seeds travel (wind, animal, water, bursting, hooking onto fur).
+- How a feature of the seed's shape (wing size, fluff, hooks, weight) changes how far seeds land from the parent plant.
+- A way to TEST it: a slider or toggle for the seed feature or the conditions (wind strength, how many animals pass by), with a visible result (where seeds land, how many grow, how far the farthest one got).
+- Why travelling far helps: seeds that land right under the parent compete with it for light and water.
+
+(b) Learning arc (discover by building and observing, in this order)
+1. Start from their own plant. Ask the scholar to explain how its seeds travel, in their own words, before anything is built.
+2. Build the seed drop first with NO special feature: seeds fall straight down. Let them watch where they land and what happens under the parent plant.
+3. Add their seed's feature. Have them PREDICT where seeds will land before they run it, then compare.
+4. Test fairly: change one thing at a time (feature size, wind, number of animals). Ask what they notice and why.
+5. Stress-test: what happens on a day with no wind, or when the animals don't come?
+6. Improve: let them change the seed or the app based on what they saw, and explain why.
+
+(c) What NOT to reveal up front
+- Don't tell them which feature works best. Coach with questions.
+- Don't introduce terms like "dispersal kernel" or "competition" before they notice the pattern. Once they discover it, give them the real word.
+- Keep it science-honest: simplified is fine, but seeds must not fly in ways their shape can't explain.
+
+(d) Scholar choice
+- The scholar chooses the look, setting, and format: a meadow, a forest, a game, a comic. They name their plant and decide what the controls are. Get a small working version first, then add features.

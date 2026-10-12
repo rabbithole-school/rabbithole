@@ -13,6 +13,8 @@
 //     server-owned desired state re-arms.
 //   - Never enter ASAM unless this install has a current paired-device record.
 
+import type { AsamTransitionReason } from "../deviceActivityQueue";
+
 /** The connectivity + intent snapshot the decision is a pure function of. */
 export type AsamInputs = {
   /** True when the device currently has confirmed internet. */
@@ -122,6 +124,49 @@ export function decideAsamAction({
   if (isOnline && paired && armed && !inSam) return "enter";
   // Online + armed + already locked, or nothing to do → leave it alone.
   return "none";
+}
+
+/**
+ * The controller's inputs at one reconcile pass, as recorded for the next
+ * pass's `asamTransitionReason`. `armed` here is the SERVER's intent, before a
+ * system-UI release is folded in.
+ */
+export type AsamReasonInputs = {
+  isOnline: boolean;
+  paired: boolean | "unknown";
+  armed: boolean;
+  releasedForSystemUI: boolean;
+};
+
+/**
+ * Why `decideAsamAction` chose this transition, for the TRA-331 lock-change
+ * telemetry. Exits are read off the current inputs in decideAsamAction's own
+ * precedence. Entries need the previous pass too, since what changed is the
+ * reason: no earlier settled pass → `cold_start`; we were offline →
+ * `back_online`; the pairing read was still loading → `cold_start`; a
+ * system-UI release ended → `system_ui_restore`; pairing or
+ * the server's intent just turned on → `armed`; and nothing changed at all →
+ * `reassert`, i.e. iOS was found outside Single App Mode on its own.
+ */
+export function asamTransitionReason(
+  action: "enter" | "exit",
+  current: AsamReasonInputs,
+  previous: AsamReasonInputs | null,
+): AsamTransitionReason {
+  if (action === "exit") {
+    if (!current.isOnline) return "offline";
+    if (current.paired === false) return "unpaired";
+    if (current.releasedForSystemUI && current.armed) return "system_ui_release";
+    return "disarmed";
+  }
+  if (previous === null) return "cold_start";
+  if (!previous.isOnline) return "back_online";
+  if (previous.paired === "unknown") return "cold_start";
+  if (previous.releasedForSystemUI && !current.releasedForSystemUI) {
+    return "system_ui_restore";
+  }
+  if (previous.paired !== true || !previous.armed) return "armed";
+  return "reassert";
 }
 
 /**

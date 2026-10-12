@@ -90,7 +90,11 @@ import {
 import {
   MAKE_PICTURE_COPY,
   FIND_IMAGE_COPY,
+  SLIDE_TEXT_COLORS,
+  SLIDE_BACKGROUND_COLORS,
+  SLIDE_TEXT_SIZES,
 } from "../../../vendor/shared/slidesScene";
+import { SlideStyleControlNative } from "./SlideStyleControlNative";
 import {
   placeholderFrameForSlot,
   resolvedImageFrame,
@@ -120,11 +124,14 @@ const HANDLE_HIT = 52;
  * short enough that a scholar who walks away mid-sentence keeps their words.
  */
 const DRAFT_AUTOSAVE_MS = 2000;
-const TEXT_SIZE_OPTIONS = [
-  { label: "Small", fontSize: 28 },
-  { label: "Medium", fontSize: 40 },
-  { label: "Large", fontSize: 56 },
-] as const;
+/**
+ * Width of the fixed contextual slot at the toolbar's end. Held CONSTANT across
+ * every selection state ([Slide background] / [Text style][Delete] / [Delete])
+ * so toolbar height never depends on selection — the widest variant is
+ * [Text style][Delete], and pinning the slot to it keeps the rest of the
+ * toolbar's wrap identical regardless of what's selected.
+ */
+const CONTEXT_SLOT_WIDTH = 200;
 
 const INSERT_SYMBOLS: Record<
   (typeof INSERT_KINDS)[number],
@@ -1048,58 +1055,63 @@ export const SlidesEditorNative = forwardRef<
               </Pressable>
             </>
           )}
-          {selectedElement?.type === "text" && (
-            <View
-              accessibilityLabel="Text size"
-              style={[styles.textSizeControl, { borderColor: colors.border }]}
-            >
-              {TEXT_SIZE_OPTIONS.map(({ label, fontSize }, optionIndex) => {
-                const selected = selectedElement.style.fontSize === fontSize;
-                return (
-                  <Pressable
-                    key={fontSize}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected }}
-                    accessibilityLabel={`${label} text`}
-                    onPress={() =>
-                      mutate([
-                        {
-                          op: "patchElement",
-                          slideId: slide.id,
-                          id: selectedElement.id,
-                          style: { fontSize },
-                        },
-                      ])
-                    }
-                    style={({ pressed }) => [
-                      styles.textSizeButton,
-                      optionIndex > 0 && { borderLeftWidth: StyleSheet.hairlineWidth },
-                      {
-                        borderLeftColor: colors.border,
-                        backgroundColor: selected ? colors.cyanSubtle : "transparent",
-                        opacity: pressed ? 0.65 : 1,
-                      },
-                    ]}
-                  >
-                    <Text style={[styles.textSizeLabel, { fontFamily: fonts.medium, color: colors.fg }]}>
-                      {label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          )}
-          {selectedId && (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={SLIDES_COPY.deleteElement}
-              onPress={deleteSelected}
-              testID="slides-toolbar-delete-element"
-              style={[styles.toolBtn, { borderColor: colors.border }]}
-            >
-              <SymbolView name="trash" size={16} tintColor={colors.fg} />
-            </Pressable>
-          )}
+          <View style={styles.contextSlot}>
+            {selectedElement?.type === "text" && (
+              <SlideStyleControlNative
+                controlLabel={SLIDES_COPY.textStyle}
+                glyph="Aa"
+                swatchNoun="text"
+                currentColor={selectedElement.style.color}
+                colors={SLIDE_TEXT_COLORS}
+                onSelectColor={(color) =>
+                  mutate([
+                    {
+                      op: "patchElement",
+                      slideId: slide.id,
+                      id: selectedElement.id,
+                      style: { color },
+                    },
+                  ])
+                }
+                sizes={SLIDE_TEXT_SIZES}
+                currentSize={selectedElement.style.fontSize}
+                onSelectSize={(fontSize) =>
+                  mutate([
+                    {
+                      op: "patchElement",
+                      slideId: slide.id,
+                      id: selectedElement.id,
+                      style: { fontSize },
+                    },
+                  ])
+                }
+                sizeLabel={SLIDES_COPY.textSize}
+                colorLabel={SLIDES_COPY.color}
+              />
+            )}
+            {!selectedElement && (
+              <SlideStyleControlNative
+                controlLabel={SLIDES_COPY.backgroundColor}
+                swatchNoun="background"
+                currentColor={slide.background}
+                colors={SLIDE_BACKGROUND_COLORS}
+                onSelectColor={(color) =>
+                  mutate([{ op: "setBackground", slideId: slide.id, color }])
+                }
+              />
+            )}
+            {selectedElement && (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={SLIDES_COPY.deleteElement}
+                onPress={deleteSelected}
+                testID="slides-toolbar-delete-element"
+                style={[styles.toolBtn, { borderColor: colors.border }]}
+              >
+                <SymbolView name="trash" size={16} tintColor={colors.fg} />
+              </Pressable>
+            )}
+          </View>
         </View>
       )}
 
@@ -2015,20 +2027,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 6,
   },
-  textSizeControl: {
+  contextSlot: {
+    // Fixed width across all selection states so the toolbar's wrap — and thus
+    // its height — never depends on what's selected. Contents right-align.
+    width: CONTEXT_SLOT_WIDTH,
     minHeight: 34,
     flexDirection: "row",
-    borderWidth: 1,
-    borderRadius: 8,
-    overflow: "hidden",
-  },
-  textSizeButton: {
-    minWidth: 56,
-    paddingHorizontal: 8,
     alignItems: "center",
-    justifyContent: "center",
+    justifyContent: "flex-end",
+    gap: 8,
   },
-  textSizeLabel: { fontSize: 12 },
   notesSurface: {
     marginTop: 14,
     borderWidth: 1,

@@ -174,8 +174,10 @@ export function GooglePickerButton({
     // that browsers now sever under popup-isolation / third-party-storage
     // rules, leaving the flow to hang forever (no callback, no error_callback,
     // just a spinner + a benign COOP console warning). When the user has a
-    // linked Google account with Drive read scope this resolves immediately;
-    // otherwise it returns null and we fall back to the GIS flow below.
+    // linked Google account with Drive read scope the server mints a fresh
+    // token down-scoped to drive.readonly + drive.file (never the stored
+    // token, which can carry Gmail access); otherwise, or if Google will not
+    // down-scope, it returns null and we fall back to the GIS flow below.
     try {
       const server = await getServerDriveToken();
       if (server?.token) return server.token;

@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -27,8 +27,15 @@ const modules = (import.meta as ImportMeta & { glob: (p: string) => Record<strin
 const WHOLE = "whole-number-arithmetic";
 const FRAC = "fraction-arithmetic";
 
+let sharedT: TestConvex<typeof schema> | null = null;
+
+function sharedSeeded() {
+  if (!sharedT) throw new Error("shared mapping test backend not initialized");
+  return sharedT;
+}
+
 async function seedScholar(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   username: string,
   gradeLevel?: string,
 ) {
@@ -42,7 +49,7 @@ async function seedScholar(
   );
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -100,7 +107,7 @@ async function mapDomainToDone(
   return { justMappedFired };
 }
 
-async function masteryRows(t: ReturnType<typeof convexTest>, scholarId: Id<"users">, domain: string) {
+async function masteryRows(t: TestConvex<typeof schema>, scholarId: Id<"users">, domain: string) {
   return await t.run(async (ctx) =>
     (await ctx.db.query("practiceMastery").collect()).filter(
       (r) => r.scholarId === scholarId && r.domain === domain,
@@ -108,7 +115,7 @@ async function masteryRows(t: ReturnType<typeof convexTest>, scholarId: Id<"user
   );
 }
 
-async function placementRow(t: ReturnType<typeof convexTest>, scholarId: Id<"users">, domain: string) {
+async function placementRow(t: TestConvex<typeof schema>, scholarId: Id<"users">, domain: string) {
   return await t.run(async (ctx) =>
     (await ctx.db.query("practicePlacements").collect()).find(
       (r) => r.scholarId === scholarId && r.domain === domain,
@@ -117,9 +124,13 @@ async function placementRow(t: ReturnType<typeof convexTest>, scholarId: Id<"use
 }
 
 describe("Option D — mapping inside the playlist (server contract)", () => {
+  beforeAll(async () => {
+    sharedT = convexTest(schema, modules);
+    await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+  });
+
   test("item 18 finalizes imperfect unresolved mapping and the next playlist is real practice", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_sit_cap");
     const asScholar = await asUser(t, scholar);
 
@@ -204,8 +215,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("an already-capped in-progress row repairs once on re-entry", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const sourceScholar = await seedScholar(t, "map_repair_source");
     const asSource = await asUser(t, sourceScholar);
 
@@ -277,8 +287,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
     // or crediting — marking the domain mapped (counted in N) while leaving it
     // unsearched. Now that `creditPlacementFrontiers` is raise-only safe, it must
     // always finalize through the real path.
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
 
     // A real capped probeLog, built by driving a source scholar to the cap
     // without converging (every 3rd unknown, as the repair test does).
@@ -373,8 +382,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("DAY 1: a fresh scholar's playlist is 100% `· mapping` (allMapping), foundational domain only", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_day1");
     const asScholar = await asUser(t, scholar);
 
@@ -395,8 +403,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("DAY 1: active mapping calibrates first probes from the scholar's grade level", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const younger = await seedScholar(t, "map_grade_1", "Grade 1");
     const older = await seedScholar(t, "map_grade_5", "5");
     const asYounger = await asUser(t, younger);
@@ -425,8 +432,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("PLACEMENT SEMANTICS preserved: mapping to done credits INFERRED (source placement), never demonstrated fluency", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_semantics");
     const asScholar = await asUser(t, scholar);
 
@@ -451,8 +457,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("BLEND MINORITY: a placed domain + an unmapped one → ≤2 mapping items, not allMapping, reviews/new lead", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_blend");
     const asScholar = await asUser(t, scholar);
 
@@ -477,8 +482,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("GHOST placement dissolves into mapping items (no migration) and appends to the SAME row", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_ghost");
     const asScholar = await asUser(t, scholar);
 
@@ -520,8 +524,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("BREADTH: the default entry serves the servable unmapped domains, never scoping to the resolved domain, and the preview matches", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_resume_one_domain");
     const asScholar = await asUser(t, scholar);
     const GEOMETRY = "geometry-measurement";
@@ -595,8 +598,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("IDEMPOTENT: re-submitting the same mapping item never double-logs (resume-safe)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_idem");
     const asScholar = await asUser(t, scholar);
 
@@ -619,8 +621,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("a FULLY-MAPPED scholar gets ZERO mapping items (existing behavior untouched)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     // A grade-9 scholar so the affect-safe ring admits every registered domain up
     // to Algebra 1 — otherwise "fully mapped" would be vacuous, satisfied by the
     // high-floor domains simply never becoming eligible.
@@ -674,8 +675,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("F1 RECOMPOSITION LOOP: the day-1 sit BUILDS across recompositions past the 6-probe batch until the first domain converges", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_recompose");
     const asScholar = await asUser(t, scholar);
 
@@ -717,8 +717,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("F2 PREVIEW PARITY (Q6): playlistForScholar(includeMapping) previews the SAME `· mapping` composition practiceSession serves", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_preview");
     const asScholar = await asUser(t, scholar);
 
@@ -756,8 +755,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("F6b/F3 ALREADY-MAPPED: a stale answer cannot demote the row or drop the canonical mapped count", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_stale");
     const asScholar = await asUser(t, scholar);
 
@@ -816,8 +814,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
   });
 
   test("F7 ZERO-ITEM GUARD: an unmapped domain with no probeable mapping band falls back to ordinary work (never a dead playlist)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_zeroitem");
     const asScholar = await asUser(t, scholar);
 
@@ -840,8 +837,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
     // who has fully mapped one domain is told to "Resume", not "Start" — even
     // though `mixedPlacementCurrent` itself still reports the remaining domains
     // as untouched. Pinned here so the behavior is deliberate.
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_persisted_progress");
     const asScholar = await asUser(t, scholar);
 
@@ -900,8 +896,7 @@ describe("Option D — mapping inside the playlist (server contract)", () => {
     // `/` instead of the box editor's stacked numerator/denominator.
     // `answerFormat` (the L1 skeleton) stays withheld — a mapping probe is a
     // measurement, so the scholar builds the shape from an empty editor.
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_twod", "5");
     const asScholar = await asUser(t, scholar);
 

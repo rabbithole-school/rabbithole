@@ -215,7 +215,13 @@ function ScholarSessionInner() {
       !hasDimensionParams &&
       !isDemoMode
     ) {
-      router.replace(teacherHomePath(user.role));
+      router.replace(
+        teacherHomePath(
+          user.role,
+          user.hasSchoolOperationsAccess,
+          user.hasCurriculumAccess,
+        ),
+      );
       return;
     }
   }, [
@@ -586,7 +592,7 @@ function ScholarSessionInner() {
 
       {/* Main Project Area */}
       <Flex flex={1} flexDir="column" overflow="hidden">
-        {currentSession?.isTestDrive && (isWorkbench || isVibecode) && (
+        {currentSession?.isTestDrive && isWorkbench && (
           <ManualRehearsalBanner session={currentSession} />
         )}
         {showSession ? (

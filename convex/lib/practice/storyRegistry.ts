@@ -106,6 +106,30 @@ const STORY_FAMILY_VISUALS: Record<string, string> = {
   "al-jabr": "📜",
   "temperature scales": "🌡️",
   "method of false position": "🏺",
+  "competitive darts": "🎯",
+  "dozens and divisibility": "🥚",
+  "calculator input methods": "🧮",
+  "opposite faces of dice": "🎲",
+  "widmann's plus and minus": "➕",
+  "cribbage fifteens": "🃏",
+  // Not the U+1F06B domino tile: it is not an emoji (Emoji=No), and newer
+  // Unicode data no longer counts it as a pictograph, so validation failed
+  // on up-to-date Node. Dominoes are dice pips on tiles.
+  "double-six dominoes": "🎲",
+  "the pythagorean theorem": "📐",
+  slope: "📈",
+  "expected value": "⚖️",
+  "tree diagrams": "🌳",
+  "center of mass": "⚖️",
+  "misleading averages": "💰",
+  "mark and recapture": "🐟",
+  "forecast probabilities": "🌦️",
+  "wisdom of crowds": "🐂",
+  "the percent sign": "🔤",
+  "unit pricing labels": "🏷️",
+  "why percentages don't add": "📉",
+  "gear ratios": "🚲",
+  "simple-interest doubling": "⏳",
 };
 
 const STORY_REGISTRY_BASE: RegistryStory[] = [
@@ -165,7 +189,7 @@ const STORY_REGISTRY_BASE: RegistryStory[] = [
     source: "Euclid, Elements, Book VII (c. 300 BC)",
   },
   {
-    fromKey: "prime_composite",
+    fromKey: "prime_or_composite",
     toKey: "cryptography",
     toLabel: "Cryptography",
     toDomain: "computer-science",
@@ -2839,6 +2863,895 @@ const STORY_REGISTRY_BASE: RegistryStory[] = [
     visualEmoji: "🐢",
     source:
       "ProofWiki, `0.999...=1`: geometric-series, fraction, multiplication-by-10, long-division, and sequence proofs; Wolfram MathWorld, `Zeno's Paradoxes`: dichotomy paradox and convergent half-step series; Britannica, `Zeno of Elea`: c. 495-c. 430 BCE.",
+    provenance: "generated",
+  },
+  // ── Wave 5 (TRA-96): algebra-1 + discrete-math world connections ──────────
+  // Two-family tournament (five candidate wows per node, self-scored against the
+  // ⭐ bar, one winner written); every survivor adversarially fact-checked by the
+  // other model family in refute mode, with the REVISE fixes applied by hand
+  // (dates, attributions, units, the 52!-vs-atoms overclaim). Four target nodes
+  // were skipped as hookless (sys_special_cases, gt_coloring,
+  // factor_trinomial_simple, plus the GPT arm’s self-explaining candidates).
+  {
+    fromKey: "quad_complete_square",
+    toKey: "the babylonian tablet ybc 6967",
+    toLabel: "The Babylonian tablet YBC 6967",
+    toDomain: "history",
+    kind: "history",
+    hook: "Solve x²+7x=60 with no algebra symbols at all — how would you even write it down?",
+    teaser:
+      "Completing the square feels like a symbol-shuffling trick. Nearly 4,000 years ago a scribe did the same steps on a clay tablet — with no symbols at all, just a rectangle, a strip, and a missing corner.",
+    narrative:
+      "Around 1800 BCE a Babylonian scribe wrote tablet YBC 6967: two numbers differ by 7 and multiply to 60 — find them. No algebra symbols existed. The scribe halved the 7, squared it (12.25), added the 60 (72.25), took the square root (8.5), then stepped 3.5 down and up to get 5 and 12. Read that as a picture: a rectangle cut, a strip moved, a small square added to complete a big one. Your completing-the-square recipe is that drawing, done in clay 3,800 years ago.",
+    probe:
+      "Draw a square of side y and glue a 7-wide strip to one edge (total area 60). Cut the strip in half and move one half around the corner: what small square is missing, and what is (y + 3.5)²? Finish it — you should land on y = 5.",
+    visualEmoji: "🧱",
+    source:
+      "Jens Høyrup, Algebra in Cuneiform (Edition Open Access, 2017), §3.3 “YBC 6967” — igûm/igibûm problem, difference 7, product 60, solution 12 and 5; Neugebauer & Sachs, Mathematical Cuneiform Texts (1945).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "quad_formula",
+    toKey: "vieta's formulas",
+    toLabel: "Vieta's Formulas",
+    toDomain: "math",
+    kind: "applies",
+    hook: "Two numbers add to 7 and multiply to 12 — could you find them without ever writing x²−7x+12=0?",
+    teaser:
+      "Before you solve x² − 7x + 12 = 0, look at the 7 and the 12. The two answers already add to one and multiply to the other. Viète noticed in 1591 that the roots are hiding in plain sight.",
+    narrative:
+      "In 1591, French mathematician François Viète showed the coefficients of a quadratic aren't random — for x²+bx+c=0, the two roots always add to −b and multiply to c. So the quadratic formula's answer was hiding in the equation's coefficients the whole time, readable before you ever solve for x.",
+    probe:
+      "Take x²−7x+12=0. Read off: roots should add to 7 and multiply to 12. Guess two numbers doing both (3 and 4), then check they satisfy the equation — no formula needed.",
+    visualEmoji: "➕",
+    source:
+      "François Viète, In Artem Analyticem Isagoge (1591); Albert Girard extended the relations to negative and complex roots, Invention nouvelle en l'algèbre (1629).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "quad_graph_features",
+    toKey: "the paper-folded parabola",
+    toLabel: "The Paper-Folded Parabola",
+    toDomain: "math",
+    kind: "instantiates",
+    hook: "Could you draw a perfect parabola using only a piece of paper and your fingers — no compass, no graph?",
+    teaser:
+      "Fold a sheet of paper so its edge touches one dot. Do it twenty times. No pencil, no graph — yet a perfect parabola appears out of the creases, with the dot as its focus.",
+    narrative:
+      "In his 1893 book on paper folding, Indian mathematician T. Sundara Row showed that repeatedly folding a straight edge of paper so it touches one fixed point creates dozens of creases — and those creases are all tangent lines to a parabola. The fixed point is the focus; the paper's edge is the directrix; the vertex sits exactly halfway between them.",
+    probe:
+      "Mark a dot (focus) a few inches from one edge of a sheet of paper. Fold the edge so it touches the dot, crease firmly, unfold. Repeat 15–20 times from different spots along the edge — the creases outline a parabola with no drawing at all.",
+    visualEmoji: "📄",
+    source:
+      "T. Sundara Row, Geometric Exercises in Paper Folding (1893), Section on the parabola.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "quad_model_context",
+    toKey: "galileo's dropped-and-shot balls",
+    toLabel: "Galileo's Dropped-And-Shot Balls",
+    toDomain: "science",
+    kind: "history",
+    hook: "Drop one ball and fire another sideways from the same height at the same instant — which lands first?",
+    teaser:
+      "Drop one coin and flick another sideways at the same instant. They hit the floor together. Galileo saw why in 1638, and it is the reason one quadratic describes both.",
+    narrative:
+      "In Two New Sciences (1638), Galileo argued that a thrown ball’s sideways motion and its fall are independent — sideways speed never changes how fast it drops. That is why a height-vs-time quadratic works identically whether an object is dropped or launched forward: in feet and seconds near Earth (ignoring air), both share the same −16t² term. The horizontal part just rides along at constant speed.",
+    probe:
+      "Hold a coin at table height in each hand. Drop one straight down while flicking the other sharply sideways off the edge at the exact same moment. Listen — both hit the floor at the same time, however far the flicked one traveled.",
+    visualEmoji: "🎱",
+    source:
+      "Galileo Galilei, Two New Sciences (1638), Fourth Day — projectile motion as a compound of uniform horizontal and accelerated vertical motion.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "lin_vs_exp",
+    toKey: "malthus's 1798 essay on population",
+    toLabel: "Malthus's 1798 Essay On Population",
+    toDomain: "history",
+    kind: "history",
+    hook: "Which wins a long race: something that adds the same amount every step, or something that multiplies?",
+    teaser:
+      "Start one column at 20 and add 3 each round; start another at 1 and double. The doubler looks hopeless — until it isn’t. Malthus built a whole argument about the world on that race.",
+    narrative:
+      "In 1798 Thomas Malthus argued that population grows geometrically — multiplying each generation, like your exponential functions — while food supply grows only arithmetically, adding a fixed amount, like your linear ones. His mathematical point stands on its own: any quantity that multiplies by a factor bigger than 1 each step eventually overtakes any quantity that only adds a fixed amount, no matter how far behind it starts.",
+    probe:
+      "Make two columns for 10 rounds: one doubling from 1 (1,2,4,8…), one adding 3 each round starting at 20 (20,23,26…). Find the exact round where the doubling column overtakes the adding one.",
+    visualEmoji: "📈",
+    source:
+      "Thomas Malthus, An Essay on the Principle of Population (1798), Chapter II.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "exp_growth_decay",
+    toKey: "the rule of 72",
+    toLabel: "The Rule Of 72",
+    toDomain: "math",
+    kind: "applies",
+    hook: "Without a calculator, how fast could you guess when your money doubles at a given interest rate?",
+    teaser:
+      "Divide 72 by an interest rate and you have the doubling time, to within days. A 1494 textbook already carried the shortcut. The mystery is why 72 works at all.",
+    narrative:
+      "Divide 72 by a percentage growth rate and you get, almost exactly, the years it takes to double. At 8% growth, 72 ÷ 8 = 9 years; the exact answer from logarithms is ln 2 / ln 1.08 ≈ 9.006 years — off by about two days. An early written reference to this shortcut appears in Luca Pacioli’s 1494 textbook Summa de Arithmetica, centuries before anyone could check it with a calculator.",
+    probe:
+      "Pick a growth rate (say 6%). Compute 72÷6=12 years. Then check the exact doubling time with ln(2)/ln(1.06) on a calculator — see how close the mental-math shortcut lands.",
+    visualEmoji: "💰",
+    source:
+      "Luca Pacioli, Summa de Arithmetica, Geometria, Proportioni et Proportionalita (1494), the “72” doubling passage; Wolfram MathWorld / Investopedia, “Rule of 72” for the ln 2 ≈ 0.693 derivation.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "sys_elimination",
+    toKey: "the nine chapters' fangcheng array",
+    toLabel: "The Nine Chapters' Fangcheng Array",
+    toDomain: "history",
+    kind: "history",
+    hook: "Could a system of equations be solved with no letters at all — just numbers arranged in columns?",
+    teaser:
+      "Two thousand years before anyone wrote x and y, Chinese mathematicians solved systems of equations by lining up numbers in columns and subtracting whole columns. It is your elimination method — done with rods.",
+    narrative:
+      "Chapter 8 of the Chinese classic The Nine Chapters on the Mathematical Art — compiled by the first century CE from older material — lays each equation’s coefficients out as a column of counting rods, then scales and subtracts whole columns until only one unknown remains. It is the elimination method you use today, some 1,800 years before Gauss’s name got attached to it, done with rods instead of letters.",
+    probe:
+      "Write two equations' coefficients as two columns of numbers stacked vertically. Multiply one column so a row matches the other, then subtract the columns — watch a whole variable vanish, just like the ancient rod array.",
+    visualEmoji: "🎋",
+    source:
+      "The Nine Chapters on the Mathematical Art, Chapter 8 (Fangcheng); Shen, Crossley & Lun, trans. (Oxford University Press, 1999).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "lin_eq_literal",
+    toKey: "maxwell's dimensional analysis",
+    toLabel: "Maxwell's Dimensional Analysis",
+    toDomain: "science",
+    kind: "applies",
+    hook: "Could you tell a physics formula is wrong just by looking at its units — without knowing any physics?",
+    teaser:
+      "Rearrange d = vt and you might get it wrong. Multiply the units instead: (meters/second) × seconds. If the seconds don’t cancel, your algebra is wrong — and you never touched a number.",
+    narrative:
+      "In his 1873 Treatise on Electricity and Magnetism, James Clerk Maxwell formalized checking that both sides of any equation carry matching units — rearranging a literal equation for a different variable, like solving F=ma for a, only works if the units still balance afterward. A unit mismatch proves a rearrangement wrong before you even plug in numbers.",
+    probe:
+      "Rearrange v=d/t to solve for d: d=vt. Plug in units (meters/second)×(seconds). Watch the seconds cancel, leaving meters — confirming the rearrangement, no numbers required.",
+    visualEmoji: "📐",
+    source:
+      "James Clerk Maxwell, A Treatise on Electricity and Magnetism, Vol. 1 (1873), Chapter I.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "lin_eq_abs_value",
+    toKey: "weierstrass's vertical bars",
+    toLabel: "Weierstrass's Vertical Bars",
+    toDomain: "history",
+    kind: "etymology",
+    hook: "Fold a strip of paper at one point — could that single fold be the reason absolute value equations have two answers?",
+    teaser:
+      "Mark 3 on a paper strip and fold it there. The crease lands 8 exactly on −2. That fold is why |x − 3| = 5 has two answers — and why the bars look the way they do.",
+    narrative:
+      "The two vertical bars in |x| were introduced by German mathematician Karl Weierstrass in 1841. They mean \"distance from zero, direction erased\" — which is exactly why |x−3|=5 has two solutions. Fold a paper number line at the point 3: the crease reflects the point 8 onto −2, showing the two answers are true mirror images of each other.",
+    probe:
+      "Mark 3 on a paper strip, then mark 8 (five steps right) and −2 (five steps left). Fold the strip at the mark 3 — the crease should land 8 exactly on top of −2, proving both solve |x−3|=5.",
+    visualEmoji: "📐",
+    source:
+      "Karl Weierstrass (1841), notation documented in Florian Cajori, A History of Mathematical Notations, Vol. 1 (1928), §368.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "roots_square_cube",
+    toKey: "the spiral of theodorus",
+    toLabel: "The Spiral of Theodorus",
+    toDomain: "math",
+    kind: "instantiates",
+    hook: "Could you build every square root from 2 to 17 using nothing but right triangles and a ruler?",
+    teaser:
+      "Stack right triangles so each hypotenuse becomes the next leg. The hypotenuses come out √2, √3, √4, √5… in order — every square root, drawn, no calculator.",
+    narrative:
+      "In Plato’s dialogue Theaetetus, the mathematician Theodorus of Cyrene (5th century BCE) is reported to have shown that the square roots up through √17 (skipping perfect squares) are irrational. A construction later named for him builds those roots by hand: stack unit right triangles so each new hypotenuse becomes a leg of the next. The hypotenuses come out √2, √3, √4, √5… in order, spiraling outward — every root, drawn, no calculator.",
+    probe:
+      "Draw a right triangle with both legs length 1 (hypotenuse √2). Attach a new unit-length leg perpendicular to that hypotenuse, forming a new triangle. Repeat 6–7 times and measure each new hypotenuse — you're drawing √2, √3, √4… by hand.",
+    visualEmoji: "🌀",
+    source:
+      "Plato, Theaetetus 147d (Theodorus and roots through 17); T. L. Heath, A History of Greek Mathematics, Vol. 1 (1921); Wolfram MathWorld, “Theodorus Spiral” (the construction is a later reconstruction).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "roots_simplify_radicals",
+    toKey: "ramanujan's nested radical",
+    toLabel: "Ramanujan's Nested Radical",
+    toDomain: "math",
+    kind: "applies",
+    hook: "Could an endless staircase of nested square roots, going on forever, add up to exactly the whole number 3?",
+    teaser:
+      "An infinite staircase of square roots inside square roots ought to be a mess. Ramanujan showed it equals exactly 3. Work it from the inside and watch it settle.",
+    narrative:
+      "In 1911, Srinivasa Ramanujan posed a problem in the Journal of the Indian Mathematical Society: an infinitely nested radical — √(1+2√(1+3√(1+4√(1+…)))) — equals exactly 3. Simplifying radicals inside radicals, which feels like it should get messier forever, instead collapses to a clean integer.",
+    probe:
+      "Starting from an inner guess like √(1+5×6)≈5.57, work outward: √(1+4×5.57)≈4.82, √(1+3×4.82)≈3.93, √(1+2×3.93)≈2.98 — watch the value converge toward 3 as you climb back out.",
+    visualEmoji: "🧩",
+    source:
+      "Srinivasa Ramanujan, \"Question 289,\" Journal of the Indian Mathematical Society 3 (1911), p. 90.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "poly_special_products",
+    toKey: "the near-square multiplication trick",
+    toLabel: "The near-square multiplication trick",
+    toDomain: "math",
+    kind: "applies",
+    hook: "Could you multiply 41×39 in your head, instantly, using only one squared number?",
+    teaser:
+      "41 × 39 in your head, instantly: it’s 40² − 1. The special product you expand on paper works just as well backwards.",
+    narrative:
+      "Mental calculators multiply numbers that straddle a round number with the difference-of-squares pattern (a + b)(a − b) = a² − b²: 41 × 39 is (40 + 1)(40 − 1) = 40² − 1² = 1599, almost instantly. Arthur Benjamin popularized the routine in his mental-math books; the pattern is exactly the special product you expand on paper, running in reverse.",
+    probe:
+      "Pick a pair of numbers 1 away from a round number, like 29×31. Compute 30²−1²=899, then verify with a calculator that 29×31 really equals 899.",
+    visualEmoji: "🧠",
+    source:
+      "Arthur Benjamin & Michael Shermer, Secrets of Mental Math: The Mathemagician's Guide to Lightning Calculation and Amazing Math Tricks (Three Rivers Press, 2006).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "slope_two_points",
+    toKey: "the egyptian seked",
+    toLabel: "The Egyptian Seked",
+    toDomain: "history",
+    kind: "history",
+    hook: "Ancient Egyptian scribes measured a pyramid's steepness — but their number is the exact opposite of your slope.",
+    teaser:
+      "Egyptian scribes measured a pyramid’s steepness 3,600 years ago — with your slope fraction turned upside down. Same line, run over rise.",
+    narrative:
+      "Problems 56–60 of the Rhind Mathematical Papyrus (c. 1650 BCE) compute a pyramid face’s seked: how many palms it shifts sideways for every cubit of height. That is the reciprocal of your slope — run over rise instead of rise over run — because builders cared how far a face leaned inward per unit climbed. The same two points, the same line, the fraction upside down.",
+    probe:
+      "Suppose a pyramid face rises 2 cubits for every 1 cubit it runs inward — slope 2. Flip it: run/rise = 1/2 cubit per cubit. Egyptians measured run in palms (7 per cubit), so the seked is 3.5 palms per cubit. Same line, opposite fraction.",
+    visualEmoji: "🔺",
+    source:
+      "Rhind Mathematical Papyrus, Problems 56–60 (c. 1650 BCE); Gay Robins & Charles Shute, The Rhind Mathematical Papyrus: An Ancient Egyptian Text (British Museum Press, 1987).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "lin_fn_interpret_context",
+    toKey: "dolbear's law",
+    toLabel: "Dolbear's Law",
+    toDomain: "nature",
+    kind: "applies",
+    hook: "Could a cricket’s chirping be a working linear thermometer, with a real slope and a real intercept?",
+    teaser:
+      "Count a cricket’s chirps for 15 seconds and add 40: that’s roughly the temperature. A real linear function with a slope and an intercept, published in 1897 — and the intercept means something.",
+    narrative:
+      "In 1897 the physicist Amos Dolbear published a formula in The American Naturalist: count a snowy tree cricket’s chirps for 15 seconds, add 40, and you have roughly the temperature in Fahrenheit. It is a genuine linear function — chirps in, degrees out — with a real slope (one degree per extra chirp per 15 seconds) and a real intercept (40). The cricket is the thermometer; the equation is what reads it.",
+    probe:
+      "Count (or watch a video of) cricket chirps for exactly 15 seconds and add 40. Compare with the actual temperature. Then say what the 40 means: what would the cricket be doing at 40°F?",
+    visualEmoji: "🦗",
+    source:
+      "A. E. Dolbear, \"The Cricket as a Thermometer,\" The American Naturalist, Vol. 31, No. 371 (1897), pp. 970–971.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "gt_euler_path",
+    toKey: "kaliningrad's rebuilt bridges",
+    toLabel: "Kaliningrad's Rebuilt Bridges",
+    toDomain: "history",
+    kind: "history",
+    hook: "Euler proved a walk crossing all 7 bridges exactly once was impossible — is it still impossible today?",
+    teaser:
+      "Euler proved in 1736 that no walk could cross all seven Königsberg bridges once. Two bridges were destroyed in the war. Count today’s five — the impossible walk is now possible.",
+    narrative:
+      "Leonhard Euler's 1736 proof of the Königsberg bridge problem needed each landmass to touch an even number of bridges (except possibly two). WWII bombing destroyed two of the original seven bridges, leaving five. Recount the connections on today's map: exactly two landmasses now have an odd bridge-count — meaning the walk Euler proved impossible in 1736 is now, since the war, actually possible.",
+    probe:
+      "Sketch the 4 landmasses connected by the 5 surviving bridges. Count each landmass's bridge connections. Find the two with an odd count, then try tracing a route crossing every bridge exactly once, starting at one of them.",
+    visualEmoji: "🌉",
+    source:
+      "Leonhard Euler, \"Solutio problematis ad geometriam situs pertinentis,\" Commentarii Academiae Scientiarum Petropolitanae 8 (1736); modern bridge count discussed in the Heidelberg Laureate Forum blog, \"The Bridges of Königsberg\" (2019).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "gt_bipartite",
+    toKey: "the mutilated chessboard problem",
+    toLabel: "The Mutilated Chessboard Problem",
+    toDomain: "math",
+    kind: "applies",
+    hook: "Cut two opposite corners off a chessboard — can 31 dominoes still cover every remaining square?",
+    teaser:
+      "Cut two opposite corners off a chessboard and try to tile it with 31 dominoes. You can’t — and you can prove it without placing a single one. Count the colors.",
+    narrative:
+      "Remove two diagonally opposite corners from an 8×8 chessboard — they are the same color — and try to tile the rest with 31 dominoes. It is provably impossible, no trial and error needed: the board’s squares split into two teams (black and white), every domino joins one of each, and the damaged board has 30 of one color and 32 of the other. A two-colorable graph with unequal halves has no perfect pairing. The philosopher Max Black posed it in 1946.",
+    probe:
+      "Draw an 8×8 checkerboard grid and cross out the two opposite corner squares (same color). Count how many black vs white squares remain, then explain why no arrangement of 1×2 dominoes can ever cover them all.",
+    visualEmoji: "♟️",
+    source:
+      "Max Black, Critical Thinking (Prentice-Hall, 1946); Martin Gardner, \"Mathematical Games,\" Scientific American, April 1957.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "gt_tree_edges",
+    toKey: "euler's polyhedron formula",
+    toLabel: "Euler's Polyhedron Formula",
+    toDomain: "math",
+    kind: "applies",
+    hook: "Is the rule 'a tree always has one fewer edge than vertex' secretly the same as a famous 3D shape formula?",
+    teaser:
+      "A tree has one fewer edge than vertex. Euler’s formula for 3D solids says V − E + F = 2. Put F = 1 into the second and you get the first — the tree rule was hiding inside geometry.",
+    narrative:
+      "Leonhard Euler's 1750 letter to Christian Goldbach gave a formula for any polyhedron drawn flat: vertices − edges + faces = 2. A tree graph, drawn flat, has exactly one face (the outside) — plug in F=1 and the formula becomes vertices − edges = 1, exactly the tree-edge rule you're using, hiding inside 3D geometry's most famous equation.",
+    probe:
+      "Draw a small branching tree with no loops. Count vertices and edges — confirm they differ by exactly 1. Then add one extra edge to create a single loop, and watch vertices − edges drop to exactly 0.",
+    visualEmoji: "🔷",
+    source:
+      "Leonhard Euler, letter to Christian Goldbach, November 14, 1750; Euler, \"Elementa doctrinae solidorum,\" Novi Commentarii Academiae Scientiarum Petropolitanae 4 (1758).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "gt_handshake_sum",
+    toKey: "the handshake lemma's parity corollary",
+    toLabel: "The Handshake Lemma's Parity Corollary",
+    toDomain: "math",
+    kind: "applies",
+    hook: "At any party, could you PROVE the number of people who shook an odd number of hands is even — without knowing who shook whose hand?",
+    teaser:
+      "At any party, the number of people who shook an odd number of hands is even. Always. You can prove it without knowing who shook whose hand.",
+    narrative:
+      "Because every handshake adds exactly 1 to two people's counts, the sum of everyone's handshake totals is always even (twice the number of handshakes) — a fact traceable to Euler's 1736 counting argument. That forces a strange guarantee: the number of people with an odd handshake count must itself always be even, at any party, no matter who shook whose hand.",
+    probe:
+      "Draw 5 dots and connect some pairs with lines (any pattern). Count each dot's connections. Count how many dots have an ODD number of connections — it will always come out even. Try a different pattern to check.",
+    visualEmoji: "🤝",
+    source:
+      "Leonhard Euler (1736), foundational degree-sum argument; standard corollary presented in Kenneth H. Rosen, Discrete Mathematics and Its Applications, 8th ed. (McGraw-Hill, 2019), §10.1.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "pigeonhole_basic",
+    toKey: "the birthday paradox's certainty gap",
+    toLabel: "The Birthday Paradox's Certainty Gap",
+    toDomain: "math",
+    kind: "applies",
+    hook: "How many people does it take to be MATHEMATICALLY CERTAIN two share a birthday — versus merely likely?",
+    teaser:
+      "To be certain two people share a birthday you need 367. For a coin-flip chance you need only 23. Guess both before you check — most people miss by a mile.",
+    narrative:
+      "Pigeonhole logic guarantees a shared birthday only once a room holds 367 people — one more than the 366 possible dates. Yet with 365 equally likely birthdays (ignoring leap day), just 23 people already give better than a 50% chance that two share one. “Guaranteed” and “likely” turn out to need wildly different numbers: 367 versus 23. Most people guess both far too high.",
+    probe:
+      "Before you compute anything, guess: how many people force a shared birthday for certain? How many for a coin-flip chance? Then check — 367 and 23. Which of your two guesses was further off, and why?",
+    visualEmoji: "🎂",
+    source:
+      "Wolfram MathWorld, “Birthday Problem” (23 people → p > 0.5 under 365 equally likely birthdays); the pigeonhole bound is 366 + 1 = 367.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "factorial_arrangements",
+    toKey: "the never-repeated shuffle",
+    toLabel: "The Never-Repeated Shuffle",
+    toDomain: "math",
+    kind: "applies",
+    hook: "Every time you properly shuffle a deck of cards, is the exact order you get likely to have ever existed before?",
+    teaser:
+      "There are about 8 × 10⁶⁷ ways to order a deck — more than atoms in the Earth. Shuffle well, and the order in your hands has almost certainly never existed before.",
+    narrative:
+      "A deck of 52 cards has 52! ≈ 8 × 10⁶⁷ possible orders — more than the number of atoms in the Earth. Dave Bayer and Persi Diaconis showed in 1992 that seven ordinary riffle shuffles bring a deck close to a uniformly random order among all of those. So the order in your hands after a good shuffle is, almost certainly, one that has never been dealt before in human history — a probability intuition, not a proof, but an overwhelming one.",
+    probe:
+      "Shuffle a deck seven times. There are about 8 × 10⁶⁷ orders and humans have shuffled perhaps 10¹⁵ decks ever. Roughly what fraction of all orders has ever existed? Is yours likely to be one of them?",
+    visualEmoji: "🃏",
+    source:
+      "Dave Bayer & Persi Diaconis, \"Trailing the Dovetail Shuffle to its Lair,\" The Annals of Applied Probability, Vol. 2, No. 2 (1992), pp. 294–313.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "combinations_r_from_n",
+    toKey: "pingala's meru prastara",
+    toLabel: "Pingala's Meru Prastara",
+    toDomain: "history",
+    kind: "history",
+    hook: "A triangle of numbers you know as Pascal's triangle — was it really discovered a thousand years before Pascal?",
+    teaser:
+      "The triangle of numbers you call Pascal’s was tabulated in India to count syllable patterns in poetry, centuries before Pascal. Row 4 says there are 6 ways to pick 2 long syllables from 4.",
+    narrative:
+      "Around the 2nd century BCE the Indian scholar Pingala’s Chandahśāstra gave rules for counting the ways to arrange long and short syllables in Sanskrit poetry — exactly nCr, the ways to choose r long syllables among n. Halayudha’s 10th-century commentary tabulated those counts explicitly as the meru prastara, a triangle of numbers. It is the same triangle Pascal published in Europe centuries later.",
+    probe:
+      "Build a 5-row number triangle by adding each pair of neighbors from the row above (1; 1,1; 1,2,1; 1,3,3,1; 1,4,6,4,1). Read row 4 (1,4,6,4,1) as: exactly 6 ways exist to choose 2 \"long\" syllables among 4 positions.",
+    visualEmoji: "🔺",
+    source:
+      "Pingala, Chandahśāstra (c. 2nd century BCE); Halayudha, Mrtasanjivini commentary (10th century CE), which first tabulated the triangle explicitly.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "count_complementary",
+    toKey: "montmort's hat-check problem",
+    toLabel: "Montmort's Hat-Check Problem",
+    toDomain: "history",
+    kind: "history",
+    hook: "If everyone's hat gets returned at random, what are the odds that literally NOBODY gets their own hat back?",
+    teaser:
+      "Hand four hats back at random. In 9 of the 24 ways, nobody gets their own. As the crowd grows the answer settles on 1/e — a question first asked in 1708.",
+    narrative:
+      "In 1708, Pierre Rémond de Montmort posed the hat-check problem, solved generally by Nicolas Bernoulli by 1713: as more hats are randomly returned, the probability that nobody gets their own converges to 1/e ≈ 0.368. It's found by complementary counting — total arrangements minus every arrangement where at least one person gets a match.",
+    probe:
+      "List all 24 ways to hand 4 hats back to 4 people. Count how many have NOBODY matched (9 arrangements). Check 9/24 = 0.375, already close to the limiting answer of 1/e ≈ 0.368.",
+    visualEmoji: "🎩",
+    source:
+      "Pierre Rémond de Montmort, Essay d'analyse sur les jeux de hazard, 2nd ed. (1713), with Nicolas Bernoulli's solution.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "nt_last_digit",
+    toKey: "automorphic numbers",
+    toLabel: "Automorphic Numbers",
+    toDomain: "math",
+    kind: "applies",
+    hook: "Could a number's square end in that exact same number, digit for digit, every single time?",
+    teaser:
+      "25² = 625. 76² = 5776. Some numbers’ squares end in the number itself — forever, however many times you square them. Try 625.",
+    narrative:
+      "25² = 625, ending in 25. 76² = 5776, ending in 76. Numbers whose squares end in themselves are called automorphic, and they are an extreme, permanent version of the last-digit patterns you track when finding a power’s units digit: their own last digits never change no matter how many times you square them. They come in a chain — 5, 25, 625, 0625, 90625… — each digit fixing the next.",
+    probe:
+      "Square 25 on a calculator: 625. Square 76: 5776. Check that each answer's last two digits are exactly the number you started with — then try squaring 625 itself and see the pattern continue.",
+    visualEmoji: "🔢",
+    source:
+      "Wolfram MathWorld, “Automorphic Number”; OEIS A003226 (automorphic numbers: 0, 1, 5, 6, 25, 76, 376, 625, 9376, …).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "nt_parity_argument",
+    toKey: "the 15-puzzle parity proof",
+    toLabel: "The 15-Puzzle Parity Proof",
+    toDomain: "history",
+    kind: "history",
+    hook: "Swap just two tiles in a sliding puzzle — could that alone make it permanently, provably unsolvable?",
+    teaser:
+      "Swap two tiles in a sliding puzzle and it becomes unsolvable — provably, before you slide anything. Count the out-of-order pairs; parity does the rest.",
+    narrative:
+      "In the classic 15-puzzle, swapping just two tiles (say 14 and 15) from the solved state makes it impossible to fix with any number of slides — proven in 1879 by counting “inversions,” pairs of tiles out of order. A sideways slide changes neither the inversion count nor the blank’s row; a vertical slide changes both parities at once. So the combined parity never changes, and a single swap’s odd mismatch can never be undone.",
+    probe:
+      "Arrange numbers 1–15 in a 4×4 grid with tiles 14 and 15 swapped. Read left-to-right, top-to-bottom, and count how many pairs are out of order — an odd count proves it's unsolvable before you slide a single tile.",
+    visualEmoji: "🧩",
+    source:
+      "W. W. Johnson & W. E. Story, \"Notes on the '15' Puzzle,\" American Journal of Mathematics, Vol. 2, No. 4 (1879), pp. 397–404.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "nt_divisibility_proof",
+    toKey: "casting out nines",
+    toLabel: "Casting Out Nines",
+    toDomain: "history",
+    kind: "history",
+    hook: "Could you check a multiplication problem is right without redoing the whole calculation?",
+    teaser:
+      "Check a multiplication without redoing it: reduce each factor to a digit sum, multiply, reduce again. Fibonacci taught the trick in 1202. It is your divisibility-by-9 rule at work.",
+    narrative:
+      "In Liber Abaci (1202), Fibonacci taught \"regula novena\" (the rule of nines): reduce each factor of a multiplication to a single digit by repeatedly summing its digits, multiply those two digits, reduce again, and check it matches the reduced original product. This is the same digit-sum test you use to check divisibility by 9 — used for centuries as a hand-calculation error check, long before calculators existed.",
+    probe:
+      "Multiply two 2-digit numbers. Reduce each factor to one digit by summing its digits (repeat if needed). Multiply those two digits and reduce again. Check the result matches your original product reduced the same way.",
+    visualEmoji: "➕",
+    source:
+      "Leonardo of Pisa (Fibonacci), Liber Abaci (1202); trans. L.E. Sigler, Fibonacci's Liber Abaci (Springer, 2002).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "nt_gcd_euclid",
+    toKey: "lam\u00e9's golden-ratio worst case",
+    toLabel: "Lamé's Golden-Ratio Worst Case",
+    toDomain: "math",
+    kind: "applies",
+    hook: "Is there a pair of numbers that makes the Euclidean algorithm take the maximum possible number of steps?",
+    teaser:
+      "Which two numbers make the Euclidean algorithm work hardest? Lamé proved in 1844: neighbors in the Fibonacci sequence. Try 21 and 13 and count the steps.",
+    narrative:
+      "In 1844, Gabriel Lamé proved that for numbers of a given size, the Euclidean algorithm takes the most steps precisely when fed two consecutive Fibonacci numbers — because their ratio approaches the golden ratio, the number that is provably the hardest of all to approximate well with fractions, forcing the algorithm through its slowest possible path.",
+    probe:
+      "Run the Euclidean algorithm on 21 and 13 and count the divisions (5). Now try 21 with 20, 15, and 8. The Fibonacci neighbor 13 makes the algorithm work hardest for its size — every remainder is the largest it can be.",
+    visualEmoji: "🐚",
+    source:
+      "Gabriel Lamé, \"Note sur la limite du nombre des divisions dans la recherche du plus grand commun diviseur,\" Comptes Rendus de l'Académie des Sciences 19 (1844), pp. 867–870.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "nt_modular_arithmetic",
+    toKey: "musical set theory's mod-12 arithmetic",
+    toLabel: "Musical Set Theory's Mod-12 Arithmetic",
+    toDomain: "music",
+    kind: "applies",
+    hook: "Could transposing a song into a different key be nothing more than adding a number, mod 12?",
+    teaser:
+      "Number the notes C = 0 through B = 11. Add 5 to each note of a C chord, mod 12, and you have an F chord. Changing key is clock arithmetic.",
+    narrative:
+      "Music theorist Allen Forte's 1973 system numbers the 12 pitches 0 through 11 and transposes any chord by adding a fixed number to every note, mod 12 — add 5 to C major's notes [0,4,7] and get [5,9,0], which is exactly F major. It's the identical clock arithmetic you use for modular equations, applied note by note to analyze music.",
+    probe:
+      "Number the notes C=0 up through B=11. Take C major's notes [0,4,7], add 5 to each, and reduce any result above 11 by subtracting 12. Check you land on [5,9,0] — the notes of F major.",
+    visualEmoji: "🎹",
+    source:
+      "Allen Forte, The Structure of Atonal Music (Yale University Press, 1973).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "lg_knights_knaves",
+    toKey: "the embedded question trick",
+    toLabel: "The Embedded Question Trick",
+    toDomain: "math",
+    kind: "applies",
+    hook: "Could one cleverly nested question force a truth-teller and a liar to both give the exact same answer?",
+    teaser:
+      "A truth-teller and a liar give opposite answers — until you ask “If I asked you X, would you say yes?” Then two lies cancel and both answer alike.",
+    narrative:
+      "Ask a truth-teller and a liar the same yes/no question and you get opposite answers. Wrap it inside another — “If I asked you X, would you say yes?” — and the difference vanishes: the liar must lie about what their lie would be, and two lies cancel. Logicians lean on this embedded-question trick; George Boolos’s 1996 “Hardest Logic Puzzle Ever” is built on it. One nesting turns an unreliable witness into a reliable one.",
+    probe:
+      "Pick a direct yes/no question. Have a friend answer it once honestly and once as a pretend liar. Then ask both the embedded version, \"If I asked you [that question], would you say yes?\" — check both now give the same answer.",
+    visualEmoji: "🎭",
+    source:
+      "George Boolos, “The Hardest Logic Puzzle Ever,” The Harvard Review of Philosophy 6 (1996), pp. 62–65 (uses embedded questions to neutralize a liar); Raymond Smullyan, What Is the Name of This Book? (1978), knights-and-knaves puzzles.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "lg_converse",
+    toKey: "the 3-4-5 rope",
+    toLabel: "The 3-4-5 rope",
+    toDomain: "history",
+    kind: "history",
+    hook: "Knowing 3² + 4² = 5² only builds a right angle if a completely different statement is ALSO true — which one?",
+    teaser:
+      "A rope knotted 3-4-5 makes a right angle. But the Pythagorean theorem doesn’t promise that — its converse does, and Euclid had to prove it separately.",
+    narrative:
+      "Builders have long marked a right angle with a rope knotted into 12 equal segments pulled into a 3-4-5 triangle. But the Pythagorean theorem says a right triangle satisfies a² + b² = c² — that alone doesn’t promise the rope trick works. The trick relies on the CONVERSE: any triangle whose sides satisfy a² + b² = c² must have a right angle. Euclid proved that separately (Elements I.48), right after the theorem itself. A statement and its converse are two different claims; the rope needs the second one.",
+    probe:
+      "Mark 12 equal segments on a string (tie knots or use a ruler). Form a triangle with sides of 3, 4, and 5 segments. Check the angle between the 3-segment and 4-segment sides against a book's square corner.",
+    visualEmoji: "🪢",
+    source:
+      "Euclid, Elements, Book I, Proposition 47 (the theorem) and Proposition 48 (its converse); the 3-4-5 triple satisfies 9 + 16 = 25.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "subtract_within_20",
+    toKey: "competitive darts",
+    toLabel: "Competitive Darts",
+    toDomain: "games",
+    kind: "applies",
+    hook: "In 501 darts, one subtraction mistake can erase all three throws",
+    teaser:
+      "A darts player races down from 501 to exactly zero, but the last dart must hit a double. Near the finish, an overshoot does something stranger than merely losing points.",
+    narrative:
+      "In 501 darts, a player begins at 501 and subtracts each visit's score, trying to reach exactly zero. Tournament double-out rules make the last dart land in a double; if a visit goes below zero, leaves 1, or reaches zero without a double, the whole visit is a bust and the score returns to where that visit began. Near the finish, subtraction within 20 becomes strategy: with 16 left, double 8 wins, but a miss changes which exact double is possible.",
+    probe:
+      "You have 16 points left. Which double ends the leg immediately? If your first dart scores 8 instead, which double would finish the remaining score?",
+    source:
+      "World Darts Federation, Playing and Tournament Rules: 501 straight start, double finish, and bust scoring.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "mult_facts_3_4_6",
+    toKey: "dozens and divisibility",
+    toLabel: "Dozens and Divisibility",
+    toDomain: "math",
+    kind: "instantiates",
+    hook: "Why a dozen is a sharing machine",
+    teaser:
+      "An egg carton of 12 can split evenly among 2, 3, 4, or 6 people. The surprise is that your ×3, ×4, and ×6 facts are the reason the dozen shares so cleanly.",
+    narrative:
+      "Take a dozen eggs. Two people get 6 each, three get 4, four get 3, and six get 2. Turn each sharing fact around and it becomes a multiplication fact: 2×6, 3×4, 4×3, and 6×2 all rebuild 12. Ten feels natural because we count in base ten, but it cannot split evenly into thirds, quarters, or sixths. A dozen's usefulness is not magic; its factor pairs make it unusually flexible.",
+    probe:
+      "Without drawing all 12 eggs, use your multiplication facts to name every group size from 2 through 6 that can share a dozen with none left over.",
+    source:
+      'Britannica Dictionary, "dozen" (a group of 12); divisor pairs of 12: 1×12, 2×6, and 3×4.',
+    provenance: "generated",
+  },
+  {
+    fromKey: "two_step_expressions",
+    toKey: "calculator input methods",
+    toLabel: "Calculator Input Methods",
+    toDomain: "technology",
+    kind: "applies",
+    hook: "Two honest calculators can give two different answers",
+    teaser:
+      "Press 4 + 3 × 2 on an immediate-execution calculator and it can show 14; a precedence-aware scientific calculator shows 10. The screen does not tell you which input rule it followed.",
+    narrative:
+      "Some basic four-function calculators use immediate execution: when × is pressed after 4 + 3, they first finish 4 + 3 = 7, then multiply by 2 to show 14. Scientific calculators such as the TI-30XS MultiView store the expression and apply algebraic precedence, so 3 × 2 happens before + 4 and the result is 10. The keys look mathematical, but the machine still needs an input convention; knowing precedence lets you predict the screen instead of trusting it blindly.",
+    probe:
+      "Before touching either calculator, predict what 4 + 3 × 2 will show under immediate execution and under multiplication-before-addition. How could you test which rule an unfamiliar calculator uses?",
+    source:
+      'Texas Instruments, TI-30XS MultiView Guidebook, "Order of Operations" (EOS); TI calculator documentation on Chain and AOS calculation modes.',
+    provenance: "generated",
+  },
+  {
+    fromKey: "add_within_10",
+    toKey: "opposite faces of dice",
+    toLabel: "Opposite Faces of Dice",
+    toDomain: "games",
+    kind: "instantiates",
+    hook: "A die hides the number bond that completes seven",
+    teaser:
+      "Cover the bottom of a standard die after it lands. The face you cannot see is fixed by the number on top — but what rule determines it?",
+    narrative:
+      "Roll a standard six-sided die and cover the bottom. If the top shows 2, the hidden face is 5; if it shows 6, the bottom is 1. Standard dice pair opposite faces so they total 7: 1 with 6, 2 with 5, and 3 with 4. Your addition facts can therefore reveal a face without lifting the die. The visible number is only half of a number bond built into the object. That hidden complement stays fixed however the die tumbles, turning each roll into a prediction you can test immediately.",
+    probe:
+      "Roll a standard die five times. Before lifting it, predict the hidden bottom face from the top face, then check whether the pair totals 7.",
+    source:
+      'Wolfram MathWorld, "Dice": on a standard six-sided die, opposite faces are arranged to sum to seven.',
+    provenance: "generated",
+  },
+  {
+    fromKey: "subtract_within_10",
+    toKey: "widmann's plus and minus",
+    toLabel: "Widmann's Plus and Minus",
+    toDomain: "history",
+    kind: "history",
+    hook: "The printed minus sign began as a merchant's mark for something missing",
+    teaser:
+      "Johannes Widmann printed + and − in a Leipzig arithmetic book in 1489. The symbols did not yet mean the operations you perform today.",
+    narrative:
+      "In 1489, Johannes Widmann printed + and − in Behende und hüpsche Rechenung auff allen Kauffmanschafft, a Leipzig arithmetic book for merchants. This is the earliest known printed use of the signs. Widmann used them to mark surplus and deficit, not yet as general operation symbols. A minus marked how much a quantity fell short of its expected amount. The small dash in a subtraction problem began on the page as a practical record of something missing. Later writers adopted the marks as operators, but Widmann's page preserves their earlier commercial job.",
+    probe:
+      "Suppose a merchant expected 9 measures but received 6. Write the shortfall with subtraction, then explain why a minus sign suits a deficit.",
+    source:
+      "Johannes Widmann, Behende und hüpsche Rechenung auff allen Kauffmanschafft (Leipzig, 1489), digitized by the Library of Congress; MacTutor History of Mathematics, Johannes Widmann.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "add_within_20_regroup",
+    toKey: "cribbage fifteens",
+    toLabel: "Cribbage Fifteens",
+    toDomain: "games",
+    kind: "applies",
+    hook: "In cribbage, every different way to make fifteen earns two points",
+    teaser:
+      "A cribbage hand may hide several overlapping groups that total 15. Fast addition finds them, but only careful counting finds every score.",
+    narrative:
+      "Cribbage turns making 15 into a search puzzle. Jacks, queens, and kings count as 10, while other cards use their face values. Under the official scoring rules, each distinct combination totaling exactly 15 scores 2 points. A 5 can pair with a king, while 7 and 8 make another fifteen; larger groups can count too. Because the same card may belong to more than one distinct combination, a player must scan the whole hand rather than stop after finding one sum. Two different fifteens score separately even when they share cards.",
+    probe:
+      "Using cards valued 5, 7, 8, and 10, list every distinct combination that totals 15. How many points would those fifteens score?",
+    source:
+      "International Cribbage Association, Rules of Cribbage, Rule 1.7: fifteen-count combinations score two points each.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "add_subtract_fluency_within_20",
+    toKey: "double-six dominoes",
+    toLabel: "Double-Six Dominoes",
+    toDomain: "games",
+    kind: "instantiates",
+    hook: "A 28-tile domino set is every pair from zero through six",
+    teaser:
+      "A standard double-six set has exactly 28 tiles, not 49. The missing copies reveal how the set treats 2|5 and 5|2.",
+    narrative:
+      "A standard double-six domino set contains 28 tiles. Each end shows a value from blank, meaning 0, through 6, and every unordered pair appears exactly once: 0|0 through 0|6, then 1|1 through 1|6, and so on to 6|6. There is no separate 5|2 tile because turning 2|5 around makes the same tile. Add or subtract the two ends and the set becomes a pocket-sized collection of facts, organized without duplicate reversals. The count is triangular: seven choices with blank, then six new choices with one, continuing down to one double-six.",
+    probe:
+      "Sort a double-six set by the smaller end. Count the groups of 7, 6, 5, 4, 3, 2, and 1 tiles, then add those group sizes.",
+    source:
+      'Encyclopaedia Britannica, "Domino": the standard Western double-six set has 28 pieces representing every combination from blank through six.',
+    provenance: "generated",
+  },
+  {
+    fromKey: "coordinate_distance",
+    toKey: "the pythagorean theorem",
+    toLabel: "The Pythagorean theorem",
+    toDomain: "geometry",
+    kind: "instantiates",
+    hook: "You can find how far apart two dots are when they share a row or column — just subtract. But if one dot is 3 right and 4 up from the other, subtraction alone cannot find the diagonal.",
+    teaser:
+      "Subtracting handles a straight-across or straight-up hop. For a diagonal, the two hops you already know hide a third length — and one rule always finds it.",
+    narrative:
+      "Hop 3 right and then 4 up between two dots. The straight diagonal is not 3 plus 4, or 7; it is 5. Those hops and the diagonal form a right triangle. The theorem named for Pythagoras, a Greek mathematician of about 500 BCE, says the square on the diagonal equals the squares on the legs added together: 3 squared plus 4 squared is 25, so the diagonal is 5. Babylonian tablets listed such number triples more than a thousand years earlier. Your two coordinate subtractions give the legs; squaring and adding finds the diagonal.",
+    probe:
+      "Two dots are 6 apart across and 8 apart up. Is the straight-line distance between them more or less than 14, and can you find it exactly?",
+    source:
+      "Checked: 3² + 4² = 25 = 5² (arithmetic); Pythagoras a Greek mathematician c. 570-495 BCE; Plimpton 322 (Babylonian, c. 1800 BCE) records Pythagorean triples, predating Pythagoras by over a millennium. The popular Egyptian rope-stretcher 3-4-5 claim was deliberately excluded as historically unverified.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "rate_constant_speed",
+    toKey: "slope",
+    toLabel: "Slope",
+    toDomain: "algebra",
+    kind: "instantiates",
+    hook: "A car holding a steady 60 km each hour has one number for its speed. Draw the trip on a distance-time graph and that same 60 becomes something you can see: how steeply the line climbs.",
+    teaser:
+      "Your steady speed is a rate — kilometres for every hour. Plot the trip and the rate becomes the tilt of the line, and mathematicians give that tilt a name that is the very same number.",
+    narrative:
+      "Put time along the bottom of a graph and distance up the side. A steady 60 kilometres each hour means that for every 1 hour you move right, the line climbs 60. That up for every across is the line's slope. Faster speed makes a steeper line; standing still makes a flat line with slope zero. Slope is rise, the change up, divided by run, the change across. For motion, that is distance divided by time: exactly the unit rate called speed. Speed and slope are one idea seen as a rate in a table and steepness on a graph.",
+    probe:
+      "On a distance-time graph, one cyclist's line is steeper than another's over the same stretch of time. Who is moving faster, and what on the graph tells you?",
+    source:
+      "Checked: for constant speed, slope = rise/run = distance/time = the unit rate itself (definitional identity); a horizontal line has slope 0, matching a stationary object. No historical or attribution claim is made, so only the arithmetic identity was verified.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "compound_two_dice",
+    toKey: "expected value",
+    toLabel: "Expected value",
+    // A world domain, never a practice-domain slug: a toDomain equal to a
+    // practice domain files the far-end node inside that graph and breaks its
+    // node count and DAG checks (Merge Marshal caught this on the first try).
+    toDomain: "games",
+    kind: "instantiates",
+    hook: "A total of 7 turns up more often than 2 on two dice. If a game paid the total in points each roll, what score should you expect — and would 7 points be a fair price to play?",
+    teaser:
+      "Some two-dice totals are common, some are rare. Weigh each total by how often it appears and you get one number the game settles toward — the number that reveals whether a game is fair or rigged.",
+    narrative:
+      "Two dice give totals from 2 to 12, but not equally often: 7 appears in 6 of 36 outcomes, while 2 and 12 each appear once. Expected value asks: if each total were paid out and weighted by its chance, what is the long-run average per roll? Multiply every total by its chance and add; for two fair dice the result is 7. Over many rolls, the average settles near 7. Charging 7 tickets to win the total is fair, with no long-run gain or loss; charging 8 favours the house. This chance-weighted average is expected value, a tool also used to price risk.",
+    probe:
+      "A carnival game pays you the total of two dice in tickets but costs 8 tickets to play. Over many plays, would you expect to come out ahead, behind, or even?",
+    source:
+      "Checked: expected total of two fair dice = 2(1/36) + … + 12(1/36) = 7, equivalently 3.5 + 3.5 (each die's mean); 7 occurs in 6 of 36 outcomes, 2 and 12 in 1 each (enumeration); 'fair' means expected net zero (standard definition).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "count_list_outcomes",
+    toKey: "tree diagrams",
+    toLabel: "Tree diagrams",
+    toDomain: "combinatorics",
+    kind: "instantiates",
+    hook: "To list every outfit from 2 shirts and 3 trousers, hold one shirt fixed and run through the trousers. Draw that careful habit and it becomes branches splitting into branches.",
+    teaser:
+      "Your neat, no-repeats way of listing outcomes has a picture: each choice is a branch, each branch splits into the next choice. The shape shows at a glance why the count is a multiplication.",
+    narrative:
+      "An organized outcome list, holding the first choice steady while sweeping through the second, is secretly a tree. From one starting point, 2 shirts make 2 branches; each splits into 3 trouser branches, giving 2 times 3, or 6 tips, one per outfit. The tree shows why the count multiplies: every first branch carries a full copy of the second set of choices. Add 2 pairs of shoes and each of the 6 tips splits into 2, reaching 12. The same picture can carry probabilities, with a chance on each branch. Your neat list is a tree lying on its side.",
+    probe:
+      "You pick a flavour from 3 choices and then a cone or a cup, 2 choices. Before listing anything, how many tips would a tree diagram have, and why?",
+    source:
+      "Checked: 2 × 3 = 6 and 2 × 3 × 2 = 12 by enumeration; a tree diagram's leaf count equals the product of the branch counts (multiplication principle). No dated or historical claim is made, so only the arithmetic and the principle were verified.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "mean_balance_point",
+    toKey: "center of mass",
+    toLabel: "Center of mass",
+    toDomain: "physics",
+    kind: "instantiates",
+    hook: "The average of your data is not only add-them-up-and-divide. Set an equal weight on a ruler at each number, let go, and the whole thing balances at exactly that spot.",
+    teaser:
+      "The mean has a physical twin: the place a loaded ruler balances. A number far out to one side tugs the balance toward it, exactly as a weight far from a pivot tips a see-saw.",
+    narrative:
+      "Set one equal weight on a ruler at each number in your data. The ruler balances exactly at the mean: the place where pulls from the low and high numbers cancel. Physicists call this the centre of mass. For equal weights along a line, it sits precisely at the arithmetic mean of their positions. That is why a value far out to one side tugs the mean toward itself, just as a weight far from a pivot tips a see-saw. The average is not only an add-and-divide rule; it is a balance you could actually feel.",
+    probe:
+      "Five equal blocks sit at the marks 2, 4, 4, 6, and 9 on a ruler. Where along the ruler does it balance?",
+    source:
+      "Checked: for equal point masses on a line, centre of mass = Σx/N = the arithmetic mean of positions (mechanics definition, equal masses cancel from the weighted formula). Sample balance point 2+4+4+6+9 = 25, ÷5 = 5 (arithmetic).",
+    provenance: "generated",
+  },
+  {
+    fromKey: "outlier_effect_on_mean_median",
+    toKey: "misleading averages",
+    toLabel: "Misleading averages",
+    toDomain: "statistics",
+    kind: "applies",
+    hook: "One billionaire walking into a small room can make the 'average' person there a millionaire — while the person standing in the middle has not changed at all.",
+    teaser:
+      "Mean and median are both averages, but only one survives a single extreme value. That difference decides which number an honest report should use.",
+    narrative:
+      "Imagine nine people in a small cafe, each earning about 40 thousand dollars a year. A person earning $1 billion in a year walks in. The mean annual income rises to about $100 million. Yet the median, the middle person once everyone is lined up, barely moves. One extreme value drags the mean far from the crowd while leaving the middle untouched. The U.S. Census Bureau reports median household income because a few very large incomes pull the mean upward. The lesson is not that one average is wrong, but that a single outlier can quietly bend the mean while the median holds steady.",
+    probe:
+      "Nine workers each earn about 40 thousand, and their boss earns 4 million. Which number better describes a typical salary in that group, the mean or the median, and why?",
+    source:
+      "Checked: the mean is sensitive to an outlier while the median is resistant (definitional). The U.S. Census Bureau reports median household income as its standard measure — verified this is the reported statistic rather than the mean.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "estimate_population_from_sample",
+    toKey: "mark and recapture",
+    toLabel: "Mark and recapture",
+    toDomain: "ecology",
+    kind: "applies",
+    hook: "How do you count the fish in a whole lake when you can never see most of them? You tag a handful, throw them back, and let the next catch do the arithmetic.",
+    teaser:
+      "Catch some, mark them, release them, then catch again and count the marks. A single proportion turns a few tagged animals into an estimate of a population you will never fully see.",
+    narrative:
+      "You cannot count every fish in a lake, but you can estimate the total. Catch 50, mark them, and release them. Later catch 50 more; suppose 10 carry marks. The marked fraction of that catch is 10 out of 50, or one fifth. If that roughly matches the marked fraction of the whole lake, the 50 tagged fish are about one fifth of the population, giving 250 fish. Biologists estimate populations of fish, deer, and butterflies this way. It is called mark and recapture: a few tagged animals and one proportion count creatures you could never all see at once.",
+    probe:
+      "A ranger tags 30 turtles, later catches 40, and finds 6 of them tagged. About how many turtles are in the pond?",
+    source:
+      "Checked: Lincoln-Petersen mark-recapture, N ≈ (marked × second catch) / recaptured = (50×50)/10 = 250 (arithmetic); probe: (30×40)/6 = 200. Verified mark-recapture is a real, standard ecological method, not folklore.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "likelihood_scale",
+    toKey: "forecast probabilities",
+    toLabel: "Forecast probabilities",
+    toDomain: "meteorology",
+    kind: "applies",
+    hook: "A 30 percent chance of rain — 30 percent of what? Not 30 percent of the sky, and not 30 percent of the day. It is a promise about a hundred days you will never see.",
+    teaser:
+      "The rain number lives on the same 0-to-1 scale as a spinner. What it counts is surprising, and forecasters can even be graded on whether they get it right.",
+    narrative:
+      "A forecast of 30 percent chance of rain sounds simple until you ask, 30 percent of what. Not 30 percent of the sky, and not 30 percent of the day. It means a 30% chance that measurable precipitation will occur at the specified place during the forecast period. Across many forecasts labeled 30%, a well-calibrated forecaster should see rain on about 30% of them. So the weather number is ordinary probability, pointed at tomorrow instead of at a spinner.",
+    probe:
+      "A forecaster says 80 percent chance of rain on ten different days. If they are well calibrated, on about how many of those ten days does rain actually fall?",
+    source:
+      "Checked: probability sits on the 0-1 scale (definitional); calibration (a stated probability p should verify near frequency p over many like forecasts) is a real forecast-verification concept. I used the frequency/calibration interpretation and deliberately did NOT claim the exact NWS 'probability of precipitation' areal-coverage formula, which has a nuance beyond this framing.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "mean",
+    toKey: "wisdom of crowds",
+    toLabel: "Wisdom of crowds",
+    toDomain: "statistics",
+    kind: "applies",
+    hook: "At a country fair, 787 people guessed the weight of an ox. Not one of them nailed it — yet their average guess missed by about a single pound.",
+    teaser:
+      "The plain add-and-divide average can pull a startlingly sharp answer out of a room full of rough guesses. One famous fair showed just how sharp.",
+    narrative:
+      "At an English country fair in 1906, 787 people guessed the weight of an ox. Not one got it right. Yet their average was about 1197 pounds, against the true 1198. The crowd's mean beat nearly every guesser, including experienced butchers and farmers. One person's overshoot can cancel another's undershoot, leaving shared signal beneath the noise. Francis Galton wrote up this event in Nature, and it became a famous example of the wisdom of crowds. The same add-and-divide mean you already know pulled a sharp answer from a room full of rough guesses.",
+    probe:
+      "Twenty friends each guess the number of jellybeans in a jar. Why might the average of all twenty guesses beat almost every single friend's guess?",
+    source:
+      "Checked against Galton, 'Vox Populi,' Nature (1907): 787 entries, ox's true weight 1198 lb. Galton's headline figure was the median (1207 lb); the mean of the guesses (~1197 lb) comes from his published data as later tabulated. I attribute 1197 to the data, not to Galton's original claim, to avoid the common median/mean conflation.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "percent_rate_per_hundred",
+    toKey: "the percent sign",
+    toLabel: "The percent sign",
+    toDomain: "history of notation",
+    kind: "etymology",
+    hook: "That little percent sign is a fraction that got squashed. Its slash and two circles are the leftovers of writing 'per 100' over and over.",
+    teaser:
+      "Percent is not a new kind of number. Trace its sign back and you find the plain fraction it has always been, hiding inside an old merchant's abbreviation.",
+    narrative:
+      "The percent sign is a fraction that got squashed. The word comes from Latin per centum and Italian per cento, meaning for each hundred. Merchants shortened per cento to per 100, then to a cramped form; over time the 100 folded into a slash flanked by two circles. So 30 percent is not a new kind of number. It is 30 for each hundred, the fraction 30 over 100, wearing an abbreviation. The slash echoes the fraction bar, and the circles trace back to the zeros of a hundred. Once you see the fraction hiding inside, the symbol stops being arbitrary.",
+    probe:
+      "If percent is shorthand for 'out of 100,' what fraction is 7 percent, and what would 100 percent be as a fraction?",
+    source:
+      "Checked against Cajori, A History of Mathematical Notations (1928, §§660-664): the % sign evolved from Italian 'per cento' → 'per 100' → a slashed symbol with the two circles tracing to the zeros of 100. Latin 'per centum' etymology confirmed. No 'first/oldest' superlative is claimed.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "rate_unit_price",
+    toKey: "unit pricing labels",
+    toLabel: "Unit pricing labels",
+    toDomain: "consumer economics",
+    kind: "applies",
+    hook: "The big box is not always the better deal — and the store has already printed the proof, in tiny type, on the shelf tag.",
+    teaser:
+      "That small second price under a grocery item is a unit rate. Reading it turns a hopeful guess about the bigger box into a fair, honest comparison.",
+    narrative:
+      "Under a grocery item you may find a second price, such as cost per ounce or per 100 grams. That number is a unit rate: total price divided by size, turning differently sized packages into a fair comparison. Shoppers may assume the giant box is cheaper, yet jumbo sizes can still be priced higher per ounce, so checking the unit price matters. Shelf unit pricing is required in the European Union and several United States states. The how-much-for-one calculation you would otherwise do by hand is already printed in small type; reading it turns a guess into a comparison.",
+    probe:
+      "A 12-ounce jar costs 3.00 dollars and an 18-ounce jar costs 4.68 dollars. Which is the better buy per ounce?",
+    source:
+      "Checked: unit price = total price ÷ quantity (definitional). Shelf unit-pricing is mandated by EU Directive 98/6/EC and by several U.S. states — I verified the mandate exists rather than claiming it is universal. Probe arithmetic: 3.00/12 = 0.25 vs 4.68/18 = 0.26, so the 12-oz jar is cheaper per ounce.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "percent_change",
+    toKey: "why percentages don't add",
+    toLabel: "Why percentages don't add",
+    toDomain: "finance",
+    kind: "instantiates",
+    hook: "A price rises 10 percent one day and falls 10 percent the next. You would think you are back where you started. You are not — you have lost money.",
+    teaser:
+      "Percent changes feel like they should add up and cancel out. They do not, because each one is taken of a different amount, and the reason is hiding in a multiplication.",
+    narrative:
+      "A price rises 10 percent and then falls 10 percent. It feels like you should be back where you started, but begin at 100: up 10 percent gives 110, then down 10 percent of 110 means subtracting 11, landing at 99. Each percent used a different amount, so the changes do not cancel. Likewise, two raises of 20 percent multiply by 1.2 twice, giving 1.44, a 44 percent rise. Percent change is multiplication in disguise: multiplying by 1.1 and then 0.9 gives 0.99, a 1 percent loss, whatever the starting amount.",
+    probe:
+      "A price goes up 25 percent and then down 25 percent. Is the final price equal to, more than, or less than the starting price?",
+    source:
+      "Checked: 100 → +10% = 110 → −10% (of 110, i.e. 11) = 99; 1.1 × 0.9 = 0.99 and 1.2 × 1.2 = 1.44 (arithmetic); percent changes compose by multiplication, not addition. Probe: 1.25 × 0.75 = 0.9375, so the final price is less. No historical claim.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "ratio_concept_language",
+    toKey: "gear ratios",
+    toLabel: "Gear ratios",
+    toDomain: "mechanics",
+    kind: "applies",
+    hook: "The ratio of teeth on a bike's two gears decides everything your legs feel — how far one pedal turn carries you, and whether a hill is easy or brutal.",
+    teaser:
+      "High gear and low gear are not mysterious settings. They are one ratio changing, a plain comparison of two tooth counts that your legs feel directly.",
+    narrative:
+      "A bike's front and back gears each have teeth. The ratio of the two tooth counts determines the wheel turns per pedal turn and strongly affects how hard pedaling feels. With 48 teeth in front and 16 behind, the ratio is 48 to 16, or 3 to 1, so one pedal turn spins the rear wheel three times. Shift to a 24-tooth back gear and the ratio is 48 to 24, or 2 to 1: one pedal turn spins the wheel twice, easier to push but carrying you less far. High and low gear are this ratio changing — a comparison your legs can feel on a hill.",
+    probe:
+      "A bike's front gear has 50 teeth and its back gear has 25. How many times does the back wheel spin for one full turn of the pedals?",
+    source:
+      "Checked: for a chain drive, gear ratio = front teeth : rear teeth = rear-wheel turns per pedal turn (mechanical fact); 48:16 = 3:1 and 48:24 = 2:1 (arithmetic); probe 50:25 = 2:1. No dated or attribution claim to refute.",
+    provenance: "generated",
+  },
+  {
+    fromKey: "percent_simple_interest",
+    toKey: "simple-interest doubling",
+    toLabel: "Simple-interest doubling",
+    toDomain: "finance",
+    kind: "applies",
+    hook: "With simple interest, doubling time hides in one division: 100 divided by the yearly percent rate.",
+    teaser:
+      "Simple interest adds the same fraction of the original amount each year. To double, the account must add one whole original amount — exactly 100 percent.",
+    narrative:
+      "Simple interest adds the same percent of the original principal every year. To double, the interest must add another 100 percent of that original amount. So doubling time is approximately 100 divided by the annual percent rate. At 5 percent simple interest, that is 20 years; at 8 percent, 12.5 years. Unlike compound interest, the yearly interest does not grow because past interest earns no new interest. The shortcut comes from I = Prt: set interest I equal to principal P, cancel P, and time is 1/r, or 100 divided by the percent rate.",
+    probe:
+      "At 4 percent simple interest per year, about how many years does it take an amount to double?",
+    source:
+      "Checked from the simple-interest formula I = Prt: doubling requires I = P, so t = 1/r. With r written as a percent, years = 100 ÷ rate; 100/5 = 20, 100/8 = 12.5, and the probe gives 100/4 = 25.",
     provenance: "generated",
   },
 ];

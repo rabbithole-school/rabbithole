@@ -1,6 +1,7 @@
 import ExpoModulesCore
 import UIKit
 
+// Deployment configuration — see DEPLOYMENT.md (Key-capture bundle namespace).
 private let keyCaptureCommandNotification =
   Notification.Name("org.rabbithole.app.keyCaptureCommand")
 

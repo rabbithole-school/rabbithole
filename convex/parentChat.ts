@@ -12,8 +12,30 @@
 import { v } from "convex/values";
 import { authedQuery, authedMutation } from "./lib/customFunctions";
 import { internalQuery, internalMutation } from "./_generated/server";
+import type { MutationCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { hasGuardianships } from "./lib/auth";
 import { ROLES } from "./lib/roles";
+import { renderStoppedAssistantContent } from "../shared/stoppedTurn";
+
+async function stampLatestStreamingParentMessage(
+  ctx: Pick<MutationCtx, "db">,
+  parentUserId: Id<"users">,
+): Promise<boolean> {
+  const recent = await ctx.db
+    .query("parentChatMessages")
+    .withIndex("by_parent", (q) => q.eq("parentUserId", parentUserId))
+    .order("desc")
+    .take(20);
+  const streaming = recent.find(
+    (message) => message.role === "assistant" && message.streamId,
+  );
+  if (!streaming) return false;
+  if (streaming.stopRequestedAt === undefined) {
+    await ctx.db.patch(streaming._id, { stopRequestedAt: Date.now() });
+  }
+  return true;
+}
 
 // ── Parent-facing (role === parent) ─────────────────────────────────────
 
@@ -31,6 +53,7 @@ export const listMessages = authedQuery({
       role: m.role,
       content: m.content,
       streamId: m.streamId ?? null,
+      stopRequestedAt: m.stopRequestedAt ?? null,
       createdAt: m._creationTime,
     }));
   },
@@ -48,6 +71,7 @@ export const sendMessage = authedMutation({
     }
     const content = args.content.trim();
     if (!content) throw new Error("Message is empty");
+    await stampLatestStreamingParentMessage(ctx, ctx.user._id);
 
     const bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
@@ -67,6 +91,21 @@ export const sendMessage = authedMutation({
       streamId,
     });
     return { assistantMsgId, streamId };
+  },
+});
+
+export const requestStop = authedMutation({
+  args: { messageId: v.id("parentChatMessages") },
+  handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.messageId);
+    if (!message || !message.streamId) return { stopped: false };
+    if (message.parentUserId !== ctx.user._id) {
+      throw new Error("Forbidden: not your parent chat");
+    }
+    if (message.stopRequestedAt === undefined) {
+      await ctx.db.patch(args.messageId, { stopRequestedAt: Date.now() });
+    }
+    return { stopped: true };
   },
 });
 
@@ -124,7 +163,13 @@ export const getContext = internalQuery({
 
     return {
       parentName: parent.name ?? "there",
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      messages: messages.map((m) => ({
+        role: m.role,
+        content:
+          m.role === "assistant"
+            ? renderStoppedAssistantContent(m.content, m.stopRequestedAt)
+            : m.content,
+      })),
       children,
     };
   },
@@ -147,7 +192,18 @@ export const getMessageOwner = internalQuery({
 export const updateStreamContent = internalMutation({
   args: { messageId: v.id("parentChatMessages"), content: v.string() },
   handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.messageId);
+    if (!message) return { stopRequested: false };
     await ctx.db.patch(args.messageId, { content: args.content });
+    return { stopRequested: message.stopRequestedAt !== undefined };
+  },
+});
+
+export const isStopRequested = internalQuery({
+  args: { messageId: v.id("parentChatMessages") },
+  handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.messageId);
+    return message?.stopRequestedAt !== undefined;
   },
 });
 

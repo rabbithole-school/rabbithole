@@ -296,6 +296,9 @@ function recompute(item: PracticeItem): { ok: boolean; expected: string } {
     const exp = +m[1] + +m[2] * +m[3];
     return { ok: answersEqual(item.answer, intAns(exp)), expected: String(exp) };
   }
+  if ((m = s.match(/^What is (\d+) × (\d+)\? \(Try splitting (\d+) into (\d+) \+ (\d+)\.\)$/))) {
+    return ok(+m[1] * +m[2]);
+  }
   if ((m = s.match(/^(\d+) ([+−×]) (\d+) = \?$/))) {
     const a = +m[1], b = +m[3];
     const exp = m[2] === "+" ? a + b : m[2] === "−" ? a - b : a * b;
@@ -453,6 +456,52 @@ describe("templates — every generated answer is correct by independent re-deri
     expect(wordProblem).not.toBeNull();
     expect(wordProblem!.prompt.promptVisual).toBeUndefined();
     expect(wordProblem!.prompt.stem).toBe("What is 6 × 7?");
+  });
+
+  test("area-model multiplication stays at its 2-digit × 1-digit prerequisite level with a scaffold", () => {
+    for (let seed = 1; seed <= 80; seed++) {
+      const item = generateItem("area_model_multiplication", seed)!;
+      const match = item.stem.match(
+        /^What is (\d+) × (\d+)\? \(Try splitting (\d+) into (\d+) \+ (\d+)\.\)$/,
+      );
+      expect(match, `seed=${seed}: ${item.stem}`).not.toBeNull();
+      if (!match || item.answer.type !== "integer") continue;
+
+      const [, factorText, twoDigitText, hintedText, tensText, onesText] = match;
+      const factor = Number(factorText);
+      const twoDigit = Number(twoDigitText);
+      const hinted = Number(hintedText);
+      const tens = Number(tensText);
+      const ones = Number(onesText);
+      expect(factor).toBeGreaterThanOrEqual(2);
+      expect(factor).toBeLessThanOrEqual(9);
+      expect(twoDigit).toBeGreaterThanOrEqual(11);
+      expect(twoDigit).toBeLessThanOrEqual(49);
+      expect(twoDigit % 10).not.toBe(0);
+      expect(hinted).toBe(twoDigit);
+      expect(tens + ones).toBe(twoDigit);
+      expect(item.answer.value).toBe(factor * twoDigit);
+
+      expect(item.promptVisual).toEqual({
+        kind: "areamodel",
+        widthParts: [factor],
+        heightParts: [tens, ones],
+      });
+      expect(item.workedSteps).toEqual([
+        {
+          text: `Break ${twoDigit} apart by place value: ${tens} + ${ones}.`,
+          blankText: `Break ${twoDigit} apart by place value: ?`,
+        },
+        {
+          text: `Multiply each part by ${factor}: ${tens} × ${factor} = ${tens * factor}, ${ones} × ${factor} = ${ones * factor}.`,
+          blankText: `Multiply each part by ${factor}: ?`,
+        },
+        {
+          text: `Add the partial products: ${tens * factor} + ${ones * factor} = ${factor * twoDigit}.`,
+          blankText: "Add the partial products: ?",
+        },
+      ]);
+    }
   });
 
   test("concept prompt-visual templates emit expected specs and answers", () => {

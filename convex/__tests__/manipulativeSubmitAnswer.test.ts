@@ -9,6 +9,7 @@ import {
 } from "../../lib/manipulative/practiceContract";
 import type {
   AreaPerimeterSpec,
+  DistributeSpec,
   DistributorSpec,
   ManipulativeSpec,
   RekenrekSpec,
@@ -90,6 +91,19 @@ const distributorSpec: DistributorSpec = {
   total: 13,
   groups: 4,
   goal: { type: "shareEqually" },
+};
+
+// The stored 6 × 13 area-model item, verbatim shape: the prompt asks for a
+// product, the goal is the split at 10.
+const distributeSpec: DistributeSpec = {
+  kind: "distribute",
+  id: "manip-dist-6x13",
+  concept: "Distributive property",
+  prompt: "Split the area model to find 6 × 13 using 6 × 10 + 6 × 3.",
+  width: 13,
+  height: 6,
+  startColumn: 4,
+  goal: { type: "splitAt", column: 10 },
 };
 
 const rekenrekSpec: RekenrekSpec = {
@@ -197,5 +211,84 @@ describe("practiceSkills.submitAnswer manipulative anti-offloading", () => {
       expect(hit.correct).toBe(true);
       expect(hit.correctAnswer).toBeUndefined();
     }
+  });
+
+  test("distribute item: a typed product decides on its own; a correct split on EITHER side passes without one", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedScholar(t);
+    const asScholar = await asUser(t, scholar);
+    const { itemId } = await seedManipulativeItem(t, distributeSpec, "area_model_multiplication");
+    const submit = (answer: unknown) =>
+      asScholar.mutation(api.practiceSkills.submitAnswer, {
+        scholarId: scholar,
+        itemId,
+        answer: json(answer),
+      });
+
+    // (a) 78 typed, divider never moved off its start column → correct.
+    expect((await submit({ column: 4, value: 78 })).correct).toBe(true);
+    // A wrong product is wrong even on a perfect split — the number is the answer.
+    expect((await submit({ column: 10, value: 77 })).correct).toBe(false);
+    expect((await submit({ column: 10, value: null })).correct).toBe(false);
+    // (b) no number; the split at 3 IS "10 and 3" read from the other side.
+    expect((await submit({ column: 3 })).correct).toBe(true);
+    expect((await submit({ column: 10 })).correct).toBe(true); // legacy shape
+    expect((await submit({ column: 4 })).correct).toBe(false);
+    // Never a reveal on submit — same as every manipulative.
+    const miss = await submit({ column: 4 });
+    expect(miss.correctAnswer).toBeUndefined();
+  });
+
+  test("distribute item's teaching moment reveals the product with the split as faded worked steps", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedScholar(t);
+    const asScholar = await asUser(t, scholar);
+    const { itemId } = await seedManipulativeItem(t, distributeSpec, "area_model_multiplication");
+
+    // Unearned: nothing.
+    const before = await asScholar.query(api.practiceSkills.teachingStep, {
+      scholarId: scholar,
+      itemId,
+    });
+    expect(before.answer).toBeNull();
+    expect(before.steps).toBeNull();
+
+    await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId: scholar,
+      itemId,
+      answer: "",
+      record: true,
+      dontKnow: true,
+    });
+    const res = await asScholar.query(api.practiceSkills.teachingStep, {
+      scholarId: scholar,
+      itemId,
+    });
+    expect(res.answer).toBe("78");
+    expect(res.answerType).toBe("integer");
+    expect(res.steps?.revealed.map((s) => s.text)).toEqual(["6 × 10 = 60", "6 × 3 = 18"]);
+    expect(res.steps?.faded).toHaveLength(1);
+    expect(res.hint).toBe("60 + 18 = ?");
+  });
+
+  test("a plain manipulative (no derived question) still reveals nothing in the teaching moment", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedScholar(t);
+    const asScholar = await asUser(t, scholar);
+    const { itemId } = await seedManipulativeItem(t);
+    await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId: scholar,
+      itemId,
+      answer: "",
+      record: true,
+      dontKnow: true,
+    });
+    const res = await asScholar.query(api.practiceSkills.teachingStep, {
+      scholarId: scholar,
+      itemId,
+    });
+    expect(res.answer).toBeNull();
+    expect(res.steps).toBeNull();
+    expect(res.answerType).toBe(MANIPULATIVE_ANSWER_TYPE);
   });
 });

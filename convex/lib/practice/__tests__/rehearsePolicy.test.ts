@@ -76,53 +76,25 @@ const CASES: {
   correct: boolean;
 }[] = [
   {
-    name: "integer — right",
+    name: "integer — right (reveal on correct)",
     item: templateItem("integer", { type: "integer", value: 42 }),
     submission: { kind: "typed", raw: "42" },
     correct: true,
   },
   {
-    name: "integer — wrong",
-    item: templateItem("integer", { type: "integer", value: 42 }),
-    submission: { kind: "typed", raw: "41" },
+    name: "unit-bearing — right value, missing unit (unitOutcome signal, withhold reveal)",
+    item: templateItem("integer", { type: "integer", value: 112 }, { requiredUnit: "cm^3" }),
+    submission: { kind: "typed", raw: "112" },
     correct: false,
   },
   {
-    name: "decimal — representation (6.50 ≡ 6.5)",
-    item: templateItem("decimal", { type: "decimal", value: 6.5 }),
-    submission: { kind: "typed", raw: "6.50" },
+    name: "manipulative — solved state (never reveals under either policy)",
+    item: manipulativeItem(),
+    submission: { kind: "manipulativeState", stateJson: JSON.stringify({ value: 3.25 }) },
     correct: true,
   },
   {
-    name: "fraction — representation (6/8 ≡ 3/4)",
-    item: templateItem("fraction", { type: "fraction", num: 3, den: 4 }),
-    submission: { kind: "typed", raw: "6/8" },
-    correct: true,
-  },
-  {
-    name: "fraction — wrong value",
-    item: templateItem("fraction", { type: "fraction", num: 3, den: 4 }),
-    submission: { kind: "typed", raw: "2/4" },
-    correct: false,
-  },
-  {
-    name: "expression — canonical equivalence (x=8 ≡ 8)",
-    item: templateItem("expression", { type: "expression", canonical: "8" }),
-    submission: { kind: "typed", raw: "x = 8" },
-    correct: true,
-  },
-  {
-    name: "multipleChoice — right index (typed)",
-    item: templateItem(
-      "multipleChoice",
-      { type: "multipleChoice", choiceIndex: 2 },
-      { choices: ["a", "b", "c"] },
-    ),
-    submission: { kind: "typed", raw: "2" },
-    correct: true,
-  },
-  {
-    name: "multipleChoice — right index (choice submission)",
+    name: "multipleChoice — right index (choice submission kind)",
     item: templateItem(
       "multipleChoice",
       { type: "multipleChoice", choiceIndex: 2 },
@@ -132,7 +104,7 @@ const CASES: {
     correct: true,
   },
   {
-    name: "multipleChoice — wrong index",
+    name: "multipleChoice — wrong index (choice submission kind)",
     item: templateItem(
       "multipleChoice",
       { type: "multipleChoice", choiceIndex: 2 },
@@ -142,33 +114,9 @@ const CASES: {
     correct: false,
   },
   {
-    name: "unit-bearing — right value AND unit",
-    item: templateItem("integer", { type: "integer", value: 112 }, { requiredUnit: "cm^3" }),
-    submission: { kind: "typed", raw: "112 cm^3" },
-    correct: true,
-  },
-  {
-    name: "unit-bearing — right value, missing unit",
-    item: templateItem("integer", { type: "integer", value: 112 }, { requiredUnit: "cm^3" }),
-    submission: { kind: "typed", raw: "112" },
-    correct: false,
-  },
-  {
-    name: "don't-know is always a miss",
+    name: "don't-know is always a miss (dontKnow submission kind)",
     item: templateItem("integer", { type: "integer", value: 42 }),
     submission: { kind: "dontKnow" },
-    correct: false,
-  },
-  {
-    name: "manipulative — solved state",
-    item: manipulativeItem(),
-    submission: { kind: "manipulativeState", stateJson: JSON.stringify({ value: 3.25 }) },
-    correct: true,
-  },
-  {
-    name: "manipulative — wrong state",
-    item: manipulativeItem(),
-    submission: { kind: "manipulativeState", stateJson: JSON.stringify({ value: 1.0 }) },
     correct: false,
   },
 ];

@@ -13,42 +13,34 @@
 //     enforces its own Convex auth).
 // A still-building coded app shows a placeholder; a bad/archived token 404s.
 
+import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
-import { ConvexHttpClient } from "convex/browser";
-import { api } from "@/convex/_generated/api";
 import { injectAppStateSdk } from "@/lib/appStateBridge.mjs";
+import { prepareCustomAppSandbox } from "@/shared/customAppSandbox";
 import { CustomAppHost } from "./CustomAppHost";
+import { resolveCustomAppByToken } from "./customAppData";
+import { buildCustomAppMetadata } from "./customAppMetadata";
 
 // The token → app lookup must run per-request, never be statically cached.
 export const dynamic = "force-dynamic";
 
-const STATIC_APP_CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'";
+type CustomAppPageProps = {
+  searchParams: Promise<{ token?: string | string[] }>;
+};
 
-function withStaticAppCsp(html: string): string {
-  if (
-    /<meta\b[^>]*http-equiv\s*=\s*["']?content-security-policy\b/i.test(html)
-  ) {
-    return html;
-  }
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${STATIC_APP_CSP}">`;
-  // srcDoc CSP support varies, so inject a matching meta policy as a fallback.
-  return /<head(?:\s[^>]*)?>/i.test(html)
-    ? html.replace(/<head(?:\s[^>]*)?>/i, (head) => `${head}${meta}`)
-    : `${meta}${html}`;
+function tokenFrom(
+  searchParams: { token?: string | string[] },
+): string | undefined {
+  const raw = searchParams.token;
+  return (Array.isArray(raw) ? raw[0] : raw)?.trim() || undefined;
 }
 
-async function resolve(token: string) {
-  const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
-  if (!convexUrl) return null;
-  try {
-    return await new ConvexHttpClient(convexUrl).query(
-      api.customApps.resolveByToken,
-      { token },
-    );
-  } catch {
-    return null;
-  }
+export async function generateMetadata({
+  searchParams,
+}: CustomAppPageProps): Promise<Metadata> {
+  const token = tokenFrom(await searchParams);
+  const app = token ? await resolveCustomAppByToken(token) : null;
+  return buildCustomAppMetadata(app, token ?? "");
 }
 
 function CenteredNote({ title, body }: { title: string; body: string }) {
@@ -77,14 +69,11 @@ function CenteredNote({ title, body }: { title: string; body: string }) {
 
 export default async function CustomAppPage({
   searchParams,
-}: {
-  searchParams: Promise<{ token?: string | string[] }>;
-}) {
-  const { token: raw } = await searchParams;
-  const token = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+}: CustomAppPageProps) {
+  const token = tokenFrom(await searchParams);
   if (!token) notFound();
 
-  const app = await resolve(token);
+  const app = await resolveCustomAppByToken(token);
   if (!app) notFound();
 
   if (app.kind === "coded") {
@@ -100,13 +89,21 @@ export default async function CustomAppPage({
   }
 
   if (app.status !== "live" || app.html == null) notFound();
+  const assetUrls = new Map(
+    app.appAssets.map((asset) => [asset.id, asset.url]),
+  );
+  const sandbox = await prepareCustomAppSandbox(
+    app.html,
+    injectAppStateSdk,
+    (assetId) => assetUrls.get(assetId),
+  );
 
   return (
     <CustomAppHost
       token={token}
       name={app.name}
-      srcDoc={injectAppStateSdk(withStaticAppCsp(app.html))}
-      csp={STATIC_APP_CSP}
+      srcDoc={sandbox.srcDoc}
+      csp={sandbox.csp}
     />
   );
 }

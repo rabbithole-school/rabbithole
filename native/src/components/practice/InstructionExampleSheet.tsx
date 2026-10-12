@@ -22,8 +22,8 @@
  * a "See an example" link under a miss (`source: "post_miss"`), plus a
  * further "Learn this from the start" node-first escalation once that's
  * showing. Those are a deliberate v1 cut here: this port covers the
- * persistent idea-shelf pill (the gap `TODO.html#native-idea-shelf-parity`
- * names), not the post-miss beat. Flagged explicitly, not silently dropped.
+ * persistent idea-shelf pill (the gap the retired TODO.html item
+ * `#native-idea-shelf-parity` named), not the post-miss beat. Flagged explicitly, not silently dropped.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";

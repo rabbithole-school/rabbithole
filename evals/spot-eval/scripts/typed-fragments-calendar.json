@@ -1,0 +1,15 @@
+{
+  "scholarName": "Scholar G",
+  "_source": "Authored synthetic script (TRA-363): typed short answers on a why-question chain about a moon-based holiday date. Not a transcript reconstruction. Tests the mic offer on the first typed fragment and no repeat afterward.",
+  "messages": [
+    "<start>",
+    "why does lunar new year move around",
+    "moon",
+    "different",
+    "it moves",
+    "shorter",
+    "11 days",
+    "it drifts",
+    "ok"
+  ]
+}

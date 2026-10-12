@@ -64,6 +64,7 @@ import { colorForDomain, palette } from "@/theme";
 import { StarDrawer } from "@/components/StarDrawer";
 import { TreeMapNative } from "@/components/tree/TreeMapNative";
 import { useMapGates } from "@/hooks/useMapGates";
+import { useExploreSeed } from "@/hooks/useExploreSeed";
 
 // The night sky. A deep-space canvas of the scholar's seeds, laid out as a
 // constellation around a hub. Pinch to zoom, drag to pan, tap a star to open
@@ -808,13 +809,14 @@ function LatticeArrow({
 
 const ZOOM_SPRING = { damping: 28, stiffness: 300, mass: 0.8 } as const;
 
-/* CRASH NOTE — never call runOnJS from this spring's completion callback.
-   `runOnJS(...)` inside a withTiming/withSpring/withDecay COMPLETION CALLBACK can
-   hard-crash the app (SIGABRT, no red box: `JSIWorkletsModuleProxy::toOptimizedObject`
-   → `JSScheduler::scheduleOnJS`) when the React Compiler is enabled, which it is
-   here. Hit for real in the workbench BottomSheet on 2026-07-28 and fixed there
-   the same way `ui/Drawer.tsx` does it: drive the follow-up off a plain JS timer,
-   which never crosses the UI-worklet→JS boundary.
+/* CRASH NOTE — a completion callback calling runOnJS is the context known to
+   crash. useAnimatedReaction is different: compiler-memoized CoordinatePlane,
+   Array, and SimulatorViewport reactions already make this hop in fleet-pushed
+   builds without the crash, and gesture callbacks are also fine. Because the
+   failure is nondeterministic, a passing tap-test is not proof either way; the
+   fix is structural. SkyScreen currently bails on beginQuest's try/finally, so
+   this nonce/reaction split is preventive against a compiler upgrade that lowers
+   it. Completion callbacks must remain UI-thread-only.
 
    Recenter went from dormant to exposed when this file moved to `.get()/.set()`:
    ZoomControls stopped violating `react-hooks/immutability`, so the React Compiler
@@ -926,10 +928,8 @@ export default function SkyScreen() {
     api.concepts.skyFieldForScholar,
     scholarId ? { scholarId } : "skip",
   );
-  const createFromSeed = useMutation(api.sessions.createFromSeed);
-
   const [selected, setSelected] = useState<PositionedStar | null>(null);
-  const [starting, setStarting] = useState(false);
+  const { exploreSeed, exploringSeedId, exploreSeedDialog } = useExploreSeed();
   const [viewMode, setViewMode] = useState<SkyViewMode>(view === "tree" ? "tree" : "sky");
   // Milestone reveals (f6): a scholar reaches the map only for lenses that have
   // real data. Neither unlocked → bounce home (no padlock); the requested lens
@@ -1028,6 +1028,14 @@ export default function SkyScreen() {
   const tx = useSharedValue(0);
   const ty = useSharedValue(0);
   const scale = useSharedValue(1);
+  const decaySettleNonce = useSharedValue(0);
+
+  useAnimatedReaction(
+    () => decaySettleNonce.get(),
+    (nonce, prev) => {
+      if (prev !== null && nonce !== prev) runOnJS(bumpLabels)();
+    },
+  );
 
   // Open the map on the seed-framed camera (center-of-gravity of the seeds,
   // zoomed to the seed neighborhood) instead of the whole-atlas fit — so the
@@ -1646,11 +1654,13 @@ export default function SkyScreen() {
       // rect, so inertia past the release framing must trigger a re-cull or a
       // hard fling exposes uncovered gutters (cross-model review finding).
       // `finished` guards the cancel case (a new touch settles on its own).
+      // CRASH NOTE — keep these callbacks UI-thread-only; see the header note.
+      // Each axis bumps the nonce, and the reaction above performs the JS hop.
       tx.set(withDecay({ velocity: vx }, (finished) => {
-        if (finished) runOnJS(bumpLabels)();
+        if (finished) decaySettleNonce.set(decaySettleNonce.get() + 1);
       }));
       ty.set(withDecay({ velocity: vy }, (finished) => {
-        if (finished) runOnJS(bumpLabels)();
+        if (finished) decaySettleNonce.set(decaySettleNonce.get() + 1);
       }));
       runOnJS(bumpLabels)();
     });
@@ -1851,25 +1861,15 @@ export default function SkyScreen() {
     hover,
   );
 
-  const beginQuest = useCallback(async () => {
-    if (!selected?.seedId || selected.completed || starting) return;
-    setStarting(true);
-    try {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
-        () => {},
-      );
-      const res = await createFromSeed({ seedId: selected.seedId as Id<"seeds"> });
-      closeStar();
-      router.push({
-        pathname: "/session/[id]",
-        params: { id: res.id, title: selected.topic },
-      });
-    } catch (e) {
-      console.warn("[beginQuest] failed", e);
-    } finally {
-      setStarting(false);
-    }
-  }, [selected, starting, createFromSeed, closeStar]);
+  const beginQuest = useCallback(() => {
+    if (!selected?.seedId || selected.completed || exploringSeedId) return;
+    const seedId = selected.seedId as Id<"seeds">;
+    closeStar();
+    void exploreSeed(seedId, {
+      title: selected.topic,
+      ...(selected.structured ? { skipMenu: true } : {}),
+    });
+  }, [selected, exploringSeedId, exploreSeed, closeStar]);
 
   return (
     <View style={[styles.root, { backgroundColor: SPACE }]}>
@@ -2117,8 +2117,9 @@ export default function SkyScreen() {
         star={selected}
         onDismiss={closeStar}
         onBeginQuest={beginQuest}
-        starting={starting}
+        starting={exploringSeedId === selected?.seedId}
       />
+      {exploreSeedDialog}
     </View>
   );
 }

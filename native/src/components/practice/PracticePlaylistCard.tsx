@@ -53,7 +53,6 @@ import {
   practiceDomainLabel,
   strandHeadlineFor,
 } from "../../../vendor/shared/practiceDomainLabels";
-import { segmentBeatLabel, withLaunchpadRow } from "../../../vendor/shared/practiceSegments";
 import {
   derivePlaylistDoneness,
   playlistMastheadDateline,
@@ -629,7 +628,6 @@ export function PracticePlaylistCard({
     practicedToday,
     firstPostPlacementBlock,
   } = active;
-  const launchpad = active.launchpad;
   const { caughtUp, blocked: activeBlocked } = derivePlaylistDoneness({
     set,
     nextUp,
@@ -818,23 +816,12 @@ export function PracticePlaylistCard({
       domain: rowDomain,
     });
   });
-  // Web parity (components/practice/PlaylistCard.tsx): the instructional doorway
-  // is a beat of the run, so it is a row of the receipt. Same server-resolved
-  // position, same shared splice, same "First look" label — a scholar on iPad
-  // sees the same list a scholar on the web does.
-  const rowsWithLaunchpad = launchpad
-    ? withLaunchpadRow(rows, launchpad.at + (nextUp && !nextInSet ? 1 : 0), (kind) => ({
-        key: "launchpad",
-        label: launchpad.title,
-        kind,
-        tag: segmentBeatLabel("launchpad", true),
-        queuedTag: segmentBeatLabel("launchpad", true),
-        muted: false,
-        domain: undefined,
-      }))
-    : rows;
-  const visibleRows = expanded ? rowsWithLaunchpad : rowsWithLaunchpad.slice(0, DEFAULT_VISIBLE);
-  const hiddenCount = Math.max(0, rowsWithLaunchpad.length - DEFAULT_VISIBLE);
+  // No "First look" row (web parity, components/practice/PlaylistCard.tsx):
+  // the run's `launchpad` entry is no longer a beat of its own — it frames an
+  // item already listed here ("Can you already do this?"), so a separate row
+  // would promise a card the run never serves.
+  const visibleRows = expanded ? rows : rows.slice(0, DEFAULT_VISIBLE);
+  const hiddenCount = Math.max(0, rows.length - DEFAULT_VISIBLE);
 
   return (
     <>
@@ -1245,6 +1232,33 @@ export function PracticePlaylistCard({
   );
 }
 
+/**
+ * What the Math tab shows in this card's place when the card threw in render
+ * (a Convex query rethrows its server error there — the 2026-09-22 incident).
+ * Mounted by the Home's `ContainmentBoundary`, never by this card itself: a
+ * card cannot catch its own render throw. Keeps the live block heading, since
+ * the block is still real; only the card's contents failed.
+ */
+export function PracticePlaylistUnavailable({
+  eyebrow,
+  eyebrowDetail,
+}: {
+  eyebrow?: string;
+  eyebrowDetail?: string | null;
+}) {
+  const colors = useColors();
+  const styles = useMemo(() => makeStyles(colors), [colors]);
+  return (
+    <HomeSection label={eyebrow ?? ""} detail={eyebrowDetail} hidden={!eyebrow}>
+      <View style={[styles.card, styles.body, styles.unavailableCard]}>
+        <Text style={styles.caughtUp}>
+          Math practice couldn’t load. Pull to refresh or try again later.
+        </Text>
+      </View>
+    </HomeSection>
+  );
+}
+
 function PracticePlaylistSkeleton({
   eyebrow,
   eyebrowDetail,
@@ -1537,6 +1551,7 @@ function makeStyles(c: ColorSet) {
     meterText: { fontFamily: fonts.semibold, fontSize: 12, color: c.charcoalSubtle },
     stripTime: { fontFamily: fonts.regular, fontSize: 12, color: c.charcoalMuted },
     body: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 6 },
+    unavailableCard: { paddingBottom: 12 },
     caughtUp: { fontFamily: fonts.regular, fontSize: 14, color: c.fgMuted, lineHeight: 20 },
     // Multipack rows — a hairline above every row (incl. the first), 18px dot.
     row: {

@@ -291,6 +291,62 @@ describe("classGalaxy — union of scholar skies", () => {
     expect(g.seeds.some((id) => id.startsWith("seed:"))).toBe(false);
   });
 
+  test("conceptDetail matches the Galaxy's institution and group roster", async () => {
+    const t = convexTest(schema, modules);
+    const { ids, a, b, c, instP, instQ } = await world(t, true);
+    if (!instP || !instQ) throw new Error("Expected institution fixtures");
+
+    const outsideGroup = await scholar(t, "outside-group", instP);
+    await observe(t, c, "fractions");
+    await observe(t, outsideGroup, "fractions");
+    for (const scholarId of [a, b, c, outsideGroup]) {
+      await plantSeed(t, scholarId, "fractions");
+    }
+
+    const groupId = await t.run((ctx) =>
+      ctx.db.insert("scholarGroups", {
+        teacherId: a,
+        institutionId: instP,
+        name: "Mixed pod",
+        scholarIds: [a, b, c],
+      }),
+    );
+
+    const asPrimaryTeacher = await teacher(t, instP);
+    const primaryGalaxy = await asPrimaryTeacher.query(
+      api.concepts.classGalaxy,
+      { scope: "p", groupId },
+    );
+    const primaryDetail = await asPrimaryTeacher.query(
+      api.concepts.conceptDetail,
+      { conceptId: ids.fractions, scope: "p", groupId },
+    );
+
+    expect(primaryGalaxy.heat[ids.fractions]).toBe(2);
+    expect(primaryDetail?.litBy.map((entry) => entry.id).sort()).toEqual(
+      [a, b].sort(),
+    );
+    expect(primaryDetail?.seededFor.map((entry) => entry.id).sort()).toEqual(
+      [a, b].sort(),
+    );
+
+    const asOtherTeacher = await teacher(t, instQ);
+    const otherDetail = await asOtherTeacher.query(
+      api.concepts.conceptDetail,
+      { conceptId: ids.fractions, scope: "q", groupId },
+    );
+
+    expect(otherDetail?.litBy.map((entry) => entry.id)).toEqual([c]);
+    expect(otherDetail?.seededFor.map((entry) => entry.id)).toEqual([c]);
+    expect(otherDetail?.litBy.some((entry) => entry.id === a || entry.id === b))
+      .toBe(false);
+    expect(
+      otherDetail?.seededFor.some(
+        (entry) => entry.id === a || entry.id === b,
+      ),
+    ).toBe(false);
+  });
+
   test("a platform admin's omitted scope remains global across institutions", async () => {
     const t = convexTest(schema, modules);
     const { ids } = await world(t, true);

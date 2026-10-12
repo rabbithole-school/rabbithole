@@ -75,6 +75,18 @@ describe("decideDeepLinkParticipation", () => {
     ).toBe("widen");
   });
 
+  // Both surfaces can name the pseudo-scope "mine" (the affinity set) where a
+  // group id goes. It is not a group, so it carries no participation signal.
+  test('the "mine" pseudo-scope is never looked up as a group', () => {
+    expect(
+      decideDeepLinkParticipation({
+        ...base,
+        groupId: "mine",
+        groups: guestGroup,
+      }),
+    ).toBe("settle");
+  });
+
   test("settles (latches, no widen) for an ordinary enrolled deep link", () => {
     expect(
       decideDeepLinkParticipation({

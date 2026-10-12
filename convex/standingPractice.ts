@@ -32,6 +32,7 @@
  */
 
 import { v } from "convex/values";
+import { internalQuery } from "./_generated/server";
 import { teacherMutation, teacherQuery, authedQuery } from "./lib/customFunctions";
 import { requireTeacherOrSelf } from "./lib/auth";
 import { requireActiveScholarAccess } from "./lib/access";
@@ -39,6 +40,7 @@ import { WHOLE_NUMBER_ARITHMETIC_DOMAIN } from "./seed/wholeNumberArithmeticGrap
 import { PRACTICE_DOMAINS } from "./lib/practice/domains";
 import { gradeRank } from "../shared/gradeRange";
 import type { Doc, Id } from "./_generated/dataModel";
+import type { QueryCtx } from "./_generated/server";
 
 // Search is a live teacher query. Keep its indexed catalog window independent
 // of the caller's result limit so a broad query cannot read an unbounded domain.
@@ -406,20 +408,35 @@ export const myActiveStanding = authedQuery({
     const scholarId = args.scholarId ?? ctx.user._id;
     const isTeacher = requireTeacherOrSelf(ctx.user, scholarId);
     if (isTeacher) await requireActiveScholarAccess(ctx, ctx.user, scholarId);
-    // No index for "assignments targeting scholar X" (same scan pattern as
-    // assignments.currentClassFocusForMe / homeworkForMe).
-    const rows = await ctx.db.query("assignments").collect();
-    const match = rows.find(
-      (a) =>
-        !a.archivedAt &&
-        a.practiceMode === "standing" &&
-        targetsScholar(a, scholarId),
-    );
-    if (!match) return null;
-    return {
-      assignmentId: match._id,
-      title: match.title ?? null,
-      ...shapeConfig(match),
-    };
+    return await activeStandingForScholarCore(ctx, scholarId);
   },
+});
+
+async function activeStandingForScholarCore(
+  ctx: { db: QueryCtx["db"] },
+  scholarId: Id<"users">,
+) {
+  // No index for "assignments targeting scholar X" (same scan pattern as
+  // assignments.currentClassFocusForMe / homeworkForMe).
+  const rows = await ctx.db.query("assignments").collect();
+  const match = rows.find(
+    (a) =>
+      !a.archivedAt &&
+      a.practiceMode === "standing" &&
+      targetsScholar(a, scholarId),
+  );
+  if (!match) return null;
+  return {
+    assignmentId: match._id,
+    title: match.title ?? null,
+    ...shapeConfig(match),
+  };
+}
+
+/** Internal twin for already-gated staff-aide reads. Shares the exact projection
+ * the scholar frontends consume through `myActiveStanding`. */
+export const activeStandingForScholarInternal = internalQuery({
+  args: { scholarId: v.id("users") },
+  handler: async (ctx, args) =>
+    await activeStandingForScholarCore(ctx, args.scholarId),
 });

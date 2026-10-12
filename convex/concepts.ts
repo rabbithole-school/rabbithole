@@ -50,7 +50,7 @@ import {
   resolveActiveMembership,
 } from "./lib/access";
 import { SEED_CONSIDERATION_CAP, SKY_FIELD_SEED_CAP, SKY_COLD_START_MIN_STARS } from "../shared/skyTiers";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 
 // ─── helpers ────────────────────────────────────────────────────────
 export function normalizeLabel(s: string): string {
@@ -789,6 +789,38 @@ export const skyFieldForScholar = authedQuery({
 const GALAXY_SEED_PER_SCHOLAR = SEED_CONSIDERATION_CAP;
 const GALAXY_FLOAT_CAP = 140;
 
+async function atlasScholarIdsInScope(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  args: {
+    scope?: string;
+    groupId?: Id<"scholarGroups">;
+  },
+): Promise<Id<"users">[]> {
+  // A platform admin's omitted scope intentionally remains global. Every other
+  // caller resolves a lens, including when scope is omitted.
+  let lensIds: Set<Id<"users">> | null = null;
+  const platformAdminAll =
+    args.scope === undefined && isPlatformAdminRole(user.role);
+  if (!platformAdminAll) {
+    const lens = await resolveInstitutionLens(ctx, user, args.scope);
+    lensIds = await scholarIdsInLens(ctx, lens);
+  }
+
+  if (args.groupId) {
+    const group = await ctx.db.get(args.groupId);
+    const ids = group?.scholarIds ?? [];
+    return lensIds ? ids.filter((id) => lensIds.has(id)) : ids;
+  }
+  if (lensIds) return [...lensIds];
+
+  const scholars = await ctx.db
+    .query("users")
+    .withIndex("by_role", (q) => q.eq("role", ROLES.SCHOLAR))
+    .collect();
+  return scholars.map((scholar) => scholar._id);
+}
+
 /**
  * The Class Galaxy: the UNION of every in-scope scholar's Sky on the one shared
  * atlas — the same stars and constellation lines each scholar sees, overlaid and
@@ -814,29 +846,7 @@ export const classGalaxy = teacherQuery({
   args: { scope: v.optional(v.string()), groupId: v.optional(v.id("scholarGroups")) },
   handler: async (ctx, args) => {
     // ── resolve the in-scope scholar set ──────────────────────────────────
-    // A platform admin's omitted scope intentionally remains global. Every other
-    // caller resolves a lens, including when scope is omitted.
-    let lensIds: Set<Id<"users">> | null = null;
-    const platformAdminAll =
-      args.scope === undefined && isPlatformAdminRole(ctx.user.role);
-    if (!platformAdminAll) {
-      const lens = await resolveInstitutionLens(ctx, ctx.user, args.scope);
-      lensIds = await scholarIdsInLens(ctx, lens);
-    }
-    let scholarIds: Id<"users">[];
-    if (args.groupId) {
-      const group = await ctx.db.get(args.groupId);
-      const ids = group?.scholarIds ?? [];
-      scholarIds = lensIds ? ids.filter((id) => lensIds!.has(id)) : ids;
-    } else if (lensIds) {
-      scholarIds = [...lensIds];
-    } else {
-      const scholars = await ctx.db
-        .query("users")
-        .withIndex("by_role", (q) => q.eq("role", ROLES.SCHOLAR))
-        .collect();
-      scholarIds = scholars.map((s) => s._id);
-    }
+    const scholarIds = await atlasScholarIdsInScope(ctx, ctx.user, args);
 
     // ── the shared atlas, read ONCE ────────────────────────────────────────
     const placed = (await ctx.db.query("knowledgeNodes").collect()).filter(isPlaced);
@@ -1133,10 +1143,25 @@ export const meatForStandard = authedQuery({
  * (if any). Teacher-facing.
  */
 export const conceptDetail = teacherQuery({
-  args: { conceptId: v.id("knowledgeNodes"), scholarId: v.optional(v.id("users")) },
+  args: {
+    conceptId: v.id("knowledgeNodes"),
+    scholarId: v.optional(v.id("users")),
+    scope: v.optional(v.string()),
+    groupId: v.optional(v.id("scholarGroups")),
+  },
   handler: async (ctx, args) => {
     const c = await ctx.db.get(args.conceptId);
     if (!c) return null;
+    if (args.scholarId) {
+      await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
+    }
+    const scholarIds =
+      args.scope !== undefined || args.groupId !== undefined
+        ? await atlasScholarIdsInScope(ctx, ctx.user, args)
+        : await scholarIdsInLens(
+            ctx,
+            await resolveInstitutionLens(ctx, ctx.user, "all"),
+          );
     // Light (no vectors) sky nodes only, placed — the atlas the drawer draws over.
     const all = (await ctx.db.query("knowledgeNodes").collect()).filter((o) => isSkySource(o.source) && isPlaced(o));
     const byKey = new Map(all.map((o) => [o.nodeKey, o]));
@@ -1179,17 +1204,31 @@ export const conceptDetail = teacherQuery({
           .slice(0, 6)
           .map((n) => ({ id: n.id, label: n.label, domain: n.domain, source: n.source }))
       : [];
-    // who demonstrated it
-    const obs = await ctx.db.query("masteryObservations").collect();
+    // Who demonstrated it, bounded to the Galaxy's exact institution/group
+    // scope when supplied, or to the caller's accessible institutions elsewhere.
     const byScholar = new Map<string, { id: string; name: string; image: string | null; level: number }>();
-    for (const o of obs) {
-      if (o.isSuperseded || o.evidenceType === "misconception_signal") continue;
-      if (normalizeLabel(o.conceptLabel) !== c.normalizedLabel) continue;
-      const cur = byScholar.get(o.scholarId as unknown as string);
-      if (!cur) {
-        const u = await ctx.db.get(o.scholarId);
-        byScholar.set(o.scholarId as unknown as string, { id: o.scholarId as unknown as string, name: u?.name ?? u?.username ?? "Scholar", image: u?.image ?? null, level: o.masteryLevel });
-      } else cur.level = Math.max(cur.level, o.masteryLevel);
+    for (const scholarId of scholarIds) {
+      const obs = await ctx.db
+        .query("masteryObservations")
+        .withIndex("by_scholar_current", (q) =>
+          q.eq("scholarId", scholarId).eq("isSuperseded", false),
+        )
+        .collect();
+      let level: number | null = null;
+      for (const o of obs) {
+        if (o.evidenceType === "misconception_signal") continue;
+        if (normalizeLabel(o.conceptLabel) !== c.normalizedLabel) continue;
+        level = Math.max(level ?? o.masteryLevel, o.masteryLevel);
+      }
+      if (level !== null) {
+        const u = await ctx.db.get(scholarId);
+        byScholar.set(scholarId, {
+          id: scholarId,
+          name: u?.name ?? u?.username ?? "Scholar",
+          image: u?.image ?? null,
+          level,
+        });
+      }
     }
 
     // SEEDED FOR — the facepile: scholars who already have this concept as a live
@@ -1197,26 +1236,43 @@ export const conceptDetail = teacherQuery({
     // by normalized topic (seeds.topic is a free string); dismissed/completed
     // seeds are not live prompts. effectiveIntent: explicit intent, else
     // "destination" if unit-backed.
-    const seedRows = (await ctx.db.query("seeds").collect()).filter(
-      (s) =>
-        (s.status === "pending" || s.status === "active") &&
-        normalizeLabel(s.topic) === c.normalizedLabel,
-    );
     const seededByScholar = new Map<string, { id: string; name: string; image: string | null; intent: "seed" | "destination"; structured: boolean }>();
-    for (const s of seedRows) {
-      const sid = s.scholarId as unknown as string;
-      const intent: "seed" | "destination" = s.intent ?? (s.unitId ? "destination" : "seed");
-      const prev = seededByScholar.get(sid);
-      // a destination outranks a plain seed if a scholar somehow has both
-      if (!prev || (intent === "destination" && prev.intent !== "destination")) {
-        const u = prev ? null : await ctx.db.get(s.scholarId);
-        seededByScholar.set(sid, {
-          id: sid,
-          name: prev?.name ?? u?.name ?? u?.username ?? "Scholar",
-          image: prev?.image ?? u?.image ?? null,
-          intent,
-          structured: prev?.structured || !!s.unitId,
-        });
+    for (const scholarId of scholarIds) {
+      // Match the live-status filter at the index level (two indexed range
+      // reads on by_scholar_status, one per live status, as in
+      // convex/mapGates.ts) rather than reading every seed the scholar has
+      // ever had and filtering in JS.
+      const [pendingRows, activeRows] = await Promise.all([
+        ctx.db
+          .query("seeds")
+          .withIndex("by_scholar_status", (q) =>
+            q.eq("scholarId", scholarId).eq("status", "pending"),
+          )
+          .collect(),
+        ctx.db
+          .query("seeds")
+          .withIndex("by_scholar_status", (q) =>
+            q.eq("scholarId", scholarId).eq("status", "active"),
+          )
+          .collect(),
+      ]);
+      for (const s of [...pendingRows, ...activeRows]) {
+        if (normalizeLabel(s.topic) !== c.normalizedLabel) continue;
+        const sid = s.scholarId as string;
+        const intent: "seed" | "destination" =
+          s.intent ?? (s.unitId ? "destination" : "seed");
+        const prev = seededByScholar.get(sid);
+        // a destination outranks a plain seed if a scholar somehow has both
+        if (!prev || (intent === "destination" && prev.intent !== "destination")) {
+          const u = prev ? null : await ctx.db.get(s.scholarId);
+          seededByScholar.set(sid, {
+            id: sid,
+            name: prev?.name ?? u?.name ?? u?.username ?? "Scholar",
+            image: prev?.image ?? u?.image ?? null,
+            intent,
+            structured: prev?.structured || !!s.unitId,
+          });
+        }
       }
     }
     const seededFor = [...seededByScholar.values()].sort((a, b) =>

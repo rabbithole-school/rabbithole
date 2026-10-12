@@ -1,0 +1,14 @@
+{
+  "scholarName": "Scholar H",
+  "_source": "Authored synthetic script (TRA-363): a scholar who DICTATES every turn (live tutor prefixes the dictated label), including short fragments. Not a transcript reconstruction. Control: the tutor must never mention the mic.",
+  "messages": [
+    "<start>",
+    "[Dictated \u2014 speech-to-text of what the scholar said out loud, not typed.] we planted lima beans and one sprouted",
+    "[Dictated \u2014 speech-to-text of what the scholar said out loud, not typed.] it has a stem and two leaves",
+    "[Dictated \u2014 speech-to-text of what the scholar said out loud, not typed.] first the seed gets wet then the root comes out",
+    "[Dictated \u2014 speech-to-text of what the scholar said out loud, not typed.] pods",
+    "[Dictated \u2014 speech-to-text of what the scholar said out loud, not typed.] it starts over",
+    "[Dictated \u2014 speech-to-text of what the scholar said out loud, not typed.] the seeds go back in the dirt and grow again",
+    "[Dictated \u2014 speech-to-text of what the scholar said out loud, not typed.] because the plant makes new seeds that are the same kind"
+  ]
+}

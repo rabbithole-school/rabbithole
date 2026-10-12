@@ -9,6 +9,7 @@ import {
 import { useMutation } from "convex/react";
 
 import { api, type Id } from "@/lib/convex";
+import { downscalePhotoForUpload } from "@/lib/downscalePhoto";
 import { uploadImageUri } from "@/lib/uploadImage";
 
 export type ImageUploadTarget = {
@@ -21,7 +22,8 @@ export type ImageUploadTarget = {
  * (api.files.generateUploadUrl → upload the file → {storageId} → sendMessage
  * imageId), using expo-image-picker for the iPad camera + photo library.
  *
- * The bytes go up through the shared `uploadImageUri` helper; this hook adds the
+ * The photo is first capped at the model's usable size (`downscalePhotoForUpload`),
+ * then the bytes go up through the shared `uploadImageUri` helper; this hook adds the
  * composer-slot state (preview, pending storage id, uploading) around it.
  * Failures surface via an Alert (never silent).
  */
@@ -87,11 +89,15 @@ export function useImageAttachment() {
         if (result.canceled || !result.assets?.length) return null;
 
         const asset = result.assets[0];
-        return await uploadUri(
-          asset.uri,
-          asset.mimeType ?? "image/jpeg",
-          target,
-        );
+        // Shrink to the size the tutor model can use before it goes up; falls
+        // back to the original rather than ever losing the photo.
+        const photo = await downscalePhotoForUpload({
+          uri: asset.uri,
+          mimeType: asset.mimeType ?? "image/jpeg",
+          width: asset.width,
+          height: asset.height,
+        });
+        return await uploadUri(photo.uri, photo.mimeType, target);
       } catch (e) {
         console.warn("[image] attach failed", e);
         Alert.alert("Couldn't add that photo", "Please try again.");

@@ -21,13 +21,11 @@ import {
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { webSessionHasContent } from "./lib/webSessionSummary";
-import { maybeAwardUnitBadge } from "./lib/badgeAward";
+import { reconcileActivityCompletion } from "./lib/activityCompletionCore";
+import { markScholarHomeworkDone } from "./activityCompletions";
 import { resolveActivityWebTarget } from "./lib/webActivityTarget";
 import { requireActiveScholarAccess } from "./lib/access";
-import {
-  launcherShowsApp,
-  scholarHasGrantForApp,
-} from "./lib/appAudiences";
+import { scholarAppAccess } from "./lib/deviceAppProjection";
 import { entryTargetsScholar } from "./assignments";
 
 // FIFO cap on stored screenshots per session — a forgotten-open iPad
@@ -135,30 +133,19 @@ export const start = authedMutation({
     assignmentId: v.optional(v.id("assignments")),
   },
   handler: async (ctx, args) => {
-    // App launch — a standing External App from the scholar's launcher.
-    // No activity/assignment; ownership is "the app is on your launcher"
-    // (a direct enabled row OR a live audience grant — see launcherShowsApp).
+    // App launch — an External App from the scholar's launcher. No
+    // activity/assignment; ownership is "the app is on your launcher" (a
+    // direct row, a grant or a live push: `scholarAppAccess`), NOT "you have
+    // a per-scholar row". A grant is never fanned out into rows and a push
+    // writes none, so a row-only check let a tile or a Now card open an app
+    // and then threw here, and the whole capture pipeline (session,
+    // heartbeat, screenshots, teacher card) silently produced nothing.
     if (args.appId) {
-      const app = await ctx.db.get(args.appId);
-      if (!app) throw new Error("App not found");
-      if (app.archived) throw new Error("App is unavailable");
-      if (!app.webUrl.trim()) throw new Error("App has no URL configured");
-      const link = await ctx.db
-        .query("scholarApps")
-        .withIndex("by_scholar_app", (q) =>
-          q.eq("scholarId", ctx.user._id).eq("appId", args.appId!),
-        )
-        .first();
-      // Ownership is "the app is on your launcher" (`launcherShowsApp`), NOT
-      // "you have a per-scholar row". A bulk `appAudiences` grant is resolved at
-      // read time and never fanned out into rows, so the row-only check refused
-      // every group-granted app: the tile opened, then this mutation threw and
-      // the whole capture pipeline (session, heartbeat, screenshots, teacher
-      // card) silently produced nothing.
-      const granted = await scholarHasGrantForApp(ctx, ctx.user, args.appId);
-      if (!launcherShowsApp({ link, granted })) {
-        throw new Error("App not available to you");
-      }
+      const access = await scholarAppAccess(ctx, ctx.user, args.appId);
+      if (access.denied === "missing") throw new Error("App not found");
+      if (access.denied === "archived") throw new Error("App is unavailable");
+      if (!access.app.webUrl.trim()) throw new Error("App has no URL configured");
+      if (!access.allowed) throw new Error("App not available to you");
       const sessionId = await ctx.db.insert("webActivitySessions", {
         scholarId: ctx.user._id,
         appId: args.appId,
@@ -289,7 +276,16 @@ export const finalize = authedMutation({
       session.extracted.xpGoal > 0 &&
       session.extracted.xpToday >= session.extracted.xpGoal;
 
-    if (!args.markDone && !goalMet) return { completed: false, goalMet };
+    const notCompleted = (
+      refusal: { reason: string; message: string } | null = null,
+    ) => ({
+      completed: false as const,
+      goalMet,
+      completionId: null,
+      undoAvailable: false,
+      refusal,
+    });
+    if (!args.markDone && !goalMet) return notCompleted();
 
     // App sessions (no activityId) have no activity/lesson to complete —
     // a standing app launch isn't an assignment. Stamp endedAt + summary
@@ -297,9 +293,50 @@ export const finalize = authedMutation({
     const activity = session.activityId
       ? await ctx.db.get(session.activityId)
       : null;
-    if (!session.activityId || !activity?.lessonId) {
-      return { completed: false, goalMet };
+    if (!session.activityId || !activity) return notCompleted();
+
+    const note = goalMet
+      ? `Daily goal met (${session.extracted!.xpToday}/${session.extracted!.xpGoal} XP)`
+      : undefined;
+
+    // The scholar tapped Done on HOMEWORK: the same write path as the offline
+    // container's "I did it" (scholar provenance, the teacher's chip, the same
+    // Slack/digest side effects). This is the only way lesson-less web homework
+    // — an ad-hoc video link — can complete, and it used to silently refuse.
+    if (args.markDone && session.assignmentId) {
+      const mark = await markScholarHomeworkDone(ctx, session.scholarId, {
+        assignmentId: session.assignmentId,
+        activityId: session.activityId,
+        note,
+      });
+      if (mark.ok) {
+        return {
+          completed: true as const,
+          goalMet,
+          completionId: mark.completionId,
+          undoAvailable: mark.created,
+          refusal: null,
+        };
+      }
+      // Lesson-less work has no other way to complete: say why, plainly, so
+      // the client never closes as if a Done tap worked.
+      if (!activity.lessonId) {
+        return notCompleted({ reason: mark.reason, message: mark.message });
+      }
+      // A lessoned web activity that isn't live homework (class focus, or an
+      // ended push) keeps its long-standing completion below.
     }
+    if (!activity.lessonId) {
+      return notCompleted(
+        args.markDone
+          ? {
+              reason: "not_homework",
+              message: "This one can't be marked done here. Your teacher can mark it.",
+            }
+          : null,
+      );
+    }
+
     const assignmentId = await validateAssignmentScopeForWebActivity(
       ctx,
       session.assignmentId,
@@ -307,49 +344,22 @@ export const finalize = authedMutation({
       activity,
       { requireLive: false },
     );
-    const lesson = await ctx.db.get(activity.lessonId);
-    if (!lesson) return { completed: false, goalMet };
-
-    const note = goalMet
-      ? `Daily goal met (${session.extracted!.xpToday}/${session.extracted!.xpGoal} XP)`
-      : undefined;
-    const existing = assignmentId
-      ? await ctx.db
-          .query("activityCompletions")
-          .withIndex("by_scholar_assignment", (q) =>
-            q.eq("scholarId", session.scholarId).eq("assignmentId", assignmentId),
-          )
-          .filter((q) => q.eq(q.field("activityId"), session.activityId!))
-          .first()
-      : (
-          await ctx.db
-            .query("activityCompletions")
-            .withIndex("by_scholar_activity", (q) =>
-              q.eq("scholarId", session.scholarId).eq("activityId", session.activityId!),
-            )
-            .collect()
-        ).find((row) => row.assignmentId === undefined);
-    if (existing) {
-      await ctx.db.patch(existing._id, {
-        completedAt: Date.now(),
-        assignmentId: assignmentId ?? existing.assignmentId,
-        note: note ?? existing.note,
-      });
-    } else {
-      await ctx.db.insert("activityCompletions", {
-        scholarId: session.scholarId,
-        activityId: session.activityId,
-        lessonId: activity.lessonId,
-        unitId: lesson.unitId,
-        completedAt: Date.now(),
-        assignmentId,
-        note,
-      });
-    }
-    // Mint the unit badge if this finishes the unit (idempotent) — same
-    // award as the manual + rubric paths. See convex/lib/badgeAward.ts.
-    await maybeAwardUnitBadge(ctx, session.scholarId, session.activityId);
-    return { completed: true, goalMet };
+    // The one completion cascade (row → badge → seeds), same as every other
+    // path; it used to be a hand-rolled insert here.
+    const { completionId } = await reconcileActivityCompletion(ctx, {
+      scholarId: session.scholarId,
+      activityId: session.activityId,
+      assignmentId,
+      note,
+    });
+    if (!completionId) return notCompleted();
+    return {
+      completed: true as const,
+      goalMet,
+      completionId,
+      undoAvailable: false,
+      refusal: null,
+    };
   },
 });
 

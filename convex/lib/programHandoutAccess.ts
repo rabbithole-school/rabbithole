@@ -39,3 +39,29 @@ export async function requireProgramHandoutAccess(
   );
   return { activity, assignment, group };
 }
+
+/**
+ * Is this activity a PROGRAM HANDOUT on this assignment?
+ *
+ * A handout is the lesson-less, teacher-authored offline card a program
+ * staffer creates straight onto an ad-hoc assignment for one scholar group —
+ * no unit, no lesson, no curriculum access required (see
+ * `createProgramHandoutDraft`). Extracted from `masterSchedule`'s inlined
+ * predicate so the Schedule chip and the family course view agree on what a
+ * handout is. Pure: callers that also care WHICH group it belongs to compare
+ * `assignment.scholarGroupId` themselves.
+ */
+export function isProgramHandoutActivity(
+  activity: Doc<"activities"> | null | undefined,
+  assignment: Doc<"assignments"> | null | undefined,
+): boolean {
+  return Boolean(
+    activity &&
+      assignment &&
+      !activity.lessonId &&
+      activity.kind === "offline" &&
+      !assignment.archivedAt &&
+      assignment.kind === "adHocDispatch" &&
+      assignment.scholarGroupId,
+  );
+}

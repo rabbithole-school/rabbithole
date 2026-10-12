@@ -1,7 +1,9 @@
 import { useCallback, useMemo, useState } from "react";
+import { useAuthActions } from "@convex-dev/auth/react";
 import { useQuery } from "convex/react";
 import { router } from "expo-router";
 import {
+  Alert,
   Modal,
   Pressable,
   StyleSheet,
@@ -20,9 +22,9 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { api } from "@/lib/convex";
+import { readManagedClaim } from "@/lib/managedClaim";
 import { resolveUserImageUri } from "@/lib/webEmbedConfig";
 import { fonts, palette, useColors } from "@/theme";
-import { useDeviceSignOutPrompt } from "@/hooks/useDeviceSignOut";
 import { ScholarAvatar } from "@/components/ScholarAvatar";
 import { usePresentationAsam } from "@/contexts/AsamControllerContext";
 
@@ -41,7 +43,8 @@ const ROLE_LABELS: Record<string, string> = {
  * generic person glyph that jumped straight to My Learning.
  *
  * Full parity with the web scholar AccountMenu (components/AccountMenu.tsx):
- * identity header (avatar + name + @username), My Learning, The Workshop,
+ * identity header (avatar + name + @username), My Learning, Messages (once
+ * the scholar has a conversation), The Workshop,
  * Account Details, Sign Out. Teacher/admin-only items (Admin Tools, remote
  * "Viewing as", pulse orb) are intentionally absent — this is the scholar app.
  *
@@ -54,8 +57,17 @@ const ROLE_LABELS: Record<string, string> = {
  */
 export function AccountMenuButton() {
   const me = useQuery(api.users.currentUser, {});
+  // Messages (scholar ↔ staff conversations) — shown only once the scholar has
+  // a thread: an adult opens every mentor thread, so a kid with none gets no
+  // empty door. Scholar callers only; this is the scholar app.
+  const messages = useQuery(
+    api.scholarMessages.listThreads,
+    me?.role === "scholar" ? {} : "skip",
+  );
+  const hasMessages = (messages?.threads.length ?? 0) > 0;
+  const unreadMessages = hasMessages ? (messages?.unreadCount ?? 0) : 0;
   const memberships = useQuery(api.memberships.myMemberships, {});
-  const promptSignOut = useDeviceSignOutPrompt();
+  const { signOut } = useAuthActions();
   const { openTeacherUnlock, isTeacherUnlockAvailable } = usePresentationAsam();
   const insets = useSafeAreaInsets();
   const [open, setOpen] = useState(false);
@@ -86,10 +98,22 @@ export function AccountMenuButton() {
   }));
 
   const go = (path: string) => hide(() => router.push(path as never));
+  const managed = readManagedClaim() !== null;
   const onSignOut = () =>
-    hide(() => {
-      promptSignOut();
-    });
+    hide(() =>
+      Alert.alert(
+        "Sign out?",
+        "You'll need your username and password to sign back in.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Sign out",
+            style: "destructive",
+            onPress: () => void signOut(),
+          },
+        ],
+      ),
+    );
 
   const name = me?.name ?? "You";
   const username = me?.username ?? null;
@@ -113,9 +137,16 @@ export function AccountMenuButton() {
         onPress={show}
         hitSlop={10}
         accessibilityRole="button"
-        accessibilityLabel="Account menu"
+        accessibilityLabel={
+          unreadMessages > 0
+            ? `Account menu, ${unreadMessages} unread ${unreadMessages === 1 ? "message" : "messages"}`
+            : "Account menu"
+        }
       >
         <ScholarAvatar name={name} image={image} size={30} />
+        {/* Web parity: an unread dot on the avatar, so a new message is
+            visible without opening the menu. The count lives on the row. */}
+        {unreadMessages > 0 && <View style={styles.avatarDot} />}
       </Pressable>
 
       <Modal visible={open} transparent animationType="none" onRequestClose={() => hide()}>
@@ -150,26 +181,46 @@ export function AccountMenuButton() {
               </View>
 
               <Item icon="graduationcap.fill" label="My Learning" onPress={() => go("/me")} colors={colors} styles={styles} />
+              {hasMessages && (
+                <Item
+                  icon="bubble.left.and.bubble.right.fill"
+                  label="Messages"
+                  badge={unreadMessages}
+                  onPress={() => go("/messages")}
+                  colors={colors}
+                  styles={styles}
+                />
+              )}
               <Item icon="wrench.and.screwdriver.fill" label="The Workshop" onPress={() => go("/workshop")} colors={colors} styles={styles} />
-              <Item icon="person.crop.circle" label="Account details" onPress={() => go("/account")} colors={colors} styles={styles} />
+              <Item
+                icon="person.crop.circle"
+                label="Account details"
+                last={managed && !isTeacherUnlockAvailable}
+                onPress={() => go("/account")}
+                colors={colors}
+                styles={styles}
+              />
               {isTeacherUnlockAvailable && (
                 <Item
                   icon="lock.shield"
                   label="Teacher unlock"
+                  last={managed}
                   onPress={() => hide(() => openTeacherUnlock())}
                   colors={colors}
                   styles={styles}
                 />
               )}
-              <Item
-                icon="rectangle.portrait.and.arrow.right"
-                label="Sign out"
-                danger
-                last
-                onPress={onSignOut}
-                colors={colors}
-                styles={styles}
-              />
+              {!managed && (
+                <Item
+                  icon="rectangle.portrait.and.arrow.right"
+                  label="Sign out"
+                  danger
+                  last
+                  onPress={onSignOut}
+                  colors={colors}
+                  styles={styles}
+                />
+              )}
             </Pressable>
           </Animated.View>
         </Pressable>
@@ -184,6 +235,7 @@ function Item({
   onPress,
   danger = false,
   last = false,
+  badge = 0,
   colors,
   styles,
 }: {
@@ -191,6 +243,8 @@ function Item({
   label: string;
   onPress: () => void;
   danger?: boolean;
+  /** Unread count pill after the label; hidden at 0. */
+  badge?: number;
   last?: boolean;
   colors: ReturnType<typeof useColors>;
   styles: ReturnType<typeof makeStyles>;
@@ -207,6 +261,14 @@ function Item({
     >
       <SymbolView name={icon} size={19} tintColor={danger ? colors.statusRed : colors.charcoalMuted} />
       <Text style={[styles.itemLabel, { color: tint }]}>{label}</Text>
+      {badge > 0 && (
+        <View
+          style={styles.badge}
+          accessibilityLabel={`${badge} unread`}
+        >
+          <Text style={styles.badgeText}>{badge > 99 ? "99+" : badge}</Text>
+        </View>
+      )}
     </Pressable>
   );
 }
@@ -272,5 +334,27 @@ function makeStyles(c: ReturnType<typeof useColors>) {
   },
   itemBorder: { borderBottomWidth: 0.5, borderBottomColor: c.gray100 },
   itemLabel: { fontSize: 15, fontFamily: fonts.medium },
+  avatarDot: {
+    position: "absolute",
+    top: -1,
+    right: -1,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: c.violet,
+    borderWidth: 1.5,
+    borderColor: c.bg,
+  },
+  badge: {
+    marginLeft: "auto",
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    paddingHorizontal: 7,
+    backgroundColor: c.violet,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  badgeText: { fontSize: 12.5, fontFamily: fonts.bold, color: c.white },
   });
 }

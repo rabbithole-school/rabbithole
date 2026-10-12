@@ -19,7 +19,7 @@
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
-import { api } from "../_generated/api";
+import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import {
   seedScholarInInstitution,
@@ -49,8 +49,9 @@ async function withUser(t: TestClient, userId: Id<"users">) {
   });
 }
 
-/** One school, one teacher, one pod-granted app, one scholar in the pod. */
-async function seedGrantedApp(t: TestClient) {
+/** One school, one teacher, one pod-granted app, one scholar in the pod.
+ *  `grant: false` leaves the grant for the test to make. */
+async function seedGrantedApp(t: TestClient, { grant = true } = {}) {
   const institutionId = await seedTestInstitution(t, { slug: "moli" });
   const teacherId = await seedStaffWithMembership(t, {
     institutionId,
@@ -78,15 +79,17 @@ async function seedGrantedApp(t: TestClient) {
       scholarIds: [scholarId],
     }),
   );
-  await t.run((ctx) =>
-    ctx.db.insert("appAudiences", {
-      appId,
-      audienceKind: "group",
-      audienceId: String(groupId),
-      enabled: true,
-      addedBy: teacherId,
-    }),
-  );
+  if (grant) {
+    await t.run((ctx) =>
+      ctx.db.insert("appAudiences", {
+        appId,
+        audienceKind: "group",
+        audienceId: String(groupId),
+        enabled: true,
+        addedBy: teacherId,
+      }),
+    );
+  }
   return { institutionId, teacherId, scholarId, appId, groupId };
 }
 
@@ -130,6 +133,49 @@ describe("bulk-granted External Apps launch", () => {
     });
     expect(creds?.username).toBe("29001000123456");
     expect(creds?.password).toBe("1234");
+  });
+
+  test("archiving a granted app withdraws its autofill with its tile; un-archiving restores both", async () => {
+    // TRA-425: the autofill gated on `launcherShowsApp` alone, whose grant
+    // half never consults the catalog, so an archived app's tile vanished
+    // while the 🔑 kept handing over the scholar's saved login for it.
+    const t = convexTest(schema, modules);
+    const { teacherId, scholarId, appId } = await seedGrantedApp(t);
+    const asTeacher = await withUser(t, teacherId);
+    const asScholar = await withUser(t, scholarId);
+    // Parks the login on a visibility-neutral source:"grant" row.
+    await asTeacher.mutation(api.scholarApps.setCredentials, {
+      scholarId,
+      appId,
+      username: "kai.k",
+      password: "honu-1234",
+    });
+    const tileShown = async () =>
+      (await asScholar.query(api.scholarApps.listForLauncher, {})).some(
+        (tile) => tile.appId === appId,
+      );
+    const autofill = () =>
+      asScholar.query(api.scholarApps.credentialsForApp, { appId });
+    const savedLogin = { username: "kai.k", password: "honu-1234" };
+
+    expect(await tileShown()).toBe(true);
+    expect(await autofill()).toMatchObject(savedLogin);
+
+    await asTeacher.mutation(api.externalApps.setCatalogAppArchived, {
+      appId,
+      archived: true,
+    });
+    expect(await tileShown()).toBe(false);
+    expect(await autofill()).toBeNull();
+
+    // Archiving deletes neither the grant nor the parked login, so
+    // un-archiving brings both back with nothing to re-enter.
+    await asTeacher.mutation(api.externalApps.setCatalogAppArchived, {
+      appId,
+      archived: false,
+    });
+    expect(await tileShown()).toBe(true);
+    expect(await autofill()).toMatchObject(savedLogin);
   });
 
   test("a scholar with neither a grant nor a direct row still cannot launch", async () => {
@@ -181,5 +227,272 @@ describe("bulk-granted External Apps launch", () => {
     await expect(
       asFormer.mutation(api.webActivitySessions.start, { appId }),
     ).rejects.toThrow(/not available to you/i);
+  });
+});
+
+// TRA-431: `setCredentials` parks a login for a group-granted app on a
+// visibility-neutral source:"grant" row. A teacher's direct add used to find
+// that row, take it for "already added", and record nothing — so the scholar
+// lost the app along with the grant, or never got it back once it was gone.
+describe("a direct add over a parked grant login", () => {
+  const savedLogin = { username: "kai.k", password: "honu-1234" };
+
+  /** The pod world, driven through the real writers: the teacher grants the
+   *  app to the pod and parks the scholar's login on it. */
+  async function seedParkedLogin(t: TestClient, { parkLogin = true } = {}) {
+    const world = await seedGrantedApp(t, { grant: false });
+    const { teacherId, scholarId, appId } = world;
+    const asTeacher = await withUser(t, teacherId);
+    const asScholar = await withUser(t, scholarId);
+    const grant = {
+      appId,
+      audienceKind: "group" as const,
+      audienceId: String(world.groupId),
+    };
+    await asTeacher.mutation(api.appAudiences.assignToAudience, grant);
+    if (parkLogin) {
+      await asTeacher.mutation(api.scholarApps.setCredentials, {
+        scholarId,
+        appId,
+        ...savedLogin,
+      });
+    }
+    return {
+      ...world,
+      asTeacher,
+      ungrant: () =>
+        asTeacher.mutation(api.appAudiences.unassignAudience, grant),
+      addDirectly: () =>
+        asTeacher.mutation(api.scholarApps.addToScholar, { scholarId, appId }),
+      /** The aide installs the app's URL for the scholar; it dedupes into
+       *  this catalog row. */
+      installUrl: () =>
+        t.mutation(internal.customApps.installExistingUrlApp, {
+          name: "Reading App",
+          webUrl: "https://reading.example.com/students",
+          callerUserId: teacherId,
+          scholarIds: [scholarId],
+          groupIds: [],
+          allowedScholarIds: [scholarId],
+        }),
+      tileShown: async () =>
+        (await asScholar.query(api.scholarApps.listForLauncher, {})).some(
+          (tile) => tile.appId === appId,
+        ),
+      /** The teacher's Apps panel row for the app, or null if it lists none. */
+      panelRow: async () =>
+        (
+          await asTeacher.query(api.scholarApps.listForScholar, { scholarId })
+        ).find((row) => row.appId === appId) ?? null,
+      autofill: () =>
+        asScholar.query(api.scholarApps.credentialsForApp, { appId }),
+      links: () =>
+        t.run((ctx) =>
+          ctx.db
+            .query("scholarApps")
+            .withIndex("by_scholar_app", (q) =>
+              q.eq("scholarId", scholarId).eq("appId", appId),
+            )
+            .collect(),
+        ),
+    };
+  }
+
+  test("grant removed, then a direct add: the tile comes back with the parked login", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedParkedLogin(t);
+    await w.ungrant();
+    // Precondition: the parked row outlives the grant but shows nothing.
+    expect(await w.links()).toMatchObject([{ source: "grant" }]);
+    expect(await w.tileShown()).toBe(false);
+    expect(await w.panelRow()).toBeNull();
+
+    await w.addDirectly();
+
+    expect(await w.tileShown()).toBe(true);
+    expect(await w.panelRow()).toMatchObject({
+      direct: true,
+      enabled: true,
+      grantGroups: [],
+      loginUsername: "kai.k",
+      hasPassword: true,
+    });
+    expect(await w.autofill()).toMatchObject(savedLogin);
+    // The parked row itself became the direct add; no second row.
+    expect(await w.links()).toMatchObject([
+      {
+        source: "manual",
+        enabled: true,
+        addedBy: w.teacherId,
+        loginUsername: "kai.k",
+        loginPassword: "honu-1234",
+      },
+    ]);
+    const audits = await t.run((ctx) =>
+      ctx.db
+        .query("auditLog")
+        .withIndex("by_action", (q) =>
+          q.eq("action", "app-grant.scholar-assigned"),
+        )
+        .collect(),
+    );
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(audits[0].detail ?? "")).toEqual({
+      appId: w.appId,
+      scholarId: w.scholarId,
+      previousEnabled: null,
+      newEnabled: true,
+      via: "ui",
+    });
+  });
+
+  test("a direct add while the grant is live outlasts the grant", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedParkedLogin(t);
+
+    await w.addDirectly();
+    expect(await w.panelRow()).toMatchObject({
+      direct: true,
+      grantGroups: [{ id: w.groupId, name: "Honu", emoji: null }],
+    });
+
+    await w.ungrant();
+    expect(await w.tileShown()).toBe(true);
+    expect(await w.panelRow()).toMatchObject({ direct: true, grantGroups: [] });
+    expect(await w.autofill()).toMatchObject(savedLogin);
+  });
+
+  test("control: with no parked login, the same direct add inserts a direct row", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedParkedLogin(t, { parkLogin: false });
+    await w.ungrant();
+    expect(await w.links()).toEqual([]);
+
+    await w.addDirectly();
+
+    expect(await w.links()).toMatchObject([{ source: "manual", enabled: true }]);
+    expect(await w.tileShown()).toBe(true);
+  });
+
+  test("removing the direct add while the grant is live parks the login again", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedParkedLogin(t);
+    const { scholarAppId } = await w.addDirectly();
+
+    await w.asTeacher.mutation(api.scholarApps.removeFromScholar, {
+      scholarAppId,
+    });
+
+    // The grant still shows the tile and still needs the login to autofill.
+    expect(await w.links()).toMatchObject([
+      { source: "grant", enabled: true, loginUsername: "kai.k" },
+    ]);
+    expect(await w.tileShown()).toBe(true);
+    expect(await w.autofill()).toMatchObject(savedLogin);
+    expect(await w.panelRow()).toMatchObject({ direct: false });
+
+    // The same id again (a stale drawer, a double click) now names a parked
+    // row, not a direct add: it stays, and no second removal is audited.
+    await w.asTeacher.mutation(api.scholarApps.removeFromScholar, {
+      scholarAppId,
+    });
+    expect(await w.links()).toMatchObject([
+      { source: "grant", loginUsername: "kai.k" },
+    ]);
+    const removals = await t.run((ctx) =>
+      ctx.db
+        .query("auditLog")
+        .withIndex("by_action", (q) =>
+          q.eq("action", "app-grant.scholar-unassigned"),
+        )
+        .collect(),
+    );
+    expect(removals).toHaveLength(1);
+  });
+
+  test("the aide's enable and disable follow the same rules", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedParkedLogin(t);
+    const aideSetAccess = (enabled: boolean) =>
+      t.mutation(internal.scholarApps.aideSetScholarAccess, {
+        callerUserId: w.teacherId,
+        appName: "Reading App",
+        scholarQuery: "kai-grantlaunch",
+        enabled,
+      });
+
+    // Grant live: enable promotes the parked row; disable parks the login again.
+    await aideSetAccess(true);
+    expect(await w.links()).toMatchObject([
+      { source: "manual", loginUsername: "kai.k" },
+    ]);
+    expect(await aideSetAccess(false)).toMatchObject({ removed: 1 });
+    expect(await w.links()).toMatchObject([
+      { source: "grant", loginUsername: "kai.k" },
+    ]);
+    expect(await w.autofill()).toMatchObject(savedLogin);
+
+    // Grant gone: enable gives the app back, and with no grant left to need
+    // the login, disable takes the row with it.
+    await w.ungrant();
+    await aideSetAccess(true);
+    expect(await w.tileShown()).toBe(true);
+    expect(await aideSetAccess(false)).toMatchObject({ removed: 1 });
+    expect(await w.tileShown()).toBe(false);
+    expect(await w.links()).toEqual([]);
+  });
+
+  // TRA-437: the aide's install-a-URL used its own copy of the "already
+  // added" check, so it took the parked row for an install and recorded
+  // nothing. It now makes the same direct add as the panel.
+  test("grant removed, then the aide installs the URL: the tile comes back", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedParkedLogin(t);
+    await w.ungrant();
+    expect(await w.tileShown()).toBe(false);
+
+    const installed = await w.installUrl();
+
+    expect(await w.tileShown()).toBe(true);
+    expect(await w.autofill()).toMatchObject(savedLogin);
+    expect(installed).toMatchObject({ appId: w.appId, scholars: 1 });
+    expect(await w.links()).toMatchObject([
+      {
+        source: "manual",
+        enabled: true,
+        addedBy: w.teacherId,
+        loginUsername: "kai.k",
+      },
+    ]);
+    const audits = await t.run((ctx) =>
+      ctx.db
+        .query("auditLog")
+        .withIndex("by_action", (q) =>
+          q.eq("action", "app-grant.scholar-assigned"),
+        )
+        .collect(),
+    );
+    expect(audits.map((a) => JSON.parse(a.detail ?? ""))).toEqual([
+      {
+        appId: w.appId,
+        scholarId: w.scholarId,
+        previousEnabled: null,
+        newEnabled: true,
+        via: "aide",
+      },
+    ]);
+  });
+
+  test("the aide's URL install while the grant is live outlasts the grant", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedParkedLogin(t);
+
+    const installed = await w.installUrl();
+    await w.ungrant();
+
+    expect(await w.tileShown()).toBe(true);
+    expect(await w.panelRow()).toMatchObject({ direct: true, grantGroups: [] });
+    expect(await w.autofill()).toMatchObject(savedLogin);
+    expect(installed).toMatchObject({ scholars: 1 });
   });
 });

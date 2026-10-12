@@ -2,7 +2,7 @@
  * MIGRATION SCAFFOLDING — mirrors `assignments.activitySchedule` into
  * `pushes` so the two can be compared before any reader switches over.
  * Deleted, with `activitySchedule` itself, at the end of
- * TODO.html#pushes-migrate-activity-schedule.
+ * Linear TRA-13.
  *
  * Every write into `activitySchedule` funnels through a handful of `apply*`
  * helpers in assignments.ts. Each one calls `syncScheduleMirror` for the

@@ -84,12 +84,12 @@ const OBSERVER_DEDUP_LOOKBACK = 60;
 export const SEED_READ_LIMIT = 60;
 
 /**
- * A WIDER read bound, used only for `active` seeds when building the sky (see
- * `buildScholarSky`). `active` is the anchored status — teacher pins and
- * scholar-kept keepsakes live there, and a story-moment souvenir mints one per
- * curated story edge. A newest-N read on that status would silently drop the
- * OLDEST anchors (the earliest teacher pins) out of the sky entirely, with no
- * zoom-reveal to catch them. Bounded above by the curated story registry's size
+ * A WIDER read bound, used only for `active` seeds in `liveSeedsForScholar`
+ * (the sky, the seed list, and the agent reads). `active` is the anchored
+ * status — teacher pins and scholar-kept keepsakes live there, and a
+ * story-moment souvenir mints one per curated story edge. A newest-N read on
+ * that status would silently drop the OLDEST anchors (the earliest teacher
+ * pins) out of every seed view entirely. Bounded above by the curated story registry's size
  * plus curation headroom, so it stays a cheap, finite read.
  */
 export const ACTIVE_SEED_READ_LIMIT = 120;
@@ -232,6 +232,52 @@ export async function recentSeedsForScholarByStatus(
     ),
   );
   return groups.flat().sort((a, b) => b._creationTime - a._creationTime);
+}
+
+/**
+ * THE definition of a scholar's live seeds (`active` + `pending`), newest
+ * first. Every reader that shows or hands "this scholar's current seeds" to
+ * anyone — the staff/scholar seed list, the AI readers (`readScholarSeeds`),
+ * and the sky — goes through here, so a person can never see fewer live seeds
+ * than an agent does over the same rows (the Coherence rule
+ * `seed_agent_visible_human_truncated` exists because two readers once bounded
+ * them differently). `active` gets the wider window for the reason on
+ * ACTIVE_SEED_READ_LIMIT.
+ */
+export async function liveSeedsForScholar(
+  ctx: QueryCtx | MutationCtx,
+  scholarId: Id<"users">,
+) {
+  const [activeRows, pendingRows] = await Promise.all([
+    recentSeedsForScholarByStatus(
+      ctx,
+      scholarId,
+      ["active"],
+      ACTIVE_SEED_READ_LIMIT,
+    ),
+    recentSeedsForScholarByStatus(ctx, scholarId, ["pending"], SEED_READ_LIMIT),
+  ]);
+  return [...activeRows, ...pendingRows].sort(
+    (a, b) => b._creationTime - a._creationTime,
+  );
+}
+
+/**
+ * The seed list people read (`seeds.listByScholar`): every live seed, plus the
+ * newest `SEED_READ_LIMIT` finished ones (`completed` / `dismissed`) as
+ * history. History never competes with live seeds for room.
+ */
+export async function seedListForScholar(
+  ctx: QueryCtx | MutationCtx,
+  scholarId: Id<"users">,
+) {
+  const [liveRows, finishedRows] = await Promise.all([
+    liveSeedsForScholar(ctx, scholarId),
+    recentSeedsForScholarByStatus(ctx, scholarId, ["dismissed", "completed"]),
+  ]);
+  return [...liveRows, ...finishedRows.slice(0, SEED_READ_LIMIT)].sort(
+    (a, b) => b._creationTime - a._creationTime,
+  );
 }
 
 /**
@@ -644,24 +690,7 @@ export async function buildScholarSky(
 ) {
   const forTeacher = opts?.forTeacher ?? false;
   const liveCap = opts?.liveCap ?? SEED_CONSIDERATION_CAP;
-  // `active` gets a WIDER read window than `pending` (see
-  // ACTIVE_SEED_READ_LIMIT): it's the anchored status, so a newest-N truncation
-  // there would drop the oldest teacher pins / kept keepsakes out of the sky
-  // entirely rather than merely out of the at-rest set. Merged and re-sorted
-  // newest-first so `liveRows` keeps the exact ordering semantics of a single
-  // multi-status read.
-  const [activeRows, pendingRows] = await Promise.all([
-    recentSeedsForScholarByStatus(
-      ctx,
-      scholarId,
-      ["active"],
-      ACTIVE_SEED_READ_LIMIT,
-    ),
-    recentSeedsForScholarByStatus(ctx, scholarId, ["pending"], SEED_READ_LIMIT),
-  ]);
-  const liveRows = [...activeRows, ...pendingRows].sort(
-    (a, b) => b._creationTime - a._creationTime,
-  );
+  const liveRows = await liveSeedsForScholar(ctx, scholarId);
   const completedRows = await recentSeedsForScholarByStatus(ctx, scholarId, [
     "completed",
   ]);

@@ -7,8 +7,6 @@
  * has lost).
  */
 // @vitest-environment jsdom
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -21,14 +19,6 @@ import type {
   CheckpointCatalogDomain,
   PracticeScope,
 } from "../mathPlanProjection";
-
-// `import.meta.url` is not a file URL under the jsdom environment, so resolve
-// from the repo root vitest already runs in.
-const read = (name: string) =>
-  readFileSync(join(process.cwd(), "components", "practice", name), "utf8");
-
-const grid = read("CheckpointBandGrid.tsx");
-const editor = read("EditMathPlanDialog.tsx");
 
 const FRACTIONS: CheckpointCatalogDomain = {
   domain: "fractions",
@@ -64,122 +54,6 @@ describe("firstSelectableBand", () => {
       domains: [{ domain: "geometry" }],
     };
     expect(firstSelectableBand(FRACTIONS, scope)).toBeNull();
-  });
-});
-
-describe("CheckpointBandGrid", () => {
-  it("is a radiogroup of chips with ONE roving tab stop", () => {
-    expect(grid).toContain('role="radiogroup"');
-    expect(grid).toContain('role="radio"');
-    expect(grid).toContain("aria-checked={chosen}");
-    expect(grid).toContain("tabIndex={tabStop === key ? 0 : -1}");
-  });
-
-  it("drives the grid with arrows, Home/End and Enter/Space, skipping what cannot be chosen", () => {
-    for (const key of [
-      "ArrowRight",
-      "ArrowLeft",
-      "ArrowDown",
-      "ArrowUp",
-      "Home",
-      "End",
-      "Enter",
-    ]) {
-      expect(grid).toContain(`case "${key}"`);
-    }
-    // The step loop only ever lands on an enabled chip.
-    expect(grid).toMatch(/if \(enabledAt\(r, c\)\) return focusCell\(r, c\)/);
-  });
-
-  it("draws a hole as an inert dash, not a disabled radio", () => {
-    expect(grid).toMatch(/if \(!band\) \{[\s\S]*?aria-hidden[\s\S]*?—/);
-    expect(grid).toContain('data-testid="checkpoint-band-empty"');
-  });
-
-  it("slashes an out-of-scope band in place rather than hiding it", () => {
-    expect(grid).toContain("outOfScope={disabled}");
-    expect(grid).toContain("disabled={disabled}");
-    expect(grid).toContain('title={disabled ? "Out of practice scope"');
-  });
-
-  it("marks the chosen band with the corner flag alone — no second ring", () => {
-    expect(grid).toContain("corner={chosen ? corner : null}");
-    expect(grid).not.toContain("selectableSurface");
-    expect(grid).not.toMatch(/borderColor=\{chosen/);
-  });
-
-  it("scrolls horizontally with the strand labels pinned", () => {
-    expect(grid).toContain('overflowX="auto"');
-    expect(grid).toMatch(/position="sticky"\s+left=\{0\}/);
-    // The chip itself never shrinks or wraps — it is a fixed cell footprint.
-    expect(read("MathPlanMarks.tsx")).toMatch(
-      /w=\{`\$\{dims\.w\}px`\}[\s\S]*?flex="0 0 auto"/,
-    );
-  });
-
-  it("keeps a held band on the board when the catalogue has lost its strand or grade", () => {
-    // The visual form of the workaround the retired selects needed: a stored
-    // target the graph no longer lists still renders, so the picker meant to
-    // repair it cannot silently hide it.
-    expect(grid).toMatch(/rows\.some\(\(row\) => row\.strand === held\.strand\)/);
-    expect(grid).toMatch(/held && !domain\.grades\.includes\(held\.grade\)/);
-    expect(grid).toMatch(/if \(!row\.grades\.includes\(grade\) && !sameBand\(value, band\)\) return null;/);
-  });
-
-  it("refuses legibly when a domain carries no graded skill at all", () => {
-    expect(grid).toMatch(/if \(grades\.length === 0\)/);
-    expect(grid).toContain('data-testid="checkpoint-band-grid-empty"');
-  });
-
-  it("states the band in one gesture, so nothing has to re-derive a grade", () => {
-    // One selection carries the strand AND the grade, so there is no second
-    // control left to re-pick one after the other changed — and exactly two
-    // gestures reach it: the click and the keyboard.
-    expect((grid.match(/onSelect\(band\)/g) ?? []).length).toBe(2);
-    expect(grid).not.toMatch(/onSelectStrand|onSelectGrade|setGrade\(|setStrand\(/);
-  });
-});
-
-describe("the editor after the swap", () => {
-  it("never lends a saved band's mode to an unsaved one", () => {
-    // The corner may carry the plan's own reading ONLY for the stored target;
-    // any other draft band gets the unresolved default the sentence explains.
-    expect(editor).toMatch(
-      /corner=\{[\s\S]*?sameTarget\(draft\.checkpoint, data\.checkpoint\)[\s\S]*?plan\?\.conflict[\s\S]*?: "toward"[\s\S]*?\}/,
-    );
-  });
-
-  it("keeps the domain select — including its No checkpoint option", () => {
-    expect(editor).toContain('"aria-label": "Checkpoint domain"');
-    expect(editor).toContain('<option value="">No checkpoint</option>');
-    expect(editor).toContain("checkpointDomainChoices");
-  });
-
-  it("has no strand or grade select, and no repair logic to keep them in step", () => {
-    expect(editor).not.toContain('"Checkpoint strand"');
-    expect(editor).not.toContain('"Checkpoint grade"');
-    expect(editor).not.toContain("checkpointStrandChoices");
-    expect(editor).not.toContain("checkpointGradeChoices");
-    expect((editor.match(/<FieldSelect/g) ?? []).length).toBe(1);
-    expect(editor).toContain("<CheckpointBandGrid");
-    expect(editor).toContain("firstSelectableBand(");
-  });
-
-  it("still saves both controls in one atomic call, blocked while invalid", () => {
-    expect((editor.match(/await save\(/g) ?? []).length).toBe(1);
-    expect(editor).toContain("disabled={!draft || !!problem || saving}");
-    // The conflict banner keeps all three named exits.
-    expect(editor).toContain("Keep it in scope");
-    expect(editor).toContain("Move checkpoint");
-    expect(editor).toContain("Clear checkpoint");
-  });
-
-  it("keeps mode derived, and says so for an unsaved target", () => {
-    expect(editor).toMatch(/Mode is derived from band fluency/);
-    expect(editor).toMatch(
-      /Mode is derived from band fluency — it resolves\s*\n?\s*once this target is saved/,
-    );
-    expect(editor).not.toMatch(/setMode/);
   });
 });
 

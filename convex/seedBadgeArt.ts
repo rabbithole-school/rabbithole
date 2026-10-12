@@ -3,18 +3,18 @@
 // Quest-badge art for the rich-cohort seed — the ONE-OFF generator + the
 // per-seed attach step. Split from badges.ts / seedRichCohort.ts on purpose:
 //
-//  • `generate` calls the REAL Gemini image pipeline (buildBadgePrompt →
-//    geminiGenerateImage → removeGreenScreen), downscales, and stores each
-//    badge design once. It's a manual tool — run via the build script — never
-//    part of a seed. Its output is baked into convex/seed/rich/badgeArtAssets.ts.
+//  • `generate` calls the REAL image pipeline (buildBadgePrompt →
+//    openaiGenerateImage), downscales, and stores each badge design once. It's
+//    a manual tool — run via the build script — never part of a seed. Its
+//    output is baked into convex/seed/rich/badgeArtAssets.ts.
 //
 //  • `attach` runs during `pnpm db:seed:rich` (see scripts/db-seed.sh): it takes
 //    the PRE-BAKED PNGs from badgeArtAssets.ts, uploads them into Convex storage,
 //    and patches each seeded badge row (imageStorageId + artStatus "ready"). No
 //    model call, cheap, idempotent — so re-seeding never triggers gen art.
 //
-// Both live here (a "use node" module) because generate runs the chroma-key +
-// downscale pipeline (lib/chromaImage, which needs pngjs). The DB helpers they
+// Both live here (a "use node" module) because generate runs the downscale
+// pipeline (lib/spriteImage, which needs pngjs). The DB helpers they
 // call (badges.seedBadgeRows / badges.setBadgeArt) live in badges.ts (V8
 // runtime — actions can't hold queries/mutations).
 
@@ -22,8 +22,9 @@ import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { buildBadgePrompt, isBadgeColorway, type BadgeColorway, type BadgeStyle } from "./lib/badgeArt";
-import { geminiGenerateImage } from "./lib/gemini";
-import { removeGreenScreen } from "./lib/chromaImage";
+import { openaiGenerateImage } from "./lib/openaiImage";
+import { openaiImageUsageKey } from "./lib/models";
+import { downscaleTransparentPng } from "./lib/spriteImage";
 import { toStorageBlob, base64ToBytes } from "./lib/imageBytes";
 import { recordImageUsage } from "./usage";
 import { badges as seedBadges } from "./seed/rich/execution";
@@ -61,16 +62,16 @@ export const generate = internalAction({
         style: (b.style ?? "patch") as BadgeStyle,
         colorway,
       });
-      const image = await geminiGenerateImage([{ text: prompt }], {
-        aspectRatio: "1:1",
-      });
+      const image = await openaiGenerateImage(prompt, { quality: "medium" });
       if (!image) {
-        throw new Error(`Gemini returned no image for badge art "${b.art}"`);
+        throw new Error(`Image model returned no image for badge art "${b.art}"`);
       }
-      void recordImageUsage(ctx, { source: "badge-art", model: image.model });
-      // Chroma-key the green screen to transparency and downscale to `target`
-      // in one alpha-correct pass (lib/chromaImage).
-      const small = removeGreenScreen(image.bytes, { maxDim: target });
+      void recordImageUsage(ctx, {
+        source: "badge-art",
+        model: openaiImageUsageKey(image.model, image.quality),
+      });
+      // The model already returned alpha; just box it down to `target`.
+      const small = downscaleTransparentPng(image.bytes, target);
       const storageId = await ctx.storage.store(toStorageBlob(small, "image/png"));
       const url = await ctx.storage.getUrl(storageId);
       if (!url) throw new Error(`No serving URL for stored badge art "${b.art}"`);

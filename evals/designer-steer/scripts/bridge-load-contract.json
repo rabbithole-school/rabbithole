@@ -1,0 +1,13 @@
+{
+  "invariants": [
+    "A beam's load is shared by the members it connects to, never carried by that beam alone by default",
+    "A member loaded past its strength breaks, and the load it carried moves onto its neighbours"
+  ],
+  "freedoms": [
+    "The setting, the story and the art style",
+    "Which vehicles or weights cross the bridge",
+    "Which controls the app has and what they are called",
+    "Extras once the load model works"
+  ],
+  "gate": "The plain beam exists and has been loaded once until it breaks, so the scholar has seen what a single member does"
+}

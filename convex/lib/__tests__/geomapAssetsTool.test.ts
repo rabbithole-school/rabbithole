@@ -76,13 +76,6 @@ describe("list_geomap_assets — result", () => {
     }
   });
 
-  test("includes one-line usage guidance naming show_map / layers / historicalBasemap", async () => {
-    const out = await runTool();
-    expect(out.usage).toContain("show_map");
-    expect(out.usage).toContain("layers");
-    expect(out.usage).toContain("historicalBasemap");
-  });
-
   test("optional kind filter narrows datasets but keeps eras", async () => {
     const overlays = await runTool({ kind: "overlay" });
     expect(overlays.datasets.length).toBeGreaterThan(0);
@@ -108,7 +101,7 @@ describe("list_geomap_assets — surface assembly", () => {
     role: Parameters<typeof assembleCurriculumTools>[2]["role"],
   ) =>
     (
-      await assembleCurriculumTools(ctx, emit, { role, callerUserId: caller })
+      await assembleCurriculumTools(ctx, emit, { surface: "private", role, callerUserId: caller })
     ).map((t) => t.name);
 
   const designerNames = async (

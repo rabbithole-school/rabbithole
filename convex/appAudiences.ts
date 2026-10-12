@@ -12,7 +12,10 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { scholarAdminMutation, scholarAdminQuery } from "./lib/customFunctions";
-import { scholarIdsForInstitution } from "./lib/scholarEnrollment";
+import {
+  scholarIdsForInstitution,
+  scholarInstitutionId,
+} from "./lib/scholarEnrollment";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import {
@@ -20,20 +23,54 @@ import {
   resolveAppByName,
   resolveGroupByName,
   resolveInstitutionByName,
+  resolveScholarByNameOrUsername,
   isScholarInScope,
   isGroupInScope,
   isInstitutionInScope,
+  groupLabelInScope,
+  HIDDEN_GROUP,
   type ExternalAppScope,
 } from "./lib/externalAppsResolve";
 import { extendedEducationTag } from "./lib/scholarParticipationTooling";
+import { timeZoneForInstitution } from "./lib/institutionTime";
+import {
+  APP_PLACEMENT_GRACE_MS,
+  APP_PLACEMENT_LEAD_MS,
+  parseHHMM,
+} from "./masterSchedule";
 import { assertCuratableInstitution } from "./lib/access";
 import { scheduleUnlockRevocationCheck } from "./lib/deviceAppUnlockScheduling";
+import {
+  assignmentIdsCovering,
+  catalogAppIsVisible,
+  openAppPushesForInstitution,
+  scholarAppAccessAt,
+  type AppAuthority,
+  type ScholarAppAccess,
+} from "./lib/deviceAppProjection";
+import {
+  isPushShowing,
+  liveUntil,
+  pushCoversScholar,
+  pushExpiresAt,
+} from "./lib/pushes";
+import { groupIdsForScholar } from "./lib/scholarGroupMembership";
+import {
+  dayKeyForTimezone,
+  dayStartForDayKey,
+  shiftDayKey,
+} from "../shared/institutionDay";
+import { shiftScheduleWeekStartMs } from "../shared/scheduleWeek";
+import { primaryInstitutionId } from "./lib/primaryInstitution";
 import { resolveAppIconUrl } from "./lib/externalAppIconUrl";
-import { managedNativeAppKeyForScheme } from "./lib/managedNativeApps";
+import { managedNativeAppKeyForApp } from "./lib/managedNativeApps";
+import { externalAppKind } from "../shared/appKind";
+import { auditManagedClaim } from "./lib/managedDeviceClaimState";
 import {
   resolveInstitutionLens,
-  institutionIdInLens,
+  scholarInstitutionReadableInLens,
 } from "./lib/institutionLens";
+import { audienceInstitutionId } from "./lib/auditLog";
 
 /**
  * ⚠️ TENANCY GATE for every audience-grant WRITE (assign / unassign / enable
@@ -80,10 +117,10 @@ async function requireAudienceInScope(
     // hole here: it forbids only a WHOLLY foreign group, so an EMPTY foreign
     // group (never forbidden) or a mixed group containing a single scholar you
     // can reach would both let you write a grant onto another school's group.
-    // institutionIdInLens treats a legacy UNSTAMPED group as the primary
+    // The lens treats a legacy UNSTAMPED group as the primary
     // school, matching how the rest of the lens layer reads those.
     const lens = await resolveInstitutionLens(ctx, user, "all");
-    if (!institutionIdInLens(lens, group.institutionId)) {
+    if (!scholarInstitutionReadableInLens(lens, group.institutionId)) {
       throw new Error("Forbidden: group is not in your institution");
     }
     return;
@@ -144,6 +181,7 @@ async function grantsInScope(
 
 const audienceKind = v.union(v.literal("group"), v.literal("institution"));
 type AudienceKind = "group" | "institution";
+type AppGrantVia = "ui" | "aide" | "slack";
 
 type AudienceMeta = {
   label: string;
@@ -249,7 +287,12 @@ async function coreAssignToAudience(
     enabled?: boolean;
   },
   user: Doc<"users">,
-): Promise<{ grantId: Id<"appAudiences">; created: boolean; memberCount: number }> {
+  via: AppGrantVia = "ui",
+): Promise<{
+  grantId: Id<"appAudiences">;
+  created: boolean;
+  memberCount: number;
+}> {
   await requireAudienceInScope(ctx, user, args.audienceKind, args.audienceId);
   const app = await ctx.db.get(args.appId);
   if (!app) throw new Error("App not found");
@@ -287,6 +330,21 @@ async function coreAssignToAudience(
   if (existing) {
     if (existing.enabled !== enabled) {
       await ctx.db.patch(existing._id, { enabled });
+      await auditManagedClaim(
+        ctx,
+        user._id,
+        enabled ? "app-grant.audience-enabled" : "app-grant.audience-disabled",
+        user._id,
+        JSON.stringify({
+          appId: args.appId,
+          audienceKind: args.audienceKind,
+          audienceId: args.audienceId,
+          previousEnabled: existing.enabled,
+          newEnabled: enabled,
+          via,
+        }),
+        await audienceInstitutionId(ctx, args.audienceKind, args.audienceId),
+      );
       await nudge();
     }
     return { grantId: existing._id, created: false, memberCount: meta.memberCount };
@@ -298,6 +356,21 @@ async function coreAssignToAudience(
     enabled,
     addedBy: user._id,
   });
+  await auditManagedClaim(
+    ctx,
+    user._id,
+    "app-grant.audience-assigned",
+    user._id,
+    JSON.stringify({
+      appId: args.appId,
+      audienceKind: args.audienceKind,
+      audienceId: args.audienceId,
+      previousEnabled: null,
+      newEnabled: enabled,
+      via,
+    }),
+    await audienceInstitutionId(ctx, args.audienceKind, args.audienceId),
+  );
   if (enabled) await nudge();
   return { grantId, created: true, memberCount: meta.memberCount };
 }
@@ -310,6 +383,7 @@ async function coreUnassignAudience(
     audienceId: string;
   },
   user: Doc<"users">,
+  via: AppGrantVia = "ui",
 ): Promise<{ removed: number }> {
   await requireAudienceInScope(ctx, user, args.audienceKind, args.audienceId);
   const rows = await ctx.db
@@ -327,7 +401,25 @@ async function coreUnassignAudience(
     args.audienceId,
   );
   for (const r of rows) await ctx.db.delete(r._id);
-  await scheduleUnlockRevocationCheck(ctx, { externalAppId: args.appId, scholarIds });
+  await auditManagedClaim(
+    ctx,
+    user._id,
+    "app-grant.audience-unassigned",
+    user._id,
+    JSON.stringify({
+      appId: args.appId,
+      audienceKind: args.audienceKind,
+      audienceId: args.audienceId,
+      previousEnabled: rows[0].enabled,
+      newEnabled: "removed",
+      via,
+    }),
+    await audienceInstitutionId(ctx, args.audienceKind, args.audienceId),
+  );
+  await scheduleUnlockRevocationCheck(ctx, {
+    externalAppId: args.appId,
+    scholarIds,
+  });
   return { removed: rows.length };
 }
 
@@ -370,6 +462,23 @@ export const setAudienceEnabled = scholarAdminMutation({
     if (!grant) throw new Error("Grant not found");
     if (grant.enabled !== args.enabled) {
       await ctx.db.patch(grant._id, { enabled: args.enabled });
+      await auditManagedClaim(
+        ctx,
+        ctx.user._id,
+        args.enabled
+          ? "app-grant.audience-enabled"
+          : "app-grant.audience-disabled",
+        ctx.user._id,
+        JSON.stringify({
+          appId: args.appId,
+          audienceKind: args.audienceKind,
+          audienceId: args.audienceId,
+          previousEnabled: grant.enabled,
+          newEnabled: args.enabled,
+          via: "ui",
+        }),
+        await audienceInstitutionId(ctx, args.audienceKind, args.audienceId),
+      );
       // BOTH edges — a managed device's allowlist is a projection of this
       // grant, so re-enabling one is as much an allowlist change as pausing it.
       const scholarIds = await scholarIdsForAudience(
@@ -578,6 +687,11 @@ async function coreListAppsWithAudiences(
         _id: app._id,
         name: app.name,
         webUrl: app.webUrl,
+        // The native launch scheme (already consumed by the native AppLauncher,
+        // schema `externalApps.nativeUrlScheme`). Surfaced here only so the web
+        // Preview helper can tell "native app with no web page to show" from
+        // "plain web app"; the teacher UI never renders the raw scheme.
+        nativeUrlScheme: app.nativeUrlScheme ?? null,
         iconUrl: await resolveAppIconUrl(ctx, app),
         iconEmoji: app.iconEmoji ?? null,
         color: app.color ?? null,
@@ -591,7 +705,12 @@ async function coreListAppsWithAudiences(
         // profile-managed native app (PR #3212's per-device MDM unlock) — the
         // teacher UI uses this to explain the one-app-at-a-time unlock, never
         // to expose the underlying bundle id/scheme/SimpleMDM identifiers.
-        managedNativeAppKey: managedNativeAppKeyForScheme(app.nativeUrlScheme),
+        managedNativeAppKey: managedNativeAppKeyForApp(app),
+        // The app's KIND — web website / Rabbithole custom app / native iPad
+        // app — derived ONCE here (shared/appKind.ts) so the teacher Apps
+        // filter and the aide's list_external_apps tool read one canonical
+        // signal, never a client-side re-parse of the launch URL.
+        appKind: externalAppKind(app),
         audiences,
         directScholarCount,
         directFacepile,
@@ -605,6 +724,283 @@ async function coreListAppsWithAudiences(
 
 /** Resolve one app's full enablement to display labels: its group + institution
  *  grants (with live member counts + enabled state) and its DIRECT scholars. */
+// ─── Block-scoped access ────────────────────────────────────────────────────
+//
+// An app reaches a scholar by THREE authorities, and `launcherShowsApp`
+// (lib/appAudiences.ts) checks all three: a direct `scholarApps` row, an
+// `appAudiences` grant, and a LIVE PUSH. `coreGetAppAccess` below answers only
+// the first two, so for any app that follows the 2026-09-15 block-scoped
+// ruling — access from a `schedulePlacements` row carrying `externalAppId`,
+// deliberately NOT a standing grant — it returned "0 groups, 0 schools, 0
+// scholars", which is indistinguishable from genuinely revoked.
+//
+// That is not a cosmetic gap. On 2026-09-21 it reported a correctly-configured
+// Scratch as ungranted; the agent reading it told two people the grants had
+// "got dropped somewhere in the reshuffle" and recommended restoring the
+// standing grants, which was approved mid-class and undid the block-scoping.
+// The zeros were true; the sentence built on them was not.
+
+const LOOKAROUND_MS = 2 * 60 * 60_000; // Andy, 2026-09-21: now ± 2 hours.
+
+const WEEKDAY_LABEL = ["", "Mon", "Tue", "Wed", "Thu", "Fri"] as const;
+
+/**
+ * Shift an "HH:MM" wall-clock label by whole minutes, for DESCRIBING a
+ * recurring window ("14:50-16:40"). Wall-clock arithmetic is correct here and
+ * only here: a recurring placement has no single instant to convert, and the
+ * block's own start/end are stored as local HH:MM. Absolute instants (a
+ * materialized push) are formatted from epoch ms in the institution's zone
+ * instead — never from these strings.
+ */
+export function shiftLocalLabel(hhmm: string, deltaMinutes: number): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return hhmm;
+  const total = h * 60 + m + deltaMinutes;
+  // Wrap rather than clamp: clamping would silently misreport a window that
+  // genuinely crosses midnight, and a wrong time reads as authoritative.
+  const wrapped = ((total % 1440) + 1440) % 1440;
+  return `${String(Math.floor(wrapped / 60)).padStart(2, "0")}:${String(
+    wrapped % 60,
+  ).padStart(2, "0")}`;
+}
+
+export function localInstant(ms: number, timeZone: string): string {
+  return new Date(ms).toLocaleString("en-CA", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/**
+ * The clocked half of "who can use this app": the recurring placements that
+ * grant it (`blockScoped`) and every push of it (`appPushAccess`, below).
+ *
+ * Tenancy for the recurring rule rides on the placement's GROUP being in the
+ * caller's scope (`isGroupInScope`).
+ */
+async function appScheduleAccess(
+  ctx: QueryCtx,
+  appId: Id<"externalApps">,
+  scope: ExternalAppScope | null,
+  now: number,
+) {
+  const placements = await ctx.db
+    .query("schedulePlacements")
+    .withIndex("by_external_app", (q) => q.eq("externalAppId", appId))
+    .collect();
+
+  const blockScoped: Array<{
+    group: string;
+    day: string;
+    block: string;
+    blockLocal: string;
+    windowLocal: string;
+    teacher: string | null;
+  }> = [];
+
+  for (const p of placements) {
+    // A shelved placement (no weekday/block) grants nothing — it is a
+    // not-yet-scheduled item, so reporting it as access would overstate.
+    if (p.weekday == null || p.blockId == null) continue;
+    const group = await ctx.db.get(p.groupId);
+    if (!group) continue;
+    if (scope && !isGroupInScope(scope, group)) continue;
+    const block = await ctx.db.get(p.blockId);
+    if (!block) continue;
+
+    const teacher = p.teacherId ? await ctx.db.get(p.teacherId) : null;
+    blockScoped.push({
+      group: group.name,
+      day: WEEKDAY_LABEL[p.weekday] ?? `weekday ${p.weekday}`,
+      block: block.label,
+      blockLocal: `${block.startLocal}-${block.endLocal}`,
+      windowLocal: `${shiftLocalLabel(
+        block.startLocal,
+        -APP_PLACEMENT_LEAD_MS / 60_000,
+      )}-${shiftLocalLabel(block.endLocal, APP_PLACEMENT_GRACE_MS / 60_000)}`,
+      teacher: teacher?.name ?? null,
+    });
+  }
+  return { blockScoped, pushes: await appPushAccess(ctx, appId, scope, now) };
+}
+
+/**
+ * Every push of this app, read from the tile's own source and judged by the
+ * tile's own predicates: `openAppPushesForInstitution`, `isPushShowing` and
+ * `catalogAppIsVisible`, as `livePushedAppIdsForScholar` uses them. So both
+ * writers appear — a block placement's window (`source: "schedule"`) and a
+ * teacher's push (`source: "teacher"`) — and `live` is true exactly when the
+ * push is putting the app on its audience's tiles: including after its window
+ * has ended if nothing has cleared it yet (`overrun`), and never for an
+ * archived app, whose pushes stay open for staff to clear (TRA-337) while
+ * every tile drops it. This read used to reach pushes only through
+ * `schedulePlacements` and judge them with its own `startsAt <= now < endsAt`,
+ * so both of those put the app on a tile while it reported nobody (TRA-426).
+ *
+ * A live push is always listed. One that is not live is listed only when its
+ * window overlaps now ± 2h, so "opens at 14:50" stays distinguishable from
+ * "not granted" without listing every planned block of the week.
+ *
+ * Tenancy rides on the push's own `institutionId`, the boundary
+ * `pushCoversScholar` never crosses: only the caller's schools are read.
+ */
+async function appPushAccess(
+  ctx: QueryCtx,
+  appId: Id<"externalApps">,
+  scope: ExternalAppScope | null,
+  now: number,
+) {
+  const institutions =
+    !scope || scope.institutions === "all"
+      ? await ctx.db.query("institutions").collect()
+      : (
+          await Promise.all([...scope.institutions].map((id) => ctx.db.get(id)))
+        ).filter((i): i is Doc<"institutions"> => i !== null);
+  const appVisible = catalogAppIsVisible(await ctx.db.get(appId));
+
+  const pushes: Array<{
+    live: boolean;
+    source: "schedule" | "teacher";
+    group: string;
+    windowLocal: string;
+    liveUntilLocal: string | null;
+    overrun: boolean;
+    occurrenceDate: string | null;
+    startsAt: number;
+    endsAt: number | null;
+  }> = [];
+
+  for (const institution of institutions) {
+    const { pushes: open, clock } = await openAppPushesForInstitution(
+      ctx,
+      institution._id,
+      now,
+    );
+    for (const push of open) {
+      if (push.target.kind !== "app" || push.target.externalAppId !== appId) {
+        continue;
+      }
+      const live = appVisible && isPushShowing(push, clock);
+      const endsAt = pushExpiresAt(push.timing);
+      // `startsAt` is the planned time: the materializer always sets it and
+      // a teacher's push never does, so fall back to `setAt`.
+      const beginsAt = push.startsAt ?? push.setAt;
+      if (beginsAt === undefined) continue;
+      if (!live) {
+        const startsWithin = Math.abs(beginsAt - now) <= LOOKAROUND_MS;
+        const endsWithin =
+          endsAt !== null && Math.abs(endsAt - now) <= LOOKAROUND_MS;
+        const spansNow = beginsAt <= now && (endsAt === null || endsAt >= now);
+        if (!startsWithin && !endsWithin && !spansNow) continue;
+      }
+      const group = await pushAudienceLabel(ctx, push.audience, institution.name);
+      // A push to a deleted group covers nobody.
+      if (group === null) continue;
+      const until = live ? liveUntil(push, clock) : null;
+      pushes.push({
+        live,
+        source: push.schedulePlacementId ? "schedule" : "teacher",
+        group,
+        windowLocal: `${localInstant(beginsAt, clock.timeZone)} - ${
+          endsAt === null ? "(no end)" : localInstant(endsAt, clock.timeZone)
+        }`,
+        liveUntilLocal:
+          until === null ? null : localInstant(until, clock.timeZone),
+        // Live past its window: the clear is late, not the window long.
+        overrun: live && endsAt !== null && endsAt <= now,
+        occurrenceDate: push.occurrenceDate ?? null,
+        startsAt: beginsAt,
+        endsAt,
+      });
+    }
+  }
+  pushes.sort((a, b) => a.startsAt - b.startsAt);
+  return pushes;
+}
+
+/**
+ * Who a push covers, worded as a teacher's push labels it (pushes.createFocus):
+ * the group's name, all of a school's scholars (named, since this read can
+ * span schools), or a count. Null for a group that no longer exists.
+ */
+async function pushAudienceLabel(
+  ctx: QueryCtx,
+  audience: Doc<"pushes">["audience"],
+  schoolName: string,
+): Promise<string | null> {
+  const count = (n: number) => `${n} scholar${n === 1 ? "" : "s"}`;
+  switch (audience.kind) {
+    case "group":
+      return (await ctx.db.get(audience.groupId))?.name ?? null;
+    case "institution":
+      return `All scholars at ${schoolName}`;
+    case "scholars":
+      return count(audience.scholarIds.length);
+    case "assignment": {
+      const assignment = await ctx.db.get(audience.assignmentId);
+      return assignment ? count(assignment.scholarIds.length) : null;
+    }
+  }
+}
+
+const GRANT_AUDIT_ACTIONS = [
+  "app-grant.audience-assigned",
+  "app-grant.audience-unassigned",
+  "app-grant.audience-enabled",
+  "app-grant.audience-disabled",
+  "app-grant.scholar-assigned",
+  "app-grant.scholar-unassigned",
+  "app-grant.scholar-enabled",
+  "app-grant.scholar-disabled",
+] as const;
+
+/**
+ * Recent grant changes for THIS app, so "was this deliberately changed?" is
+ * answerable — the question that went unasked on 2026-09-21, when the record
+ * already held the five removals that contradicted "dropped in the reshuffle".
+ *
+ * App-scoped by construction: filtering to an app the caller already resolved
+ * through their own institution lens is tenant-safe without `auditLog`'s
+ * tenancy key. The general, institution-scoped reader is `get_audit_log`
+ * (convex/auditLog.ts, TRA-362).
+ */
+async function appGrantHistory(
+  ctx: QueryCtx,
+  appId: Id<"externalApps">,
+  timeZone: string,
+) {
+  const out: Array<{ at: string; action: string; by: string; via: string | null }> = [];
+  for (const action of GRANT_AUDIT_ACTIONS) {
+    const rows = await ctx.db
+      .query("auditLog")
+      .withIndex("by_action", (q) => q.eq("action", action))
+      .order("desc")
+      .take(40);
+    for (const r of rows) {
+      if (!r.detail?.includes(appId)) continue;
+      const actor = await ctx.db.get(r.actorUserId);
+      let via: string | null = null;
+      try {
+        via = (JSON.parse(r.detail) as { via?: string }).via ?? null;
+      } catch {
+        via = null;
+      }
+      out.push({
+        at: localInstant(r.at, timeZone),
+        action: action.replace("app-grant.", ""),
+        by: actor?.name ?? actor?.username ?? "unknown",
+        via,
+      });
+    }
+  }
+  return out.sort((a, b) => (a.at < b.at ? 1 : -1)).slice(0, 12);
+}
+
 async function coreGetAppAccess(
   ctx: QueryCtx,
   appId: Id<"externalApps">,
@@ -664,6 +1060,659 @@ async function coreGetAppAccess(
   return { groups, institutions, scholars };
 }
 
+// ── One scholar: may they open it, through what, until when (TRA-445) ──────
+//
+// The app-centric read above cannot answer "can Kai open this?": it names
+// standing grants by audience, and a push to a list of scholars or an
+// assignment only as a count ("1 scholar"). On 2026-09-15 answering that for
+// one scholar took reading five tables by hand; on 2026-09-21 a block-scoped
+// app read as ungranted and a standing grant was wrongly restored.
+//
+// So a "no" here says what is set up around it, and never names grants as
+// the missing piece: a block-scoped app has none by design (the 2026-09-15
+// ruling), and a sentence listing them reads as "broken, add a grant".
+//
+// It states FACTS FROM ROWS, never a forecast. Whether and when a class opens
+// the app is the scheduler's decision (masterSchedule.ts: the term, the
+// teacher, a wrap-up, a closed day), and re-deriving it here would be a second
+// copy of that rule, the bug class this program removes (T7). So "when it
+// opens" comes only from pushes the scheduler or a teacher already created,
+// and a class placement is stated as configuration, annotated where its row
+// alone shows it cannot open anything.
+
+/** One route in the per-scholar answer, worded for staff. */
+type ScholarRoute = {
+  route: "direct" | "group grant" | "school grant" | "schedule push" | "teacher push";
+  /** The route by name, as it reads after "via": "the Robotics group grant". */
+  name: string;
+  /** When this route is expected to end, school-local; null when it has no
+   *  end of its own. */
+  untilLocal: string | null;
+  /** A push whose window has closed with nothing cleared yet. */
+  overrun: boolean;
+  /** A push's window close, school-local; null for any other route. */
+  windowEndsLocal: string | null;
+};
+
+/** A push already planned for them (the scheduler's or a teacher's row): the
+ *  one authority on when the app opens. The scheduler plans only about a
+ *  week ahead, so the soonest is not necessarily the next opening. */
+type PlannedOpening = {
+  /** When it opens, school-local. */
+  atLocal: string;
+  /** As it reads after "It opens at …": "for Robotics (Block E)". */
+  name: string;
+  /** Its window, school-local. */
+  windowLocal: string;
+};
+
+/** A session of the app covering them that a teacher ended, or called off
+ *  before it opened, today (see `whenForScholar` for which clears count). */
+type WrappedToday = {
+  /** "Today's Robotics Block E session", "Sloane Kahale's push to them alone". */
+  name: string;
+  /** When the teacher cleared it, school-local. */
+  atLocal: string;
+  /** False: it was called off before it opened. */
+  opened: boolean;
+};
+
+/** A schedule placement of the app for a class they are in: CONFIGURATION,
+ *  stated as fact, never a promise that the app will open. */
+type ScheduledClass = {
+  /** "Robotics during Block E" */
+  name: string;
+  /** The placement's days and window, lead-in and grace included:
+   *  "Mon/Wed 14:50-16:40", or "Mon 14:50-16:40, week of Oct 5 only". */
+  windowLocal: string;
+  /** Its term, and where today falls against the term's own dates. */
+  term: string;
+  termStatus: "current" | "ended" | "upcoming";
+  termStartsLocal: string;
+  termEndsLocal: string;
+  /** A one-week placement whose week is over. */
+  weekOver: boolean;
+};
+
+/** "HH:MM" in `timeZone`, for a sentence; `localInstant` for a field. */
+function localClock(ms: number, timeZone: string): string {
+  return new Date(ms).toLocaleTimeString("en-CA", {
+    timeZone,
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** "Oct 2" in `timeZone`, with the year when it is not `now`'s. */
+function localDate(ms: number, timeZone: string, now: number): string {
+  const year = (at: number) =>
+    new Date(at).toLocaleDateString("en-US", { timeZone, year: "numeric" });
+  return new Date(ms).toLocaleDateString("en-US", {
+    timeZone,
+    month: "short",
+    day: "numeric",
+    ...(year(ms) === year(now) ? {} : { year: "numeric" }),
+  });
+}
+
+/** "at 14:50 today", or "on Wed, Sep 30 at 14:50". */
+function whenLocal(ms: number, timeZone: string, now: number): string {
+  if (dayKeyForTimezone(ms, timeZone) === dayKeyForTimezone(now, timeZone)) {
+    return `at ${localClock(ms, timeZone)} today`;
+  }
+  const day = new Date(ms).toLocaleDateString("en-US", {
+    timeZone,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+  return `on ${day} at ${localClock(ms, timeZone)}`;
+}
+
+/** "a, b and c" */
+function joinAnd(parts: readonly string[]): string {
+  if (parts.length <= 1) return parts.join("");
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+
+/** Does this term belong to that school? A legacy UNSTAMPED term belongs to
+ *  the primary school, the rule `requireScheduleScopeAccessible` applies. */
+async function termBelongsTo(
+  ctx: QueryCtx,
+  term: Doc<"reportingPeriods">,
+  institutionId: Id<"institutions"> | undefined,
+): Promise<boolean> {
+  if (!institutionId) return false;
+  if (term.institutionId) return term.institutionId === institutionId;
+  return (await primaryInstitutionId(ctx)) === institutionId;
+}
+
+/**
+ * A schedule push's class, as the caller may see it: its group's name (or
+ * `HIDDEN_GROUP`), and its block's label only when the placement's term
+ * belongs to the push's own school. A legacy unstamped group can be placed in
+ * another school's term, and the scheduler stamps its push with the primary
+ * school (`institutionIdForPlacementGroup`), so the push can reach this
+ * school's scholar while its block label is the other school's.
+ */
+async function schedulePushClass(
+  ctx: QueryCtx,
+  scope: ExternalAppScope,
+  push: Doc<"pushes">,
+): Promise<{ group: string; block: string | null }> {
+  const placement = push.schedulePlacementId
+    ? await ctx.db.get(push.schedulePlacementId)
+    : null;
+  const groupId =
+    push.audience.kind === "group" ? push.audience.groupId : (placement?.groupId ?? null);
+  const group = (groupId ? await groupLabelInScope(ctx, scope, groupId) : null) ?? HIDDEN_GROUP;
+  const term = placement ? await ctx.db.get(placement.periodId) : null;
+  const block =
+    placement?.blockId && term && (await termBelongsTo(ctx, term, push.institutionId))
+      ? await ctx.db.get(placement.blockId)
+      : null;
+  return { group, block: block?.label ?? null };
+}
+
+/** A push as staff would name it: "the Robotics Block E schedule push",
+ *  "Sloane Kahale's push to Robotics", "…'s push to a list of 3 scholars". */
+async function pushRouteName(
+  ctx: QueryCtx,
+  scope: ExternalAppScope,
+  push: Doc<"pushes">,
+): Promise<string> {
+  const audience = push.audience;
+  if (push.schedulePlacementId) {
+    const { group, block } = await schedulePushClass(ctx, scope, push);
+    if (group === HIDDEN_GROUP) return `a schedule push to ${HIDDEN_GROUP}`;
+    return `the ${group}${block ? ` ${block}` : ""} schedule push`;
+  }
+  const pusher = await ctx.db.get(push.pushedBy);
+  const by = pusher?.name ? `${pusher.name}'s push` : "a teacher's push";
+  switch (audience.kind) {
+    case "group":
+      return `${by} to ${(await groupLabelInScope(ctx, scope, audience.groupId)) ?? HIDDEN_GROUP}`;
+    case "institution": {
+      // `pushCoversScholar` never crosses a school, so this is the scholar's
+      // own school, which the caller's scope already holds.
+      const school = await ctx.db.get(push.institutionId);
+      return `${by} to all scholars at ${school?.name ?? "their school"}`;
+    }
+    case "scholars": {
+      const n = audience.scholarIds.length;
+      return n === 1 ? `${by} to them alone` : `${by} to a list of ${n} scholars`;
+    }
+    case "assignment": {
+      const assignment = await ctx.db.get(audience.assignmentId);
+      const n = assignment?.scholarIds.length ?? 0;
+      return `${by} to an assignment roster of ${n} scholar${n === 1 ? "" : "s"}`;
+    }
+  }
+}
+
+/** A route as staff read it, plus its push's window close as an instant (for
+ *  the sentence; null for any other route). */
+async function describeRoute(
+  ctx: QueryCtx,
+  scope: ExternalAppScope,
+  scholar: Doc<"users">,
+  authority: AppAuthority,
+  timeZone: string,
+): Promise<{ route: ScholarRoute; windowEndsAt: number | null }> {
+  const untilLocal =
+    authority.until === null ? null : localInstant(authority.until, timeZone);
+  const standing = { untilLocal, overrun: false, windowEndsLocal: null };
+  switch (authority.kind) {
+    case "direct":
+      return {
+        route: {
+          route: "direct",
+          // Both are their own row. "default" is seeded for every new scholar
+          // when the app is a default, so it is not an add made for them.
+          name:
+            authority.source === "default"
+              ? "the default apps every new scholar gets"
+              : "a direct add to them",
+          ...standing,
+        },
+        windowEndsAt: null,
+      };
+    case "grant": {
+      if (authority.audience === "group") {
+        const group = await groupLabelInScope(ctx, scope, authority.groupId);
+        return {
+          route: {
+            route: "group grant",
+            name: group ? `the ${group} group grant` : `a group grant to ${HIDDEN_GROUP}`,
+            ...standing,
+          },
+          windowEndsAt: null,
+        };
+      }
+      // The school `grantProvenanceForScholar` read the grant for.
+      const institutionId = await scholarInstitutionId(ctx, scholar._id);
+      const school =
+        institutionId && isInstitutionInScope(scope, institutionId)
+          ? await ctx.db.get(institutionId)
+          : null;
+      return {
+        route: {
+          route: "school grant",
+          name: school ? `the school-wide grant at ${school.name}` : "a school-wide grant",
+          ...standing,
+        },
+        windowEndsAt: null,
+      };
+    }
+    case "push": {
+      const push = await ctx.db.get(authority.pushId);
+      const endsAt = push ? pushExpiresAt(push.timing) : null;
+      return {
+        route: {
+          route: authority.source === "schedule" ? "schedule push" : "teacher push",
+          name: push ? await pushRouteName(ctx, scope, push) : "a push",
+          untilLocal,
+          overrun: authority.overrun,
+          windowEndsLocal: endsAt === null ? null : localInstant(endsAt, timeZone),
+        },
+        windowEndsAt: endsAt,
+      };
+    }
+  }
+}
+
+/** "It opens at 14:50 today ___": a planned push, by its class or its pusher. */
+async function plannedPushName(
+  ctx: QueryCtx,
+  scope: ExternalAppScope,
+  push: Doc<"pushes">,
+): Promise<string> {
+  if (!push.schedulePlacementId) return `with ${await pushRouteName(ctx, scope, push)}`;
+  const { group, block } = await schedulePushClass(ctx, scope, push);
+  return `for ${group}${block ? ` (${block})` : ""}`;
+}
+
+/** "___ was wrapped up at 15:30": a cleared push, by its session or its pusher. */
+async function wrappedPushName(
+  ctx: QueryCtx,
+  scope: ExternalAppScope,
+  push: Doc<"pushes">,
+): Promise<string> {
+  if (!push.schedulePlacementId) return await pushRouteName(ctx, scope, push);
+  const { group, block } = await schedulePushClass(ctx, scope, push);
+  return `today's ${block ? `${block} ` : ""}session for ${group}`;
+}
+
+/**
+ * The app's schedule placements for a group the scholar is in (by
+ * `groupIdsForScholar`, the membership rule a placement's push uses), stated
+ * as CONFIGURATION: the class, its days and window, and its term's dates.
+ * Only placements in a term of the scholar's own school: a legacy group can
+ * sit in another school's term, whose block labels and dates are not this
+ * caller's to see. Weekly placements that differ only by weekday merge
+ * ("Mon/Wed"); a one-week placement names its week. Nothing here decides
+ * whether or when one opens: that is the scheduler's job, and its planned
+ * pushes say it.
+ */
+async function scheduledForScholar(
+  ctx: QueryCtx,
+  scope: ExternalAppScope,
+  scholar: Doc<"users">,
+  appId: Id<"externalApps">,
+  groupIds: ReadonlyArray<Id<"scholarGroups">>,
+  now: number,
+  timeZone: string,
+): Promise<ScheduledClass[]> {
+  const inGroup = new Set(groupIds.map(String));
+  type Entry = ScheduledClass & {
+    order: number;
+    days: Array<{ weekday: number; label: string }>;
+    window: string;
+    week: string | null;
+  };
+  const entries = new Map<string, Entry>();
+  const placements = await ctx.db
+    .query("schedulePlacements")
+    .withIndex("by_external_app", (q) => q.eq("externalAppId", appId))
+    .collect();
+  for (const p of placements) {
+    if (p.weekday == null || p.blockId == null) continue; // on the shelf: not scheduled
+    if (!inGroup.has(String(p.groupId))) continue;
+    const term = await ctx.db.get(p.periodId);
+    if (!term || !(await termBelongsTo(ctx, term, scholar.institutionId))) continue;
+    const block = await ctx.db.get(p.blockId);
+    if (!block) continue;
+    const window = `${shiftLocalLabel(block.startLocal, -APP_PLACEMENT_LEAD_MS / 60_000)}-${shiftLocalLabel(
+      block.endLocal,
+      APP_PLACEMENT_GRACE_MS / 60_000,
+    )}`;
+    const name = `${(await groupLabelInScope(ctx, scope, p.groupId)) ?? HIDDEN_GROUP} during ${block.label}`;
+    const week = p.weekStartMs == null ? null : localDate(p.weekStartMs, timeZone, now);
+    const key = [name, window, String(term._id), week ?? "weekly"].join("|");
+    const order = p.weekday * 1440 + (parseHHMM(block.startLocal) ?? 0);
+    let entry = entries.get(key);
+    if (!entry) {
+      entry = {
+        name,
+        windowLocal: "",
+        term: term.label,
+        termStatus: now < term.startsAt ? "upcoming" : now > term.endsAt ? "ended" : "current",
+        termStartsLocal: localDate(term.startsAt, timeZone, now),
+        termEndsLocal: localDate(term.endsAt, timeZone, now),
+        weekOver:
+          p.weekStartMs != null &&
+          shiftScheduleWeekStartMs(p.weekStartMs, 1, timeZone) <= now,
+        order,
+        days: [],
+        window,
+        week,
+      };
+      entries.set(key, entry);
+    }
+    entry.order = Math.min(entry.order, order);
+    const day: string = WEEKDAY_LABEL[p.weekday] ?? `weekday ${p.weekday}`;
+    if (!entry.days.some((d) => d.label === day)) entry.days.push({ weekday: p.weekday, label: day });
+  }
+  return [...entries.values()]
+    .sort((a, b) => a.order - b.order)
+    .map(({ order: _order, days, window, week, ...entry }) => ({
+      ...entry,
+      windowLocal: `${[...days]
+        .sort((a, b) => a.weekday - b.weekday)
+        .map((d) => d.label)
+        .join("/")} ${window}${week ? `, week of ${week} only` : ""}`,
+    }));
+}
+
+/**
+ * What is set up around a scholar who cannot open the app right now, as facts
+ * from rows that already exist (see this section's header):
+ *
+ *   • `opens`: pushes of the app already planned (not yet set live) whose
+ *     audience covers them (`pushCoversScholar`) and whose start is ahead,
+ *     soonest first. The scheduler plans a class's push only when its own
+ *     rules allow one (a term, no wrap-up, a school day), so these rows, not
+ *     the placements, are the authority on when the app opens. It plans only
+ *     about a week ahead, so the soonest of them is the soonest ALREADY
+ *     PLANNED, not necessarily the next opening.
+ *   • `wrappedToday`: today's sessions of the app covering them that a
+ *     teacher wrapped up or called off. The scheduler stamps the same
+ *     "teacher" clear when a class is deleted or merged
+ *     (`settlePlacementAppPush`) or its app is detached
+ *     (`coreUpdatePlacement`), which ends no session. So a clear counts only
+ *     while its placement still exists and still targets this app, and while
+ *     no newer push of the app covers them for that session.
+ *   • `scheduled`: `scheduledForScholar`, configuration only.
+ */
+async function whenForScholar(
+  ctx: QueryCtx,
+  scope: ExternalAppScope,
+  scholar: Doc<"users">,
+  appId: Id<"externalApps">,
+  now: number,
+  timeZone: string,
+): Promise<{
+  opens: Array<PlannedOpening & { at: number }>;
+  wrappedToday: Array<WrappedToday & { at: number }>;
+  scheduled: ScheduledClass[];
+}> {
+  const groupIds = await groupIdsForScholar(ctx, scholar);
+  const opens: Array<PlannedOpening & { at: number }> = [];
+  const wrappedToday: Array<WrappedToday & { at: number }> = [];
+  const institutionId = scholar.institutionId;
+  if (institutionId) {
+    const today = dayKeyForTimezone(now, timeZone);
+    const isThisApp = (p: Doc<"pushes">) =>
+      p.target.kind === "app" && p.target.externalAppId === appId;
+    // A push's session: a block's occurrence date, else the day it was set
+    // (or planned for).
+    const sessionOf = (p: Doc<"pushes">) =>
+      p.occurrenceDate ??
+      dayKeyForTimezone(p.setAt ?? p.startsAt ?? p._creationTime, timeZone);
+    const { pushes: open } = await openAppPushesForInstitution(ctx, institutionId, now);
+    const openOfApp = open.filter(isThisApp);
+    const planned = openOfApp.filter(
+      (p) => p.setAt === undefined && p.startsAt !== undefined && p.startsAt > now,
+    );
+    // The school's clears since its midnight, by index, then a teacher's clear
+    // of TODAY's session.
+    const cleared = (
+      await ctx.db
+        .query("pushes")
+        .withIndex("by_institution_cleared", (q) =>
+          q
+            .eq("institutionId", institutionId)
+            .gte("clearedAt", dayStartForDayKey(today, timeZone))
+            .lte("clearedAt", now),
+        )
+        .collect()
+    ).filter((p) => isThisApp(p) && p.clearedReason === "teacher" && sessionOf(p) === today);
+    const audience = {
+      scholarId: scholar._id,
+      institutionId,
+      groupIds,
+      assignmentIds: await assignmentIdsCovering(ctx, scholar, [...openOfApp, ...cleared]),
+    };
+    for (const push of planned) {
+      if (!pushCoversScholar(push, audience)) continue;
+      const at = push.startsAt!;
+      const endsAt = pushExpiresAt(push.timing);
+      opens.push({
+        at,
+        atLocal: localInstant(at, timeZone),
+        name: await plannedPushName(ctx, scope, push),
+        windowLocal: `${localInstant(at, timeZone)} - ${
+          endsAt === null ? "(no end)" : localInstant(endsAt, timeZone)
+        }`,
+      });
+    }
+    for (const push of cleared) {
+      if (!pushCoversScholar(push, audience)) continue;
+      // A deleted, merged or detached class clears with "teacher" too, and
+      // ends no session: its placement is gone or no longer this app's.
+      if (push.schedulePlacementId) {
+        const placement = await ctx.db.get(push.schedulePlacementId);
+        if (!placement || placement.externalAppId !== appId) continue;
+      }
+      // Nor is a session over while a newer push covers them for it.
+      const superseded = openOfApp.some(
+        (p) =>
+          p._creationTime > push._creationTime &&
+          sessionOf(p) === sessionOf(push) &&
+          pushCoversScholar(p, audience),
+      );
+      if (superseded) continue;
+      const at = push.clearedAt!;
+      wrappedToday.push({
+        at,
+        atLocal: localInstant(at, timeZone),
+        name: await wrappedPushName(ctx, scope, push),
+        opened: push.setAt !== undefined,
+      });
+    }
+    opens.sort((a, b) => a.at - b.at);
+    wrappedToday.sort((a, b) => a.at - b.at);
+  }
+  return {
+    opens,
+    wrappedToday,
+    scheduled: await scheduledForScholar(ctx, scope, scholar, appId, groupIds, now, timeZone),
+  };
+}
+
+/** One placement, as a sentence of fact: "Scratch is scheduled for Robotics
+ *  during Block E (Mon 14:50-16:40) this term (ends Dec 19)." — with, where
+ *  its row alone shows it cannot open anything, the plain reason. */
+function scheduledSentence(appName: string, c: ScheduledClass): string {
+  const notes: string[] = [];
+  if (c.termStatus === "ended") notes.push(`that term ended ${c.termEndsLocal}`);
+  else if (c.termStatus === "upcoming") notes.push(`that term starts ${c.termStartsLocal}`);
+  if (c.weekOver) notes.push("that week is over");
+  const thisTerm = c.termStatus === "current" ? ` this term (ends ${c.termEndsLocal})` : "";
+  return `${appName} is scheduled for ${c.name} (${c.windowLocal})${thisTerm}${
+    notes.length ? `, but ${notes.join(", and ")}` : ""
+  }.`;
+}
+
+/**
+ * One scholar's answer to "may they open this app right now, through what,
+ * and until when?" — `scholarAppAccessAt`, the launch gates' own check, worded
+ * for staff. `canOpen` is therefore exactly what the scholar's tile and launch
+ * gates say, never a re-derivation of the rule. When it is false and the app
+ * is not archived, `when` states what is set up around it, as facts from rows
+ * (`whenForScholar`), never a forecast.
+ *
+ * TENANCY. The scholar resolves inside the caller's scope
+ * (`resolveScholarByNameOrUsername` narrows its pool before matching), so one
+ * outside it is "not found", indistinguishable from a name that matches no
+ * one. A group the caller cannot see is counted but never named
+ * (`groupLabelInScope`).
+ *
+ * CLOCK. Everything here is judged at `now`, the instant the tool's action
+ * took from the SERVER clock, which is also the instant the app-wide `pushes`
+ * list beside it is judged at, so the two halves of one answer cannot
+ * disagree about a push. An internal query, so no client can supply `now`.
+ *
+ * `untilLocal` is the EXPECTED end (`accessEndsAt`): null while any route has
+ * no end of its own; for a push, its window's close, when the scheduled clear
+ * retires it. If that clear is late the push stays on the scholar's tile as an
+ * overrun until midnight, and a later read says so.
+ */
+async function scholarAccessForStaff(
+  ctx: QueryCtx,
+  scope: ExternalAppScope,
+  scholarQuery: string,
+  app: Doc<"externalApps">,
+  now: number,
+) {
+  const scholar = await resolveScholarByNameOrUsername(ctx, scholarQuery, scope);
+  const access = await scholarAppAccessAt(ctx, scholar, app._id, now);
+  // The clock the pushes were judged by is the scholar's school's.
+  const timeZone = await timeZoneForInstitution(ctx, scholar.institutionId);
+  const described = [];
+  for (const authority of access.via) {
+    described.push(await describeRoute(ctx, scope, scholar, authority, timeZone));
+  }
+  // Only a scholar nothing covers right now needs "when": an archived app has
+  // nothing that opens it.
+  const when =
+    access.denied === "no-authority"
+      ? await whenForScholar(ctx, scope, scholar, app._id, now, timeZone)
+      : null;
+  const who = scholar.name ?? scholar.username ?? "This scholar";
+  return {
+    name: who,
+    username: scholar.username ?? null,
+    ...extendedEducationTag({ enrollmentStanding: scholar.enrollmentStanding }),
+    canOpen: access.allowed,
+    // Why not, when `canOpen` is false: nothing opens it for them at this
+    // moment, or the app is archived. ("missing" cannot happen here: the app
+    // was resolved by name in this same read. Were it gone, nothing would open
+    // it, as with an archived app.)
+    whyNot:
+      access.denied === null
+        ? null
+        : access.denied === "no-authority"
+          ? ("no-route" as const)
+          : ("archived" as const),
+    via: described.map((d) => d.route),
+    untilLocal: access.until === null ? null : localInstant(access.until, timeZone),
+    // Null when `canOpen` is true or the app is archived. Otherwise the pushes
+    // already planned for them (the authority on when it opens), today's
+    // wrapped-up sessions, and the class placements that name them, each
+    // possibly empty.
+    when: when && {
+      opens: when.opens.map(({ at: _at, ...o }) => o),
+      wrappedToday: when.wrappedToday.map(({ at: _at, ...w }) => w),
+      scheduled: when.scheduled,
+    },
+    summary: scholarAccessSentence({
+      who,
+      appName: app.name,
+      access,
+      described,
+      when,
+      timeZone,
+      now,
+    }),
+  };
+}
+
+/** The one line a human reads: "Kai Kahale can open LEGO SPIKE via the
+ *  Robotics Block E schedule push, until 16:40, when the window closes." A
+ *  "no" states the rows around it, never a forecast, a fault or a missing
+ *  grant. */
+function scholarAccessSentence(args: {
+  who: string;
+  appName: string;
+  access: ScholarAppAccess;
+  described: ReadonlyArray<{ route: ScholarRoute; windowEndsAt: number | null }>;
+  when: Awaited<ReturnType<typeof whenForScholar>> | null;
+  timeZone: string;
+  now: number;
+}): string {
+  const { who, appName, access, described, when: around, timeZone, now } = args;
+  const today = dayKeyForTimezone(now, timeZone);
+  const midnight = dayStartForDayKey(shiftDayKey(today, 1), timeZone);
+  const when = (ms: number) =>
+    ms === midnight
+      ? "midnight"
+      : dayKeyForTimezone(ms, timeZone) === today
+        ? localClock(ms, timeZone)
+        : localInstant(ms, timeZone);
+  if (!access.allowed) {
+    if (access.denied !== "no-authority" || !around) {
+      return `${who} can't open ${appName}: it is archived, so nothing opens it until it is restored.`;
+    }
+    const { opens, wrappedToday, scheduled } = around;
+    if (opens.length === 0 && wrappedToday.length === 0 && scheduled.length === 0) {
+      // Scoped to what the caller sees: a class in another school's term is
+      // left out of `scheduled` (scheduledForScholar), and can still open it.
+      return `${who} can't open ${appName} right now, and no class they're in is on their school's schedule for it.`;
+    }
+    const sentences = [`${who} can't open ${appName} right now.`];
+    // The soonest push ALREADY planned, not necessarily the next opening:
+    // the scheduler plans only about a week ahead. The rest are in `when`.
+    if (opens[0]) {
+      sentences.push(`It opens ${whenLocal(opens[0].at, timeZone, now)} ${opens[0].name}.`);
+    }
+    for (const w of wrappedToday) {
+      const name = w.name.charAt(0).toUpperCase() + w.name.slice(1);
+      sentences.push(
+        `${name} was ${w.opened ? "wrapped up" : "called off"} at ${localClock(w.at, timeZone)}.`,
+      );
+    }
+    for (const c of scheduled) sentences.push(scheduledSentence(appName, c));
+    if (opens.length === 0 && scheduled.length === 0) {
+      sentences.push("No class they're in is on their school's schedule for it.");
+    }
+    // Two rows can read identically (a re-push, a duplicated placement).
+    return [...new Set(sentences)].join(" ");
+  }
+  // A re-push is a second route with the same name: say it once.
+  const names = [...new Set(described.map((d) => d.route.name))];
+  const opens = `${who} can open ${appName} via ${joinAnd(names)}`;
+  const until = access.until;
+  if (until === null) {
+    const endless = access.via.find((a) => a.until === null);
+    return endless?.kind === "push"
+      ? `${opens}, with no set end: the push lasts until a teacher clears it.`
+      : `${opens}, with no set end: standing access lasts until someone removes it.`;
+  }
+  // The route whose end is the answer's end: the latest one.
+  const last = described[access.via.findIndex((a) => a.until === until)];
+  if (last?.route.overrun) {
+    const closed = last.windowEndsAt === null ? "" : ` at ${when(last.windowEndsAt)}`;
+    return `${opens}, until ${when(until)} at the latest: its window closed${closed}, but nothing has cleared the push yet (a clear normally lands within minutes).`;
+  }
+  if (last?.windowEndsAt != null) {
+    return `${opens}, until ${when(until)}, when the window closes.`;
+  }
+  return `${opens}, until ${when(until)}.`;
+}
+
 // ── Internal aide* wrappers (verified callerUserId, no ctx.user) ───────────
 
 export const aideListApps = internalQuery({
@@ -675,11 +1724,37 @@ export const aideListApps = internalQuery({
 });
 
 export const aideGetAppAccess = internalQuery({
-  args: { callerUserId: v.id("users"), appName: v.string() },
-  handler: async (ctx, { callerUserId, appName }) => {
+  args: {
+    callerUserId: v.id("users"),
+    appName: v.string(),
+    // The instant everything here is judged at: every push (live, live
+    // until, the lookaround) and, with `scholar`, that scholar's answer, so
+    // the two halves of one response cannot disagree about a push. Required,
+    // because the fallback it replaced was Date.now() inside a query, which is
+    // not a dependency and silently goes stale (the T11 rule in
+    // .claude/rules/rabbithole-product-taste.md). The caller is the tool's
+    // action, which passes its own Date.now(): the SERVER's clock, exact,
+    // since a one-shot call from an action has no subscription to bucket.
+    // This is an internal query, so no client can supply it.
+    now: v.number(),
+    // One scholar, by name or username: adds `forScholar`, whether they may
+    // open the app right now, through what, and until when (TRA-445).
+    // Resolved inside the caller's scope; outside it reads as "not found".
+    scholar: v.optional(v.string()),
+  },
+  handler: async (ctx, { callerUserId, appName, now, scholar }) => {
     const scope = await requireScholarAdminScope(ctx, callerUserId);
     const app = await resolveAppByName(ctx, appName);
+    const forScholar =
+      scholar === undefined
+        ? undefined
+        : await scholarAccessForStaff(ctx, scope, scholar, app, now);
     const access = await coreGetAppAccess(ctx, app._id, scope);
+    const schedule = await appScheduleAccess(ctx, app._id, scope, now);
+    const timeZone = await timeZoneForInstitution(
+      ctx,
+      scope.caller.institutionId,
+    );
     return {
       app: {
         id: app._id,
@@ -687,7 +1762,16 @@ export const aideGetAppAccess = internalQuery({
         webUrl: app.webUrl,
         archived: !!app.archived,
       },
+      // Only when a scholar was named, so the app-wide answer is unchanged.
+      ...(forScholar ? { forScholar } : {}),
       ...access,
+      // The THIRD authority, previously missing entirely. `blockScoped` is the
+      // recurring rule ("Robotics, Block E, Mon+Wed, 14:50-16:40"); `pushes`
+      // are the pushes themselves, from a block or a teacher, each saying
+      // whether it is live at this instant and until when.
+      blockScoped: schedule.blockScoped,
+      pushes: schedule.pushes,
+      recentGrantChanges: await appGrantHistory(ctx, app._id, timeZone),
     };
   },
 });
@@ -698,8 +1782,9 @@ export const aideSetGroupAccess = internalMutation({
     appName: v.string(),
     groupName: v.string(),
     enabled: v.boolean(),
+    via: v.optional(v.union(v.literal("aide"), v.literal("slack"))),
   },
-  handler: async (ctx, { callerUserId, appName, groupName, enabled }) => {
+  handler: async (ctx, { callerUserId, appName, groupName, enabled, via }) => {
     const scope = await requireScholarAdminScope(ctx, callerUserId);
     const caller = scope.caller;
     const app = await resolveAppByName(ctx, appName);
@@ -707,8 +1792,14 @@ export const aideSetGroupAccess = internalMutation({
     if (enabled) {
       const r = await coreAssignToAudience(
         ctx,
-        { appId: app._id, audienceKind: "group", audienceId: group._id, enabled: true },
+        {
+          appId: app._id,
+          audienceKind: "group",
+          audienceId: group._id,
+          enabled: true,
+        },
         caller,
+        via ?? "aide",
       );
       return {
         app: app.name,
@@ -717,11 +1808,16 @@ export const aideSetGroupAccess = internalMutation({
         memberCount: r.memberCount,
       };
     }
-    const r = await coreUnassignAudience(ctx, {
-      appId: app._id,
-      audienceKind: "group",
-      audienceId: group._id,
-    }, caller);
+    const r = await coreUnassignAudience(
+      ctx,
+      {
+        appId: app._id,
+        audienceKind: "group",
+        audienceId: group._id,
+      },
+      caller,
+      via ?? "aide",
+    );
     return { app: app.name, group: group.name, enabled: false, removed: r.removed };
   },
 });
@@ -732,8 +1828,12 @@ export const aideSetInstitutionAccess = internalMutation({
     appName: v.string(),
     institutionName: v.string(),
     enabled: v.boolean(),
+    via: v.optional(v.union(v.literal("aide"), v.literal("slack"))),
   },
-  handler: async (ctx, { callerUserId, appName, institutionName, enabled }) => {
+  handler: async (
+    ctx,
+    { callerUserId, appName, institutionName, enabled, via },
+  ) => {
     const scope = await requireScholarAdminScope(ctx, callerUserId);
     const caller = scope.caller;
     const app = await resolveAppByName(ctx, appName);
@@ -748,6 +1848,7 @@ export const aideSetInstitutionAccess = internalMutation({
           enabled: true,
         },
         caller,
+        via ?? "aide",
       );
       return {
         app: app.name,
@@ -756,11 +1857,16 @@ export const aideSetInstitutionAccess = internalMutation({
         memberCount: r.memberCount,
       };
     }
-    const r = await coreUnassignAudience(ctx, {
-      appId: app._id,
-      audienceKind: "institution",
-      audienceId: inst._id,
-    }, caller);
+    const r = await coreUnassignAudience(
+      ctx,
+      {
+        appId: app._id,
+        audienceKind: "institution",
+        audienceId: inst._id,
+      },
+      caller,
+      via ?? "aide",
+    );
     return {
       app: app.name,
       institution: inst.name,

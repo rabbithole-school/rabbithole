@@ -18,6 +18,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { formatRelative } from "@/lib/relativeTime";
 import { useKeepWorking } from "@/hooks/useKeepWorking";
+import { isLicenseCardBadge } from "@/shared/calculatorLicense";
 import { BadgeArt, type BadgeArtStatus } from "./BadgeArt";
 import { BadgeRemixStrip } from "./BadgeRemixStrip";
 
@@ -25,6 +26,7 @@ const GOLD = "#f4c44c";
 
 export type BadgeDetail = {
   _id: Id<"scholarUnitBadges">;
+  kind?: string | null;
   unitId?: Id<"units">;
   unitTitle: string;
   unitEmoji: string | null;
@@ -45,6 +47,8 @@ export function BadgeDetailDialog({
   onClose: () => void;
 }) {
   const generating = badge?.artStatus === "generating";
+  // The license card is the badge's whole image — nothing to remix.
+  const licenseCard = isLicenseCardBadge(badge?.kind);
   // The badge is unit-scoped; resolve the scholar's re-openable session for
   // that unit so "Keep working on this" can reopen the real work (its
   // artifact) — not just admire the medal. Completion is never touched
@@ -101,8 +105,9 @@ export function BadgeDetailDialog({
                     imageUrl={badge.imageUrl}
                     emoji={badge.badge.icon ?? badge.unitEmoji ?? "🏅"}
                     status={badge.artStatus ?? "ready"}
-                    size="360px"
+                    size={licenseCard ? "440px" : "360px"}
                     alt={`${badge.badge.title} badge`}
+                    kind={badge.kind}
                   />
 
                   <Dialog.Title asChild>
@@ -149,13 +154,15 @@ export function BadgeDetailDialog({
                 )}
 
                 {/* The same capped remix the celebration offers. */}
-                <BadgeRemixStrip
-                  badgeId={badge._id}
-                  style={badge.style}
-                  colorway={badge.colorway}
-                  rerollsRemaining={badge.rerollsRemaining}
-                  generating={!!generating}
-                />
+                {!licenseCard && (
+                  <BadgeRemixStrip
+                    badgeId={badge._id}
+                    style={badge.style}
+                    colorway={badge.colorway}
+                    rerollsRemaining={badge.rerollsRemaining}
+                    generating={!!generating}
+                  />
+                )}
               </Dialog.Body>
             )}
           </Dialog.Content>

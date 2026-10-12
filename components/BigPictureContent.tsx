@@ -90,7 +90,7 @@ export function BigPictureContent({
   );
   const regenerate = useMutation(api.sessions.regenerateReflection);
   const router = useRouter();
-  const { stamp } = useRemote();
+  const { remote, stamp } = useRemote();
   const [renameOpen, setRenameOpen] = useState(false);
   // Seeded fresh from sessionTitle at every open-site below, so no
   // sync-to-prop effect is needed (the draft is only read while open).
@@ -163,9 +163,13 @@ export function BigPictureContent({
           )}
 
           {data.reflectionStatus === "pending" && <PendingBanner />}
-          {data.reflectionStatus === "error" && (
+          {/* A failed summary is GARNISH failing: the activity list above is
+              the content, and the child needs the controls beside it, not a
+              red box (least of all one printing a raw exception). Scholars get
+              silence; the adult watching over `?remote=` gets the banner and
+              the retry, since they're the one who can act on it. */}
+          {data.reflectionStatus === "error" && remote && (
             <ErrorBanner
-              message={data.reflectionError}
               onRetry={async () => {
                 await regenerate({ sessionId });
               }}
@@ -678,13 +682,7 @@ function PendingBanner() {
   );
 }
 
-function ErrorBanner({
-  message,
-  onRetry,
-}: {
-  message: string | null;
-  onRetry: () => void;
-}) {
+function ErrorBanner({ onRetry }: { onRetry: () => void }) {
   return (
     <Box
       px={3}
@@ -699,12 +697,9 @@ function ErrorBanner({
         fontFamily="heading"
         fontWeight="700"
         color="red.700"
-        mb={1}
+        mb={2}
       >
         Couldn&apos;t generate the big-picture summary
-      </Text>
-      <Text fontSize="xs" color="charcoal.600" mb={2}>
-        {message ?? "Unknown error"}
       </Text>
       <Button
         size="xs"

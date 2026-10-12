@@ -57,10 +57,12 @@ describe("dispatchActivity (Q1 ad-hoc dispatch)", () => {
     const teacher = await seedUser(t, "teacher");
     const scholar = await seedUser(t, "scholar");
     const asT = await withUser(t, teacher);
+    const endsAt = Date.now() + 2 * 60 * 60_000;
 
     const { assignmentId, activityId } = await asT.mutation(api.assignments.dispatchActivity, {
       scholarId: scholar,
       title: "Copenhagen taxation exploration",
+      endsAt,
     });
 
     const a = (await getAssignment(t, assignmentId)) as Doc<"assignments">;
@@ -73,6 +75,7 @@ describe("dispatchActivity (Q1 ad-hoc dispatch)", () => {
     expect(entry.activityId).toBe(activityId);
     expect(entry.mode).toBe("classFocus");
     expect(entry.setAt).toBeGreaterThan(0); // LIVE now
+    expect(entry.endsAt).toBe(endsAt);
 
     const act = (await getActivity(t, activityId)) as Doc<"activities">;
     expect(act.lessonId).toBeUndefined(); // ad-hoc, no lesson/unit
@@ -86,17 +89,20 @@ describe("dispatchActivity (Q1 ad-hoc dispatch)", () => {
     const scholar = await seedUser(t, "scholar");
     const asT = await withUser(t, teacher);
     const startsAt = Date.now() + 3 * 86_400_000;
+    const endsAt = startsAt + 2 * 60 * 60_000;
 
     const { assignmentId } = await asT.mutation(api.assignments.dispatchActivity, {
       scholarId: scholar,
       title: "Read about tessellations",
       live: false,
       startsAt,
+      endsAt,
     });
     const a = (await getAssignment(t, assignmentId)) as Doc<"assignments">;
     const entry = a.activitySchedule![0];
     expect(entry.setAt).toBeUndefined(); // planned, not live
     expect(entry.startsAt).toBe(startsAt);
+    expect(entry.endsAt).toBe(endsAt);
   });
 
   test("homework mode carries a dueAt and no endsAt", async () => {
@@ -214,6 +220,65 @@ In your notebook:
     expect(activity.kind).toBe("web");
     expect(activity.webUrl).toBe("https://example.com/triangle-angles");
     expect(activity.systemPrompt).toBeUndefined();
+  });
+
+  test("rewrites a YouTube web dispatch into an online activity with a sandboxed video resource", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar");
+    const asT = await withUser(t, teacher);
+
+    const res = await asT.mutation(api.assignments.dispatchActivity, {
+      scholarId: scholar,
+      title: "Watch: how tide pools work",
+      activityKind: "web",
+      webUrl: "https://www.youtube.com/watch?v=lZUyUkJMc3U",
+    });
+    expect(res.activityKind).toBe("online");
+    expect(res.attachedVideoResource).toBe(true);
+
+    // A YouTube URL never becomes a web activity (it would host-lock the WebView
+    // to all of youtube.com and could never be completed).
+    const activity = (await getActivity(t, res.activityId)) as Doc<"activities">;
+    expect(activity.kind).toBe("online");
+    expect(activity.webUrl).toBeUndefined();
+    expect(activity.systemPrompt).toBeTruthy();
+
+    const resources = await t.run(async (ctx) =>
+      ctx.db
+        .query("activityResources")
+        .withIndex("by_activity", (q) => q.eq("activityId", res.activityId))
+        .collect(),
+    );
+    expect(resources).toHaveLength(1);
+    expect(resources[0].source).toEqual({
+      kind: "video",
+      url: "https://www.youtube.com/watch?v=lZUyUkJMc3U",
+    });
+    expect(resources[0].uploadedBy).toBe(teacher);
+  });
+
+  test("a non-YouTube web dispatch keeps the web activity (no resource attached)", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar");
+    const asT = await withUser(t, teacher);
+
+    const res = await asT.mutation(api.assignments.dispatchActivity, {
+      scholarId: scholar,
+      title: "Read the field guide",
+      activityKind: "web",
+      webUrl: "https://example.com/reef-guide",
+    });
+    expect(res.activityKind).toBe("web");
+    expect(res.attachedVideoResource).toBe(false);
+    const resources = await t.run(async (ctx) =>
+      ctx.db
+        .query("activityResources")
+        .withIndex("by_activity", (q) => q.eq("activityId", res.activityId))
+        .collect(),
+    );
+    expect(resources).toHaveLength(0);
   });
 
   test("dispatches targeted practice using canonical knowledge-node keys", async () => {

@@ -47,7 +47,7 @@ upstream `main` carries unreleased fixes for both authoring quirks below
 plus typesetting/perf fixes (#55, #60, #63, #67, #69, #70). Decision (Andy,
 2026-07-17): **wait for the next tagged upstream release** rather than vendor an
 untagged `main` snapshot; the upgrade runbook + ecosystem watch-list live in
-`TODO.html#swiftmath-release-pin`.
+`Linear TRA-8`.
 
 ## Usage
 

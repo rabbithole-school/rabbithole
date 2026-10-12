@@ -29,6 +29,7 @@ import { Surface } from "@/components/ui/Surface";
 import { AppTileIcon } from "@/components/ui/AppTileIcon";
 import { toaster } from "@/lib/toaster";
 import { serverErrorMessage } from "@/lib/serverErrorMessage";
+import { throughDayPhrase } from "@/lib/appAccessCopy";
 
 /** A small "why does this scholar have this app" provenance pill. A group grant
  *  reads green, a school-wide grant violet, a direct add grey (plan §6.4). */
@@ -245,7 +246,13 @@ export function ScholarAppsManager({
                       <ProvChip tone="institution">School-wide</ProvChip>
                     )}
                     {app.direct && (
-                      <ProvChip tone="direct">Added directly</ProvChip>
+                      <ProvChip tone="direct">
+                        {/* Opened for a day or until a date on the device
+                            console (TRA-444): say when it ends. */}
+                        {app.directThroughDay
+                          ? `Open through ${throughDayPhrase(app.directThroughDay)}`
+                          : "Added directly"}
+                      </ProvChip>
                     )}
                   </HStack>
                 )}

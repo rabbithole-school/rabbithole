@@ -419,6 +419,41 @@ describe("activityResources API", () => {
     ).toBeNull();
   });
 
+  test("family visibility defaults to staff_only and is a curriculum-editor write", async () => {
+    const t = convexTest(schema, modules);
+    const world = await seedWorld(t);
+    const teacher = await withUser(t, world.teacherId);
+    const linkId = await teacher.mutation(api.activityResources.addLink, {
+      activityId: world.activityId,
+      title: "Family handout",
+      url: "https://example.com/handout",
+    });
+
+    const before = await teacher.query(api.activityResources.listForActivity, {
+      activityId: world.activityId,
+    });
+    expect(before[0].familyVisibility).toBe("staff_only");
+
+    // Not a curriculum editor: an operations staffer administers accounts, not
+    // what a family may read off an activity.
+    const opsStaff = await withUser(t, world.opsStaffId);
+    await expect(
+      opsStaff.mutation(api.activityResources.setFamilyVisibility, {
+        resourceId: linkId,
+        familyVisibility: "families",
+      }),
+    ).rejects.toThrow();
+
+    await teacher.mutation(api.activityResources.setFamilyVisibility, {
+      resourceId: linkId,
+      familyVisibility: "families",
+    });
+    const after = await teacher.query(api.activityResources.listForActivity, {
+      activityId: world.activityId,
+    });
+    expect(after[0].familyVisibility).toBe("families");
+  });
+
   test("same-unit references reach scholar lists, tutor context, sharing, and transcripts in owned-first order", async () => {
     const t = convexTest(schema, modules);
     const world = await seedWorld(t);
@@ -977,6 +1012,29 @@ describe("activityResources API", () => {
     expect(context?.activityResourceContext?.map((row) => row.id)).toHaveLength(
       2,
     );
+  });
+
+  test("session prompt context resolves resources for vibecode activities", async () => {
+    const t = convexTest(schema, modules);
+    const world = await seedWorld(t);
+    await t.run(async (ctx) => {
+      await ctx.db.patch(world.activityId, { kind: "vibecode" });
+      await ctx.db.insert("activityResources", {
+        activityId: world.activityId,
+        title: "Vibecode design notes",
+        source: { kind: "link", url: "https://example.com/design-notes" },
+        order: 0,
+        uploadedBy: world.teacherId,
+      });
+    });
+
+    const context = await t.query(
+      internal.sessionHelpers.getSessionContext,
+      { sessionId: world.sessionId },
+    );
+    expect(context?.activityResourceContext?.map((row) => row.title)).toEqual([
+      "Vibecode design notes",
+    ]);
   });
 
   test("share tool persists an inline event and resolves scholar-safe card data", async () => {

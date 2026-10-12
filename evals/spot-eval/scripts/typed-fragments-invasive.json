@@ -1,0 +1,16 @@
+{
+  "scholarName": "Scholar F",
+  "_source": "Authored synthetic script (TRA-363): a habitual typer answering causal questions in 1-4 word fragments. Not a transcript reconstruction. Tests whether the first typed-fragment ask carries the mic offer, and only once.",
+  "messages": [
+    "<start>",
+    "we are doing cane toads in australia",
+    "they brought them to eat beetles",
+    "didnt work",
+    "wrong time of day",
+    "ate other stuff",
+    "poison",
+    "nothing eats them",
+    "more toads",
+    "quolls die"
+  ]
+}

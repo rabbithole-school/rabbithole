@@ -31,7 +31,8 @@ import { recordAnthropicUsage } from "./usage";
 import { ROLES } from "./lib/roles";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { MODELS } from "./lib/models";
+import { MODELS, type ModelId } from "./lib/models";
+import { resolveTutorModel, tutorRuntime } from "./lib/tutorModel";
 import { PRIMARY_INSTITUTION_PROMPT_PROFILE } from "./lib/primaryInstitutionPromptProfile";
 import {
   buildKidSystem,
@@ -92,7 +93,15 @@ import {
 import { optimize, type OptVariant } from "./lib/curriculumOptimize";
 
 const anthropic = new Anthropic(); // reads ANTHROPIC_API_KEY from the env
-const TUTOR_MODEL = process.env.TUTOR_MODEL || MODELS.SONNET;
+// The sims' tutor is the model scholars will get on this activity
+// (lib/tutorModel.resolveTutorModel), not a cheaper stand-in: a rehearsal on a
+// different model rehearses a different tutor. TUTOR_MODEL overrides for evals.
+function simTutorModel(activity: SimActivity): ModelId {
+  return (
+    (process.env.TUTOR_MODEL as ModelId | undefined) ||
+    resolveTutorModel(activity.tutorModel)
+  );
+}
 const SIM_MODEL = process.env.SIM_MODEL || MODELS.HAIKU;
 const JUDGE_MODEL = process.env.JUDGE_MODEL || MODELS.OPUS;
 const IMPROVER_MODEL = process.env.IMPROVER_MODEL || MODELS.OPUS;
@@ -125,6 +134,14 @@ async function runSession(
 ): Promise<{ turns: SimTurn[]; stopReason: StopReason }> {
   const turns: SimTurn[] = [];
   const kidSystem = buildKidSystem(profile, activity);
+  const tutorModel = simTutorModel(activity);
+  const tutorRun = tutorRuntime(tutorModel);
+  // Opus 5.5 / Fable always think, so a 1024 cap could be eaten before any
+  // text; take the live tutor's ceiling and effort for those models.
+  const tutorMaxTokens = Math.max(1024, tutorRun.maxTokens);
+  const tutorEffortConfig = tutorRun.effort
+    ? { output_config: { effort: tutorRun.effort } }
+    : {};
   // Snapshot-and-report: pass a copy (turns is mutated as the session grows).
   const report = async () => {
     if (!onTurn) return;
@@ -139,25 +156,35 @@ async function runSession(
 
   // Tutor opens (the production <start> greeting).
   const opener = await anthropic.messages.create({
-    model: TUTOR_MODEL,
-    max_tokens: 1024,
+    model: tutorModel,
+    max_tokens: tutorMaxTokens,
+    ...tutorEffortConfig,
     system: firstTurnPrompt,
     messages: [{ role: "user", content: "(start)" }],
   });
   await recordAnthropicUsage(ctx, {
     source: "curriculum-sim",
     role: ROLES.TEACHER,
-    model: TUTOR_MODEL,
+    model: tutorModel,
     usage: opener.usage,
     institutionId,
   });
   turns.push({ role: "tutor", content: textOf(opener) });
   await report();
 
+  // Both sides resend their whole system prompt + the transcript every turn,
+  // and `toMessages` is append-only per perspective, so top-level automatic
+  // caching turns each turn's prefix into a read of the previous turn's. That
+  // matters on the tutor side: the production tutor prompt is ~13K tokens per
+  // call and was fully uncached (prod usageEvents, 2026-09-03 to 2026-09-24).
+  // The kid prompt is usually under Haiku's cache minimum, so there it's a
+  // harmless no-op. The opener and the judge/probe calls send a one-off tail,
+  // so they stay unmarked: marking them would only add the write premium.
   for (let i = 0; i < maxTurns; i++) {
     const kid = await anthropic.messages.create({
       model: SIM_MODEL,
       max_tokens: 400,
+      cache_control: { type: "ephemeral" },
       system: kidSystem,
       messages: toMessages(turns, "scholar"),
     });
@@ -174,15 +201,17 @@ async function runSession(
     if (reply.stop) return { turns, stopReason: reply.stop };
 
     const tutor = await anthropic.messages.create({
-      model: TUTOR_MODEL,
-      max_tokens: 1024,
+      model: tutorModel,
+      max_tokens: tutorMaxTokens,
+      ...tutorEffortConfig,
+      cache_control: { type: "ephemeral" },
       system: laterPrompt,
       messages: toMessages(turns, "tutor"),
     });
     await recordAnthropicUsage(ctx, {
       source: "curriculum-sim",
       role: ROLES.TEACHER,
-      model: TUTOR_MODEL,
+      model: tutorModel,
       usage: tutor.usage,
       institutionId,
     });
@@ -975,6 +1004,7 @@ export const runExperiment = internalAction({
       deliverablePrompt: activity.deliverablePrompt,
       durationMinutes: activity.durationMinutes,
       unitDesign: activity.unitDesign,
+      tutorModel: activity.tutorModel,
     };
     // Candidate target skills for the OUTCOME PROBE (adoptable #1); the probe
     // filters these to templated ones and skips gracefully when none resolve.

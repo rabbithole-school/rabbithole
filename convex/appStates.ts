@@ -1,4 +1,4 @@
-import { ConvexError, v } from "convex/values";
+import { ConvexError, v, type Infer } from "convex/values";
 import {
   mutation,
   query,
@@ -46,6 +46,7 @@ import {
   jsonByteLength,
   normalizeAppActionRegistry,
 } from "../shared/appActionPolicy";
+import { characterLineValidator } from "./lib/appAiValidators";
 
 export const MAX_APP_STATE_DOC_BYTES = 8 * 1024;
 export const MAX_APP_STATE_LOG_ENTRIES = 30;
@@ -92,6 +93,7 @@ export type AppStateSnapshot = {
   doc: unknown;
   actions: AppActionRegistration[];
   actionRequest?: AppActionRequest;
+  characterLine?: Infer<typeof characterLineValidator>;
   log: AppStateLogEntry[];
   version: number;
   updatedAt: number;
@@ -262,6 +264,7 @@ function snapshotFromRow(row: Doc<"appStates"> | null): AppStateSnapshot | null 
     doc: row.doc ?? row.state ?? {},
     actions: normalizeAppActionRegistry(row.actions),
     actionRequest: row.actionRequest,
+    characterLine: row.characterLine,
     log: row.log ?? [],
     version: row.version,
     updatedAt: row.updatedAt,
@@ -457,9 +460,10 @@ export const getSessionState = authedQuery({
       }),
     );
     // Teachers may inspect the state/log/registry, but only the owner host is
-    // allowed to receive and execute the tutor's live invocation mailbox.
+    // allowed to receive the tutor's live mailboxes (an action to run, a line
+    // to speak through the app's character).
     return snapshot && session.userId !== ctx.user._id
-      ? { ...snapshot, actionRequest: undefined }
+      ? { ...snapshot, actionRequest: undefined, characterLine: undefined }
       : snapshot;
   },
 });
@@ -511,6 +515,28 @@ export const listSessionStatesForScholar = teacherQuery({
     }
 
     return snapshots.sort((a, b) => b.updatedAt - a.updatedAt);
+  },
+});
+
+/** Reset app state (Play): clear this session artifact's persisted app-state
+ * document so a remount comes back to a clean slate. App state is
+ * server-persisted (the host re-posts the saved doc after each iframe reload),
+ * so remounting the frame alone does NOT reset it — this must run first (F10).
+ * Owner-gated, mirroring `getSessionState`'s ownership check. */
+export const clearSessionState = authedMutation({
+  args: { artifactId: v.id("artifacts") },
+  handler: async (ctx, args) => {
+    const { artifact, session, stateKey } = await sessionStateKey(
+      ctx,
+      args.artifactId,
+    );
+    if (session.userId !== ctx.user._id) throw new Error("Forbidden");
+    const existing = await findStateRow(ctx, stateKey, {
+      sessionId: session._id,
+      artifactId: artifact._id,
+    });
+    if (existing) await ctx.db.delete(existing._id);
+    return null;
   },
 });
 
@@ -667,6 +693,50 @@ export const requestSessionActionForTutor = internalMutation({
     return request;
   },
 });
+
+/**
+ * Put one tutor-spoken line in the character's mouth; the owner host delivers
+ * it on its next update (`rabbithole.character.onLine`). Unlike the action
+ * mailbox this UPSERTS: the tutor may speak before the app has ever written
+ * state. A newer line replaces an undelivered one; the SDK dedupes by id.
+ */
+export async function upsertCharacterLine(
+  ctx: MutationCtx,
+  args: {
+    sessionId: Id<"sessions">;
+    artifactId: Id<"artifacts">;
+    line: Infer<typeof characterLineValidator>;
+  },
+): Promise<void> {
+  const { artifact, session, stateKey } = await sessionStateKey(
+    ctx,
+    args.artifactId,
+  );
+  if (session._id !== args.sessionId || artifact.type !== "code") {
+    throw new Error("Character lines are available only in the owner's app");
+  }
+  const existing = await findStateRow(ctx, stateKey, {
+    sessionId: session._id,
+    artifactId: artifact._id,
+  });
+  const updatedAt = args.line.requestedAt;
+  if (existing) {
+    await ctx.db.patch(existing._id, {
+      characterLine: args.line,
+      version: existing.version + 1,
+      updatedAt,
+    });
+    return;
+  }
+  await ctx.db.insert("appStates", {
+    ...stateKey,
+    doc: {},
+    log: [],
+    characterLine: args.line,
+    version: 1,
+    updatedAt,
+  });
+}
 
 export const readSessionActionResultForTutor = internalQuery({
   args: {

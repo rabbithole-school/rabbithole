@@ -42,14 +42,18 @@ import { useManagedClaimBootstrap } from "@/hooks/useManagedClaimBootstrap";
 import { useManagedMaximumBrightness } from "@/hooks/useManagedMaximumBrightness";
 import { devServerUrlFromHostUri } from "@/lib/devClientSafety";
 import { guardCurrentDevServer } from "../../modules/dev-client-safety";
+import {
+  recordInteraction,
+  useDeviceActivity,
+} from "@/hooks/useDeviceActivity";
 import { useNativeClientHeartbeat } from "@/hooks/useNativeClientHeartbeat";
 import { DevNavigationBridge } from "@/components/DevNavigationBridge";
+import { UniversalLinkNavigator } from "@/components/UniversalLinkNavigator";
 import { getManagedConfig } from "../../modules/managed-config";
 import { isManagedAsamEnabled } from "@/lib/asam/asamDecision";
 import { authGateScreen } from "./authGateState";
 import { captureStationEnrollmentToken } from "@/lib/captureStationToken";
 import { CaptureStationScreen } from "@/components/CaptureStationScreen";
-import { useApprovedDeviceSignOut } from "@/hooks/useDeviceSignOut";
 import { useAssignedDeviceCaptureStation } from "@/hooks/useAssignedDeviceCaptureStation";
 
 const showBuildStamp = process.env.EXPO_PUBLIC_SHOW_BUILD_STAMP === "1";
@@ -83,14 +87,13 @@ const ASAM_HYBRID_ENABLED = isManagedAsamEnabled(getManagedConfig());
 // Games load LAZILY in a fleet build so a broken game module can never take
 // down app startup on a kiosk iPad (no app switcher, no USB recovery — "the
 // game is broken" and "the iPad is a brick" must not be the same event). In dev
-// and the rhtest variant we want the opposite: require every registered game
-// right here at module scope so a failure is found at boot. CI is the real gate
+// we want the opposite: require every registered game right here at module
+// scope so a failure is found at boot. CI is the real gate
 // (native/src/games/__tests__/registry.test.ts).
 if (shouldEagerLoadGames()) {
   void eagerLoadAllGames().catch((err) => {
-    // ALWAYS loud; fatal only in dev. rhtest opts into the boot-time check but
-    // is a RELEASE build, where an unhandled JS exception is process death
-    // rather than a dismissible RedBox — see `eagerLoadFailureIsFatal`.
+    // ALWAYS loud; fatal only in dev, where an unhandled exception reaches the
+    // dismissible RedBox.
     console.error(err);
     if (eagerLoadFailureIsFatal()) {
       setTimeout(() => {
@@ -153,6 +156,7 @@ function DevClientSafetyGate() {
 function AuthGate({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useConvexAuth();
   useNativeClientHeartbeat();
+  useDeviceActivity();
   const { signIn, signOut } = useAuthActions();
   const colors = useColors();
   const devLoginAttempted = useRef(false);
@@ -161,7 +165,6 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     isAuthenticated,
     isAuthLoading: isLoading,
   });
-  useApprovedDeviceSignOut(isAuthenticated && !isLoading && devAutoLoginReady);
 
   useEffect(() => {
     if (
@@ -328,6 +331,10 @@ export default function RootLayout() {
           and report the route AuthGate actually permits, not surprise-navigate
           only after authentication completes (REVIEW-BRIDGE #8). */}
       {DEV_NAVIGATION_ENABLED && <DevNavigationBridge />}
+      {/* Universal-link navigation (an /open/... link on a claimed host).
+          Above AuthGate, inside the router + auth providers, so it can observe
+          sign-in and hold a pending link until the auth gate opens. */}
+      <UniversalLinkNavigator />
       <AuthGate>
         <OnboardingGate>
           {/* expo-router <Stack> = native-stack = UINavigationController: real
@@ -347,6 +354,7 @@ export default function RootLayout() {
             <Stack.Screen name="reflection" options={{ title: "Today's reflection" }} />
             <Stack.Screen name="workshop" options={{ title: "The Workshop" }} />
             <Stack.Screen name="workshop-ask" options={{ title: "Ask Rabbithole" }} />
+            <Stack.Screen name="messages" options={{ title: "Messages" }} />
             <Stack.Screen name="meta" options={{ title: "The Workshop" }} />
             <Stack.Screen name="account" options={{ title: "Account details" }} />
             <Stack.Screen name="how-it-works" options={{ title: "How it works" }} />
@@ -417,7 +425,17 @@ export default function RootLayout() {
   );
 
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
+    <GestureHandlerRootView
+      style={{ flex: 1 }}
+      // Presence witness: observe every touch in the capture phase to feed the
+      // device-activity presence clock. Returning false NEVER makes this view
+      // the responder, so it cannot intercept or swallow any touch — it only
+      // records that a human is here.
+      onStartShouldSetResponderCapture={() => {
+        recordInteraction();
+        return false;
+      }}
+    >
       <ConvexAuthProvider client={convex} storage={secureTokenStorage}>
         <BugReportGate>
           {/* ASAM "best of both" hybrid host — wraps the entire app subtree so the

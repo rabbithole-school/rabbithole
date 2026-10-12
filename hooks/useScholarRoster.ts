@@ -46,17 +46,19 @@ export type RosterGroup = {
   ownerId: string | null;
 };
 
-export function useScholarRosterQuery({
-  institutionScope,
-  includeProgramGuests = false,
-  retainEnrolledFallback = true,
-  enabled = true,
-}: {
+type ScholarRosterQueryArgs = {
   institutionScope: string | undefined;
   includeProgramGuests?: boolean;
   retainEnrolledFallback?: boolean;
   enabled?: boolean;
-}) {
+};
+
+function useScholarRosterQueryParts({
+  institutionScope,
+  includeProgramGuests = false,
+  retainEnrolledFallback = true,
+  enabled = true,
+}: ScholarRosterQueryArgs) {
   const queryEnabled = enabled && institutionScope !== undefined;
   const enrolledScholars = useQuery(
     api.users.listScholars,
@@ -74,10 +76,29 @@ export function useScholarRosterQuery({
   // Convex returns undefined while a newly enabled query loads. Keep the
   // enrolled roster visible during that one-way expansion instead of replacing
   // the whole picker with its loading skeleton.
-  return includeProgramGuests
+  const scholars = includeProgramGuests
     ? (scholarsWithProgramGuests ??
         (retainEnrolledFallback ? enrolledScholars : undefined))
     : enrolledScholars;
+
+  // True only INSIDE that expansion window: the caller asked for program
+  // guests, the rows on hand are still the enrolled-only fallback, and
+  // `isLoading` is deliberately false (the whole point of the fallback).
+  //
+  // Any caller that DECIDES something from the roster's contents has to wait
+  // for this to clear — otherwise it judges a scope against a roster one
+  // filter behind the one it is applying. The Math Skills shell's
+  // scope-reconcile is the case in point: mid-window, an all-program-guest
+  // group still looks like a group with no visible members, and the scope a
+  // shared link named would be cleared a beat before its members arrive.
+  const isWidening =
+    queryEnabled && includeProgramGuests && scholarsWithProgramGuests === undefined;
+
+  return { scholars, isWidening };
+}
+
+export function useScholarRosterQuery(args: ScholarRosterQueryArgs) {
+  return useScholarRosterQueryParts(args).scholars;
 }
 
 export function useScholarRoster({
@@ -96,7 +117,7 @@ export function useScholarRoster({
       : activeInstitution.scope === "all"
         ? "all"
         : activeInstitution.institutionSlug ?? "primary";
-  const rawScholars = useScholarRosterQuery({
+  const { scholars: rawScholars, isWidening } = useScholarRosterQueryParts({
     institutionScope,
     includeProgramGuests,
     retainEnrolledFallback,
@@ -188,6 +209,8 @@ export function useScholarRoster({
 
   return {
     isLoading,
+    /** See `useScholarRosterQueryParts` — the enrolled→extended window. */
+    isWidening,
     scholars,
     groups,
     myScholarIds,

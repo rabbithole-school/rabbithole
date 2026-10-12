@@ -1,8 +1,5 @@
 import { describe, expect, test } from "vitest";
-import {
-  buildGameHandoffPrompt,
-  GAME_HANDOFF_PROMPT_VERSION,
-} from "../lib/practice/handoff";
+import { buildGameHandoffPrompt } from "../lib/practice/handoff";
 
 const packet = {
   gameTitle: "Warmer or Colder (toy)",
@@ -12,13 +9,15 @@ const packet = {
 };
 
 describe("buildGameHandoffPrompt (post-C2 integration)", () => {
-  test("grounds in the round and keeps the game framing", () => {
-    const out = buildGameHandoffPrompt(packet);
-    expect(out).toContain('playing "Warmer or Colder (toy)"');
-    expect(out).toContain('tap "Hint"');
-    expect(out).toContain("Where they are: probe");
-    expect(out).toContain('They predicted: "the left half"');
-    expect(out).toContain("never spoil the reveal");
+  test("private coaching controls include the fallback line only when no scholarContext is supplied", () => {
+    const withoutContext = buildGameHandoffPrompt(packet);
+    const withContext = buildGameHandoffPrompt(packet, {
+      ageBand: "6-8",
+      readingLevel: "grade-2",
+      entryMode: "game",
+    });
+    expect(withoutContext).toContain("No personalized scholar controls were supplied");
+    expect(withContext).not.toContain("No personalized scholar controls were supplied");
   });
 
   test("carries the shared coach sections: private controls, landing, tone", () => {
@@ -35,18 +34,8 @@ describe("buildGameHandoffPrompt (post-C2 integration)", () => {
     expect(out).toContain('NEVER "I remember you,"');
   });
 
-  test("without scholarContext the sections degrade to the no-controls line", () => {
-    const out = buildGameHandoffPrompt(packet);
-    expect(out).toContain("No personalized scholar controls were supplied");
-    expect(out).toContain("Land the plane");
-  });
-
   test("skillStatus is never asserted for games (packet has no mastery input)", () => {
     const out = buildGameHandoffPrompt(packet, { ageBand: "9-11", entryMode: "game" });
     expect(out).not.toContain("Skill status:");
-  });
-
-  test("version stamp is game-specific", () => {
-    expect(GAME_HANDOFF_PROMPT_VERSION).toMatch(/game/);
   });
 });

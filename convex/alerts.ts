@@ -65,6 +65,8 @@ const ALERT_KIND_EMOJI: Readonly<Record<string, string>> = {
   // Asking to stop is a feeling, not a failure. A severity glyph (⚠️) would
   // read as "this scholar is a problem"; this one reads as "this was hard".
   chat_overwhelm: "😫",
+  // An app build drifting from its brief is a steering moment, not a failure.
+  app_off_track: "🧭",
 };
 
 export function alertEmoji(
@@ -249,7 +251,7 @@ export async function raiseAlert(
     });
 
     const emoji = alertEmoji(args.kind, args.severity);
-    const lines = [`${emoji} *${args.title}*`, args.body];
+    const lines = [`${emoji} **${args.title}**`, args.body];
     if (args.deepLink) lines.push(`<${args.deepLink}|Open in Rabbithole>`);
     const text = lines.join("\n");
 
@@ -605,6 +607,25 @@ export const improvementLoopsChannelId = internalQuery({
       .withIndex("by_role", (q) => q.eq("role", "improvement-loops"))
       .first();
     return ch?.slackChannelId ?? null;
+  },
+});
+
+/**
+ * The channel an "institution"-audience alert for this institution would
+ * resolve to — its scoped channel, else the catchall, else null. Exposed as
+ * its own query so an action-context caller (no direct `ctx.db`) can reuse
+ * the exact same routing rule as `raiseAlert`/`resolveTargetChannels` without
+ * hand-rolling channel lookup, and — same as that routing rule — this NEVER
+ * resolves to the platform-ops or improvement-loops channels.
+ */
+export const institutionAlertChannelId = internalQuery({
+  args: { institutionId: v.id("institutions") },
+  handler: async (ctx, args): Promise<string | null> => {
+    const channels = await resolveTargetChannels(ctx, {
+      audience: "institution",
+      institutionId: args.institutionId,
+    });
+    return channels[0] ?? null;
   },
 });
 

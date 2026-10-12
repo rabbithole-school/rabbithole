@@ -30,7 +30,6 @@ import {
   HStack,
   Heading,
   Input,
-  Popover,
   Portal,
   Spinner,
   Stack,
@@ -39,8 +38,6 @@ import {
 } from "@chakra-ui/react";
 import {
   ArrowsOut,
-  CaretDown,
-  Check,
   MagnifyingGlass,
   ShootingStar,
 } from "@phosphor-icons/react";
@@ -49,12 +46,15 @@ import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ScholarPicker } from "@/components/ScholarPicker";
+import { ScholarScopePicker } from "@/components/ScholarScopePicker";
 import {
   DEFAULT_SCHOLAR_PARTICIPATION,
   type ScholarParticipationSelection,
 } from "@/components/ScholarParticipationFilter";
 import { noScholarMatchCopy } from "@/shared/scholarSearchCopy";
 import { scholarMatchesParticipation } from "@/shared/scholarParticipation";
+import { groupMatchesParticipation } from "@/shared/scholarGroupRouting";
+import { useScholarRoster } from "@/hooks/useScholarRoster";
 import { QuestsTabSkeleton } from "@/components/skeletons/PanelSkeletons";
 import { Avatar } from "@/components/Avatar";
 import { BadgeArt } from "@/components/BadgeArt";
@@ -271,13 +271,21 @@ export function QuestsTab() {
     scholarName: string;
   } | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [scholarFilterOpen, setScholarFilterOpen] = useState(false);
   const [query, setQuery] = useState("");
-  // "" = all scholars. Otherwise a scholar id to narrow the board to one
-  // scholar ("what Quests does Oliver have?").
+  // The pool: "" = all scholars · "mine" = my scholars · a scholarGroup id.
+  const [scopeKey, setScopeKey] = useState("");
+  // "" = the whole pool. Otherwise a scholar id, drilling the board into one
+  // scholar ("what Quests does Oliver have?"). Both are session state, not URL
+  // state — the board is a working view, not a shareable one.
   const [scholarFilter, setScholarFilter] = useState<string>("");
   const [participation, setParticipation] =
     useState<ScholarParticipationSelection>(DEFAULT_SCHOLAR_PARTICIPATION);
+  // Groups + affinity for the scope tier. The scholar rows themselves still
+  // come from listScholars above (the "Suggest a quest" dialog names a scholar
+  // from that same list, guests included).
+  const { groups, myScholarIds } = useScholarRoster({
+    includeProgramGuests: participation.extendedEducation,
+  });
 
   if (scholars === undefined || units === undefined) {
     return <QuestsTabSkeleton />;
@@ -286,20 +294,70 @@ export function QuestsTab() {
   const selectedScholar = scholars.find(
     (scholar) => String(scholar.id) === scholarFilter,
   );
-  const visibleScholarIds = new Set(
-    scholars
-      .filter((scholar) => scholarMatchesParticipation(scholar, participation))
-      .map((scholar) => String(scholar.id)),
+  const visibleScholars = scholars.filter((scholar) =>
+    scholarMatchesParticipation(scholar, participation),
   );
+  const visibleScholarIds = visibleScholars.map((scholar) => String(scholar.id));
+  const hasMine = visibleScholarIds.some((id) => myScholarIds.has(id));
 
-  // Narrow by the chosen scholar, then by scholar name / quest title text,
-  // then group by canonical state into mission-control lanes (offer → active →
-  // finished), with retracted rows held aside for a quiet group below.
-  const filteredUnits = units.filter((u) => {
-    if (scholarFilter && String(u.scholarId) !== scholarFilter) return false;
-    if (!scholarFilter && !visibleScholarIds.has(String(u.scholarId))) {
-      return false;
+  const scopeGroup = groups.find((group) => group.id === scopeKey);
+  const inScope = (scholarId: string) =>
+    scopeKey === ""
+      ? true
+      : scopeKey === "mine"
+        ? myScholarIds.has(scholarId)
+        : (scopeGroup?.scholarIds.includes(scholarId) ?? false);
+  const scopedScholarIds = visibleScholarIds.filter(inScope);
+  const scopedScholarIdSet = new Set(scopedScholarIds);
+
+  // Scope and focus both narrow the pool, so switching either can strand the
+  // other. Reconcile at switch time (the same predicates the Math Skills studio
+  // applies) rather than leaving an empty board with a lit control.
+  const selectScope = (key: string) => {
+    setScopeKey(key);
+    if (!selectedScholar) return;
+    const nextGroup = groups.find((group) => group.id === key);
+    const remainsVisible =
+      key === ""
+        ? true
+        : key === "mine"
+          ? myScholarIds.has(scholarFilter)
+          : nextGroup?.scholarIds.includes(scholarFilter) === true;
+    if (!remainsVisible) setScholarFilter("");
+  };
+
+  const changeParticipation = (next: ScholarParticipationSelection) => {
+    const nextVisibleIds = new Set(
+      scholars
+        .filter((scholar) => scholarMatchesParticipation(scholar, next))
+        .map((scholar) => String(scholar.id)),
+    );
+    if (
+      scopeGroup &&
+      (!groupMatchesParticipation(scopeGroup, next.extendedEducation) ||
+        !scopeGroup.scholarIds.some((id) => nextVisibleIds.has(id)))
+    ) {
+      setScopeKey("");
     }
+    if (
+      scopeKey === "mine" &&
+      ![...myScholarIds].some((id) => nextVisibleIds.has(id))
+    ) {
+      setScopeKey("");
+    }
+    if (scholarFilter && !nextVisibleIds.has(scholarFilter)) {
+      setScholarFilter("");
+    }
+    setParticipation(next);
+  };
+
+  // Narrow to the scoped pool, then to the focused scholar, then by scholar
+  // name / quest title text, then group by canonical state into mission-control
+  // lanes (offer → active → finished), with retracted rows held aside for a
+  // quiet group below.
+  const filteredUnits = units.filter((u) => {
+    if (!scopedScholarIdSet.has(String(u.scholarId))) return false;
+    if (scholarFilter && String(u.scholarId) !== scholarFilter) return false;
     const n = query.trim().toLowerCase();
     if (!n) return true;
     return (
@@ -379,70 +437,31 @@ export function QuestsTab() {
               borderColor="gray.200"
             />
           </Box>
-          {/* The shared ScholarPicker owns roster search, group membership,
-              and the enrolled-first participation filter. */}
-          <Popover.Root
-            open={scholarFilterOpen}
-            onOpenChange={(details) => setScholarFilterOpen(details.open)}
-            positioning={{ placement: "bottom-end" }}
-          >
-            <Popover.Trigger asChild>
-              <Button
-                size="sm"
-                variant="outline"
-                bg="white"
-                borderColor="gray.200"
-                minW="180px"
-                maxW="240px"
-                justifyContent="space-between"
-                aria-label="Filter by scholar"
-              >
-                <Text lineClamp={1}>
-                  {selectedScholar?.name ??
-                    selectedScholar?.username ??
-                    "All scholars"}
-                </Text>
-                <CaretDown size={14} />
-              </Button>
-            </Popover.Trigger>
-            <Portal>
-              <Popover.Positioner>
-                <Popover.Content w="460px" maxW="calc(100vw - 32px)">
-                  <Popover.Body p={4}>
-                    <Stack gap={3}>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        justifyContent="space-between"
-                        onClick={() => {
-                          setScholarFilter("");
-                          setScholarFilterOpen(false);
-                        }}
-                      >
-                        All scholars
-                        {!scholarFilter && <Check size={14} />}
-                      </Button>
-                      <ScholarPicker
-                        mode="single"
-                        selected={scholarFilter || null}
-                        participation={participation}
-                        onParticipationChange={setParticipation}
-                        showParticipationFilter
-                        showEnrollmentStanding
-                        showAffinityToggle={false}
-                        autoFocusSearch
-                        maxH="300px"
-                        onChange={(scholarId) => {
-                          setScholarFilter(scholarId ?? "");
-                          if (scholarId) setScholarFilterOpen(false);
-                        }}
-                      />
-                    </Stack>
-                  </Popover.Body>
-                </Popover.Content>
-              </Popover.Positioner>
-            </Portal>
-          </Popover.Root>
+          {/* One shared scope control: the pool (all / mine / a group) names the
+              trigger, and a focused scholar rides beside it as a chip. */}
+          <ScholarScopePicker
+            groups={groups}
+            scopeKey={scopeKey}
+            hasMine={hasMine}
+            onSelectScope={selectScope}
+            visibleScholarIds={visibleScholarIds}
+            participation={participation}
+            onParticipationChange={changeParticipation}
+            scopedScholarIds={scopedScholarIds}
+            focusScholar={
+              selectedScholar
+                ? {
+                    id: String(selectedScholar.id),
+                    name:
+                      selectedScholar.name ??
+                      selectedScholar.username ??
+                      "(unnamed)",
+                    image: selectedScholar.image ?? null,
+                  }
+                : undefined
+            }
+            onFocusScholar={(scholarId) => setScholarFilter(scholarId ?? "")}
+          />
           {/* Show inactive — off by default so the board matches the Work tab /
               scholar plate (both active-only). */}
           <Switch.Root

@@ -3,10 +3,10 @@ import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import type { Doc, Id } from "../_generated/dataModel";
 import {
-  classifySessionOrigin,
   readScholarSessions,
   readSessionTranscript,
 } from "../lib/scholarReads";
+import { classifySessionOrigin } from "../lib/sessionOrigin";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -109,17 +109,29 @@ async function seedSession(
 async function addMessages(
   t: ReturnType<typeof convexTest>,
   sessionId: Id<"sessions">,
-  turns: Array<{ role: "user" | "assistant"; content: string }>,
+  turns: Array<{
+    role: "user" | "assistant";
+    content: string;
+    inputModality?: Doc<"messages">["inputModality"];
+  }>,
 ) {
-  await t.run(async (ctx) => {
+  return await t.run(async (ctx) => {
+    const messages: Doc<"messages">[] = [];
     for (const m of turns) {
-      await ctx.db.insert("messages", {
+      const messageId = await ctx.db.insert("messages", {
         sessionId,
         role: m.role,
         content: m.content,
         flagged: false,
+        ...(m.inputModality !== undefined
+          ? { inputModality: m.inputModality }
+          : {}),
       });
+      const message = await ctx.db.get(messageId);
+      if (!message) throw new Error("Failed to seed transcript message");
+      messages.push(message);
     }
+    return messages;
   });
 }
 
@@ -128,9 +140,13 @@ describe("readSessionTranscript", () => {
     const t = convexTest(schema, modules);
     const scholar = await seedScholar(t, "oliver");
     const s = await seedSession(t, scholar); // anchorless = self-initiated
-    await addMessages(t, s, [
+    const storedMessages = await addMessages(t, s, [
       { role: "assistant", content: "What's an LD50?" },
-      { role: "user", content: "the dose that kills half the animals" },
+      {
+        role: "user",
+        content: "the dose that kills half the animals",
+        inputModality: "spoken",
+      },
     ]);
 
     const result = await t.run((ctx) => readSessionTranscript(ctx, scholar, {}));
@@ -139,6 +155,20 @@ describe("readSessionTranscript", () => {
     expect(result!.messageCount).toBe(2);
     expect(result!.messages.map((m) => m.role)).toEqual(["assistant", "user"]);
     expect(result!.messages[1].content).toMatch(/kills half/);
+    expect(result!.messages).toEqual([
+      {
+        role: "assistant",
+        content: "What's an LD50?",
+        createdAt: storedMessages[0]._creationTime,
+      },
+      {
+        role: "user",
+        content: "the dose that kills half the animals",
+        inputModality: "spoken",
+        createdAt: storedMessages[1]._creationTime,
+      },
+    ]);
+    expect("inputModality" in result!.messages[0]).toBe(false);
   });
 
   test("SCOPE GUARD: a sessionId that isn't this scholar's reads nothing", async () => {

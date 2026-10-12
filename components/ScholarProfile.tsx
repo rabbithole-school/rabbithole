@@ -56,7 +56,12 @@ import {
   BracketsCurly,
 } from "@phosphor-icons/react";
 import { ParentsManager } from "@/components/ParentsManager";
-import { passwordActionLabel } from "@/components/scholarSignInLinkUtils";
+import {
+  ISSUE_FAILED_GUIDANCE,
+  canIssueSignInLink,
+  passwordActionLabel,
+} from "@/components/scholarSignInLinkUtils";
+import { usernameError } from "@/convex/lib/username";
 import { AwardBadgeDialog } from "@/components/AwardBadgeDialog";
 import { ScholarAssignmentsCard } from "@/components/ScholarAssignmentsCard";
 import { ScholarHomeMirrorCard } from "@/components/ScholarHomeMirrorCard";
@@ -144,6 +149,11 @@ const READING_LEVELS = buildReadingLevels();
 
 // Chronological grade options for the Knowledge Tree notch (users.gradeLevel).
 // K–8 only — must match the acceleration grade columns (ACCELERATION_GRADES).
+// Common pronoun sets offered as a datalist. Deliberately a SUGGESTION list on
+// a free-text input, not a closed select: a fixed menu tells a child their
+// answer has to be on someone else's list. Staff can type anything.
+const PRONOUN_SUGGESTIONS = ["she/her", "he/him", "they/them", "she/they", "he/they"];
+
 const GRADE_LEVELS: { value: string; label: string }[] = [
   { value: "", label: "Not set" },
   { value: "K", label: "K — Kindergarten" },
@@ -168,9 +178,10 @@ const ALL_TABS: { key: TabKey; label: string; icon: React.ComponentType<{ size?:
 
 // Tabs visible to operations staff: the Feed (non-sensitive overview), Portfolio
 // (the accumulated record — portfolio items only for operations staff), Documents
-// (health-record attachments only — the merged list gives them the health
-// half and never reads scholarDocuments), and Settings (identity + password +
-// parents). No map/dossier/guidance/now (all sensitive learning data).
+// (the administrative record kinds they may file — incident reports, transfer
+// records, conference notes, doctor's notes, report cards — plus health-record
+// attachments; the merged list never shows them an assessment or IEP), and
+// Settings (identity + password + parents). No map/dossier/guidance/now (all sensitive learning data).
 // Settings is the gear.
 const OPERATIONS_TABS: TabKey[] = [
   "feed",
@@ -249,6 +260,130 @@ function AddToggle({
     >
       {active ? "Cancel" : (<><Plus style={{ marginRight: "4px" }} /> {label}</>)}
     </Button>
+  );
+}
+
+// Interests block for the Dossier tab — the canonical home for a scholar's
+// interests (T1: one rendering). `how` is the interest's provenance; its pill
+// hue is fixed here so the same source always reads the same way.
+type TeacherInterestHow = "said" | "picked" | "menu" | "teacher";
+type TeacherInterest = {
+  label: string;
+  how: TeacherInterestHow;
+  dates: number[];
+  sessionIds: Id<"sessions">[];
+  words?: string;
+  state: "active" | "past";
+  changedBy?: "teacher" | "observer";
+};
+
+const INTEREST_PILL: Record<TeacherInterestHow, { bg: string; color: string; label: string }> = {
+  said: { bg: "teal.50", color: "teal.600", label: "said" },
+  picked: { bg: "violet.50", color: "violet.600", label: "picked" },
+  menu: { bg: "gray.100", color: "charcoal.500", label: "menu" },
+  teacher: { bg: "amber.50", color: "amber.600", label: "teacher" },
+};
+
+function formatInterestDate(ms: number): string {
+  // UTC, to match how mergeInterests dedupes days and how the prompt renders them.
+  return new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+function InterestRow({
+  interest,
+  onToggle,
+}: {
+  interest: TeacherInterest;
+  onToggle: (label: string, state: "active" | "past") => void;
+}) {
+  const pill = INTEREST_PILL[interest.how];
+  const isPast = interest.state === "past";
+  const recent = [...interest.dates].sort((a, b) => b - a);
+  const shown = recent.slice(0, 3).reverse();
+  const extra = recent.length - shown.length;
+  return (
+    <HStack gap={2} align="baseline" opacity={isPast ? 0.6 : 1}>
+      <Text fontSize="sm" fontFamily="body" fontWeight="600" color="charcoal.600" flexShrink={0}>
+        {interest.label}
+      </Text>
+      <Badge bg={pill.bg} color={pill.color} fontSize="xs" flexShrink={0}>
+        {pill.label}
+      </Badge>
+      {shown.length > 0 && (
+        <Text as="span" fontSize="xs" color="charcoal.400" fontFamily="body" flexShrink={0}>
+          {shown.map(formatInterestDate).join(", ")}
+          {extra > 0 ? ` +${extra}` : ""}
+        </Text>
+      )}
+      {interest.words && (
+        <Text
+          as="span"
+          fontSize="xs"
+          color="charcoal.400"
+          fontFamily="body"
+          fontStyle="italic"
+          lineClamp={1}
+          minW={0}
+          title={interest.words}
+        >
+          “{interest.words}”
+        </Text>
+      )}
+      {isPast && (
+        <Text as="span" fontSize="xs" color="charcoal.300" fontFamily="body" flexShrink={0}>
+          past
+        </Text>
+      )}
+      <Button
+        size="xs"
+        variant="ghost"
+        color="violet.500"
+        fontFamily="heading"
+        fontSize="xs"
+        flexShrink={0}
+        ml="auto"
+        _hover={{ bg: "violet.50" }}
+        onClick={() => onToggle(interest.label, isPast ? "active" : "past")}
+      >
+        {isPast ? "Mark active" : "Mark past"}
+      </Button>
+    </HStack>
+  );
+}
+
+function InterestsBlock({
+  interests,
+  legend,
+  onToggle,
+}: {
+  interests: TeacherInterest[] | undefined;
+  legend: string | undefined;
+  onToggle: (label: string, state: "active" | "past") => void;
+}) {
+  if (!interests || interests.length === 0) {
+    return (
+      <Text fontSize="xs" color="charcoal.400" fontFamily="body" mb={4}>
+        No interests recorded yet — the observer adds them from what the scholar says or picks.
+      </Text>
+    );
+  }
+  const ordered = [
+    ...interests.filter((i) => i.state === "active"),
+    ...interests.filter((i) => i.state === "past"),
+  ];
+  return (
+    <Box mb={4}>
+      <VStack gap="6px" align="stretch">
+        {ordered.map((interest) => (
+          <InterestRow key={interest.label.trim().toLowerCase()} interest={interest} onToggle={onToggle} />
+        ))}
+      </VStack>
+      {legend && (
+        <Text fontSize="xs" color="charcoal.400" fontFamily="body" mt={2}>
+          {legend}
+        </Text>
+      )}
+    </Box>
   );
 }
 
@@ -428,6 +563,10 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
   // "Create password".
   const hasCredential = profile?.scholar.hasCredential;
   const passwordLabel = passwordActionLabel(hasCredential);
+  // The one-time link keys off the username, so the password dialog points at
+  // Account details instead of offering a link that can only fail.
+  const needsUsername =
+    profile !== undefined && !canIssueSignInLink(profile.scholar.username);
   // Math Skills portrait — loaded only while the Skills tab is open. Reuses the
   // same gatherer the parent portal reads, gated teacher/admin + institution.
   const mathPortrait = useQuery(
@@ -466,6 +605,11 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
   const setScholarInstitution = useMutation(api.institutions.setScholarInstitution);
   const setScholarEnrollmentStanding = useMutation(api.users.setScholarEnrollmentStanding);
   const updateDossier = useMutation(api.dossier.updateByTeacher);
+  const scholarInterests = useQuery(
+    api.dossier.interestsForTeacher,
+    isOperationsMode ? "skip" : { scholarId: scholarId as Id<"users"> }
+  );
+  const setInterestState = useMutation(api.dossier.setInterestState);
   const updateReadingLevel = useMutation(api.scholars.updateReadingLevel);
   const updateAudioSettings = useMutation(api.scholars.updateAudioSettings);
   const acceptReadingLevelSuggestion = useMutation(api.scholars.acceptReadingLevelSuggestion);
@@ -523,12 +667,28 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
     setResetLink(null);
     setResetError("");
   };
-  // Operations-staff basic-details editor (name / DOB / grade) — null until the user
-  // edits a field, then it holds the draft.
+  // Operations-staff basic-details editor (name / username / DOB / grade) —
+  // null until the user edits a field, then it holds the draft.
   const [detailsName, setDetailsName] = useState<string | null>(null);
+  const [detailsUsername, setDetailsUsername] = useState<string | null>(null);
   const [detailsDob, setDetailsDob] = useState<string | null>(null);
   const [detailsGrade, setDetailsGrade] = useState<string | null>(null);
+  const [detailsPronouns, setDetailsPronouns] = useState<string | null>(null);
   const [savingDetails, setSavingDetails] = useState(false);
+  const [detailsError, setDetailsError] = useState("");
+  // The profile stays mounted while the rail switches scholars, so drop the
+  // drafts when the scholar changes — otherwise Save writes one scholar's
+  // half-typed name or username onto the next one.
+  const [detailsScholarId, setDetailsScholarId] = useState(scholarId);
+  if (detailsScholarId !== scholarId) {
+    setDetailsScholarId(scholarId);
+    setDetailsName(null);
+    setDetailsUsername(null);
+    setDetailsDob(null);
+    setDetailsGrade(null);
+    setDetailsPronouns(null);
+    setDetailsError("");
+  }
   const [savingInstitution, setSavingInstitution] = useState(false);
   // The picked-but-not-yet-confirmed standing, so the select doesn't snap back
   // to the query value for the duration of the save round-trip.
@@ -537,19 +697,37 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
   >(null);
 
   const handleSaveDetails = async () => {
+    const username = detailsUsername?.trim() ?? "";
+    const usernameChanged =
+      detailsUsername !== null && username !== (scholar?.username ?? "");
+    const usernameProblem = usernameChanged ? usernameError(username) : null;
+    if (usernameProblem) {
+      setDetailsError(usernameProblem);
+      return;
+    }
     setSavingDetails(true);
+    setDetailsError("");
     try {
       await adminUpdateScholarProfile({
         scholarId: scholarId as Id<"users">,
         ...(detailsName !== null ? { name: detailsName } : {}),
+        ...(usernameChanged ? { username } : {}),
         ...(detailsDob !== null ? { dateOfBirth: detailsDob } : {}),
         ...(detailsGrade !== null ? { gradeLevel: detailsGrade || null } : {}),
+        ...(detailsPronouns !== null
+          ? { pronouns: detailsPronouns.trim() || null }
+          : {}),
       });
       setDetailsName(null);
+      setDetailsUsername(null);
       setDetailsDob(null);
       setDetailsGrade(null);
+      setDetailsPronouns(null);
     } catch (error) {
       console.error("Error saving scholar details:", error);
+      setDetailsError(
+        serverErrorMessage(error, "Couldn't save these details. Try again."),
+      );
     } finally {
       setSavingDetails(false);
     }
@@ -580,6 +758,20 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
       await runAIAnalysis({ scholarId: scholarId as Id<"users"> });
     } finally {
       setAiLoading(false);
+    }
+  };
+
+  const handleSetInterestState = async (
+    label: string,
+    state: "active" | "past",
+  ) => {
+    try {
+      await setInterestState({ scholarId: scholarId as Id<"users">, label, state });
+    } catch (error) {
+      toaster.error({
+        title: "Couldn't update interest",
+        description: serverErrorMessage(error) || undefined,
+      });
     }
   };
 
@@ -1298,6 +1490,11 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
           <VStack gap={4} align="stretch" maxW="820px">
             <Surface p={5}>
               <CardHeading icon={<User />} title="Learner profile" />
+              <InterestsBlock
+                interests={scholarInterests?.interests as TeacherInterest[] | undefined}
+                legend={scholarInterests?.legend}
+                onToggle={handleSetInterestState}
+              />
               <Textarea
                 size="sm"
                 placeholder="No dossier yet — the AI will build one during conversations."
@@ -1730,6 +1927,28 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                   />
                 </Box>
                 <Box>
+                  <Text fontSize="xs" color="charcoal.400" fontFamily="heading" mb={1}>Username</Text>
+                  <Input
+                    size="sm"
+                    aria-label="Username"
+                    placeholder="Not set"
+                    value={detailsUsername ?? scholar?.username ?? ""}
+                    onChange={(e) => setDetailsUsername(e.target.value)}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    fontFamily="body"
+                  />
+                  <Text fontSize="2xs" color="charcoal.300" fontFamily="body" mt={1}>
+                    What they sign in with, along with a password.{" "}
+                    {!scholar?.username
+                      ? "Add one before creating their password — school iPads don't need it."
+                      : hasCredential
+                        ? "If you change it, their old username stops working — their password stays the same."
+                        : null}
+                  </Text>
+                </Box>
+                <Box>
                   <Text fontSize="xs" color="charcoal.400" fontFamily="heading" mb={1}>Date of birth</Text>
                   <Input
                     size="sm"
@@ -1738,6 +1957,26 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                     onChange={(e) => setDetailsDob(e.target.value)}
                     fontFamily="body"
                   />
+                </Box>
+                <Box>
+                  <Text fontSize="xs" color="charcoal.400" fontFamily="heading" mb={1}>Pronouns</Text>
+                  <Input
+                    size="sm"
+                    list="scholar-pronoun-suggestions"
+                    placeholder="Not set"
+                    value={detailsPronouns ?? scholar?.pronouns ?? ""}
+                    onChange={(e) => setDetailsPronouns(e.target.value)}
+                    fontFamily="body"
+                  />
+                  <datalist id="scholar-pronoun-suggestions">
+                    {PRONOUN_SUGGESTIONS.map((p) => (
+                      <option key={p} value={p} />
+                    ))}
+                  </datalist>
+                  <Text fontSize="2xs" color="charcoal.300" fontFamily="body" mt={1}>
+                    How staff tools refer to this scholar. Staff-only — never
+                    shown to the scholar or their family.
+                  </Text>
                 </Box>
                 <Box>
                   <Text fontSize="xs" color="charcoal.400" fontFamily="heading" mb={1}>Grade level</Text>
@@ -1849,13 +2088,18 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                   </Text>
                 </Box>
                 )}
+                {detailsError && (
+                  <Text fontSize="xs" color="red.500" fontFamily="body">
+                    {detailsError}
+                  </Text>
+                )}
                 <Button
                   size="sm"
                   colorPalette="violet"
                   alignSelf="flex-start"
                   fontFamily="heading"
                   fontSize="xs"
-                  disabled={savingDetails || (detailsName === null && detailsDob === null && detailsGrade === null)}
+                  disabled={savingDetails || (detailsName === null && detailsUsername === null && detailsDob === null && detailsGrade === null && detailsPronouns === null)}
                   onClick={handleSaveDetails}
                 >
                   {savingDetails ? "Saving…" : "Save"}
@@ -2043,6 +2287,11 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                       sign in through device setup instead.
                     </Text>
                   </VStack>
+                ) : needsUsername ? (
+                  <Text fontSize="sm" fontFamily="body" color="charcoal.500">
+                    A password needs a username first. Add one in Account
+                    details above, then create the password.
+                  </Text>
                 ) : (
                   <Text fontSize="sm" fontFamily="body" color="charcoal.500">
                     {hasCredential ? "Reset" : "Create"} the password for{" "}
@@ -2085,20 +2334,15 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                       color="white"
                       _hover={{ bg: "violet.600" }}
                       fontFamily="heading"
+                      disabled={needsUsername}
                       onClick={async () => {
                         setResetError("");
                         try {
                           const result = await issuePinLink({ userId: scholarId as Id<"users"> });
                           setResetLink(window.location.origin + result.path);
                         } catch (err) {
-                          // Prod redacts thrown Error messages to "Server Error",
-                          // so surface actionable guidance instead of the raw
-                          // string — the realistic failure is a missing username,
-                          // editable in Account Details on this same tab.
                           console.error("Issue reset link failed:", err);
-                          setResetError(
-                            "Couldn't create the link. If this scholar has no username yet, set one in Account Details above, then try again.",
-                          );
+                          setResetError(ISSUE_FAILED_GUIDANCE);
                         }
                       }}
                     >

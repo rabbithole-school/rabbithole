@@ -485,34 +485,60 @@ function toStorageBlob(bytes: Uint8Array, mime: string): Blob {
  */
 const MAX_EXPORT_ASSET_BYTES = 64 * 1024 * 1024;
 
-export const exportDeck = action({
-  args: {
-    artifactId: v.id("artifacts"),
-    format: v.union(v.literal("pptx"), v.literal("pdf")),
-  },
-  handler: async (ctx, args): Promise<Id<"_storage">> => {
-    // getById is the canonical owner/staff access gate and runs with this
-    // action's auth identity. Null intentionally does not reveal existence.
-    const artifact = await ctx.runQuery(api.artifacts.getById, {
-      artifactId: args.artifactId,
-    });
-    if (!artifact) throw new Error("Slides artifact not found or not accessible");
-    const artifactType: string | undefined = artifact.type;
-    if (artifactType !== "slides") {
-      throw new Error("Artifact is not a slides deck");
-    }
+const exportArgs = {
+  artifactId: v.id("artifacts"),
+  format: v.union(v.literal("pptx"), v.literal("pdf")),
+};
 
-    const deck = parseDeckContent(artifact.content);
-    const assets = await loadDeckAssets(ctx, deck);
-    const instructions = renderDeckInstructions(deck, args.format);
-    const bytes =
-      args.format === "pptx"
-        ? await renderPptx(instructions, assets)
-        : await renderPdf(instructions, assets);
-    const mime =
-      args.format === "pptx"
-        ? "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        : "application/pdf";
-    return await ctx.storage.store(toStorageBlob(bytes, mime));
+async function storeDeckExport(
+  ctx: ActionCtx,
+  args: { artifactId: Id<"artifacts">; format: "pptx" | "pdf" },
+): Promise<Id<"_storage">> {
+  // getById is the canonical owner/staff access gate and runs with this
+  // action's auth identity. Null intentionally does not reveal existence.
+  const artifact = await ctx.runQuery(api.artifacts.getById, {
+    artifactId: args.artifactId,
+  });
+  if (!artifact) throw new Error("Slides artifact not found or not accessible");
+  const artifactType: string | undefined = artifact.type;
+  if (artifactType !== "slides") {
+    throw new Error("Artifact is not a slides deck");
+  }
+
+  const deck = parseDeckContent(artifact.content);
+  const assets = await loadDeckAssets(ctx, deck);
+  const instructions = renderDeckInstructions(deck, args.format);
+  const bytes =
+    args.format === "pptx"
+      ? await renderPptx(instructions, assets)
+      : await renderPdf(instructions, assets);
+  const mime =
+    args.format === "pptx"
+      ? "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+      : "application/pdf";
+  return await ctx.storage.store(toStorageBlob(bytes, mime));
+}
+
+/**
+ * Export a deck and return a serving URL for the file. Clients use this rather
+ * than resolving `exportDeck`'s storage id through the generic file endpoint,
+ * which minted URLs for any storage id (TRA-389).
+ */
+export const exportDeckFile = action({
+  args: exportArgs,
+  handler: async (ctx, args): Promise<{ url: string }> => {
+    const url = await ctx.storage.getUrl(await storeDeckExport(ctx, args));
+    if (!url) throw new Error("The exported file could not be opened.");
+    return { url };
   },
+});
+
+/**
+ * Kept for iPads still on a build that calls it and then `files.getUrl`;
+ * remove with that endpoint once the fleet has updated.
+ */
+export const exportDeck = action({
+  args: exportArgs,
+  handler: async (ctx, args): Promise<Id<"_storage">> =>
+    await storeDeckExport(ctx, args),
 });

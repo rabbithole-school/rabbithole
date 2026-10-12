@@ -2,18 +2,14 @@ import type { TestConvex } from "convex-test";
 import schema from "../schema";
 import type { Id } from "../_generated/dataModel";
 import type { Role } from "../lib/roles";
+import type { StaffCapability } from "../lib/staffCapabilities";
 
 type TestCtx = TestConvex<typeof schema>;
 type InstitutionStaffRole = Extract<
   Role,
   "teacher" | "staff" | "school_admin" | "curriculum_designer"
 >;
-type StaffCapability =
-  | "school:operations"
-  | "health:manage"
-  | "curriculum:edit"
-  | "program:publish"
-  | "captures:review";
+
 
 // Keep the prefix stable but make each defaulted username unique, so seeding
 // more than one fixture user without an explicit username can't collide on

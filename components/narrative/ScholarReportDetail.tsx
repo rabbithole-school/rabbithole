@@ -28,9 +28,10 @@ import {
   Text,
   VStack,
 } from "@chakra-ui/react";
-import { CaretRight, NotePencil, Plus, UsersThree, X } from "@phosphor-icons/react";
+import { CaretRight, ClipboardText, NotePencil, Plus, UsersThree, X } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { INTERIM_ITEM_KEYS, interimHasContent, interimRatedCount } from "@/convex/lib/interimCheckinTemplate";
 import { Avatar } from "@/components/Avatar";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { useScholarRoster } from "@/hooks/useScholarRoster";
@@ -38,6 +39,7 @@ import { ReportShell } from "@/components/narrative/ReportShell";
 import { SectionStatusIcon } from "@/components/narrative/SectionStatusIcon";
 import { reportSectionState, SharedTag } from "@/components/narrative/reportStatus";
 import { toaster } from "@/lib/toaster";
+import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 
 export function ScholarReportDetail({
   scholarId,
@@ -47,8 +49,9 @@ export function ScholarReportDetail({
   periodParam: string | null;
 }) {
   const router = useRouter();
-  const current = useQuery(api.reportingPeriods.current, {});
-  const periods = useQuery(api.reportingPeriods.list, {});
+  const { scopeParam, hrefWithActiveInstitution } = useActiveInstitution();
+  const current = useQuery(api.reportingPeriods.current, { scope: scopeParam });
+  const periods = useQuery(api.reportingPeriods.list, { scope: scopeParam });
 
   const activePeriod = periods
     ? (periodParam && periods.find((p) => String(p._id) === periodParam)) || current || periods[0] || null
@@ -63,15 +66,21 @@ export function ScholarReportDetail({
     api.wholeChildNarratives.getForScholarPeriod,
     periodId ? { scholarId, periodId } : "skip",
   );
+  const checkin = useQuery(
+    api.interimCheckins.getForScholarPeriod,
+    periodId ? { scholarId, periodId } : "skip",
+  );
 
   const [addOpen, setAddOpen] = useState(false);
 
-  const backHref = `/teacher/report${periodId ? `?period=${String(periodId)}` : ""}`;
+  const backHref = hrefWithActiveInstitution(`/teacher/report${periodId ? `?period=${String(periodId)}` : ""}`);
   const withPeriod = (suffix: string) =>
-    `/teacher/report/${String(scholarId)}${suffix}${periodId ? `${suffix.includes("?") ? "&" : "?"}period=${String(periodId)}` : ""}`;
+    hrefWithActiveInstitution(
+      `/teacher/report/${String(scholarId)}${suffix}${periodId ? `${suffix.includes("?") ? "&" : "?"}period=${String(periodId)}` : ""}`,
+    );
 
   const narratives = (allNarratives ?? []).filter((n) => !periodId || String(n.periodId) === String(periodId));
-  const loading = periods === undefined || rosterLoading || allNarratives === undefined || (periodId !== null && wholeChild === undefined);
+  const loading = periods === undefined || rosterLoading || allNarratives === undefined || (periodId !== null && (wholeChild === undefined || checkin === undefined));
 
   return (
     <ReportShell
@@ -132,6 +141,38 @@ export function ScholarReportDetail({
                     );
                   })}
                 </VStack>
+              )}
+            </SectionCard>
+
+            {/* Interim check-in */}
+            <SectionCard title="Interim check-in" icon={<ClipboardText size={15} weight="fill" />}>
+              {!periodId ? null : checkin ? (
+                <Link href={withPeriod("?ic=1")} style={{ textDecoration: "none" }}>
+                  <Flex align="center" gap={2.5} bg="gray.50" borderRadius="md" px={3} py={2.5} borderWidth="1px" borderColor="gray.100" _hover={{ borderColor: "violet.200", bg: "white" }} cursor="pointer">
+                    <SectionStatusIcon
+                      state={reportSectionState(checkin.status, interimHasContent(checkin))}
+                      size={15}
+                    />
+                    <Text flex={1} fontFamily="heading" fontWeight="600" fontSize="sm" color="navy.600">
+                      Interim check-in
+                    </Text>
+                    <Text fontSize="xs" color="charcoal.400" fontFamily="body">
+                      {interimRatedCount(checkin.ratings)} of {INTERIM_ITEM_KEYS.length} rated
+                    </Text>
+                    <CaretRight size={13} color="var(--chakra-colors-charcoal-300)" />
+                  </Flex>
+                </Link>
+              ) : (
+                <Flex align="center" justify="space-between" gap={3} py={1}>
+                  <Text fontSize="sm" color="charcoal.400" fontFamily="body">
+                    Not started. One per scholar each term.
+                  </Text>
+                  <Button asChild size="xs" colorPalette="violet">
+                    <Link href={withPeriod("?ic=1")}>
+                      <Plus size={12} style={{ marginRight: 4 }} /> Start interim check-in
+                    </Link>
+                  </Button>
+                </Flex>
               )}
             </SectionCard>
 

@@ -47,8 +47,9 @@ npx tsx evals/curriculum-sim/ground.ts \
 ```
 
 Output lands in `out/` (gitignored): `report.md` / `propose.md` / `improve.md` /
-`ground.md` + matching `.json`. Models via env: `TUTOR_MODEL` (Sonnet, the live
-tutor), `SIM_MODEL` (Haiku, the kids), `JUDGE_MODEL` / `IMPROVER_MODEL` (Opus).
+`ground.md` + matching `.json`. Models via env: `TUTOR_MODEL` (the live
+`TUTOR_DEFAULT_MODEL` by default), `TUTOR_EFFORT` (the live runtime effort by
+default), `SIM_MODEL` (Haiku, the kids), `JUDGE_MODEL` / `IMPROVER_MODEL` (Opus).
 
 ## Design notes
 

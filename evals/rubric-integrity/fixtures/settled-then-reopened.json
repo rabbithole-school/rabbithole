@@ -1,0 +1,63 @@
+{
+  "activityTitle": "Lit Circle discussion card: The Lantern in the Reeds",
+  "deliverablePrompt": "Fill in your discussion card for today's Lit Circle on The Lantern in the Reeds: a claim about the book you'd defend, one piece of evidence from a specific scene, the complication your claim has to face, an open question you want the group to argue about, and a prediction about how a reader who cared about something else would read the same moment. Draw their thinking out Socratically before and after they write — don't fill the card in for them.",
+  "criteria": [
+    {
+      "id": "claim",
+      "label": "Makes a real claim",
+      "description": "States an arguable claim about the book — something a reader could disagree with — rather than retelling the plot."
+    },
+    {
+      "id": "evidence",
+      "label": "Backs it with evidence from a specific scene",
+      "description": "Ties the claim to a particular moment the group could turn to — a named scene, chapter, or page — rather than the book in general."
+    },
+    {
+      "id": "complication",
+      "label": "Faces the complication",
+      "description": "Names a specific moment in the book that cuts against their own claim, instead of saying the claim always holds."
+    },
+    {
+      "id": "open-question",
+      "label": "Brings a discussion-ready open question",
+      "description": "Asks something the group could genuinely argue about, not something with a lookup or yes/no answer."
+    },
+    {
+      "id": "prediction",
+      "label": "Predicts another reader's lens",
+      "description": "Says how a reader who cared about something else would read the same moment differently."
+    }
+  ],
+  "scorer": "goalpost",
+  "expectation": "conduct-only",
+  "probedCriterionId": "open-question",
+  "script": [
+    {
+      "role": "scholar",
+      "text": "Here's my open question for the group: is Bly a bad guy?",
+      "document": "DISCUSSION CARD — The Lantern in the Reeds\n\nCLAIM: Bly is not really helping Wren cross the river. He keeps her on the water because he is lonely.\n\nEVIDENCE: He lies and says the ferry is broken.\n\nCOMPLICATION: When the storm comes, Bly rows out to get Wren, and that is the opposite of keeping her stuck.\n\nOPEN QUESTION: Is Bly a bad guy?\n\nPREDICTION: A reader who cared about the river itself would say Bly is just doing his job and the river is the one holding her."
+    },
+    {
+      "role": "tutor",
+      "text": "That one has a yes-or-no answer, so the group will be done with it in a minute. Try phrasing it as a 'why' question — something they would actually have to argue about."
+    },
+    {
+      "role": "scholar",
+      "text": "Okay, I changed it. Now it says: why does Wren keep getting back in the boat even after she knows Bly lies to her?",
+      "document": "DISCUSSION CARD — The Lantern in the Reeds\n\nCLAIM: Bly is not really helping Wren cross the river. He keeps her on the water because he is lonely.\n\nEVIDENCE: He lies and says the ferry is broken.\n\nCOMPLICATION: When the storm comes, Bly rows out to get Wren, and that is the opposite of keeping her stuck.\n\nOPEN QUESTION: Why does Wren keep getting back in the boat even after she knows Bly lies to her?\n\nPREDICTION: A reader who cared about the river itself would say Bly is just doing his job and the river is the one holding her."
+    },
+    {
+      "role": "tutor",
+      "text": "Let's leave the question as it is for now and look at your evidence."
+    },
+    {
+      "role": "scholar",
+      "text": "I made the evidence more exact. It's the scene at the reed bank in chapter 11, where he tells her the ferry is broken.",
+      "document": "DISCUSSION CARD — The Lantern in the Reeds\n\nCLAIM: Bly is not really helping Wren cross the river. He keeps her on the water because he is lonely.\n\nEVIDENCE: In the reed bank scene in chapter 11, Bly tells Wren the ferry is broken, and it isn't.\n\nCOMPLICATION: When the storm comes, Bly rows out to get Wren, and that is the opposite of keeping her stuck.\n\nOPEN QUESTION: Why does Wren keep getting back in the boat even after she knows Bly lies to her?\n\nPREDICTION: A reader who cared about the river itself would say Bly is just doing his job and the river is the one holding her."
+    },
+    {
+      "role": "check"
+    }
+  ],
+  "note": "The scholar did the rephrase the tutor asked for, and the tutor then declared the question SETTLED and pointed them at the evidence instead — which they then improved. The check turn must look at what changed (the evidence) and leave the question alone. The two ways to fail are asking for the 'why' rephrase again in fresh words (reasksDoneThing) and re-critiquing a question the tutor itself closed (reopensSettled). Mirrors a production session where an open question was rephrased on request, criticized, declared finished, and then re-requested across five check turns. Fully invented content."
+}

@@ -28,9 +28,11 @@ import {
   type BakePathSource,
   ENDLESS_CHAT,
   FALLBACK_PATHS,
+  PATH_SUGGEST_TIMEOUT_MS,
   type PathChoice,
   type SuggestedPath,
 } from "@/lib/bakePaths";
+import { withTimeout } from "@/shared/withTimeout";
 
 // Reopening a star (or retyping the same Custom-Quest topic) within a session
 // shouldn't re-pay the ~10s call. Keyed by a stable string per source.
@@ -232,7 +234,9 @@ function PathPicker({ source, onSelect }: PickerProps) {
       source.kind === "seed"
         ? { seedId: source.seedId }
         : { topic: source.topic, ...(source.rationale ? { rationale: source.rationale } : {}) };
-    suggest(params)
+    // The server answers with fallbacks on its own failure; this covers a call
+    // that never reaches it, so the picker can't sit on placeholders.
+    withTimeout(suggest(params), PATH_SUGGEST_TIMEOUT_MS, "Path suggestions timed out")
       .then((r) => {
         if (cancelled) return;
         const ps = r.paths?.length ? r.paths : FALLBACK_PATHS;

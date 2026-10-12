@@ -22,8 +22,10 @@
  * stripe trick.
  */
 
+import { useEffect } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
+import { useOfferLedger, type OfferLedgerKind } from "@/hooks/useOfferLedger";
 import { fonts, useColors } from "@/theme";
 
 export type BonusCardSpec = {
@@ -32,6 +34,8 @@ export type BonusCardSpec = {
   title: string;
   body: string;
   onAccept: () => void;
+  /** Offer-ledger identity (`practiceOfferEvents.kind`). */
+  kind: OfferLedgerKind;
   acceptLabel?: string;
   disabled?: boolean;
   /** Soft background/border/text triple — each bonus kind gets its own quiet
@@ -41,6 +45,13 @@ export type BonusCardSpec = {
 };
 
 export function BonusChooser({ cards }: { cards: BonusCardSpec[] }) {
+  const ledger = useOfferLedger();
+  const kindsShown = cards.map((card) => card.kind).join(",");
+  useEffect(() => {
+    for (const kind of kindsShown ? (kindsShown.split(",") as OfferLedgerKind[]) : []) {
+      ledger.shown(kind);
+    }
+  }, [kindsShown, ledger]);
   const c = useColors();
   const styles = makeStyles(c);
   if (cards.length === 0) return null;
@@ -56,7 +67,10 @@ export function BonusChooser({ cards }: { cards: BonusCardSpec[] }) {
         {cards.map((card, i) => (
           <Pressable
             key={card.key}
-            onPress={card.onAccept}
+            onPress={() => {
+              ledger.settle(card.kind, "accepted");
+              card.onAccept();
+            }}
             disabled={card.disabled}
             style={({ pressed }) => [
               styles.row,

@@ -29,17 +29,27 @@ export function MessageBody({
   messageId,
   surface,
   source,
+  edited,
 }: {
   body: string;
   mine: boolean;
   messageId: Id<"parentMessages">;
   surface?: "parent" | "staff";
   source?: string | null;
+  edited?: boolean;
 }) {
   const linkColor = mine ? "white" : "navy.600";
   const previewUrl = previewableMessageLink(body);
   const loadPreview = useAction(api.messageLinkPreviews.previewForMessage);
-  const [preview, setPreview] = useState<Preview | null | undefined>(undefined);
+  // Keyed by URL: the body can change under us (author edits), so a preview
+  // fetched for a previous URL must never show against the new one.
+  const [previewState, setPreviewState] = useState<
+    { url: string; preview: Preview | null } | undefined
+  >(undefined);
+  const preview =
+    previewUrl && previewState?.url === previewUrl
+      ? previewState.preview
+      : undefined;
 
   useEffect(() => {
     let active = true;
@@ -67,10 +77,13 @@ export function MessageBody({
             retryDelay = nextPendingPreviewRetryDelay(retryDelay);
             return;
           }
-          setPreview(result && "status" in result ? null : result);
+          setPreviewState({
+            url: previewUrl,
+            preview: result && "status" in result ? null : result,
+          });
         })
         .catch(() => {
-          if (active) setPreview(null);
+          if (active) setPreviewState({ url: previewUrl, preview: null });
         });
     };
 
@@ -106,16 +119,16 @@ export function MessageBody({
             whiteSpace="pre-wrap"
           >
             {visibleTokens.map((token, index) =>
-              token.type === "url" ? (
+              token.type !== "text" ? (
                 <a
                   key={`${token.value}-${index}`}
-                  href={token.value}
+                  href={token.type === "link" ? token.url : token.value}
                   target="_blank"
                   rel="noopener noreferrer"
                   referrerPolicy="no-referrer"
                   style={{ color: linkColor, textDecoration: "underline" }}
                 >
-                  {token.value}
+                  {token.type === "link" ? token.label : token.value}
                 </a>
               ) : (
                 token.value
@@ -130,17 +143,36 @@ export function MessageBody({
               </Text>
             </HStack>
           )}
-          {source === "slack" && (
+          {(source === "slack" || edited) && (
             <HStack
-              gap={1}
+              gap={2}
               mt={1}
               justify={mine ? "flex-end" : "flex-start"}
               color={mine ? "whiteAlpha.700" : "charcoal.300"}
             >
-              <SlackLogo size={11} weight="fill" />
-              <Text as="span" fontFamily="heading" fontSize="2xs" fontWeight="500">
-                via Slack
-              </Text>
+              {source === "slack" && (
+                <HStack gap={1}>
+                  <SlackLogo size={11} weight="fill" />
+                  <Text
+                    as="span"
+                    fontFamily="heading"
+                    fontSize="2xs"
+                    fontWeight="500"
+                  >
+                    via Slack
+                  </Text>
+                </HStack>
+              )}
+              {edited && (
+                <Text
+                  as="span"
+                  fontFamily="heading"
+                  fontSize="2xs"
+                  fontWeight="500"
+                >
+                  edited
+                </Text>
+              )}
             </HStack>
           )}
         </Box>

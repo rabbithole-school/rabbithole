@@ -4,7 +4,7 @@
 // survive close→reopen without creating one-off routes.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import { useConvexAuth } from "@convex-dev/auth/react";
 import {
   ActivityIndicator,
@@ -28,8 +28,10 @@ import * as FileSystem from "expo-file-system/legacy";
 import CookieManager, { type Cookie, type Cookies } from "@preeternal/react-native-cookie-manager";
 
 import { api, type Id } from "@/lib/convex";
+import { useNow } from "@/hooks/useNow";
 import {
   closeEmbeddedWebContent,
+  nativeCustomAppHeartbeatArgs,
   useOpenEmbeddedWebContent,
   type OpenEmbeddedWebContent,
 } from "@/lib/externalAppHost";
@@ -48,7 +50,13 @@ import {
   webEmbedUrlError,
 } from "@/lib/webEmbedConfig";
 import { isAllowedYouTubeResourceUrl } from "@/lib/activityResourcePlayer";
+import { PAUSE_MEDIA_SNIPPET } from "@/lib/pauseMediaSnippet";
 import { fonts, useColors } from "@/theme";
+import {
+  CodeArtifactWebView,
+  type CodeArtifactWebViewHandle,
+} from "@/components/CodeArtifactWebView";
+import { getStableDeviceId } from "@/lib/deviceIdentity";
 
 const CAPTURE_INTERVAL_MS = 25_000;
 const FIRST_CAPTURE_DELAY_MS = 2_000;
@@ -99,6 +107,8 @@ const EXTRACT_SNIPPET = `
 true;
 `;
 
+// Injected on close to silence a keep-alive WebView. Shared with the native
+// static custom-app host (CodeArtifactWebView). See PAUSE_MEDIA_SNIPPET.
 const INTERACTIVE_GESTURE_SNIPPET = `
 (function () {
   try {
@@ -356,6 +366,8 @@ export function ExternalAppHost() {
   const styles = useMemo(() => makeStyles(colors), [colors]);
 
   const webViewRef = useRef<WebView>(null);
+  const codeArtifactRef = useRef<CodeArtifactWebViewHandle>(null);
+  const usingNativeCustomAppRef = useRef(false);
   const [mounted, setMounted] = useState<OpenEmbeddedWebContent | null>(null);
   const mountedKeyRef = useRef<string | null>(null);
   const [webViewKey, setWebViewKey] = useState(0);
@@ -378,6 +390,10 @@ export function ExternalAppHost() {
   // token appended (null until minted). It's reset to null on each new mount
   // (in the mount effect above) and re-derived by the effect below.
   const [handoffUri, setHandoffUri] = useState<string | null>(null);
+  const [customAppStateUserId, setCustomAppStateUserId] = useState<string | null>(
+    null,
+  );
+  const [customAppIdentityAttempt, setCustomAppIdentityAttempt] = useState(0);
   const prefilledFor = useRef<string | null>(null);
   const [opacity] = useState(() => new Animated.Value(0));
 
@@ -439,15 +455,157 @@ export function ExternalAppHost() {
     }).start();
   }, [open, opacity]);
 
+  // Silence media without unmounting. The host is keep-alive by design (mounted
+  // persists, `open` flips to false, opacity animates to 0), so a playing
+  // WebView keeps making sound after close. Pause both hosts — the plain
+  // EmbeddedWebView AND the native static custom-app CodeArtifactWebView (which
+  // owns its own WebView ref) — as `open` goes true→false; each call is a no-op
+  // when its ref is null. Never unmount here — external apps depend on page
+  // state surviving close→reopen.
+  const pauseEmbeddedMedia = useCallback(() => {
+    try {
+      webViewRef.current?.injectJavaScript(PAUSE_MEDIA_SNIPPET);
+    } catch {
+      // WebView may be tearing down; pausing is best-effort.
+    }
+    codeArtifactRef.current?.pauseMedia();
+  }, []);
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    if (wasOpenRef.current && !open) pauseEmbeddedMedia();
+    wasOpenRef.current = open;
+  }, [open, pauseEmbeddedMedia]);
+
+  const customAppToken =
+    mounted?.kind === "externalApp" &&
+    mounted.hostRequest.kind === "customApp"
+      ? mounted.hostRequest.token
+      : null;
+  const resolvedCustomApp = useQuery(
+    api.customApps.resolveByToken,
+    customAppToken ? { token: customAppToken } : "skip",
+  );
+  const resolveCustomAppForHost = useAction(
+    api.appAssetHostActions.resolveCustomAppForHost,
+  );
+  const [preparedCustomApp, setPreparedCustomApp] = useState<{
+    token: string;
+    sourceHtml: string;
+    html: string;
+    assetUrls: Map<string, string>;
+  } | null>(null);
+  const [customAppAssetAttempt, setCustomAppAssetAttempt] = useState(0);
+  const rawStaticCustomAppHtml =
+    resolvedCustomApp?.kind === "static" &&
+    resolvedCustomApp.status === "live" &&
+    resolvedCustomApp.html != null
+      ? resolvedCustomApp.html
+      : null;
+  useEffect(() => {
+    if (!customAppToken || rawStaticCustomAppHtml === null) return;
+    let cancelled = false;
+    void resolveCustomAppForHost({ token: customAppToken }).then(
+      (app) => {
+        if (
+          !cancelled &&
+          app?.kind === "static" &&
+          app.status === "live" &&
+          app.html !== null
+        ) {
+          setPreparedCustomApp({
+            token: customAppToken,
+            sourceHtml: rawStaticCustomAppHtml,
+            html: app.html,
+            assetUrls: new Map(
+              app.appAssets.map((asset) => [asset.id, asset.url]),
+            ),
+          });
+        }
+      },
+      (assetError: unknown) => {
+        if (!cancelled) {
+          console.warn("[web-embed] custom app assets unavailable", assetError);
+          setError("This custom app could not prepare its pictures.");
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    customAppAssetAttempt,
+    customAppToken,
+    rawStaticCustomAppHtml,
+    resolveCustomAppForHost,
+  ]);
+  const nativeStaticCustomApp =
+    rawStaticCustomAppHtml !== null &&
+    preparedCustomApp?.token === customAppToken &&
+    preparedCustomApp.sourceHtml === rawStaticCustomAppHtml
+      ? preparedCustomApp
+      : null;
+  const nativeStaticCustomAppHtml = nativeStaticCustomApp?.html ?? null;
+  useEffect(() => {
+    if (
+      !customAppToken ||
+      nativeStaticCustomAppHtml === null ||
+      customAppStateUserId
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void getStableDeviceId()
+      .then((deviceId) => {
+        if (!cancelled) setCustomAppStateUserId(`anon:${deviceId}`);
+      })
+      .catch((identityError) => {
+        console.warn(
+          "[web-embed] custom app device identity unavailable",
+          identityError,
+        );
+        if (!cancelled) {
+          setError("This custom app could not prepare its saved state.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    customAppIdentityAttempt,
+    customAppStateUserId,
+    customAppToken,
+    nativeStaticCustomAppHtml,
+  ]);
+
+  const useNativeCustomApp =
+    nativeStaticCustomAppHtml !== null && customAppStateUserId !== null;
+  const customAppHostPending =
+    customAppToken !== null &&
+    (resolvedCustomApp === undefined ||
+      (rawStaticCustomAppHtml !== null &&
+        (nativeStaticCustomAppHtml === null ||
+          customAppStateUserId === null)));
+  const useUrlWebView =
+    customAppToken === null ||
+    (resolvedCustomApp !== undefined && rawStaticCustomAppHtml === null);
+  useEffect(() => {
+    usingNativeCustomAppRef.current = useNativeCustomApp;
+  }, [useNativeCustomApp]);
+
   const credentialAppId =
     mounted?.kind === "externalApp"
       ? mounted.appId
       : mounted?.kind === "webActivity"
         ? mounted.externalAppId
         : null;
+  // Re-arms across institution-local midnight, matching the launcher — an
+  // autofill must not outlive the push that authorised it.
+  const credentialMinuteNow = Math.floor(useNow(60_000) / 60_000) * 60_000;
   const creds = useQuery(
     api.scholarApps.credentialsForApp,
-    credentialAppId && isAuthenticated ? { appId: credentialAppId } : "skip",
+    credentialAppId && isAuthenticated
+      ? { appId: credentialAppId, now: credentialMinuteNow }
+      : "skip",
   );
   const userSelector =
     creds?.usernameSelector ??
@@ -548,8 +706,17 @@ export function ExternalAppHost() {
   }, [interactive, shouldCapture]);
 
   const injectCapture = useCallback(() => {
-    if (shouldCapture) webViewRef.current?.injectJavaScript(EXTRACT_SNIPPET);
-  }, [shouldCapture]);
+    if (!shouldCapture) return;
+    if (usingNativeCustomAppRef.current) {
+      const activeSession = sessionIdRef.current;
+      if (!activeSession) return;
+      void recordProgress(
+        nativeCustomAppHeartbeatArgs(activeSession.sessionId),
+      ).catch(() => {});
+      return;
+    }
+    webViewRef.current?.injectJavaScript(EXTRACT_SNIPPET);
+  }, [recordProgress, shouldCapture]);
 
   const injectInteractiveGestureCss = useCallback(() => {
     if (interactive) webViewRef.current?.injectJavaScript(INTERACTIVE_GESTURE_SNIPPET);
@@ -588,12 +755,23 @@ export function ExternalAppHost() {
       if (pendingStartRef.current?.runId === runId) pendingStartRef.current = null;
       if (!sessionId) return;
       try {
-        await finalizeSession({
+        const result = await finalizeSession({
           sessionId,
           ...(markDone ? { markDone: true } : {}),
         });
+        // A Done tap that couldn't record says so plainly (TRA-458). It used
+        // to close as if it had worked while nothing was written.
+        if (markDone && !result.completed && result.refusal) {
+          Alert.alert("Not marked done", result.refusal.message);
+        }
       } catch {
         // Offline at close: the heartbeat row still records useful duration.
+        if (markDone) {
+          Alert.alert(
+            "Not marked done",
+            "Rabbithole couldn't save that. Open it again and tap Done when you're back online.",
+          );
+        }
       }
     },
     [finalizeSession, saveCookies],
@@ -676,11 +854,12 @@ export function ExternalAppHost() {
 
   const closeHost = useCallback(
     (markDone: boolean) => {
+      pauseEmbeddedMedia();
       void saveCookies();
       void finishSession(markDone);
       closeEmbeddedWebContent();
     },
-    [finishSession, saveCookies],
+    [finishSession, saveCookies, pauseEmbeddedMedia],
   );
 
   const confirmClose = useCallback(() => {
@@ -720,11 +899,26 @@ export function ExternalAppHost() {
     setError(null);
     setReady(false);
     setLoading(true);
+    if (customAppToken && rawStaticCustomAppHtml !== null) {
+      setCustomAppAssetAttempt((attempt) => attempt + 1);
+    }
+    if (
+      customAppToken &&
+      nativeStaticCustomAppHtml !== null &&
+      !customAppStateUserId
+    ) {
+      setCustomAppIdentityAttempt((attempt) => attempt + 1);
+    }
     // Drop any stale (single-use) embed token so an authHandoff embed re-mints
     // a fresh one before the WebView reloads — never reuse a consumed token.
     setHandoffUri(null);
     setWebViewKey((value) => value + 1);
-  }, []);
+  }, [
+    customAppStateUserId,
+    customAppToken,
+    nativeStaticCustomAppHtml,
+    rawStaticCustomAppHtml,
+  ]);
 
   const autoLoginInspectorRef = useRef<() => void>(() => {});
 
@@ -856,8 +1050,14 @@ export function ExternalAppHost() {
 
   const visibleError = urlError ?? error;
   const showLoading =
-    open && !visibleError && (!cookiesReady || !handoffReady || loading || !ready);
-  const showCredentialChip = onLogin && !!creds?.username;
+    open &&
+    !visibleError &&
+    (customAppHostPending ||
+      (!useNativeCustomApp && (!cookiesReady || !handoffReady)) ||
+      loading ||
+      !ready);
+  const showCredentialChip =
+    !useNativeCustomApp && onLogin && !!creds?.username;
   const isManipulative = mounted.kind === "interactive" && manipulativeDone !== null;
   const doneLabel =
     mounted.kind === "webActivity" ? "Done" : isManipulative ? "Continue" : "Close";
@@ -901,7 +1101,7 @@ export function ExternalAppHost() {
             <Text style={styles.subtitle} numberOfLines={1}>{mounted.subtitle}</Text>
           ) : null}
         </View>
-        {creds ? (
+        {creds && !useNativeCustomApp ? (
           <ToolbarButton label="Fill saved login" onPress={fillCredentials} colors={colors}>
             <Text style={styles.keyText}>🔑</Text>
           </ToolbarButton>
@@ -927,7 +1127,41 @@ export function ExternalAppHost() {
       ) : null}
 
       <View style={styles.webWrap}>
-        {!urlError && cookiesReady && handoffReady && autoLoginCredentialGateOpen && sourceUri ? (
+        {!urlError &&
+        useNativeCustomApp &&
+        customAppToken &&
+        customAppStateUserId &&
+        nativeStaticCustomApp ? (
+          <CodeArtifactWebView
+            ref={codeArtifactRef}
+            key={`${customAppToken}:${webViewKey}`}
+            scope={{
+              kind: "customApp",
+              token: customAppToken,
+              stateUserId: customAppStateUserId,
+              stateKey: "default",
+            }}
+            content={nativeStaticCustomApp.html}
+            appAssetUrls={nativeStaticCustomApp.assetUrls}
+            onLoadStart={() => {
+              setLoading(true);
+              setError(null);
+              setReady(false);
+            }}
+            onLoadEnd={handleLoadEnd}
+            onError={(message) => {
+              setLoading(false);
+              setReady(false);
+              setError(message);
+            }}
+            style={styles.webView}
+          />
+        ) : !urlError &&
+          useUrlWebView &&
+          cookiesReady &&
+          handoffReady &&
+          autoLoginCredentialGateOpen &&
+          sourceUri ? (
           <EmbeddedWebView
             key={webViewKey}
             ref={webViewRef}

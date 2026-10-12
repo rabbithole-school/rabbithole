@@ -1,0 +1,804 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "path": "Convex deployment",
+      "name": "Convex deployment",
+      "kind": "external",
+      "description": "The Convex backend that runs every query, mutation, action, and HTTP action.",
+      "publishedAs": "Not present. No deployment identity ships.",
+      "unsetBehavior": "The app cannot reach a backend. Nothing loads or saves.",
+      "setBy": "Create a Convex deployment and provision its schema and functions with the Convex CLI."
+    },
+    {
+      "path": "Google OAuth client",
+      "name": "Google OAuth client",
+      "kind": "external",
+      "description": "The Google Cloud OAuth client that powers Google sign-in and Drive access.",
+      "publishedAs": "Not present. No client ships.",
+      "unsetBehavior": "Google sign-in and the Drive picker fail. Optional if you do not use Google.",
+      "setBy": "Create an OAuth client in Google Cloud, then set the GOOGLE_OAUTH_* and NEXT_PUBLIC_GOOGLE_* variables listed below."
+    },
+    {
+      "path": "First platform admin",
+      "name": "First platform admin",
+      "kind": "external",
+      "description": "The first administrator account. Signup is invite-only and closed until one admin exists.",
+      "publishedAs": "Not present. No account ships.",
+      "unsetBehavior": "No one can sign up, so no one can administer the deployment.",
+      "setBy": "Run the admin-key-gated internal mutation users:bootstrapFirstPlatformAdmin with a username, then sign in and set a password."
+    },
+    {
+      "path": "Primary institution",
+      "name": "Primary institution",
+      "kind": "external",
+      "description": "The default institution rows (primary school plus guests) the app expects to exist.",
+      "publishedAs": "Not present. No institution rows ship.",
+      "unsetBehavior": "The app has no institution to place users in until you seed one.",
+      "setBy": "Run the internal mutation institutions:ensureDefaults once against the deployment."
+    },
+    {
+      "path": "NEXT_PUBLIC_CONVEX_URL",
+      "name": "Convex URLs (web)",
+      "kind": "env",
+      "description": "The web app's addresses for the backend: NEXT_PUBLIC_CONVEX_URL for queries and websockets, NEXT_PUBLIC_CONVEX_SITE_URL for HTTP actions.",
+      "publishedAs": "Not present. No deployment URLs ship.",
+      "unsetBehavior": "The web app has no backend to talk to and fails to start.",
+      "setBy": "Set both to your Convex deployment's .convex.cloud and .convex.site URLs before building the web app."
+    },
+    {
+      "path": "SITE_URL",
+      "name": "Backend app origin",
+      "kind": "env",
+      "description": "The absolute origin the Convex backend uses to build links, such as invite and magic-link URLs.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Any backend feature that emits a link throws when it runs; invites and magic links cannot be generated.",
+      "setBy": "Set SITE_URL in the Convex deployment's environment to your web app's public origin."
+    },
+    {
+      "path": "NEXT_PUBLIC_SITE_URL",
+      "name": "Web app origin",
+      "kind": "env",
+      "description": "The web app's own public origin, used for page metadata and canonical links.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Page metadata and absolute links point at the wrong or a missing origin.",
+      "setBy": "Set NEXT_PUBLIC_SITE_URL to your web app's public origin at build time."
+    },
+    {
+      "path": "EXPO_PUBLIC_CONVEX_URL",
+      "name": "Convex URL (native)",
+      "kind": "env",
+      "description": "The iPad app's address for the Convex backend. EXPO_PUBLIC_CONVEX_SITE_URL optionally overrides the HTTP-actions origin.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "The native app throws at startup ('EXPO_PUBLIC_CONVEX_URL is not set') and does not launch.",
+      "setBy": "Set EXPO_PUBLIC_CONVEX_URL (and optionally EXPO_PUBLIC_CONVEX_SITE_URL) in native/.env before building the app."
+    },
+    {
+      "path": "EXPO_PUBLIC_RABBITHOLE_WEB_URL",
+      "name": "Native web origin",
+      "kind": "env",
+      "description": "The web origin the iPad app embeds for webview surfaces and the offline network probe.",
+      "publishedAs": "Not present. The code falls back to https://rabbithole.school.",
+      "unsetBehavior": "Native web embeds and the offline probe silently point at https://rabbithole.school instead of your site.",
+      "setBy": "Set EXPO_PUBLIC_RABBITHOLE_WEB_URL in native/.env to your web app's origin."
+    },
+    {
+      "path": "ANTHROPIC_API_KEY",
+      "name": "Anthropic API key",
+      "kind": "env",
+      "description": "The key for Anthropic Claude, which powers the tutor and the observer analysis.",
+      "publishedAs": "Not present. Secrets are never published.",
+      "unsetBehavior": "The tutor and observer produce no responses.",
+      "setBy": "Set ANTHROPIC_API_KEY in the Convex deployment's environment."
+    },
+    {
+      "path": "OPENAI_API_KEY",
+      "name": "OpenAI API key",
+      "kind": "env",
+      "description": "The key for OpenAI, used for voice transcription (Whisper), text-to-speech, and the charm-layer image generation that draws badges, flair, and manipulative sprites.",
+      "publishedAs": "Not present. Secrets are never published.",
+      "unsetBehavior": "Voice dictation, speech playback, and generated badge/flair/sprite art do not work; text still works.",
+      "setBy": "Set OPENAI_API_KEY in the Convex deployment's environment."
+    },
+    {
+      "path": "GEMINI_API_KEY",
+      "name": "Google Gemini API key",
+      "kind": "env",
+      "description": "The key for Google's Gemini image model, used for tutor-generated illustrations and image annotation.",
+      "publishedAs": "Not present. Secrets are never published.",
+      "unsetBehavior": "Tutor image generation and annotation are disabled; the rest of the app works. Optional.",
+      "setBy": "Set GEMINI_API_KEY in the Convex deployment's environment if you want tutor image generation."
+    },
+    {
+      "path": "JWT_PRIVATE_KEY",
+      "name": "Auth signing key",
+      "kind": "env",
+      "description": "The PKCS#8 RSA signing key @convex-dev/auth uses to sign session tokens.",
+      "publishedAs": "Not present. Secrets are never published.",
+      "unsetBehavior": "Authentication cannot issue sessions; no one can sign in.",
+      "setBy": "Generate an RSA-2048 keypair and set its PKCS#8 private PEM as JWT_PRIVATE_KEY in the Convex deployment's environment."
+    },
+    {
+      "path": "JWKS",
+      "name": "Auth verification keys",
+      "kind": "env",
+      "description": "The JSON Web Key Set @convex-dev/auth uses to verify session tokens.",
+      "publishedAs": "Not present. Secrets are never published.",
+      "unsetBehavior": "Authentication cannot verify sessions; no one stays signed in.",
+      "setBy": "Set JWKS to a JSON Web Key Set containing the RS256 public JWK for JWT_PRIVATE_KEY."
+    },
+    {
+      "path": "PASSKEY_RP_ID",
+      "name": "Passkey relying-party id",
+      "kind": "env",
+      "description": "The WebAuthn relying-party id (a domain) passkeys are bound to.",
+      "publishedAs": "Not present. The code defaults to localhost.",
+      "unsetBehavior": "Passkeys register against localhost and will not work on your real domain.",
+      "setBy": "Set PASSKEY_RP_ID in the Convex deployment's environment to your production domain."
+    },
+    {
+      "path": "PASSKEY_ORIGIN",
+      "name": "Passkey origin",
+      "kind": "env",
+      "description": "The allowed WebAuthn origin(s) for passkey ceremonies, comma-separated.",
+      "publishedAs": "Not present. The code defaults to localhost origins.",
+      "unsetBehavior": "Passkey ceremonies are only accepted from localhost.",
+      "setBy": "Set PASSKEY_ORIGIN in the Convex deployment's environment to your production origin(s)."
+    },
+    {
+      "path": "PASSKEY_RP_NAME",
+      "name": "Passkey display name",
+      "kind": "env",
+      "description": "The human label shown in the operating system's passkey prompt.",
+      "publishedAs": "Not present. The code defaults to 'Rabbithole'.",
+      "unsetBehavior": "The passkey prompt shows 'Rabbithole' instead of your school's name.",
+      "setBy": "Set PASSKEY_RP_NAME in the Convex deployment's environment."
+    },
+    {
+      "path": "AUTH_RESEND_KEY",
+      "name": "Email API key",
+      "kind": "env",
+      "description": "The Resend API key used to send magic-link sign-in email.",
+      "publishedAs": "Not present. Secrets are never published.",
+      "unsetBehavior": "Magic-link email is not sent; the sign-in URL is only logged. Optional if you do not use email sign-in.",
+      "setBy": "Set AUTH_RESEND_KEY in the Convex deployment's environment."
+    },
+    {
+      "path": "AUTH_EMAIL_FROM",
+      "name": "Email sender identity",
+      "kind": "env",
+      "description": "The full From identity for system email, such as 'Rabbithole <no-reply@mail.example.org>'.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Sending system email throws because no sender is configured. Required once email sending is on.",
+      "setBy": "Set AUTH_EMAIL_FROM in the Convex deployment's environment."
+    },
+    {
+      "path": "PARENT_MESSAGE_FROM",
+      "name": "Family-facing sender",
+      "kind": "env",
+      "description": "Optional mailbox for family-facing parent messages; AUTH_EMAIL_FROM_ADDRESS is an accepted alias. Defaults to a family-facing form of AUTH_EMAIL_FROM.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Parent messages are sent from a family-facing form of AUTH_EMAIL_FROM. Optional.",
+      "setBy": "Set PARENT_MESSAGE_FROM (or AUTH_EMAIL_FROM_ADDRESS) in the Convex deployment's environment to override the sender mailbox."
+    },
+    {
+      "path": "NEXT_PUBLIC_MAPBOX_TOKEN",
+      "name": "Mapbox token (web)",
+      "kind": "env",
+      "description": "The Mapbox access token used to render maps in the web app.",
+      "publishedAs": "Not present. Adopters must supply their own; see NOTICE.",
+      "unsetBehavior": "Map surfaces render a tokenless empty state; the rest of the app works. Optional.",
+      "setBy": "Set NEXT_PUBLIC_MAPBOX_TOKEN at build time to your Mapbox token."
+    },
+    {
+      "path": "EXPO_PUBLIC_MAPBOX_TOKEN",
+      "name": "Mapbox token (native)",
+      "kind": "env",
+      "description": "The Mapbox access token used to render maps in the iPad app.",
+      "publishedAs": "Not present. Adopters must supply their own; see NOTICE.",
+      "unsetBehavior": "Native map cards render a tokenless empty state; the rest of the app works. Optional.",
+      "setBy": "Set EXPO_PUBLIC_MAPBOX_TOKEN in native/.env to your Mapbox token."
+    },
+    {
+      "path": "GOOGLE_OAUTH_CLIENT_ID",
+      "name": "Google OAuth client id",
+      "kind": "env",
+      "description": "The OAuth client id for backend Google sign-in and Drive access.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Backend Google OAuth throws when used. Optional if you do not use Google.",
+      "setBy": "Set GOOGLE_OAUTH_CLIENT_ID in the Convex deployment's environment."
+    },
+    {
+      "path": "GOOGLE_OAUTH_CLIENT_SECRET",
+      "name": "Google OAuth client secret",
+      "kind": "env",
+      "description": "The OAuth client secret paired with GOOGLE_OAUTH_CLIENT_ID.",
+      "publishedAs": "Not present. Secrets are never published.",
+      "unsetBehavior": "Backend Google OAuth throws when used. Optional if you do not use Google.",
+      "setBy": "Set GOOGLE_OAUTH_CLIENT_SECRET in the Convex deployment's environment."
+    },
+    {
+      "path": "GOOGLE_OAUTH_REDIRECT_URI",
+      "name": "Google OAuth redirect",
+      "kind": "env",
+      "description": "The redirect URI registered on the Google OAuth client.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Backend Google OAuth throws when used. Optional if you do not use Google.",
+      "setBy": "Set GOOGLE_OAUTH_REDIRECT_URI in the Convex deployment's environment to a URI registered on your OAuth client."
+    },
+    {
+      "path": "GOOGLE_OAUTH_STATE_SECRET",
+      "name": "Google OAuth state secret",
+      "kind": "env",
+      "description": "The secret used to sign the OAuth state parameter.",
+      "publishedAs": "Not present. Falls back to JWT_PRIVATE_KEY.",
+      "unsetBehavior": "The OAuth state is signed with JWT_PRIVATE_KEY instead. Optional.",
+      "setBy": "Set GOOGLE_OAUTH_STATE_SECRET in the Convex deployment's environment to use a dedicated secret."
+    },
+    {
+      "path": "NEXT_PUBLIC_GOOGLE_API_KEY",
+      "name": "Google Picker API key",
+      "kind": "env",
+      "description": "The browser API key the web Google Drive picker uses.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "The web Drive picker cannot open. Optional if you do not use the picker.",
+      "setBy": "Set NEXT_PUBLIC_GOOGLE_API_KEY at build time."
+    },
+    {
+      "path": "NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID",
+      "name": "Google Picker client id",
+      "kind": "env",
+      "description": "The browser OAuth client id the web Google Drive picker uses.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "The web Drive picker cannot authorize. Optional if you do not use the picker.",
+      "setBy": "Set NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID at build time."
+    },
+    {
+      "path": "DRIVE_WEBHOOK_BASE_URL",
+      "name": "Drive webhook base URL",
+      "kind": "env",
+      "description": "The absolute base URL Google Drive push notifications are delivered to.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Drive webhook registration throws when used. Optional if you do not use Drive change notifications.",
+      "setBy": "Set DRIVE_WEBHOOK_BASE_URL in the Convex deployment's environment to an absolute HTTPS URL."
+    },
+    {
+      "path": "GOOGLE_EVENTS_PROJECT",
+      "name": "Google Drive change events",
+      "kind": "env",
+      "description": "The Google Cloud Pub/Sub settings for Drive change events: GOOGLE_EVENTS_PROJECT, GOOGLE_EVENTS_TOPIC, GOOGLE_EVENTS_PUSH_SECRET, and GOOGLE_EVENTS_PUSH_SA.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Drive change-event subscriptions do not work. Optional if you do not use them.",
+      "setBy": "Set GOOGLE_EVENTS_PROJECT, GOOGLE_EVENTS_TOPIC, GOOGLE_EVENTS_PUSH_SECRET, and GOOGLE_EVENTS_PUSH_SA in the Convex deployment's environment."
+    },
+    {
+      "path": "SIMPLEMDM_API_KEY",
+      "name": "SimpleMDM API key",
+      "kind": "env",
+      "description": "The API key for the SimpleMDM device-management integration.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Device-management features stay off; nothing else is affected. Optional.",
+      "setBy": "Set SIMPLEMDM_API_KEY in the Convex deployment's environment if you run a SimpleMDM tenant."
+    },
+    {
+      "path": "SLACK_SIGNING_SECRET",
+      "name": "Slack signing secret",
+      "kind": "env",
+      "description": "The signing secret that verifies inbound Slack event requests.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "The Slack events endpoint returns 503 and the bot stays off; nothing else is affected. Optional.",
+      "setBy": "Set SLACK_SIGNING_SECRET in the Convex deployment's environment if you run the Slack bot."
+    },
+    {
+      "path": "SLACK_BOT_TOKEN",
+      "name": "Slack bot token",
+      "kind": "env",
+      "description": "The bot token used to call the Slack Web API.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Slack calls are skipped and the bot stays off; nothing else is affected. Optional.",
+      "setBy": "Set SLACK_BOT_TOKEN in the Convex deployment's environment if you run the Slack bot."
+    },
+    {
+      "path": "SLACK_WORKSHOP_CHANNEL_ID",
+      "name": "Slack workshop channel",
+      "kind": "env",
+      "description": "The channel id the bot posts workshop notifications to.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Workshop notifications are not posted; nothing else is affected. Optional.",
+      "setBy": "Set SLACK_WORKSHOP_CHANNEL_ID in the Convex deployment's environment if you run the Slack bot."
+    },
+    {
+      "path": "RESEND_WEBHOOK_SECRET",
+      "name": "Resend webhook secret",
+      "kind": "env",
+      "description": "The secret verifying inbound Resend email webhooks for parent messaging.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Inbound parent email is not processed; nothing else is affected. Optional.",
+      "setBy": "Set RESEND_WEBHOOK_SECRET in the Convex deployment's environment if you use inbound parent email."
+    },
+    {
+      "path": "RESEND_RECEIVING_API_KEY",
+      "name": "Resend receiving key",
+      "kind": "env",
+      "description": "The Resend API key used to read inbound parent email.",
+      "publishedAs": "Not present. Secrets are never published.",
+      "unsetBehavior": "Inbound parent email cannot be fetched; nothing else is affected. Optional.",
+      "setBy": "Set RESEND_RECEIVING_API_KEY in the Convex deployment's environment if you use inbound parent email."
+    },
+    {
+      "path": "PARENT_INBOUND_DOMAIN",
+      "name": "Parent inbound domain",
+      "kind": "env",
+      "description": "The email domain inbound parent messages are received on.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Inbound parent email addressing does not resolve; nothing else is affected. Optional.",
+      "setBy": "Set PARENT_INBOUND_DOMAIN in the Convex deployment's environment if you use inbound parent email."
+    },
+    {
+      "path": "PARENT_INBOUND_SECRET",
+      "name": "Parent inbound secret",
+      "kind": "env",
+      "description": "The secret validating inbound parent-message addresses.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "Inbound parent email validation is off; nothing else is affected. Optional.",
+      "setBy": "Set PARENT_INBOUND_SECRET in the Convex deployment's environment if you use inbound parent email."
+    },
+    {
+      "path": "SCHOOL_WHATSAPP_NUMBER",
+      "name": "School WhatsApp number",
+      "kind": "env",
+      "description": "The WhatsApp number parent messages are sent from and received on.",
+      "publishedAs": "Not present.",
+      "unsetBehavior": "WhatsApp parent messaging stays off; nothing else is affected. Optional.",
+      "setBy": "Set SCHOOL_WHATSAPP_NUMBER in the Convex deployment's environment if you use WhatsApp messaging."
+    },
+    {
+      "path": "WHATSAPP_ACCESS_TOKEN",
+      "name": "WhatsApp credentials",
+      "kind": "env",
+      "description": "The WhatsApp Cloud API credential and template settings: WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN, WHATSAPP_TEMPLATE_NAME, and WHATSAPP_TEMPLATE_LANG.",
+      "publishedAs": "Not present. Secrets are never published.",
+      "unsetBehavior": "WhatsApp parent messaging stays off; nothing else is affected. Optional.",
+      "setBy": "Set the WHATSAPP_* variables in the Convex deployment's environment if you use WhatsApp messaging."
+    },
+    {
+      "path": "lib/primaryInstitutionBrand.ts",
+      "name": "Institution brand",
+      "kind": "file",
+      "description": "Your school's name, logo, tagline, and contact details for printed materials.",
+      "publishedAs": "A neutral 'Rabbithole' identity with no logo or contact details.",
+      "unsetBehavior": "Printed forms and branded surfaces show 'Rabbithole' and omit your logo and contacts.",
+      "setBy": "Replace the values in PRIMARY_INSTITUTION_BRAND with your school's identity."
+    },
+    {
+      "path": "convex/lib/primaryInstitutionPromptProfile.ts",
+      "name": "Institution prompt profile",
+      "kind": "file",
+      "description": "Your school's identity as the tutor and observer see it: name, short name, location, and time zone.",
+      "publishedAs": "A neutral 'Rabbithole' profile located nowhere, in UTC.",
+      "unsetBehavior": "The tutor refers to a generic school and reasons about time in UTC.",
+      "setBy": "Replace the values in PRIMARY_INSTITUTION_PROMPT_PROFILE with your school's identity and time zone."
+    },
+    {
+      "path": "convex/lib/primaryInstitutionPrintIdentity.ts",
+      "name": "Institution print identity",
+      "kind": "file",
+      "description": "The issuing authority named in the header of printed materials such as calculator licenses.",
+      "publishedAs": "'Rabbithole' as the issuing authority.",
+      "unsetBehavior": "Printed materials are headed 'Rabbithole' rather than your school's name.",
+      "setBy": "Replace issuingAuthority in PRIMARY_INSTITUTION_PRINT_IDENTITY with your school's name."
+    },
+    {
+      "path": "convex/assets/seal/primaryInstitutionSeal.ts",
+      "name": "Institution seal",
+      "kind": "file",
+      "description": "The base64 PNG seal stamped on printed documents.",
+      "publishedAs": "A transparent one-pixel placeholder.",
+      "unsetBehavior": "Printed documents carry no seal.",
+      "setBy": "Replace primaryInstitutionSealPngBase64 with your school's seal as a base64 PNG."
+    },
+    {
+      "path": "native/app.json",
+      "name": "Native app identity",
+      "kind": "file",
+      "description": "The iPad app's identity: bundle identifier, URL scheme, display name, and icons. Signing (team and credentials) is configured separately in your own build setup, not in this file.",
+      "publishedAs": "Neutral 'Rabbithole' values with the bundle id 'org.rabbithole.app' and no signing configuration.",
+      "unsetBehavior": "You cannot sign or distribute the app under your own identity, and you clash with the placeholder bundle id.",
+      "setBy": "Set ios.bundleIdentifier, scheme, name, and the icon assets in native/app.json, and configure iOS signing in your build pipeline."
+    },
+    {
+      "path": "native/src/lib/universalLinks.ts",
+      "name": "Universal-link hosts",
+      "kind": "value",
+      "description": "The web hostnames whose /open/* links the iPad app claims as Apple universal links.",
+      "publishedAs": "An empty list.",
+      "unsetBehavior": "Universal links are ignored. Everything else works.",
+      "setBy": "Add your hostname to UNIVERSAL_LINK_HOSTS, and to ios.associatedDomains in native/app.json."
+    },
+    {
+      "path": "shared/institutionDay.ts",
+      "name": "Default time zone",
+      "kind": "value",
+      "description": "The fallback calendar time zone for institutions with no time zone set. Sibling fallbacks appear in several schedule and scholar surfaces.",
+      "publishedAs": "'Pacific/Honolulu'.",
+      "unsetBehavior": "Dates and day boundaries are computed in Pacific/Honolulu until you change DEFAULT_TIMEZONE and its siblings.",
+      "setBy": "Set DEFAULT_TIMEZONE in shared/institutionDay.ts to your region, and update the matching fallbacks noted in the file."
+    },
+    {
+      "path": "convex/deviceAppUnlock.ts",
+      "name": "Device-unlock bundle namespace",
+      "kind": "value",
+      "description": "The app bundle-id namespace the device-management unlock logic treats as this deployment's own app.",
+      "publishedAs": "The 'org.rabbithole.app' namespace (base, .dev, .metro).",
+      "unsetBehavior": "Device-unlock recognizes only the 'org.rabbithole.app' namespace, so your own bundle id is not treated as the app.",
+      "setBy": "Set RABBITHOLE_BUNDLE_IDS to match your native/app.json bundle id and its dev/metro variants."
+    },
+    {
+      "path": "convex/lib/guestTutor.ts",
+      "name": "Guest-tutor origins",
+      "kind": "value",
+      "description": "The production and preview origins allowed to call the unauthenticated guest-tutor endpoint.",
+      "publishedAs": "Rabbithole's public origin and generic Rabbithole preview hosts.",
+      "unsetBehavior": "A separate school marketing site cannot call the endpoint directly, though the built-in Rabbithole page still can.",
+      "setBy": "Add your production and preview hosts to GUEST_ORIGIN_PATTERNS and GUEST_PREVIEW_ORIGIN_PATTERNS."
+    },
+    {
+      "path": "convex/lib/homeLayoutTiles.ts",
+      "name": "Home-layout app bundle ids",
+      "kind": "value",
+      "description": "The bundle ids recognized as this deployment's native app when projecting managed-device Home Screen layouts.",
+      "publishedAs": "The generic school.rabbithole bundle namespace.",
+      "unsetBehavior": "Devices built under another bundle namespace do not receive Rabbithole-first tile ordering.",
+      "setBy": "Add your production, development, and Metro bundle ids to RABBITHOLE_BUNDLE_IDS."
+    },
+    {
+      "path": "convex/lib/managedNativeApps.ts",
+      "name": "Managed external apps",
+      "kind": "value",
+      "description": "The bundle ids and URL schemes of third-party iPad apps the device integration can launch.",
+      "publishedAs": "Three fixed third-party apps (a spreadsheet, a robotics app, a stop-motion app).",
+      "unsetBehavior": "The device integration manages exactly those three apps. Change MANAGED_NATIVE_APPS to manage a different set.",
+      "setBy": "Edit MANAGED_NATIVE_APPS (and the matching LSApplicationQueriesSchemes in native/app.json) to your own managed apps."
+    },
+    {
+      "path": "native/modules/dev-client-safety/ios/DevClientSafetyModule.swift",
+      "name": "Dev-client bundle namespace",
+      "kind": "value",
+      "description": "The bundle-id namespace the native dev-client-safety module uses for its stored keys.",
+      "publishedAs": "The 'org.rabbithole.app' namespace.",
+      "unsetBehavior": "The dev-client-safety keys stay under the 'org.rabbithole.app' namespace regardless of your bundle id.",
+      "setBy": "Update the namespace in DevClientSafetyModule.swift to match your bundle id."
+    },
+    {
+      "path": "native/modules/key-capture/ios/KeyCaptureView.swift",
+      "name": "Key-capture bundle namespace",
+      "kind": "value",
+      "description": "The bundle-id namespace the native key-capture module uses for its notification name.",
+      "publishedAs": "The 'org.rabbithole.app' namespace.",
+      "unsetBehavior": "The key-capture notification stays under the 'org.rabbithole.app' namespace regardless of your bundle id.",
+      "setBy": "Update the namespace in KeyCaptureView.swift to match your bundle id."
+    }
+  ],
+  "nonConfiguration": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "reason": "Continuous-integration workflow for the public repository. Housekeeping, not a value to set."
+    },
+    {
+      "path": ".gitignore",
+      "reason": "Repository ignore rules for the public tree. Housekeeping."
+    },
+    {
+      "path": "AGENTS.md",
+      "reason": "The adopter agent guide itself. Documentation, not a configuration point."
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "reason": "Contributor guide for the public repository. Documentation, not configurable."
+    },
+    {
+      "path": "LICENSE",
+      "reason": "License for the public repository. Not configurable here."
+    },
+    {
+      "path": "NOTICE",
+      "reason": "Third-party notices for the public repository. Not configurable here."
+    },
+    {
+      "path": "README.md",
+      "reason": "Top-level readme for the public repository. Documentation, not configurable."
+    },
+    {
+      "path": "SECURITY.md",
+      "reason": "Security policy for the public repository. Documentation, not configurable."
+    },
+    {
+      "path": "app/api/mcp/route.ts",
+      "reason": "MCP route with the private admissions tools removed. The remaining tools register as before. No adopter action required."
+    },
+    {
+      "path": "app/page.tsx",
+      "reason": "First-party landing-page branding, biographies, images, and links removed; public links stay neutral. No adopter action required."
+    },
+    {
+      "path": "app/parent/[[...tab]]/page.tsx",
+      "reason": "First-party admissions tab title removed. No adopter action required."
+    },
+    {
+      "path": "app/school/__tests__/nav.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "app/school/directory/staff/page.tsx",
+      "reason": "Staff-capability description neutralized. No adopter action required."
+    },
+    {
+      "path": "app/school/layout.tsx",
+      "reason": "School-directory layout rebuilt from a neutral template. No deployment-specific value."
+    },
+    {
+      "path": "app/school/nav.tsx",
+      "reason": "School-directory navigation rebuilt from a neutral template. No deployment-specific value."
+    },
+    {
+      "path": "app/school/page.tsx",
+      "reason": "School-directory index rebuilt from a neutral template. No deployment-specific value."
+    },
+    {
+      "path": "app/school/settings/page.tsx",
+      "reason": "School settings with a private print-status surface removed. No adopter action required."
+    },
+    {
+      "path": "components/BehindTheCurtain.tsx",
+      "reason": "Published-prompts links neutralized to the public repository. No adopter action required."
+    },
+    {
+      "path": "components/ParentDashboard.tsx",
+      "reason": "Parent dashboard with private surfaces removed. No adopter action required."
+    },
+    {
+      "path": "components/ScholarFeed.tsx",
+      "reason": "Scholar feed with private surfaces removed. No adopter action required."
+    },
+    {
+      "path": "convex/__tests__/activityResources.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/alerts.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/applicantParent.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/calculatorLicense.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/customAppTools.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/customApps.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/familyOnboarding.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/googleTokenEncryption.test.ts",
+      "reason": "Test file with the private migration case removed. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/guestTutor.test.ts",
+      "reason": "Test file with first-party origin cases removed. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/institutionPromptProfile.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/metaPrompts.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/promptVersion.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/scholarCodeTools.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/__tests__/slackBot.test.ts",
+      "reason": "Test file. Published and runnable; not a configuration point."
+    },
+    {
+      "path": "convex/auth.ts",
+      "reason": "Auth configuration with a private-deployment branch removed. The keys to set are listed as environment entries."
+    },
+    {
+      "path": "convex/calculatorLicenses.ts",
+      "reason": "Calculator-license feature. A first-party physical-print pipeline removed; the rest is published as-is."
+    },
+    {
+      "path": "convex/crons.ts",
+      "reason": "Scheduled jobs with private jobs removed. No adopter action required."
+    },
+    {
+      "path": "convex/externalApps.ts",
+      "reason": "External-app catalog. Private, provider-specific registration removed; the rest is published as-is."
+    },
+    {
+      "path": "convex/http.ts",
+      "reason": "HTTP routes with private endpoints removed. Optional-integration routes stay off until their environment variables are set."
+    },
+    {
+      "path": "convex/improvementTraces.ts",
+      "reason": "Improvement-trace sources. Private trace sources removed; the rest is published as-is."
+    },
+    {
+      "path": "convex/institutions.ts",
+      "reason": "Default-institution seed neutralized to a generic primary. Create institutions with institutions:ensureDefaults (see the external entry); identity lives in the brand and prompt-profile files."
+    },
+    {
+      "path": "convex/lib/aideTools.ts",
+      "reason": "Staff-aide tools. Private, deployment-specific tools were removed; the rest is published as-is."
+    },
+    {
+      "path": "convex/lib/customAppTools.ts",
+      "reason": "Custom-app tools. Private sections removed; the rest is published as-is."
+    },
+    {
+      "path": "convex/lib/googleDocsCommentTools.ts",
+      "reason": "Google Docs comment tools. Published and inert unless the Google OAuth variables are set."
+    },
+    {
+      "path": "convex/lib/guardianFormTools.ts",
+      "reason": "Guardian-form tools. Private sections removed; the rest is published as-is."
+    },
+    {
+      "path": "convex/lib/scholarCodeTools.ts",
+      "reason": "Scholar code-explorer tools. Private sections removed; the rest is published as-is."
+    },
+    {
+      "path": "convex/lib/slackTools.ts",
+      "reason": "Slack bot tools. Published and inert unless the SLACK_* variables are set (see the environment entries)."
+    },
+    {
+      "path": "convex/mcp.ts",
+      "reason": "MCP connector functions with the private admissions tools removed. No adopter action required."
+    },
+    {
+      "path": "convex/metaPrompts.ts",
+      "reason": "Code-explorer repository URL neutralized to the public repository. No adopter action required."
+    },
+    {
+      "path": "convex/practiceDigest.ts",
+      "reason": "Practice digest. A private weekly quality-pulse path removed; the rest is published as-is."
+    },
+    {
+      "path": "convex/schema.ts",
+      "reason": "Data-model source of truth with a few private-feature tables removed. No adopter action required."
+    },
+    {
+      "path": "convex/scholarApps.ts",
+      "reason": "Scholar-app wiring. A private-deployment branch removed; the rest is published as-is."
+    },
+    {
+      "path": "convex/scholarHealthRecords.ts",
+      "reason": "Health-records feature. Published and functional; no deployment configuration required."
+    },
+    {
+      "path": "convex/seed/devPersonas.ts",
+      "reason": "Development seed data. Published for local development; not a configuration point."
+    },
+    {
+      "path": "convex/seed/launchpadDemo.ts",
+      "reason": "Development seed data. Published for local development; not a configuration point."
+    },
+    {
+      "path": "convex/seed/physicalEnvironment.ts",
+      "reason": "Development seed data. Published for local development; not a configuration point."
+    },
+    {
+      "path": "convex/seedData.ts",
+      "reason": "Development seed data. Private records removed; not a configuration point."
+    },
+    {
+      "path": "convex/seeds.ts",
+      "reason": "Development seed data. Private records removed; not a configuration point."
+    },
+    {
+      "path": "convex/simplemdm.ts",
+      "reason": "SimpleMDM device-management module. Published and inert unless SIMPLEMDM_API_KEY is set (see the environment entry)."
+    },
+    {
+      "path": "convex/simulator.ts",
+      "reason": "Curriculum simulator with a private-deployment detection branch removed. No adopter action required."
+    },
+    {
+      "path": "convex/slackBot.ts",
+      "reason": "Slack bot module. Published and inert unless the SLACK_* variables are set (see the environment entries)."
+    },
+    {
+      "path": "convex/slackInteractivity.ts",
+      "reason": "Slack interactivity worker with the private admissions button and modal handlers removed. Inert unless the SLACK_* variables are set (see the environment entries)."
+    },
+    {
+      "path": "convex/takeHomePlans.ts",
+      "reason": "Take-home plans with the private special-delivery print signal disabled. No adopter action required."
+    },
+    {
+      "path": "convex/users.ts",
+      "reason": "User functions with a private-deployment branch removed. Create the first admin with users:bootstrapFirstPlatformAdmin (see the external entry)."
+    },
+    {
+      "path": "eslint.config.mjs",
+      "reason": "ESLint configuration with a private repository-specific rule removed. No adopter action required."
+    },
+    {
+      "path": "lib/geomap/historicalBasemaps.ts",
+      "reason": "Local-geography curriculum overlays neutralized to generic values. No adopter action required."
+    },
+    {
+      "path": "lib/geomap/registry/keys.ts",
+      "reason": "Local-geography overlay identifiers neutralized to generic values. No adopter action required."
+    },
+    {
+      "path": "lib/passkeyClient.ts",
+      "reason": "A legacy passkey origin specific to the originating school's migration, neutralized to an inert placeholder. Not relevant to a new deployment."
+    },
+    {
+      "path": "native/metro.config.js",
+      "reason": "Metro bundler configuration for the native app. Housekeeping."
+    },
+    {
+      "path": "native/package.json",
+      "reason": "Native app dependency and script manifest, regenerated for the published tree. Housekeeping."
+    },
+    {
+      "path": "native/src/app/how-it-works.tsx",
+      "reason": "Native explainer copy neutralized. No adopter action required."
+    },
+    {
+      "path": "native/src/components/ExternalAppHost.tsx",
+      "reason": "External-app embedding. Private sections removed; the rest is published as-is."
+    },
+    {
+      "path": "native/src/lib/externalAppBundledIcons.ts",
+      "reason": "External-app icon bundle. Private icons removed; the rest is published as-is."
+    },
+    {
+      "path": "native/src/lib/externalAppIcon.ts",
+      "reason": "External-app icon resolution. Private sections removed; the rest is published as-is."
+    },
+    {
+      "path": "native/vendor/geomap/historicalBasemaps.ts",
+      "reason": "Vendored local-geography overlays neutralized to generic values. No adopter action required."
+    },
+    {
+      "path": "next.config.js",
+      "reason": "Next.js build configuration. The published template carries no deployment-specific hosts."
+    },
+    {
+      "path": "package.json",
+      "reason": "Root dependency and script manifest, regenerated without private packages and scripts. Housekeeping."
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "reason": "Lockfile regenerated for the published dependency set. Housekeeping."
+    },
+    {
+      "path": "pnpm-workspace.yaml",
+      "reason": "Workspace layout for the published tree. Housekeeping."
+    },
+    {
+      "path": "shared/tutorQualityRubric.ts",
+      "reason": "A single rubric phrase neutralized to a generic wording. No adopter action required."
+    }
+  ]
+}

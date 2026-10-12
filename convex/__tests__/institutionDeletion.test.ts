@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
+import { sha256Hex } from "../lib/oauthCrypto";
 
 // Why this file: institution cascade-delete is the most destructive operation
 // in the product and is IRREVERSIBLE, so these tests pin the whole safety
@@ -994,5 +995,241 @@ describe("institution cascade-delete — blast radius", () => {
     expect(done.job!.status).toBe("completed");
     expect(done.institution).toBeNull();
     expect(done.remainingScholars).toBe(0);
+  });
+});
+
+// TRA-360: the device tables are institution-scoped, so the cascade must reach
+// them — once the institution row is gone every per-institution staff gate
+// fails closed and a stranded row (and the iPad behind it) is unreachable.
+describe("institution cascade-delete — devices", () => {
+  test("claimed managed iPad, manual pairing, and approved request are signed out and removed; the iPad's claim no longer exchanges; another school's devices untouched", async () => {
+    const t = convexTest(schema, modules);
+    const { moli, kona } = await seedInstitutions(t);
+    const now = Date.now();
+    const konaClaimToken = `rhc_${"a".repeat(64)}`;
+    const moliClaimToken = `rhc_${"b".repeat(64)}`;
+    const approvedVerifier = "v".repeat(43);
+
+    const seeded = await t.run(async (ctx) => {
+      // A scholar who SURVIVES the deletion (also enrolled at Moli): Phase 1
+      // keeps their account and auth sessions, so only the device cascade can
+      // sign their Kona iPad out.
+      const survivor = await ctx.db.insert("users", {
+        username: "two-school-kid",
+        role: "scholar",
+        institutionId: kona,
+      });
+      await ctx.db.insert("memberships", { userId: survivor, role: "scholar", institutionId: kona });
+      await ctx.db.insert("memberships", { userId: survivor, role: "scholar", institutionId: moli });
+      // A Kona-only scholar (deleted in Phase 1) with a manually paired iPad.
+      const konaOnly = await ctx.db.insert("users", {
+        username: "kona-only-kid",
+        role: "scholar",
+        institutionId: kona,
+      });
+      await ctx.db.insert("memberships", { userId: konaOnly, role: "scholar", institutionId: kona });
+      const moliKid = await ctx.db.insert("users", {
+        username: "moli-device-kid",
+        role: "scholar",
+        institutionId: moli,
+      });
+      await ctx.db.insert("memberships", { userId: moliKid, role: "scholar", institutionId: moli });
+
+      const claim = async (
+        institutionId: Id<"institutions">,
+        serial: string,
+        scholarId: Id<"users"> | undefined,
+        claimTokenHash: string | undefined,
+      ) =>
+        await ctx.db.insert("managedDeviceClaims", {
+          institutionId,
+          serial,
+          scholarId,
+          claimTokenHash,
+          claimState: scholarId ? "unclaimed" : "unassigned",
+          createdBy: scholarId ?? survivor,
+          createdAt: now,
+          updatedAt: now,
+          claimIssuedAt: now,
+          rotationCount: 0,
+          claimCount: 0,
+        });
+      const konaClaim = await claim(kona, "KONA0001", survivor, await sha256Hex(konaClaimToken));
+      await claim(kona, "KONA0002", undefined, undefined); // roster-only
+      const moliClaim = await claim(moli, "MOLI0001", moliKid, await sha256Hex(moliClaimToken));
+
+      // Manual pairing at Kona, with its live device session.
+      const manualSession = await ctx.db.insert("authSessions", {
+        userId: konaOnly,
+        expirationTime: now + 60 * 60 * 1000,
+      });
+      const manualBinding = await ctx.db.insert("pairedDevices", {
+        institutionId: kona,
+        deviceId: "kona-manual-ipad",
+        scholarId: konaOnly,
+        pairedAt: now,
+        pairedBy: konaOnly,
+        authSessionId: manualSession,
+      });
+      await ctx.db.insert("pairedDeviceAuthSessions", {
+        pairedDeviceId: manualBinding,
+        authSessionId: manualSession,
+        scholarId: konaOnly,
+        attachedAt: now,
+      });
+
+      // An approved request still inside its exchange window, for the
+      // surviving scholar — left behind, it could re-bind a device at Kona.
+      const approvedRequest = await ctx.db.insert("devicePairingRequests", {
+        code: "KONAAPPR",
+        verifierHash: await sha256Hex(approvedVerifier),
+        deviceId: "kona-new-ipad",
+        status: "approved",
+        createdAt: now,
+        expiresAt: now + 5 * 60 * 1000,
+        scholarId: survivor,
+        institutionId: kona,
+        approvedBy: survivor,
+        approvedAt: now,
+        approvalExpiresAt: now + 60 * 1000,
+      });
+      const moliRequest = await ctx.db.insert("devicePairingRequests", {
+        code: "MOLIEXCH",
+        verifierHash: "moli-hash",
+        deviceId: "moli-new-ipad",
+        status: "exchanged",
+        createdAt: now,
+        expiresAt: now + 5 * 60 * 1000,
+        scholarId: moliKid,
+        institutionId: moli,
+        exchangedAt: now,
+      });
+      await ctx.db.insert("simpleMdmDeviceSnapshots", {
+        institutionId: kona,
+        serial: "KONA0001",
+        updatedAt: now,
+      });
+
+      return {
+        survivor,
+        konaClaim,
+        moliClaim,
+        manualBinding,
+        manualSession,
+        approvedRequest,
+        moliRequest,
+      };
+    });
+
+    // The real motion, as a positive control: both iPads exchange their MDM
+    // claims, which writes the binding + device session + session log.
+    const konaExchange = await t.mutation(
+      internal.managedDeviceClaims.consumeManagedClaim,
+      { claimToken: konaClaimToken, deviceId: "kona-managed-ipad" },
+    );
+    expect(konaExchange?.userId).toBe(seeded.survivor);
+    const moliExchange = await t.mutation(
+      internal.managedDeviceClaims.consumeManagedClaim,
+      { claimToken: moliClaimToken, deviceId: "moli-managed-ipad" },
+    );
+    expect(moliExchange).not.toBeNull();
+
+    const adminId = await t.run((ctx) =>
+      ctx.db.insert("users", { username: "pa", role: "platform_admin" }),
+    );
+    const as = await withUser(t, adminId);
+    const preview = await as.query(api.institutionDeletion.previewDeletion, {
+      institutionId: kona,
+    });
+    // Two managed roster rows + one manual pairing (the managed binding is the
+    // same physical iPad as its roster row).
+    expect(preview.footprint.devices).toBe(3);
+
+    const { jobId } = await as.mutation(api.institutionDeletion.requestDeletion, {
+      institutionId: kona,
+      typedName: "Kona Tutoring",
+    });
+    await driveToCompletion(t, jobId);
+
+    const after = await t.run(async (ctx) => ({
+      konaClaims: await ctx.db
+        .query("managedDeviceClaims")
+        .withIndex("by_institution", (q) => q.eq("institutionId", kona))
+        .collect(),
+      konaBindings: await ctx.db
+        .query("pairedDevices")
+        .withIndex("by_institution", (q) => q.eq("institutionId", kona))
+        .collect(),
+      konaRequests: await ctx.db
+        .query("devicePairingRequests")
+        .withIndex("by_institution", (q) => q.eq("institutionId", kona))
+        .collect(),
+      konaSnapshots: await ctx.db
+        .query("simpleMdmDeviceSnapshots")
+        .withIndex("by_institution", (q) => q.eq("institutionId", kona))
+        .collect(),
+      survivor: await ctx.db.get(seeded.survivor),
+      konaDeviceSession: await ctx.db.get(konaExchange!.sessionId),
+      konaSessionLog: await ctx.db
+        .query("pairedDeviceAuthSessions")
+        .withIndex("by_claim_generation", (q) =>
+          q.eq("managedDeviceClaimId", seeded.konaClaim),
+        )
+        .collect(),
+      manualSession: await ctx.db.get(seeded.manualSession),
+      manualSessionLog: await ctx.db
+        .query("pairedDeviceAuthSessions")
+        .withIndex("by_paired_device", (q) => q.eq("pairedDeviceId", seeded.manualBinding))
+        .collect(),
+      moliClaim: await ctx.db.get(seeded.moliClaim),
+      moliBindings: await ctx.db
+        .query("pairedDevices")
+        .withIndex("by_institution", (q) => q.eq("institutionId", moli))
+        .collect(),
+      moliDeviceSession: await ctx.db.get(moliExchange!.sessionId),
+      moliRequest: await ctx.db.get(seeded.moliRequest),
+      job: await ctx.db.get(jobId),
+    }));
+
+    // Nothing references the deleted school.
+    expect(after.konaClaims).toEqual([]);
+    expect(after.konaBindings).toEqual([]);
+    expect(after.konaRequests).toEqual([]);
+    expect(after.konaSnapshots).toEqual([]);
+    expect(after.job!.status).toBe("completed");
+    expect(after.job!.counts).toMatchObject({
+      managedDeviceClaims: 2,
+      devicePairingRequests: 1,
+    });
+
+    // The surviving scholar's account lives on, but the Kona iPad's session is
+    // gone — so the app drops to its sign-in wall and re-tries its claim...
+    expect(after.survivor).not.toBeNull();
+    expect(after.konaDeviceSession).toBeNull();
+    expect(after.konaSessionLog).toEqual([]);
+    expect(after.manualSession).toBeNull();
+    expect(after.manualSessionLog).toEqual([]);
+    // ...which the exchange now refuses, exactly as for a revoked claim, so the
+    // iPad lands on the manual sign-in/pairing screen.
+    expect(
+      await t.mutation(internal.managedDeviceClaims.consumeManagedClaim, {
+        claimToken: konaClaimToken,
+        deviceId: "kona-managed-ipad",
+      }),
+    ).toBeNull();
+    // The approved request can no longer re-bind a device at the dead school.
+    expect(
+      await t.mutation(internal.devicePairing.consumePairingExchange, {
+        requestId: seeded.approvedRequest,
+        verifier: approvedVerifier,
+      }),
+    ).toBeNull();
+
+    // Moli's devices are untouched.
+    expect(after.moliClaim?.claimState).toBe("claimed");
+    expect(after.moliBindings).toHaveLength(1);
+    expect(after.moliBindings[0].managedDeviceClaimId).toBe(seeded.moliClaim);
+    expect(after.moliDeviceSession).not.toBeNull();
+    expect(after.moliRequest).not.toBeNull();
   });
 });

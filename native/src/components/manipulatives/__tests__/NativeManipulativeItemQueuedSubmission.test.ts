@@ -21,6 +21,7 @@ const { items, passthrough } = vi.hoisted(() => ({
 
 vi.mock("react-native", () => ({
   ActivityIndicator: passthrough,
+  Keyboard: { dismiss: vi.fn() },
   Pressable: ({
     children,
     onPress,
@@ -35,9 +36,14 @@ vi.mock("react-native", () => ({
   ScrollView: passthrough,
   StyleSheet: { create: <T,>(styles: T) => styles },
   Text: passthrough,
-  View: passthrough,
+  // Keeps props (unlike `passthrough`) so the stage wrapper's `onTouchStart`
+  // — the manipulative's first-interaction clock (TRA-221) — is reachable.
+  View: ({ children, ...props }: { children?: ReactNode }) =>
+    createElement("view", props, children),
 }));
 vi.mock("react-native-gesture-handler", () => ({ ScrollView: passthrough }));
+vi.mock("react-native-reanimated", () => ({ default: { View: passthrough } }));
+vi.mock("@/hooks/useKeyboardInset", () => ({ useKeyboardInset: () => ({ style: {} }) }));
 vi.mock("convex/react", () => ({
   useMutation: () => vi.fn(),
   useQuery: (_query: unknown, { itemId }: { itemId: string }) => items.get(itemId),
@@ -104,11 +110,13 @@ vi.mock("@/lib/externalAppHost", () => ({ openManipulativeEmbed: vi.fn() }));
 vi.mock("../kit", async () => {
   const { createContext } = await vi.importActual<typeof import("react")>("react");
   return {
+    ManipulativeIdleContext: createContext(true),
     ManipulativeScrollContext: createContext(null),
     successNotify: vi.fn(),
     warningNotify: vi.fn(),
   };
 });
+vi.mock("@/components/AppTextInput", () => ({ AppTextInput: passthrough }));
 // Calls onStateChange once on mount so Done becomes enabled — the mock in
 // NativeManipulativeItem.test.ts deliberately never does this (that file
 // never presses Done at all).
@@ -141,6 +149,7 @@ const SCHOLAR = "scholar-1" as never;
 // ElementType union recognizes, so findAllByType/findByType need this same
 // escape hatch the file already used for "verdict-stamp".
 const PRESSABLE = "pressable" as unknown as ElementType;
+const VIEW = "view" as unknown as ElementType;
 
 function item(prompt = "solve") {
   return {
@@ -184,6 +193,15 @@ function press(tree: ReturnType<typeof create>, label: string) {
     .find((candidate) => candidate.props.accessibilityLabel === label);
   if (!node) throw new Error(`No pressable found for "${label}"`);
   node.props.onPress();
+}
+
+/** Simulate the scholar's first touch on the manipulative stage. */
+function touchStage(tree: ReturnType<typeof create>) {
+  const stage = tree.root
+    .findAllByType(VIEW)
+    .find((candidate) => typeof candidate.props.onTouchStart === "function");
+  if (!stage) throw new Error("No stage wrapper with onTouchStart found");
+  stage.props.onTouchStart();
 }
 
 describe("NativeManipulativeItem (parent-routed submission)", () => {
@@ -305,5 +323,63 @@ describe("NativeManipulativeItem (parent-routed submission)", () => {
     expect(submitAnswerOverride.mock.calls[1][0].clientEventId).toBeUndefined();
 
     await act(async () => tree.unmount());
+  });
+
+  // TRA-221: a drag/tap manipulative never emits a keystroke, so its
+  // render→first-interaction latency comes from the stage's first touch.
+  it("stamps firstKeyMs from the first touch on the stage, and omits it untouched", async () => {
+    let now = 10_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const submitAnswerOverride = mockSubmitAnswerOverride().mockImplementation(async () => ({
+      status: "graded" as const,
+      result: gradedResult(true),
+    }));
+
+    // Untouched: Done straight away → elapsed only, no first-interaction reading.
+    items.set("m4", item());
+    let untouched!: ReturnType<typeof create>;
+    await act(async () => {
+      untouched = create(
+        createElement(NativeManipulativeItem, {
+          itemId: "m4",
+          scholarId: SCHOLAR,
+          shell: {} as never,
+          isLast: false,
+          submitAnswerOverride,
+        }),
+      );
+    });
+    now = 12_000;
+    await act(async () => press(untouched, "Done"));
+    expect(submitAnswerOverride.mock.calls[0][0]).toMatchObject({ elapsedMs: 2_000 });
+    expect(submitAnswerOverride.mock.calls[0][0].firstKeyMs).toBeUndefined();
+    await act(async () => untouched.unmount());
+
+    // Touched: the FIRST touch arms the clock; later touches don't move it.
+    now = 20_000;
+    items.set("m5", item());
+    let touched!: ReturnType<typeof create>;
+    await act(async () => {
+      touched = create(
+        createElement(NativeManipulativeItem, {
+          itemId: "m5",
+          scholarId: SCHOLAR,
+          shell: {} as never,
+          isLast: false,
+          submitAnswerOverride,
+        }),
+      );
+    });
+    now = 21_500;
+    act(() => touchStage(touched));
+    now = 23_000;
+    act(() => touchStage(touched));
+    now = 25_000;
+    await act(async () => press(touched, "Done"));
+    expect(submitAnswerOverride.mock.calls[1][0]).toMatchObject({
+      firstKeyMs: 1_500,
+      elapsedMs: 5_000,
+    });
+    await act(async () => touched.unmount());
   });
 });

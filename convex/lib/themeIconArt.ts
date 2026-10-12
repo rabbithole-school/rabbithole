@@ -1,23 +1,44 @@
 // Generative manipulative theme-icon art — the prompt builder for the charm
 // layer. A manipulative's `theme.fill.label` (a short noun) becomes a single,
-// bold, flat cartoon object rendered on the SAME flat chroma-green screen as
-// quest badges, so `removeGreenScreen` (lib/chromaImage.ts) can strip it to a
-// transparent PNG. See convex/manipulativeThemeIconActions.ts.
+// bold, flat cartoon object on a genuinely transparent background, returned as
+// alpha by the model itself (convex/lib/openaiImage.ts) rather than keyed out
+// of a chroma screen. See convex/manipulativeThemeIconActions.ts.
 //
 // Distinct house style from badges on purpose: a badge is an ornate patch shown
 // large; a FILL ICON is tiled small (~30–48px) inside a grid cell, so it must
 // read as ONE bold silhouette with a flat interior and a clean edge — no fine
 // detail, no scene, no ground shadow.
 
-import { CHROMA_KEY_RGB } from "./badgeArt";
-
-const CHROMA_BG = `a solid, perfectly flat, uniform chroma-key green screen background (pure green, RGB ${CHROMA_KEY_RGB.join(
-  ", ",
-)} / hex #00B140), with absolutely no gradient, no glow, no vignette, and NO drop shadow beneath the object — every pixel around the object must be that one identical green so the background can be removed cleanly`;
-const FLAIR_CHROMA_BG = "#FF00FF";
+// Every charm sprite is composited over a grid cell, an isometric tile, or a
+// chip, so it needs REAL alpha — which the model now returns directly
+// (`background: "transparent"`, lib/openaiImage.ts). What the prompt must still
+// do is stop the model from PAINTING a backdrop into that alpha: left to
+// itself it adds a ground plane and a contact shadow, and a shadow baked into a
+// tiled sprite reads as dirt on the grid.
+const TRANSPARENT_BG = `a fully TRANSPARENT background — no backdrop color, no painted checkerboard, no scenery, no ground plane, no drop shadow, no reflection, and no glow or vignette; every pixel that is not part of the object itself must be empty`;
 
 /** Hard cap on a label so a stray long string can't blow up the prompt. */
 export const MAX_THEME_LABEL_LEN = 60;
+export type AppCharmStyle = "flat" | "isometric";
+
+const APP_CHARM_FLAT_PREFIX = "app:flat:";
+const APP_CHARM_ISOMETRIC_PREFIX = "world:app asset:";
+
+export function appCharmThemeLabel(
+  name: string,
+  style: AppCharmStyle,
+): string {
+  const subject = themeIconSubject(name).slice(0, 36);
+  return `${style === "isometric" ? APP_CHARM_ISOMETRIC_PREFIX : APP_CHARM_FLAT_PREFIX}${subject}`;
+}
+
+export function isAppCharmThemeLabel(label: string): boolean {
+  const normalized = label.trim().toLowerCase();
+  return (
+    normalized.startsWith(APP_CHARM_FLAT_PREFIX) ||
+    normalized.startsWith(APP_CHARM_ISOMETRIC_PREFIX)
+  );
+}
 
 /**
  * The human SUBJECT noun for a cache label. Cache keys are namespaced so a
@@ -72,7 +93,7 @@ export function buildThemeIconPrompt(label: string): string {
     `Sprite level of detail: a bold clean silhouette with a single clear outline and flat, cheerful fill colors (just a few colors); chunky simple shapes with minimal interior detail so it reads clearly when rendered very small (about 32–64 pixels wide). Sticker / emoji / game-token feel, NOT a detailed illustration and NOT a scene.`,
     `No background scenery, no ground, no shadow, no reflection.`,
     `IMPORTANT: the image must contain NO text, NO letters, NO words, and NO numbers — it is a purely pictorial icon.`,
-    `Render it on ${CHROMA_BG}.`,
+    `Render it on ${TRANSPARENT_BG}.`,
   ].join(" ");
 }
 
@@ -115,9 +136,9 @@ STRICT COMPOSITION:
 - draw only the subject; do not add a border around the canvas
 
 BACKGROUND:
-- completely flat, uniform chroma magenta ${FLAIR_CHROMA_BG}
-- no shadow, glow, ground plane, texture, or color variation in the background
-- preserve a clean hard edge between the outlined icon and the magenta screen
+- fully transparent — no backdrop color, no painted checkerboard, no panel or tile behind the icon
+- no shadow, glow, ground plane, or texture behind or beneath the icon
+- the near-black outline is the outermost mark; everything outside it is empty
 
 Final self-check: at 36px, a child should identify "${subject}" immediately from its silhouette and 1–3 bold interior cues.`;
 }
@@ -175,6 +196,6 @@ export function buildSpeciesSpritePrompt(
     `Sprite level of detail: a bold clean silhouette with a single clear outline and flat, cheerful fill colors (just a few colors); chunky simple shapes with minimal interior detail so it reads clearly when rendered very small (about 32–64 pixels wide). Sticker / emoji / game-token feel, NOT a detailed illustration.`,
     `No background scenery, no ground, no shadow, no reflection${notBackground}.`,
     `IMPORTANT: the image must contain NO text, NO letters, NO words, and NO numbers — it is a purely pictorial sprite.`,
-    `Render it on ${CHROMA_BG}.`,
+    `Render it on ${TRANSPARENT_BG}.`,
   ].join(" ");
 }

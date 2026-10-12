@@ -13,6 +13,7 @@ import { SymbolView } from "expo-symbols";
 import * as Haptics from "expo-haptics";
 
 import { useUnitProgress } from "@/hooks/useUnitProgress";
+import { findActivitySession } from "@/lib/activitySession";
 import { api, type Id } from "@/lib/convex";
 import { openWebActivity } from "@/lib/externalAppHost";
 import { openGameActivity } from "@/lib/gameHost";
@@ -24,6 +25,12 @@ type Props = {
   unitId?: Id<"units"> | null;
   activityId?: Id<"activities"> | null;
   assignmentId?: Id<"assignments"> | null;
+  /**
+   * The session screen's `shouldSkipLearnerQueries` verdict. `sessions.list`
+   * with `asLearner` throws "A learner membership is required" for staff, so a
+   * teacher's test drive must not mount it (TRA-321).
+   */
+  skipLearnerQueries: boolean;
 };
 
 /**
@@ -37,6 +44,7 @@ export function SessionActivityNav({
   unitId,
   activityId,
   assignmentId,
+  skipLearnerQueries,
 }: Props) {
   const router = useRouter();
   const convex = useConvex();
@@ -51,8 +59,13 @@ export function SessionActivityNav({
   });
 
   // Load active sessions so we can jump to an existing session for an adjacent
-  // activity instead of always creating a new one.
-  const activeSessions = useQuery(api.sessions.list, { asLearner: true });
+  // activity instead of always creating a new one. Skipped with no unit (the
+  // nav renders nothing) and wherever the session screen skips its own
+  // learner-only queries.
+  const activeSessions = useQuery(
+    api.sessions.list,
+    unitId && !skipLearnerQueries ? { asLearner: true } : "skip",
+  );
 
   const { flatActivities } = progress;
 
@@ -72,18 +85,6 @@ export function SessionActivityNav({
       ? flatActivities[currentIdx + 1]
       : null;
   const showUpNext = currentItem.isCompleted && !!progress.nextIncompleteOnlineActivity;
-
-  // activityId → sessionId map from the scholar's existing sessions.
-  const sessionByActivity = new Map<string, Id<"sessions">>();
-  for (const s of activeSessions ?? []) {
-    const sameAssignment = assignmentId
-      ? String(s.assignmentId ?? "") === String(assignmentId)
-      : s.assignmentId === undefined;
-    if (s.activityId && sameAssignment) {
-      // list returns `{ ...session, id: session._id }` — use `id` as the Id.
-      sessionByActivity.set(String(s.activityId), s.id as Id<"sessions">);
-    }
-  }
 
   const goTo = async (
     targetActivity: (typeof flatActivities)[number]["activity"],
@@ -129,7 +130,11 @@ export function SessionActivityNav({
         });
         return;
       }
-      const existing = sessionByActivity.get(String(targetActivity._id));
+      const existing = findActivitySession(
+        activeSessions,
+        targetActivity._id,
+        assignmentId,
+      );
       if (existing) {
         // Replace, don't push: stepping between a unit's activities swaps the
         // current one on the stack instead of nesting home > act1 > act2, so a

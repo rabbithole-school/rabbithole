@@ -1,6 +1,7 @@
 // The Workshop's staff-facing aide tools (review/scholar-meta-prep-time-
-// plan.html §§5, 6). Three tools — read the idea queue, reply to an idea, and
-// post a "What's new" changelog entry (with editorial credit) — composed into
+// plan.html §§5, 6). Four tools — read the idea queue, reply to an idea, start
+// a new Workshop thread with one scholar, and post a "What's new" changelog
+// entry (with editorial credit) — composed into
 // assembleCurriculumTools (lib/aideTools.ts), so every surface built on it (the
 // in-app aide, the Slack bot, the MCP connector) gets them from one gating
 // point.
@@ -23,6 +24,10 @@ import {
   extendedEducationOmittedNote,
 } from "./scholarParticipationTooling";
 import type { AideEmit } from "./aideStream";
+import { matchScholarByName } from "./scholarReadTools";
+import { MESSAGE_EDIT_WINDOW_MS } from "../../shared/messageEditWindow";
+
+const EDIT_WINDOW_MINUTES = Math.round(MESSAGE_EDIT_WINDOW_MS / 60_000);
 
 /** Human "how long ago" label for a filed idea (§6's digest shows age). */
 function ageLabel(createdAt: number): string {
@@ -136,6 +141,9 @@ export async function makeSuggestionTools(
         // was sent as-is.
         ...(r.refined ? { refined: r.refined } : {}),
         answered: r.answered,
+        // A scholar's own bug report (its triage lives in the bug-report
+        // channel); replying here is the follow-up the scholar sees.
+        ...(r.bugReport ? { bugReport: true } : {}),
         ...(r.archivedAt ? { archivedByScholar: true } : {}),
         age: ageLabel(r.createdAt),
         ...(r.extendedEducation ? { extendedEducation: true } : {}),
@@ -178,6 +186,89 @@ export async function makeSuggestionTools(
         ok: true,
         message: `Done — replied to "${result.title}". ${result.scholarFirstName} will see it the next time they open the Workshop, and it stays on their board until THEY archive it.`,
       });
+    },
+  });
+
+  const startThreadTool = betaTool({
+    name: "start_workshop_thread",
+    description:
+      `Start a NEW Workshop conversation with ONE scholar, posted as you (by name). Use it for a fresh topic not tied to any idea — e.g. an apology after an outage. To answer an idea the scholar filed, use respond_to_suggestion instead. The scholar sees it in their Workshop with an unread badge (no push or email) and can reply. It is read by a CHILD: keep it short, kind, plain and age-appropriate, in the staff member's own voice; confirm the wording first unless they gave you the exact words. You can edit or withdraw it for ${EDIT_WINDOW_MINUTES} minutes from the Messages page (link in the result).`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        scholarName: {
+          type: "string" as const,
+          description:
+            "The scholar's name (case-insensitive partial match; must match exactly one scholar).",
+        },
+        body: {
+          type: "string" as const,
+          description: "The message the scholar reads.",
+        },
+      },
+      required: ["scholarName", "body"] as const,
+    },
+    run: async (input: { scholarName: string; body: string }) => {
+      // Strict resolver: posting to the wrong child is not undoable by the
+      // reader, so zero or several matches is refused, never guessed.
+      const { scholars } = await ctx.runQuery(
+        internal.curriculumAssistant.listScholarsInternal,
+        {
+          includeProgramGuests: true,
+          ...(allowedScholarIds ? { allowedScholarIds } : {}),
+        },
+      );
+      const visible = opts.allowedScholarIds
+        ? scholars.filter((s) => opts.allowedScholarIds!.has(s.id as Id<"users">))
+        : scholars;
+      const match = input.scholarName.trim()
+        ? matchScholarByName(input.scholarName, visible)
+        : ({ kind: "none" } as const);
+      if (match.kind === "none") {
+        return JSON.stringify({
+          ok: false,
+          error: `No scholar found matching "${input.scholarName}". Nothing was sent.`,
+        });
+      }
+      if (match.kind === "ambiguous") {
+        return JSON.stringify({
+          ok: false,
+          error: `"${input.scholarName}" matches more than one scholar (${match.candidates
+            .map((c) => c.name)
+            .join(", ")}). Ask which one; nothing was sent.`,
+        });
+      }
+      try {
+        const result = await ctx.runMutation(
+          internal.scholarMessages.startWorkshopThreadForCaller,
+          {
+            callerUserId,
+            scholarId: match.scholar.id as Id<"users">,
+            body: input.body,
+            allowedScholarIds,
+            scholarLensResolved,
+          },
+        );
+        emit({
+          toolComplete: {
+            name: "start_workshop_thread",
+            result: `Started a Workshop thread with ${result.scholarFirstName}`,
+          },
+        });
+        return JSON.stringify({
+          ok: true,
+          threadId: result.threadId,
+          posted: result.body,
+          link: result.threadUrl,
+          editableUntil: new Date(result.editableUntil).toISOString(),
+          message: `Sent to ${result.scholarFirstName}'s Workshop. They'll see an unread badge next time they open Rabbithole. You can edit or withdraw it from the link until ${new Date(result.editableUntil).toISOString()} (${EDIT_WINDOW_MINUTES} minutes).`,
+        });
+      } catch (err) {
+        return JSON.stringify({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     },
   });
 
@@ -252,7 +343,7 @@ export async function makeSuggestionTools(
     },
   });
 
-  return [listSuggestionsTool, respondTool, createWhatsNewTool];
+  return [listSuggestionsTool, respondTool, startThreadTool, createWhatsNewTool];
 }
 
 /**
@@ -267,7 +358,7 @@ export async function makeSuggestionTools(
 export const SUGGESTION_SYSTEM_PROMPT_SECTION = `
 ## Responding to Workshop ideas (from scholars, about Rabbithole itself)
 
-Scholars file ideas about Rabbithole in "the Workshop." Use \`list_scholar_suggestions\` to read the queue (filter by scholar, or by \`filter\`: needs_reply / answered / archived) and \`respond_to_suggestion\` to reply. Your reply is a real message a CHILD reads, delivered by the staff member's name ("From Ms. Lehua") — so keep it warm, honest, plain, and short, in that staff member's own voice; confirm the wording before sending unless they've given you the exact words. You are a COURIER, not a decision-maker: relay the human's response, never attach a verdict or good/bad label (there is no such field), and never promise a feature will ship ("I'll pass this along" / "this made us think" is the ceiling; "we'll build that" is not yours to say). Replying does not close or archive anything — an idea stays on the scholar's board until the SCHOLAR archives it, which is deliberate: the five-open limit is a prioritization lesson aimed at them, so they hold the lever. Never say or imply that your reply closed it.
+Scholars file ideas about Rabbithole in "the Workshop." Use \`list_scholar_suggestions\` to read the queue (filter by scholar, or by \`filter\`: needs_reply / answered / archived) and \`respond_to_suggestion\` to reply. To raise a NEW topic with one scholar (not an answer to an idea), use \`start_workshop_thread\` — same voice, same rules. Your reply is a real message a CHILD reads, delivered by the staff member's name ("From Ms. Lehua") — so keep it warm, honest, plain, and short, in that staff member's own voice; confirm the wording before sending unless they've given you the exact words. You are a COURIER, not a decision-maker: relay the human's response, never attach a verdict or good/bad label (there is no such field), and never promise a feature will ship ("I'll pass this along" / "this made us think" is the ceiling; "we'll build that" is not yours to say). Replying does not close or archive anything — an idea stays on the scholar's board until the SCHOLAR archives it, which is deliberate: the five-open limit is a prioritization lesson aimed at them, so they hold the lever. Never say or imply that your reply closed it.
 
 When something actually SHIPS, use \`create_whats_new_entry\` to post a class-visible "What's new" note. The \`kidBody\` is read BY CHILDREN — plain, warm, no jargon, 1-3 sentences about what changed and why it's good for them, never how it was built; confirm the wording with the staff member unless they gave you the exact words. Credit is a SEPARATE editorial act, independent of any idea's status: pass \`creditedScholarUsernames\` (0..n) ONLY for scholars whose idea genuinely led to the feature — each hears it personally at their next Prep Time. If the staff member points you at a private proposals-repo PR with a \`Credits:\` line, use those usernames; otherwise ask who (if anyone) to credit. NEVER guess credit.
 `;

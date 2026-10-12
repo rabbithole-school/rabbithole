@@ -107,7 +107,6 @@ async function runScript(script: Script): Promise<Event[]> {
     openIdeas: [],
     ideaUpdates: [],
     credits: [],
-    codeExplorerEnabled: true, // the eval always exercises the flag-on prompt
   });
 
   const tools = await makeScholarCodeTools((data) => {

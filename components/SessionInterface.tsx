@@ -21,6 +21,10 @@ import { RemoteLink } from "./RemoteLink";
 import { DispatchCompletionReceipt } from "./DispatchCompletionReceipt";
 import { useStreamingDictation } from "@/hooks/useStreamingDictation";
 import { usePendingImage } from "@/hooks/usePendingImage";
+import {
+  type CaptureAppSnapshot,
+  uploadChangedAppSnapshot,
+} from "@/hooks/useAppStateIframeBridge";
 import { useQuery as useRetainedQuery } from "convex-helpers/react/cache";
 import { useCachedQuery } from "@/hooks/useCachedQuery";
 import type { DispatchCompletionReceipt as DispatchCompletionReceiptData } from "@/shared/dispatchCompletionReceipt";
@@ -37,6 +41,7 @@ import {
   SessionAssistantMessageBody,
   SessionInputModality,
   SessionStreamStatus,
+  TutorTurnFailedNotice,
   useReconciledSessionMessages,
 } from "@/components/SessionTranscript";
 import { SessionHeader } from "./SessionHeader";
@@ -77,6 +82,14 @@ import { useSwipeDismiss } from "@/hooks/useSwipeGesture";
 import { MAX_FLAG_SNIPPET_LEN } from "@/lib/manualRehearsalFlags";
 import { isPreReader } from "@/convex/lib/readingLevels";
 import { pickAdmonishment } from "@/lib/admonishments";
+import { useNow } from "@/hooks/useNow";
+import { dueStatus } from "@/shared/institutionDay";
+import {
+  HOMEWORK_DONE_CONFIRMED,
+  HOMEWORK_DONE_LABEL,
+  HOMEWORK_DONE_UNDO,
+  homeworkEyebrow,
+} from "@/shared/homeworkFraming";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { PhysicalTaskCard } from "./PhysicalTaskCard";
 import {
@@ -84,6 +97,7 @@ import {
   type FlairAward,
 } from "./FlairAwardNotice";
 import { useFlairArrivals } from "@/shared/useFlairArrivals";
+import { useQuestBakeHold } from "@/shared/questBakeHold";
 import { DimensionOption } from "./DimensionPicker";
 import { useActiveRoomCues } from "@/hooks/useActiveRoomCues";
 import { RoomCueBanner } from "@/components/RoomCueBanner";
@@ -93,6 +107,25 @@ import { api } from "@/convex/_generated/api";
 import { Id, Doc } from "@/convex/_generated/dataModel";
 import { useAgentStream } from "@/hooks/useAgentStream";
 import type { StreamEvent } from "@/hooks/useAgentStream";
+import { deriveServerTurnState } from "@/shared/streamRetry";
+import {
+  appTutorSendResultFromStatus,
+  newestAppTutorAskContext,
+  settleAppTutorSend,
+  type AppTutorSendResult,
+  type AppTutorUpdateBatch,
+} from "@/shared/appTutorRequest";
+import { useAppTutorUpdates } from "@/hooks/useAppTutorUpdates";
+import {
+  AppAiTurnRow,
+  appCharacterNamesFrom,
+  type AppCharacterNames,
+} from "@/components/AppAiTurnRow";
+import type { AppAiTurnView } from "@/convex/appAi";
+import { isTeacherRole } from "@/convex/lib/roles";
+
+const NO_APP_AI_TURNS: AppAiTurnView[] = [];
+const NO_APP_CHARACTER_NAMES: AppCharacterNames = {};
 import { useSendLock } from "@/hooks/useSendLock";
 import { useManualRehearsalReplay } from "@/hooks/useManualRehearsalReplay";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -248,6 +281,13 @@ export function SessionInterface({
   const { isStreaming, streamingContent, streamingMsgId, toolActivity, generatingImage } = stream;
   const runWithSendLock = useSendLock();
 
+  // The inline "Didn't go through — try again" affordance is for FAILED SCHOLAR
+  // (user) turns only. This flag is set when a user-turn send exhausts its retry
+  // budget (or hard-errors) in THIS tab; silent turns (activity kickoff / rubric
+  // check) never set it. Reset when a user send starts. (A dead user placeholder
+  // after a reload / in another tab is derived from server truth below.)
+  const [userTurnFailed, setUserTurnFailed] = useState(false);
+
   // Convex queries for dimension options (reactive, auto-updating)
   // Dimension lists ride the perceived-speed cache — they're stable
   // curriculum data, ideal for instant cold-start rendering.
@@ -349,8 +389,13 @@ export function SessionInterface({
     messages[0].streamTrigger === "activityKickoff"
       ? messages[0]
       : null;
+  // A quest launched before its activity exists holds its opening turn until the
+  // background bake lands (shared/questBakeHold.ts). It is the same state the
+  // kickoff flag already models — the opening turn has not happened yet — so it
+  // blocks sending through the same path rather than a parallel one.
+  const questBakeHolding = useQuestBakeHold(sessionData?.session);
   const kickoffBlocksSending =
-    kickoffPending || activeKickoffPlaceholder !== null;
+    kickoffPending || activeKickoffPlaceholder !== null || questBakeHolding;
   const activeSession = sessionData?.session
     ? {
         title: sessionData.session.title,
@@ -378,21 +423,42 @@ export function SessionInterface({
 
   // Is THIS session an at-home (homework) push? Match the session's
   // assignment + activity against the scholar's live homework list. Drives the
-  // homework-only "your teacher can read this" admonishment line.
+  // homework-only "your teacher can read this" admonishment line, the header
+  // eyebrow, and the footer "I'm done with this" control.
   const sessionAssignmentId = sessionData?.session?.assignmentId
     ? String(sessionData.session.assignmentId)
     : null;
   const sessionActivityIdForHomework = sessionData?.session?.activityId
     ? String(sessionData.session.activityId)
     : null;
-  const isHomeworkSession =
-    !!sessionAssignmentId &&
-    !!sessionActivityIdForHomework &&
-    (homeworkForMe ?? []).some(
-      (h) =>
-        String(h.assignmentId) === sessionAssignmentId &&
-        String(h.activityId) === sessionActivityIdForHomework,
-    );
+  // The homework row itself, not just the boolean — it already carries the
+  // deadline and the teacher who set it, which the tonight list renders and
+  // the session view used to drop the moment the scholar opened the work.
+  const homeworkForThisSession =
+    sessionAssignmentId && sessionActivityIdForHomework
+      ? ((homeworkForMe ?? []).find(
+          (h) =>
+            String(h.assignmentId) === sessionAssignmentId &&
+            String(h.activityId) === sessionActivityIdForHomework,
+        ) ?? null)
+      : null;
+  const isHomeworkSession = !!homeworkForThisSession;
+
+  // The homework framing line for the header eyebrow. Ticks at 60s so the
+  // deadline re-derives across institution midnight while the session is open
+  // (T11) — a scholar who leaves the tab up overnight must not still be told
+  // the work is "due today".
+  const nowMs = useNow(60_000);
+  const homeworkEyebrowText = homeworkForThisSession
+    ? homeworkEyebrow(
+        dueStatus(
+          homeworkForThisSession.dueAt,
+          nowMs,
+          homeworkForThisSession.timeZone,
+        )?.phrase,
+        homeworkForThisSession.teacherName,
+      )
+    : null;
 
   // Seed-spawned independent exploration: the scholar started this themselves
   // by clicking "Explore" on a seed, so it has NO unit/lesson/activity anchor
@@ -428,6 +494,17 @@ export function SessionInterface({
     api.artifacts.getBySession,
     { sessionId: sessionId as Id<"sessions"> }
   ) ?? [];
+  // Staff reading a session with an app see its in-app AI turns inline. No
+  // subscription for chats without an app, nor for the scholar (the app
+  // already shows them the scene).
+  const sessionHasApp = artifacts.some((a) => a.type === "code");
+  const appAiTurns = useQuery(
+    api.appAi.listForSession,
+    isRemoteMode && sessionHasApp && isTeacherRole(currentUser?.role)
+      ? { sessionId: sessionId as Id<"sessions"> }
+      : "skip",
+  );
+  const appCharacterNames = appCharacterNamesFrom(artifacts);
 
   // Deliverable context for the per-document Check buttons. We load
   // it once at the project level (activity + criteria snapshot for
@@ -604,6 +681,27 @@ export function SessionInterface({
   // bubble is ever persisted or rendered.
   const startRubricCheck = useMutation(api.sessions.startRubricCheck);
   const startActivityKickoff = useMutation(api.sessions.startActivityKickoff);
+  // User-initiated stop: stamps stopRequestedAt on the session's in-flight
+  // assistant row so the running server loop stops and finalizes the partial.
+  const requestStop = useMutation(api.sessions.requestStop);
+  const generateAppSnapshotUploadUrl = useMutation(
+    api.files.generateUploadUrl,
+  );
+  const appSnapshotCaptureRef = useRef<CaptureAppSnapshot | null>(null);
+  const startAppUpdateTurn = useMutation(api.sessions.startAppUpdateTurn);
+  // The assistant row of an in-flight app-update turn: invisible until the
+  // tutor actually says something (it may stay silent).
+  const [appUpdateMsgId, setAppUpdateMsgId] = useState<string | null>(null);
+  const [lastSentAppSnapshot, setLastSentAppSnapshot] = useState<{
+    sessionId: string;
+    hash: string;
+  } | null>(null);
+  const handleAppSnapshotCaptureReady = useCallback(
+    (capture: CaptureAppSnapshot | null) => {
+      appSnapshotCaptureRef.current = capture;
+    },
+    [],
+  );
 
   // Convex mutation for sending messages
   // Optimistic update: the scholar's bubble appears the instant they hit
@@ -638,6 +736,10 @@ export function SessionInterface({
               resourceShare: null,
               gotItWrong: false,
               gotItWrongReason: undefined,
+              // The server copy brings the photo's URL; the optimistic bubble
+              // shows the text until then.
+              imageUrl: null,
+              appSnapshotUrl: null,
               ...(args.imageId ? { imageId: args.imageId } : {}),
             },
           ],
@@ -795,7 +897,7 @@ export function SessionInterface({
   // the replay hook, which is set up further down.
   const replayNotifyRef = useRef<() => void>(() => {});
 
-  const { state: dictationState, error: dictationError, isTooLoud, hasSpeech, toggleRecording, startRecording, stopRecording, cancelRecording } =
+  const { state: dictationState, error: dictationError, isTooLoud, hasSpeech, isMicBusy, toggleRecording, startRecording, stopRecording, cancelRecording } =
     useStreamingDictation((text) => {
       sendMessageRef.current(text, "spoken");
     }, sessionId as Id<"sessions">);
@@ -969,20 +1071,31 @@ export function SessionInterface({
     focusLock?.label ?? null,
     focusLock?.endsAt ?? null,
   );
-  const completionUnitComplete =
+  // Current activity done with NO forward next: this session is over, so the
+  // card hands off to Home. What it deliberately does NOT claim is that the
+  // UNIT is finished. These counts come from `activities.listByUnitPublic`,
+  // which is scoped to what THIS assignment made live, so "nothing in front of
+  // me" is not "I finished the unit" — a homework session carrying one
+  // activity out of a multi-lesson unit satisfied the old
+  // `completedCount >= total` test and announced "Unit complete!" to a scholar
+  // who had barely started. Home owns the real unit picture; the card's only
+  // job is to get the scholar there.
+  const completionHandsOffToHome =
     activityNav.hasActivityContext &&
     activityNav.isCurrentDone &&
     !activityNav.nextOnlineActivity &&
-    activityNav.unitOnlineActivityCount > 0 &&
-    activityNav.unitCompletedOnlineCount >= activityNav.unitOnlineActivityCount;
+    // Requires the activity list to be loaded (count > 0) so a still-loading or
+    // genuinely empty unit falls through to the generic complete state rather
+    // than a premature "head home".
+    activityNav.unitOnlineActivityCount > 0;
+  // The one thing this list CAN prove: activities visible in this session are
+  // still incomplete, and they are all behind us (the in-session Continue CTA
+  // is forward-only — see shared/nextIncompleteActivity.ts). Home owns routing
+  // back to those earlier beats; the card just says there is more left.
   const completionEarlierHole =
-    activityNav.hasActivityContext &&
-    activityNav.isCurrentDone &&
-    !activityNav.nextOnlineActivity &&
-    activityNav.unitOnlineActivityCount > 0 &&
+    completionHandsOffToHome &&
     activityNav.unitCompletedOnlineCount < activityNav.unitOnlineActivityCount;
-  const completionHandoffOwnsNavigation =
-    completionUnitComplete || completionEarlierHole;
+  const completionHandoffOwnsNavigation = completionHandsOffToHome;
   const focusTimeLabel =
     focusLock?.endsAt != null && focusLock.timeZone
       ? formatRoomTurnTime(focusLock.endsAt, focusLock.timeZone)
@@ -1021,16 +1134,47 @@ export function SessionInterface({
   // (useManualRehearsalReplay) relies on this to avoid advancing past an
   // undispatched turn. Once we pass the no-op guard the message IS created, so
   // even a streaming error returns true (retrying would duplicate the turn).
+  // App → tutor updates (askTutor taps, character/judge events) wait in one
+  // queue and go out between replies as one app-update turn. Only the owner's
+  // client drains: a teacher in remote mode hosts the same app but must never
+  // start tutor turns in the scholar's session.
+  const isSessionOwner =
+    !isRemoteMode &&
+    !!currentUser &&
+    !!sessionData?.session &&
+    String(sessionData.session.userId) === String(currentUser._id);
+  const appTutorUpdates = useAppTutorUpdates({
+    sessionId,
+    enabled: isSessionOwner,
+    busy: isStreaming || kickoffBlocksSending,
+    send: (batch) =>
+      settleAppTutorSend((onPrepared) =>
+        handleSend(undefined, "app", { appUpdate: { batch, onPrepared } }),
+      ),
+  });
+
+  // `appUpdate` turns are opened by the queue above, which calls this only
+  // while no reply streams; it learns the mutation's outcome via `onPrepared`
+  // and the stream continues on its own.
   const handleSend = async (
     directText?: string,
     inputModality: MessageInputModality = "typed",
+    options?: {
+      appUpdate?: {
+        batch: AppTutorUpdateBatch;
+        onPrepared: (result: AppTutorSendResult) => void;
+      };
+    },
   ): Promise<boolean> => {
-    const rawMessage = directText?.trim() || input.trim();
+    const appUpdate = options?.appUpdate;
+    const isAppRequest = appUpdate !== undefined;
+    const rawMessage = isAppRequest ? "" : directText?.trim() || input.trim();
     // Allow sending with just an image (use placeholder text)
-    const userMessage = rawMessage || (pendingImage ? "What do you see in this image?" : "");
+    const userMessage =
+      rawMessage ||
+      (!isAppRequest && pendingImage ? "What do you see in this image?" : "");
     if (
-      !userMessage ||
-      isStreaming ||
+      (!userMessage && !isAppRequest) ||
       kickoffPendingRef.current ||
       activeKickoffPlaceholder
     ) {
@@ -1038,15 +1182,26 @@ export function SessionInterface({
     }
     voiceMark("sendMessage"); // no-op unless a voice-perf cycle is armed
 
-    const sent = await runWithSendLock(async () => {
+    // Steering: submitting while the tutor streams stops the current reply and
+    // replaces it with this turn. Stop the server loop + abort the local fetch
+    // BEFORE taking the send lock — the aborted stream (which now runs OUTSIDE
+    // the lock) releases it, so this new turn isn't blocked.
+    if (isStreaming && !isAppRequest) {
+      void requestStop({ sessionId: sessionId as Id<"sessions"> });
+      void stream.stop();
+    }
+
+    // The lock guards only the mutation (artifact flush + message insert), not
+    // the whole stream, so a later steer can always acquire it.
+    const prepared = await runWithSendLock(async () => {
       // A non-<start> send the teacher initiated retires any pending replay
       // strip (no-op during a replayed turn — the driver checks its own run
       // flag). Skip the synthetic greeting kick.
-      if (rawMessage !== "<start>") replayNotifyRef.current();
+      if (!isAppRequest && rawMessage !== "<start>") replayNotifyRef.current();
 
       // Upload image if attached
       let imageId: string | null = null;
-      if (pendingImage) {
+      if (!isAppRequest && pendingImage) {
         try {
           imageId = await uploadPendingImage();
         } catch (err) {
@@ -1061,15 +1216,32 @@ export function SessionInterface({
         await flushAllArtifactSaves();
       } catch (error) {
         console.error("Error saving document before message:", error);
-        toaster.error({
-          title: "Finish saving your document",
-          description:
-            "Choose a document version or retry its save before sending your message.",
-        });
-        return false;
+        // A background app update stays queued and retries; only the
+        // scholar's own send needs telling.
+        if (!isAppRequest) {
+          toaster.error({
+            title: "Finish saving your document",
+            description:
+              "Choose a document version or retry its save before sending your message.",
+          });
+        }
+        return null;
       }
 
-      let messageCreated = false;
+      if (appUpdate) {
+        try {
+          const result = await startAppUpdateTurn({
+            sessionId: sessionId as Id<"sessions">,
+            asks: appUpdate.batch.asks,
+          });
+          appUpdate.onPrepared(appTutorSendResultFromStatus(result.status));
+          return result.status === "started" ? result : null;
+        } catch {
+          appUpdate.onPrepared("failed");
+          return null;
+        }
+      }
+
       try {
         // Send message via Convex mutation (creates user msg + placeholder assistant msg)
         const result = await sendMsg({
@@ -1078,57 +1250,175 @@ export function SessionInterface({
           ...(imageId ? { imageId: imageId as Id<"_storage"> } : {}),
           ...(userMessage !== "<start>" ? { inputModality } : {}),
         });
-        messageCreated = true;
         // Both the artifact flush and message mutation succeeded. Keep the
         // composer intact when a revision conflict blocks either operation.
         setInput("");
         clearPendingImage();
+        // This turn carries the app's character/judge events to the tutor.
+        appTutorUpdates.clearAppAi();
         haptic("light");
-
-        // Stream from HTTP action
-        const convexUrl = convexSiteUrl();
-        await stream.send(
-          `${convexUrl}/project-stream`,
-          {
-            sessionId: result.sessionId,
-            streamId: result.streamId,
-            assistantMsgId: result.assistantMsgId,
-            platform: "web",
-          },
-          result.assistantMsgId,
-        );
+        return result;
       } catch (error) {
         console.error("Error sending message:", error);
+        return null;
       }
-      return messageCreated;
     });
-    return sent ?? false;
+
+    if (!prepared) return false;
+
+    let appSnapshot:
+      | { storageId: Id<"_storage">; hash: string }
+      | null = null;
+    // A character-only update adds no user row, so a snapshot would land on
+    // the scholar's last typed message instead: send none.
+    if (
+      userMessage !== "<start>" &&
+      (!appUpdate || appUpdate.batch.asks.length > 0)
+    ) {
+      try {
+        appSnapshot = await uploadChangedAppSnapshot({
+          captureSnapshot: appSnapshotCaptureRef.current,
+          lastSentHash:
+            lastSentAppSnapshot?.sessionId === sessionId
+              ? lastSentAppSnapshot.hash
+              : null,
+          generateUploadUrl: generateAppSnapshotUploadUrl,
+        });
+      } catch (error) {
+        console.error("[session] app snapshot upload failed", error);
+      }
+    }
+
+    // Stream OUTSIDE the lock. useAgentStream.send() self-serializes (a steer
+    // preempts any run still settling), so overlapping turns can't interleave.
+    const convexUrl = convexSiteUrl();
+    if (!isAppRequest) setUserTurnFailed(false);
+    if (appSnapshot) {
+      setLastSentAppSnapshot({
+        sessionId,
+        hash: appSnapshot.hash,
+      });
+    }
+    const appContext = appUpdate
+      ? newestAppTutorAskContext(appUpdate.batch)
+      : undefined;
+    if (appUpdate) setAppUpdateMsgId(prepared.assistantMsgId);
+    const completed = await stream.send(
+      `${convexUrl}/session-stream`,
+      {
+        sessionId: prepared.sessionId,
+        streamId: prepared.streamId,
+        assistantMsgId: prepared.assistantMsgId,
+        platform: "web",
+        ...(appSnapshot
+          ? { appSnapshotStorageId: appSnapshot.storageId }
+          : {}),
+        ...(appUpdate && appUpdate.batch.asks.length > 0
+          ? { appRequest: { ...(appContext ? { context: appContext } : {}) } }
+          : {}),
+      },
+      prepared.assistantMsgId,
+    );
+    if (appUpdate) {
+      setAppUpdateMsgId(null);
+      // An app update is not the scholar's turn: it never shows the
+      // "didn't go through" retry (the next update or typed turn covers it).
+      return true;
+    }
+    // A user turn that never completed (busy budget spent / hard error) keeps
+    // its message visible with the inline retry affordance.
+    if (!completed) setUserTurnFailed(true);
+    return true;
   };
 
+  // An app-update turn that has not spoken yet is invisible: no typing dots,
+  // no Stop control, a live composer (sending steers it). Once text arrives
+  // it renders as an ordinary tutor reply.
+  const quietTurn =
+    isStreaming &&
+    appUpdateMsgId !== null &&
+    streamingMsgId === appUpdateMsgId &&
+    !streamingContent.trim();
+  const tutorVisiblyStreaming = isStreaming && !quietTurn;
+
+  // The composer's Stop control: stop the server loop (finalizes the partial
+  // and stops it "popping back") AND abort the local fetch, keeping the partial
+  // text on screen. Never marks the turn failed and never toasts.
   const handleStopStream = useCallback(() => {
-    stream.stop();
-  }, [stream]);
+    void requestStop({ sessionId: sessionId as Id<"sessions"> });
+    void stream.stop();
+  }, [requestStop, sessionId, stream]);
+
+  // Re-run a FAILED SCHOLAR (user) turn without persisting a second scholar
+  // message. retryAssistantTurn inserts a fresh placeholder server-side, and
+  // refuses (returns null) unless the trailing turn is a genuinely-dead scholar
+  // user turn — so a silent turn (kickoff / rubric check) can never be retried
+  // through here. Silent turns own their own recovery (kickoff self-recovers;
+  // "Check my work" re-runs the rubric), and the affordance is never shown for
+  // them, so this path is user-turn-only.
+  const retryAssistantTurn = useMutation(api.sessions.retryAssistantTurn);
+  const handleRetryTurn = useCallback(async () => {
+    if (isStreaming) return;
+    // Hold the lock only around the placeholder mutation, then stream OUTSIDE
+    // it (like handleSend) so a steer submitted mid-retry can acquire the lock
+    // and isn't silently dropped.
+    const prepared = await runWithSendLock(async () => {
+      try {
+        const result = await retryAssistantTurn({
+          sessionId: sessionId as Id<"sessions">,
+        });
+        if (!result) {
+          // The server refused (e.g. a user turn that streamed text before a
+          // tool split — the partial reply stays visible). Clear the affordance
+          // so the button doesn't linger. Matches native.
+          setUserTurnFailed(false);
+          return null;
+        }
+        setUserTurnFailed(false);
+        return result;
+      } catch (error) {
+        console.error("Error retrying turn:", error);
+        return null;
+      }
+    });
+    // undefined = lock was held (a concurrent send); null = server refused /
+    // errored. Either way there is nothing to stream.
+    if (!prepared) return;
+    const convexUrl = convexSiteUrl();
+    const completed = await stream.send(
+      `${convexUrl}/session-stream`,
+      {
+        sessionId: prepared.sessionId,
+        streamId: prepared.streamId,
+        assistantMsgId: prepared.assistantMsgId,
+        platform: "web",
+      },
+      prepared.assistantMsgId,
+    );
+    if (!completed) setUserTurnFailed(true);
+  }, [isStreaming, retryAssistantTurn, runWithSendLock, sessionId, stream]);
 
   const handleInstructionHandback = useCallback(
     async (handback: InstructionHandbackStart) => {
       if (isStreaming) {
         throw new Error("The tutor is already responding");
       }
-      const started = await runWithSendLock(async () => {
-        const convexUrl = convexSiteUrl();
-        await stream.send(
-          `${convexUrl}/project-stream`,
-          {
-            sessionId: handback.sessionId,
-            streamId: handback.streamId,
-            assistantMsgId: handback.assistantMsgId,
-            platform: "web",
-          },
-          handback.assistantMsgId,
-        );
-        return true;
-      });
-      if (!started) throw new Error("The tutor is already responding");
+      // The handback data is already prepared server-side; the lock only claims
+      // the send slot. Acquire-and-release it, then stream OUTSIDE the lock (as
+      // handleSend does) so a steer isn't blocked for the whole stream.
+      const acquired = await runWithSendLock(async () => true);
+      if (!acquired) throw new Error("The tutor is already responding");
+      const convexUrl = convexSiteUrl();
+      await stream.send(
+        `${convexUrl}/session-stream`,
+        {
+          sessionId: handback.sessionId,
+          streamId: handback.streamId,
+          assistantMsgId: handback.assistantMsgId,
+          platform: "web",
+        },
+        handback.assistantMsgId,
+      );
     },
     [isStreaming, runWithSendLock, stream],
   );
@@ -1150,7 +1440,10 @@ export function SessionInterface({
     ) {
       return;
     }
-    await runWithSendLock(async () => {
+    // Hold the lock only around the deliverable submit + rubric-check
+    // preparation; stream OUTSIDE it (like handleSend) so a steer submitted
+    // mid-check can acquire the lock instead of being silently dropped.
+    const prepared = await runWithSendLock(async () => {
       try {
         await flushAllArtifactSaves();
       } catch (error) {
@@ -1160,7 +1453,7 @@ export function SessionInterface({
           description:
             "Choose a saved version or retry the save before checking your work.",
         });
-        return;
+        return null;
       }
       try {
         await submitDeliverable({
@@ -1169,22 +1462,13 @@ export function SessionInterface({
           artifactId,
           intent: shouldCheck ? "check" : "send",
         });
-        if (!shouldCheck) return;
+        if (!shouldCheck) return null;
         const result = await startRubricCheck({
           sessionId: sessionId as Id<"sessions">,
         });
-        const convexUrl = convexSiteUrl();
-        await stream.send(
-          `${convexUrl}/project-stream`,
-          {
-            sessionId: result.sessionId,
-            streamId: result.streamId,
-            assistantMsgId: result.assistantMsgId,
-            platform: "web",
-            rubricCheck: { artifactTitle },
-          },
-          result.assistantMsgId,
-        );
+        // A new silent turn supersedes any lingering failed-user-turn state.
+        setUserTurnFailed(false);
+        return result;
       } catch (error) {
         console.error("Error checking artifact:", error);
         toaster.error({
@@ -1193,8 +1477,24 @@ export function SessionInterface({
             : "Couldn't send your work",
           description: "Your work is still saved. Try again in a moment.",
         });
+        return null;
       }
     });
+    // undefined = lock held; null = send-only / flush conflict / error. Nothing
+    // to stream in any of those cases.
+    if (!prepared) return;
+    const convexUrl = convexSiteUrl();
+    await stream.send(
+      `${convexUrl}/session-stream`,
+      {
+        sessionId: prepared.sessionId,
+        streamId: prepared.streamId,
+        assistantMsgId: prepared.assistantMsgId,
+        platform: "web",
+        rubricCheck: { artifactTitle },
+      },
+      prepared.assistantMsgId,
+    );
   };
 
   // Keep ref in sync so dictation callback can call latest handleSend
@@ -1277,9 +1577,11 @@ export function SessionInterface({
             }, result.retryAfterMs + 50);
             return;
           }
+          // A new silent turn supersedes any lingering failed-user-turn state.
+          setUserTurnFailed(false);
           const convexUrl = convexSiteUrl();
           const completed = await stream.send(
-            `${convexUrl}/project-stream`,
+            `${convexUrl}/session-stream`,
             {
               sessionId: result.sessionId,
               streamId: result.streamId,
@@ -1307,9 +1609,16 @@ export function SessionInterface({
       return;
     }
 
+    // No activity yet, but one is being designed right now: hold the opener
+    // rather than ad-libbing the topic and abandoning it when the real task
+    // lands mid-conversation. The effect re-runs on both exits — the activity
+    // arriving (sessionData) and the wait capping out (questBakeHolding) — so
+    // one of the two branches above always ends up opening the session.
+    if (questBakeHolding) return;
+
     welcomeSentRef.current = sessionId;
     void handleSend("<start>");
-  }, [sessionData, isStreaming, sessionId, currentUser, activeKickoffPlaceholder]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionData, isStreaming, sessionId, currentUser, activeKickoffPlaceholder, questBakeHolding]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle keyboard
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -1425,7 +1734,14 @@ export function SessionInterface({
         // The unit is the breadcrumb (compassEyebrow below). For a session
         // with no specific activity (seed exploration, ad-lib), fall back
         // to the session's own title.
-        sessionTitle={activityNav.activity?.title ?? activeSession.title}
+        sessionTitle={
+          // On homework the eyebrow below carries the framing instead of the
+          // unit name, so the unit's emoji rides the title to keep the session
+          // recognisable as the same "🍕 pizza one" from the tonight list.
+          homeworkEyebrowText && activityNav.activity
+            ? `${activityNav.unit?.emoji ? `${activityNav.unit.emoji} ` : ""}${activityNav.activity.title}`
+            : (activityNav.activity?.title ?? activeSession.title)
+        }
         unitId={activeSession.unitId}
         unitOptions={unitOptions}
         // The hamburger is retired for scholar projects — the
@@ -1445,12 +1761,21 @@ export function SessionInterface({
         // twice. The Big Picture drawer carries the rest of the framing.
         // For a seed-spawned exploration there's no unit, so label it as
         // self-started so the scholar doesn't read it as an assigned lesson.
+        //
+        // HOMEWORK TAKES THE SLOT. At 7pm at the kitchen table the load-
+        // bearing facts are that this is homework, when it's due, and who
+        // set it — the unit name is the one thing on this line a parent
+        // never asks about, and it still names itself in the Big picture
+        // drawer and the unit navigator. Same `dueStatus()` phrasing as the
+        // tonight list that sent the scholar here.
         compassEyebrow={
-          activityNav.activity && activityNav.unit
-            ? `${activityNav.unit.emoji ? `${activityNav.unit.emoji} ` : ""}${activityNav.unit.title}`
-            : isSeedExploration
-              ? "Quest · you started this"
-              : null
+          homeworkEyebrowText
+            ? homeworkEyebrowText
+            : activityNav.activity && activityNav.unit
+              ? `${activityNav.unit.emoji ? `${activityNav.unit.emoji} ` : ""}${activityNav.unit.title}`
+              : isSeedExploration
+                ? "Quest · you started this"
+                : null
         }
         isSynced={hasArtifacts ? artifactSynced : undefined}
         isTestMode={isTestMode}
@@ -1648,8 +1973,11 @@ export function SessionInterface({
           personaOptions,
           graphemeStages,
           hasGraphemeStages,
-          isStreaming,
+          isStreaming: tutorVisiblyStreaming,
           sendBlocked: kickoffBlocksSending,
+          questBakeHolding,
+          userTurnFailed,
+          onRetryTurn: handleRetryTurn,
           input,
           setInput,
           handleKeyDown,
@@ -1658,6 +1986,7 @@ export function SessionInterface({
           messagesEndRef,
           dictationState,
           dictationError,
+          isMicBusy,
           toggleRecording,
           startRecording,
           stopRecording,
@@ -1687,6 +2016,8 @@ export function SessionInterface({
           onSendWhisper: handleSendWhisper,
           onClearWhisper: handleClearWhisper,
           observations: sessionObservations,
+          appAiTurns: appAiTurns ?? undefined,
+          appCharacterNames,
           isTooLoud,
           hasSpeech,
           generatingImage,
@@ -1699,6 +2030,16 @@ export function SessionInterface({
           sessionActivityId:
             sessionData?.session?.activityId ?? undefined,
           admonishmentIsHomework: isHomeworkSession,
+          // Homework only, and only where mark-complete already applies
+          // (online activities) — the same state the Big picture drawer
+          // toggles, no second completion mechanism.
+          homeworkDone: activityNav.isCurrentDone,
+          onToggleHomeworkDone:
+            isHomeworkSession &&
+            !isManualRehearsalSession &&
+            activityNav.activity?.kind === "online"
+              ? activityNav.toggleComplete
+              : undefined,
           isTouchDevice,
           onStopStream: handleStopStream,
           toolActivity,
@@ -1740,15 +2081,7 @@ export function SessionInterface({
             activityNav.isCurrentDone && activityNav.nextOnlineActivity
               ? activityNav.continueToNext
               : undefined,
-          completionUnitComplete,
-          // Current activity is done and there is NO forward next, yet the unit
-          // isn't fully complete — an EARLIER activity is still a hole. The
-          // in-session Continue CTA is forward-only (see
-          // shared/nextIncompleteActivity.ts), so hand off to Home, which owns
-          // routing back to earlier incomplete beats. Requires the activity
-          // list to be loaded (count > 0) so a still-loading or genuinely empty
-          // unit falls through to the generic complete state, not a premature
-          // "head home".
+          completionHandsOffToHome,
           completionEarlierHole,
           dispatchCompleted: isRemoteMode
             ? []
@@ -1811,6 +2144,11 @@ export function SessionInterface({
               onCreateArtifact={handleCreateArtifact}
               onDeleteArtifact={handleDeleteArtifact}
               onSyncChange={setArtifactSynced}
+              onSnapshotCaptureReady={handleAppSnapshotCaptureReady}
+              onAskTutor={appTutorUpdates.onAskTutor}
+              onAppAiTurn={appTutorUpdates.onAppAiTurn}
+              // The real stream state, quiet turns included: Check starts its
+              // own turn and handleSubmitArtifact refuses while one streams.
               isStreaming={isStreaming}
               // Commit affordance on the map: the scholar taps a button that
               // sends a normal typed turn so the tutor reacts to their pins.
@@ -2021,6 +2359,12 @@ export function SessionInterface({
 
 // Chat column extracted to avoid duplication between splitter/non-splitter layouts
 interface ChatColumnProps {
+  /**
+   * The session is waiting on its background quest bake, so the empty chat can
+   * say so. Distinct from `sendBlocked`, which is also true during an ordinary
+   * activity kickoff — that wait is seconds and is not a quest being built.
+   */
+  questBakeHolding?: boolean;
   messages: MessageData[];
   streamingContent: string;
   streamingMsgId: string | null;
@@ -2029,6 +2373,10 @@ interface ChatColumnProps {
   hasGraphemeStages: boolean;
   isStreaming: boolean;
   sendBlocked?: boolean;
+  /** A FAILED scholar (user) turn in this tab (busy budget spent / hard error). */
+  userTurnFailed?: boolean;
+  /** Re-run the trailing failed user turn (no new user message). */
+  onRetryTurn?: () => void;
   input: string;
   setInput: (v: string) => void;
   handleKeyDown: (e: React.KeyboardEvent) => void;
@@ -2037,6 +2385,10 @@ interface ChatColumnProps {
   messagesEndRef: React.Ref<HTMLDivElement>;
   dictationState: "idle" | "recording" | "transcribing";
   dictationError: string | null;
+  /** True only when a DIFFERENT recorder (writing box, practice handoff) holds
+   *  the mic — mirrors DictationMicButton/PracticeSession's use of the same
+   *  micOwner registry. Never true while this composer is itself recording. */
+  isMicBusy?: boolean;
   toggleRecording: () => void;
   startRecording: () => void;
   stopRecording: () => void;
@@ -2049,6 +2401,9 @@ interface ChatColumnProps {
   onSendWhisper?: () => void;
   onClearWhisper?: () => void;
   observations?: ObservationData[];
+  /** Staff only: the app's in-app AI turns, interleaved by time. */
+  appAiTurns?: AppAiTurnView[];
+  appCharacterNames?: AppCharacterNames;
   isTooLoud?: boolean;
   hasSpeech?: boolean;
   generatingImage?: boolean;
@@ -2072,6 +2427,11 @@ interface ChatColumnProps {
   /** When true, this session is a homework push — surfaces the
    *  homework-only "your teacher can read this" admonishment line. */
   admonishmentIsHomework?: boolean;
+  /** Homework only: the same `activityCompletions` state the Big picture
+   *  drawer toggles, surfaced where the scholar can actually see it. Undefined
+   *  (or a non-online activity) hides the control entirely. */
+  homeworkDone?: boolean;
+  onToggleHomeworkDone?: () => void | Promise<void>;
   isTouchDevice?: boolean;
   onStopStream?: () => void;
   toolActivity?: import("@/hooks/useAgentStream").ToolActivity[];
@@ -2111,10 +2471,13 @@ interface ChatColumnProps {
    *  navigates. Null/undefined hides the banner. */
   nextQuestActivity?: { activityId: string; title: string } | null;
   onContinueToNextActivity?: () => void;
-  completionUnitComplete?: boolean;
-  /** Current activity done, no forward next, but the unit isn't fully complete
-   *  (an earlier activity is still incomplete). The card then hands off to Home
-   *  rather than offering a backward Continue. */
+  /** Current activity is done and there is NO forward next activity in this
+   *  session's list, so the card hands off to Home. Says nothing about whether
+   *  the unit is finished — the list is assignment-scoped. */
+  completionHandsOffToHome?: boolean;
+  /** Handing off to Home AND activities visible in this session are still
+   *  incomplete behind us. The in-session Continue CTA is forward-only (see
+   *  shared/nextIncompleteActivity.ts), so Home owns routing back to them. */
   completionEarlierHole?: boolean;
   dispatchCompleted?: DispatchCompletionReceiptData[];
   /** Process pipeline for the sticky thumbnail at top of chat. */
@@ -2138,7 +2501,7 @@ interface ChatColumnProps {
 function CompletionMilestone({
   sessionId,
   completedUnitId,
-  completionUnitComplete,
+  completionHandsOffToHome,
   completionEarlierHole,
   nextQuestActivity,
   onContinueToNextActivity,
@@ -2147,7 +2510,7 @@ function CompletionMilestone({
 }: {
   sessionId: Id<"sessions">;
   completedUnitId: Id<"units"> | null;
-  completionUnitComplete: boolean;
+  completionHandsOffToHome: boolean;
   completionEarlierHole: boolean;
   nextQuestActivity?: { activityId: string; title: string } | null;
   onContinueToNextActivity?: () => void;
@@ -2186,9 +2549,7 @@ function CompletionMilestone({
           color="green.700"
           mb={1}
         >
-          {completionUnitComplete
-            ? "Unit complete!"
-            : "Nice work — this one's done!"}
+          {"Nice work — this one's done!"}
         </Text>
         <Text
           fontSize="sm"
@@ -2198,10 +2559,10 @@ function CompletionMilestone({
         >
           {nextQuestActivity
             ? "Ready when you are — your next activity is up next."
-            : completionUnitComplete
-              ? "You finished every activity in this unit."
-              : completionEarlierHole
-                ? "This part is done — head home to see what is left."
+            : completionEarlierHole
+              ? "This part is done — head home to see what is left."
+              : completionHandsOffToHome
+                ? "Head back when you're ready."
                 : "Your session is marked complete. Keep the momentum going — pick what's next."}
         </Text>
         {dispatchCompleted.length > 0 && (
@@ -2229,20 +2590,7 @@ function CompletionMilestone({
             <Text as="span">{nextQuestActivity.title}</Text>
             <ArrowRight size={14} />
           </Button>
-        ) : completionUnitComplete ? (
-          <RemoteLink href="/scholar" style={{ textDecoration: "none" }}>
-            <Button
-              bg="green.500"
-              color="white"
-              _hover={{ bg: "green.600" }}
-              fontFamily="heading"
-              fontWeight="600"
-              size="md"
-            >
-              Unit complete — back to home
-            </Button>
-          </RemoteLink>
-        ) : completionEarlierHole ? (
+        ) : completionHandsOffToHome ? (
           <RemoteLink href="/scholar" style={{ textDecoration: "none" }}>
             <Button
               bg="green.500"
@@ -2284,6 +2632,9 @@ function ChatColumn({
   hasGraphemeStages,
   isStreaming,
   sendBlocked = false,
+  questBakeHolding = false,
+  userTurnFailed = false,
+  onRetryTurn,
   input,
   setInput,
   handleKeyDown,
@@ -2292,6 +2643,7 @@ function ChatColumn({
   messagesEndRef,
   dictationState,
   dictationError,
+  isMicBusy = false,
   toggleRecording,
   startRecording,
   stopRecording,
@@ -2304,6 +2656,8 @@ function ChatColumn({
   onSendWhisper,
   onClearWhisper,
   observations = [],
+  appAiTurns = NO_APP_AI_TURNS,
+  appCharacterNames = NO_APP_CHARACTER_NAMES,
   isTooLoud = false,
   hasSpeech = false,
   generatingImage = false,
@@ -2315,6 +2669,8 @@ function ChatColumn({
   onClearImage,
   sessionActivityId,
   admonishmentIsHomework = false,
+  homeworkDone = false,
+  onToggleHomeworkDone,
   isTouchDevice = false,
   onStopStream,
   toolActivity = [],
@@ -2339,13 +2695,30 @@ function ChatColumn({
   processSteps: chatProcessSteps,
   nextQuestActivity,
   onContinueToNextActivity,
-  completionUnitComplete = false,
+  completionHandsOffToHome = false,
   completionEarlierHole = false,
   dispatchCompleted = [],
 }: ChatColumnProps) {
   const micBtnRef = useRef<HTMLButtonElement>(null);
   const tabHeldRef = useRef(false);
   const tabTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // "I'm done with this" (homework). The mutation can legitimately reject
+  // (offline, a lesson-less activity), and this button is CHILD-facing — an
+  // unhandled rejection is exactly the raw-error-to-a-nine-year-old failure
+  // this change exists to remove. Swallow to the console and leave the button
+  // in its previous state; the Big picture drawer remains the fallback.
+  const [homeworkDoneSaving, setHomeworkDoneSaving] = useState(false);
+  const handleToggleHomeworkDone = async () => {
+    if (!onToggleHomeworkDone || homeworkDoneSaving) return;
+    setHomeworkDoneSaving(true);
+    try {
+      await onToggleHomeworkDone();
+    } catch (error) {
+      console.warn("[session] homework completion change failed", error);
+    } finally {
+      setHomeworkDoneSaving(false);
+    }
+  };
   // Engine state for the voice-mode toggle's "speaking" pulse.
   const { state: ttsState } = useTTSQueue();
 
@@ -2358,6 +2731,66 @@ function ChatColumn({
   const reconciledMessagesById = new Map(
     reconciledMessages.map((message) => [message.message.id, message]),
   );
+
+  // Turn state. Two sources, by design (see streamRetry.ts + finding 7):
+  //   • THIS tab's local `isStreaming` / `userTurnFailed` is authoritative for
+  //     the tab that owns the fetch — while its connection is open it shows
+  //     pending even if the server heartbeat briefly lapses (a genuinely hung
+  //     open connection resolves via the fetch's own error → userTurnFailed).
+  //   • The server-derived state governs OTHER tabs and after a reload, where
+  //     there is no local fetch: a live placeholder → pending, a dead scholar
+  //     placeholder → the retry affordance (silent turns excluded).
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const serverTurnState = deriveServerTurnState(
+    lastMessage
+      ? {
+          role: lastMessage.role,
+          content: lastMessage.content ?? "",
+          streamId: lastMessage.streamId ?? null,
+          createdAt: lastMessage.createdAt,
+          lastStreamActivityAt: lastMessage.lastStreamActivityAt ?? null,
+          // A quiet app-update placeholder reads "idle" (no dots, no retry).
+          streamTrigger: lastMessage.streamTrigger ?? null,
+        }
+      : null,
+    nowTick,
+  );
+  // This tab's own USER-turn retry loop gave up (busy budget spent or a hard
+  // error). The placeholder may already be deleted/finalized server-side, so we
+  // anchor to client state, not to a specific assistant row.
+  const clientFailedHere = userTurnFailed && !isStreaming;
+  // Server-derived dead SCHOLAR turn (governs a reload / another tab, where this
+  // tab has no local fetch): the trailing placeholder is dead, is NOT a silent
+  // turn (no streamTrigger — a kickoff placeholder is streamTrigger:
+  // "activityKickoff"), and the message before it (skipping tool rows) is a
+  // scholar `user` message (a rubric-check placeholder is preceded by an
+  // assistant message, so it is excluded). A dead silent turn gets NO
+  // affordance — kickoff self-recovers, and "Check my work" is the rubric retry.
+  const deadScholarTurn =
+    serverTurnState === "dead" &&
+    !!lastMessage &&
+    lastMessage.role === "assistant" &&
+    !lastMessage.streamTrigger &&
+    (() => {
+      for (let i = messages.length - 2; i >= 0; i--) {
+        if (messages[i].role === "tool") continue;
+        return messages[i].role === "user";
+      }
+      return false;
+    })();
+  const isTurnPending =
+    !clientFailedHere && (isStreaming || serverTurnState === "pending");
+  const isTurnDead = !isStreaming && (clientFailedHere || deadScholarTurn);
+  const pendingSince =
+    isTurnPending && lastMessage ? lastMessage.createdAt : null;
+  // Tick once a second only while a turn is pending, to advance the escalating
+  // "thinking" copy and to cross the dead threshold on a stuck turn.
+  useEffect(() => {
+    if (!isTurnPending && serverTurnState !== "pending") return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [isTurnPending, serverTurnState]);
 
   // Hold-the-mic push-to-talk (touch-first twin of Tab-to-talk): press and
   // hold ≥250ms records while held; release stops & sends. A quick tap keeps
@@ -2528,6 +2961,7 @@ function ChatColumn({
     type TimelineItem =
       | { kind: "message"; data: MessageData; time: number }
       | { kind: "observation"; data: ObservationData; time: number }
+      | { kind: "appAi"; data: AppAiTurnView; time: number }
       | { kind: "completion"; time: number };
 
     const timeline: TimelineItem[] = filteredMsgs.map((m) => ({
@@ -2543,6 +2977,14 @@ function ChatColumn({
           data: obs,
           time: obs.observedAt,
         });
+      }
+    }
+
+    // Same staff-only interleave as observations: the record of what the
+    // app's character and judges said, beside the chat it happened in.
+    if (isRemoteMode) {
+      for (const turn of appAiTurns) {
+        timeline.push({ kind: "appAi" as const, data: turn, time: turn.createdAt });
       }
     }
 
@@ -2577,6 +3019,7 @@ function ChatColumn({
   }, [
     activityCompletedAt,
     activityCompletionMessageId,
+    appAiTurns,
     isRemoteMode,
     messages,
     observations,
@@ -2751,8 +3194,21 @@ function ChatColumn({
 
         <VStack gap={4} maxW="3xl" mx="auto" align="stretch">
           {messages.length === 0 && !streamingContent && (
-            <Flex py={12} justify="center">
+            <Flex py={12} justify="center" direction="column" align="center" gap={3}>
               <Spinner size="lg" color="violet.500" />
+              {/* The bake runs into the minutes. A bare spinner for that long
+                  reads as broken, and the scholar has no way to know anything is
+                  being made for them — say what is happening. */}
+              {questBakeHolding && (
+                <VStack gap={0.5}>
+                  <Text fontFamily="heading" color="charcoal.600">
+                    Building your quest…
+                  </Text>
+                  <Text fontSize="sm" color="charcoal.400">
+                    This takes a minute. Your first task will be here when it&rsquo;s ready.
+                  </Text>
+                </VStack>
+              )}
             </Flex>
           )}
 
@@ -2779,12 +3235,22 @@ function ChatColumn({
                     key="activity-completion"
                     sessionId={sessionId}
                     completedUnitId={completedUnitId}
-                    completionUnitComplete={completionUnitComplete}
+                    completionHandsOffToHome={completionHandsOffToHome}
                     completionEarlierHole={completionEarlierHole}
                     nextQuestActivity={nextQuestActivity}
                     onContinueToNextActivity={onContinueToNextActivity}
                     onNewSession={onNewSession}
                     dispatchCompleted={dispatchCompleted}
+                  />
+                );
+              }
+
+              if (item.kind === "appAi") {
+                return (
+                  <AppAiTurnRow
+                    key={`app-ai-${item.data._id}`}
+                    turn={item.data}
+                    characterNames={appCharacterNames}
                   />
                 );
               }
@@ -2859,6 +3325,7 @@ function ChatColumn({
                     <ChatPracticeItem
                       key={message.id}
                       scholarId={practiceScholarId as Id<"users">}
+                      sessionId={sessionId as Id<"sessions">}
                       item={message.chatPractice}
                       interactive={!isRemoteMode && !!practiceScholarId}
                     />
@@ -2923,8 +3390,8 @@ function ChatColumn({
                 const toolDisplay = toolRowDisplay<string>(message);
                 return (
                   <Box key={message.id} textAlign="center" py={1}>
-                    {toolDisplay.imageId && (
-                      <GeneratedImage imageId={toolDisplay.imageId} />
+                    {toolDisplay.imageId && message.imageUrl && (
+                      <GeneratedImage url={message.imageUrl} />
                     )}
                     {toolDisplay.label && (
                       <Text
@@ -2982,7 +3449,13 @@ function ChatColumn({
             generatingImage={generatingImage}
             toolActivity={toolActivity}
             scholarSafe={!isRemoteMode}
+            pending={isTurnPending}
+            pendingSince={pendingSince}
           />
+
+          {isTurnDead && onRetryTurn && (
+            <TutorTurnFailedNotice onRetry={onRetryTurn} />
+          )}
 
           <div ref={messagesEndRef} />
         </VStack>
@@ -3286,7 +3759,7 @@ function ChatColumn({
               {!whisperMode && (
                 <ComposerAttachMenu
                   onPick={(img) => setPendingImage?.(img)}
-                  disabled={isStreaming || sendBlocked || timeLimit?.isExpired}
+                  disabled={sendBlocked || timeLimit?.isExpired}
                 >
                   {!isRemoteMode && onToggleTimeLimitModal && (
                     <Menu.Item
@@ -3388,7 +3861,7 @@ function ChatColumn({
                 disabled={
                   whisperMode
                     ? false
-                    : isStreaming || sendBlocked || timeLimit?.isExpired
+                    : sendBlocked || timeLimit?.isExpired
                 }
               />
               {/* Voice-first mode toggle — spoken replies + hands-free
@@ -3493,7 +3966,7 @@ function ChatColumn({
                     getTTSEngine()?.stop(); // don't record over the tutor's voice
                     void toggleRecording();
                   }}
-                  disabled={dictationState === "transcribing" || timeLimit?.isExpired}
+                  disabled={dictationState === "transcribing" || timeLimit?.isExpired || isMicBusy}
                 >
                   {dictationState === "transcribing" ? (
                     <Spinner size="sm" />
@@ -3511,7 +3984,13 @@ function ChatColumn({
                   borderRadius="xl"
                   size="md"
                   onClick={() => handleSend()}
-                  disabled={(!input.trim() && !pendingImage) || isStreaming || sendBlocked || timeLimit?.isExpired}
+                  // A server-derived pending turn (isTurnPending, not a live
+                  // local stream) must NOT disable Send: a click steers exactly
+                  // like the Enter path (handleKeyDown → handleSend), whose
+                  // send mutation stamps the in-flight row. Only the real
+                  // guards remain (empty input / sendBlocked / time limit); the
+                  // streaming case is handled by the Stop control above.
+                  disabled={(!input.trim() && !pendingImage) || sendBlocked || timeLimit?.isExpired}
                 >
                 <ArrowUp />
               </IconButton>
@@ -3528,18 +4007,43 @@ function ChatColumn({
             shown on every surface — including touch, the kid's primary device,
             which used to get only a weak data line. Ordinary chat always shows
             the third-person, tool-framed relational line; homework precedence
-            lives in lib/admonishments.ts. */}
+            lives in lib/admonishments.ts.
+
+            On homework the "I'm done with this" control sits on this same
+            line: the caption already establishes that a teacher is on the
+            other end, so this is where "tell them I've finished" belongs.
+            It is the SAME `activityCompletions` toggle the Big picture drawer
+            offers — given a place a child can see, not a second way to
+            finish (review/homework-flow-plan.html barred that). */}
         <Box mt={2}>
-          <Text
-            fontSize="xs"
-            color="fg.muted"
-            textAlign="center"
-            fontFamily="heading"
-          >
-            {pickAdmonishment({
-              isHomework: admonishmentIsHomework,
-            })}
-          </Text>
+          <Flex align="center" justify="center" gap={2} wrap="wrap">
+            <Text
+              fontSize="xs"
+              color="fg.muted"
+              textAlign="center"
+              fontFamily="heading"
+            >
+              {onToggleHomeworkDone && homeworkDone
+                ? HOMEWORK_DONE_CONFIRMED
+                : pickAdmonishment({
+                    isHomework: admonishmentIsHomework,
+                  })}
+            </Text>
+            {onToggleHomeworkDone && (
+              <Button
+                size="xs"
+                variant={homeworkDone ? "ghost" : "outline"}
+                fontFamily="heading"
+                fontWeight="600"
+                color={homeworkDone ? "charcoal.400" : "navy.500"}
+                borderColor="gray.300"
+                loading={homeworkDoneSaving}
+                onClick={handleToggleHomeworkDone}
+              >
+                {homeworkDone ? HOMEWORK_DONE_UNDO : HOMEWORK_DONE_LABEL}
+              </Button>
+            )}
+          </Flex>
         </Box>
         </Box>
       </Box>
@@ -3559,6 +4063,10 @@ interface MessageData {
   toolAction?: string | null;
   flairAwards?: FlairAward[];
   imageId?: string | null;
+  appSnapshotStorageId?: string | null;
+  // Served by getWithMessages behind its session gate.
+  imageUrl?: string | null;
+  appSnapshotUrl?: string | null;
   chatPractice?: ChatPracticePayload | null;
   instruction?: InstructionChatPayload | null;
   resourceShare?: ResourceShare | null;
@@ -3566,6 +4074,14 @@ interface MessageData {
   gotItWrong?: boolean;
   gotItWrongReason?: string | null;
   graphemeSpans?: readonly GraphemeSpan[];
+  // Streaming placeholder fields (present on the raw messages row) — used to
+  // derive server-truth pending/failed turn state.
+  streamId?: string | null;
+  lastStreamActivityAt?: number | null;
+  streamTrigger?: "activityKickoff" | "appUpdate";
+  // Set (and never cleared) when the user cut this reply short. Drives the
+  // muted "Stopped" caption under a finalized assistant bubble.
+  stopRequestedAt?: number | null;
 }
 
 interface ObservationData {
@@ -3583,10 +4099,8 @@ interface ObservationData {
 
 /** Strip markdown formatting for TTS. */
 // Generated Image Component (for AI-generated illustrations in tool messages)
-function GeneratedImage({ imageId }: { imageId: string }) {
-  const url = useQuery(api.files.getUrl, { storageId: imageId as Id<"_storage"> });
+function GeneratedImage({ url }: { url: string }) {
   const [zoomed, setZoomed] = useState(false);
-  if (!url) return null;
   return (
     <Box my={2} mx="auto" maxW="400px" borderRadius="xl" overflow="hidden">
       {/* eslint-disable-next-line @next/next/no-img-element -- dynamic remote AI-generated image URL; next/image needs per-domain config */}
@@ -3652,11 +4166,9 @@ const MessageBubble = memo(function MessageBubble({
     !!message.graphemeSpans &&
     message.graphemeSpans.length > 0;
 
-  // Resolve image URL if message has an image
-  const imageUrl = useQuery(
-    api.files.getUrl,
-    message.imageId ? { storageId: message.imageId as Id<"_storage"> } : "skip"
-  );
+  const imageUrl = message.imageUrl ?? null;
+  const appSnapshotUrl = message.appSnapshotUrl ?? null;
+  const [snapshotZoomed, setSnapshotZoomed] = useState(false);
 
   if (isUser) {
     return (
@@ -3664,6 +4176,51 @@ const MessageBubble = memo(function MessageBubble({
         className="message-bubble user animate-fade-in"
         alignSelf="flex-end"
       >
+        {appSnapshotUrl && (
+          <>
+            <Box
+              as="button"
+              display="block"
+              ml="auto"
+              mb={2}
+              overflow="hidden"
+              borderRadius="lg"
+              borderWidth="1px"
+              borderColor="border.subtle"
+              bg="bg.subtle"
+              onClick={() => setSnapshotZoomed(true)}
+              aria-label="Open app snapshot"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element -- dynamic Convex storage URL */}
+              <img
+                src={appSnapshotUrl}
+                alt="App snapshot of the running app"
+                style={{
+                  width: "120px",
+                  height: "68px",
+                  objectFit: "cover",
+                  display: "block",
+                }}
+              />
+              <Text
+                px={2}
+                py={1}
+                fontSize="2xs"
+                color="fg.muted"
+                textAlign="left"
+              >
+                📸 App snapshot
+              </Text>
+            </Box>
+            {snapshotZoomed && (
+              <ImageLightbox
+                src={appSnapshotUrl}
+                alt="App snapshot of the running app"
+                onClose={() => setSnapshotZoomed(false)}
+              />
+            )}
+          </>
+        )}
         {imageUrl && (
           <Box mb={2} borderRadius="lg" overflow="hidden" maxW="300px" ml="auto">
             {/* eslint-disable-next-line @next/next/no-img-element -- dynamic remote image URL; next/image needs per-domain config */}
@@ -3893,6 +4450,12 @@ const MessageBubble = memo(function MessageBubble({
         >
           {assistantLabel}
         </Text>
+        {/* The user cut this reply short — a quiet, iconless caption. */}
+        {!isStreaming && message.stopRequestedAt && (
+          <Text fontSize="xs" color="fg.muted" fontFamily="heading">
+            Stopped
+          </Text>
+        )}
         {/* Manual-rehearsal flags: 👍 / 👎 on the tutor's own messages, only when
             the parent session is a manual rehearsal. Lets the teacher tag good /
             bad responses; flags surface to Curriculum Bot when the bot

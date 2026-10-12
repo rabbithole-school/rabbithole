@@ -426,7 +426,7 @@ describe("renderParamHealthSection", () => {
       null,
     );
     expect(decision.kind).toBe("none");
-    expect(text).toContain("🩺 *Practice parameter health*");
+    expect(text).toContain("🩺 **Practice parameter health**");
     expect(text).toContain("No parameter change");
     expect(text).toContain("system working");
     expect(text).toContain("in the healthy band");
@@ -446,7 +446,7 @@ describe("renderParamHealthSection", () => {
       previous,
     );
     expect(decision.kind).toBe("fire");
-    expect(text).toContain("📈 *Recommendation (memory-model):*");
+    expect(text).toContain("📈 **Recommendation (memory-model):**");
     expect(text).toContain("`HALFLIFE_GROWTH` 2.3 → 2.6");
     expect(text).toContain("two consecutive windows");
     expect(text).toContain("never auto-applied");
@@ -462,7 +462,7 @@ describe("renderParamHealthSection", () => {
       ),
     ];
     const { text } = section(rows, null);
-    expect(text).toContain("⚖️ *Discussion prompt (policy — not a recommendation):*");
+    expect(text).toContain("⚖️ **Discussion prompt (policy — not a recommendation):**");
     expect(text).toContain("14 challenge items taken");
     expect(text).toContain("11 correct");
     expect(text).toContain("values call");

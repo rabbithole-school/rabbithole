@@ -19,6 +19,15 @@
 // `listForStaffInternal` for the aide tool), and the human reply (`respond`,
 // the aide tool's backing mutation). The reflection chat that auto-distills
 // ideas is Phase 2.
+//
+// THE CONVERSATION (2026-09-25). Every idea now has a Workshop thread — a
+// `parentThreads` row of kind "workshop" (scholarMessages.ts), linked both
+// ways (`scholarSuggestions.threadId` / `parentThreads.suggestionId`). The
+// scholar's words are its first message; every staff reply (dashboard, aide,
+// Slack) is a message in it, and the scholar can answer back. "A human
+// replied" = the thread holds a staff message; `staffResponse` and
+// `responseSeenAt` are DEPRECATED (read only to backfill a legacy idea's
+// thread) until the narrow drops them.
 
 import { v } from "convex/values";
 import { authedQuery, authedMutation, teacherQuery, teacherMutation } from "./lib/customFunctions";
@@ -40,8 +49,24 @@ import { extendedEducationTag } from "./lib/scholarParticipationTooling";
 import { firstLineToTitle } from "./lib/textToTitle";
 import { scholarInstitutionId } from "./lib/scholarEnrollment";
 import {
+  ensureWorkshopThreadForSuggestion,
+  appendScholarWordsIfMissing,
+  postScholarThreadMessage,
+  scholarThreadFacts,
+} from "./scholarMessages";
+import {
+  scholarForThread,
+  staffCanReachScholar,
+} from "./lib/scholarThreadAccess";
+import {
+  attachmentPreview,
+  previewOf,
+  userDisplayName,
+} from "./parentMessages";
+import {
   escapeSlackText,
   fetchConversationHistory,
+  fetchConversationReplies,
   messageWithDeliveryMetadata,
   postMessage,
   type SlackMessageMetadata,
@@ -104,6 +129,99 @@ export function suggestionIdFromDeliveryId(deliveryId: unknown): string | null {
 /** Shared with the meta-observer so its at-cap skip matches the composer's. */
 export const MAX_OPEN_SUGGESTIONS_EXPORT = MAX_OPEN_SUGGESTIONS;
 
+/**
+ * A scholar's OPEN IDEAS — not archived, and not a bug-report card. The one
+ * read behind the five-open cap (composer, chat capture, restore, observer) and
+ * the reflection chat's duplicate-avoidance list, so a bug report can never
+ * push a kid into the "which idea matters most?" moment.
+ */
+export async function openIdeas(
+  ctx: QueryCtx,
+  scholarId: Id<"users">,
+): Promise<Doc<"scholarSuggestions">[]> {
+  const open = await ctx.db
+    .query("scholarSuggestions")
+    .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
+    .filter((q) => q.eq(q.field("archivedAt"), undefined))
+    .collect();
+  return open.filter((row) => !row.bugReportId);
+}
+
+// Voice-only reports have no words until transcription lands.
+const BUG_REPORT_CARD_FALLBACK_TITLE = "A bug you reported";
+
+function bugReportCardFields(description: string | undefined) {
+  const words = description?.trim() ?? "";
+  return {
+    title: (words && firstLineToTitle(words)) || BUG_REPORT_CARD_FALLBACK_TITLE,
+    scholarWords: words,
+  };
+}
+
+/**
+ * Put a bug report the scholar filed about their OWN view onto their Workshop
+ * board and into #workshop, exactly like an idea — a plain staff reply in that
+ * thread reaches the scholar. Triage stays in the bug channel's own thread. The
+ * one difference from an idea: no cap, because a bug report is never refused.
+ * Idempotent per report. A spoken report's words don't exist yet, so its
+ * #workshop post waits for `syncBugReportCard` after transcription.
+ */
+export async function fileBugReportCard(
+  ctx: MutationCtx,
+  args: {
+    scholarId: Id<"users">;
+    bugReportId: Id<"bugReports">;
+    description: string | undefined;
+    awaitingTranscript: boolean;
+  },
+): Promise<void> {
+  const existing = await ctx.db
+    .query("scholarSuggestions")
+    .withIndex("by_bugReport", (q) => q.eq("bugReportId", args.bugReportId))
+    .first();
+  if (existing) return;
+  const now = Date.now();
+  const fields = bugReportCardFields(args.description);
+  const suggestionId = await ctx.db.insert("scholarSuggestions", {
+    scholarId: args.scholarId,
+    bugReportId: args.bugReportId,
+    ...fields,
+    createdAt: now,
+    updatedAt: now,
+  });
+  // The card's conversation. A spoken report's words land later
+  // (syncBugReportCard), so its first message may wait for them.
+  const card = await ctx.db.get(suggestionId);
+  if (card) await ensureWorkshopThreadForSuggestion(ctx, card, now);
+  if (!args.awaitingTranscript) await fanOutWorkshopIdea(ctx, { suggestionId });
+}
+
+/**
+ * Once transcription has run, refresh the card's words and, for a spoken
+ * report, post the #workshop thread `fileBugReportCard` held back.
+ */
+export async function syncBugReportCard(
+  ctx: MutationCtx,
+  args: {
+    bugReportId: Id<"bugReports">;
+    description: string | undefined;
+    heldBack: boolean;
+  },
+): Promise<void> {
+  const card = await ctx.db
+    .query("scholarSuggestions")
+    .withIndex("by_bugReport", (q) => q.eq("bugReportId", args.bugReportId))
+    .first();
+  if (!card) return;
+  await ctx.db.patch(card._id, {
+    ...bugReportCardFields(args.description),
+    updatedAt: Date.now(),
+  });
+  const refreshed = await ctx.db.get(card._id);
+  if (refreshed) await appendScholarWordsIfMissing(ctx, refreshed);
+  if (args.heldBack) await fanOutWorkshopIdea(ctx, { suggestionId: card._id });
+}
+
 /** "Kai Nakamura" → "Kai N." for the digest line — a first name + last
  * initial, the same register the Slack sketch uses (§6). Falls back to the
  * whole name when there's no surname, or a generic label when unknown. */
@@ -125,13 +243,17 @@ const MAX_SLACK_IDEA_CHARS = 3500;
 export function workshopIdeaSlackText(
   scholarName: string | undefined | null,
   scholarWords: string,
+  kind: "idea" | "bug_report" = "idea",
 ): string {
   const trimmed = scholarWords.trim();
   const clipped = trimmed.length > MAX_SLACK_IDEA_CHARS
     ? `${trimmed.slice(0, MAX_SLACK_IDEA_CHARS)}…\n(truncated — the full idea is in Rabbithole)`
     : trimmed;
-  const quotedIdea = escapeSlackText(clipped).replace(/\r?\n/g, "\n> ");
-  return `💡 *${escapeSlackText(shortScholarName(scholarName))}* filed a Workshop idea:\n> ${quotedIdea}`;
+  const quotedIdea = escapeSlackText(clipped || "(no words captured)").replace(/\r?\n/g, "\n> ");
+  const name = `**${escapeSlackText(shortScholarName(scholarName))}**`;
+  return kind === "bug_report"
+    ? `🐛 ${name} reported a bug (triage is in the bug-report channel):\n> ${quotedIdea}`
+    : `💡 ${name} filed a Workshop idea:\n> ${quotedIdea}`;
 }
 
 /**
@@ -163,7 +285,11 @@ export const workshopDeliveryContext = internalQuery({
     if (!institution?.isPrimary || institution.disabledAt !== undefined) return null;
     const scholar = await ctx.db.get(suggestion.scholarId);
     return {
-      text: workshopIdeaSlackText(scholar?.name, suggestion.scholarWords),
+      text: workshopIdeaSlackText(
+        scholar?.name,
+        suggestion.scholarWords,
+        suggestion.bugReportId ? "bug_report" : "idea",
+      ),
       deliveryId: workshopDeliveryId(suggestion._id),
       createdAt: suggestion.createdAt,
     };
@@ -203,13 +329,19 @@ export const postWorkshopIdea = internalAction({
       await scheduleRetry(history.retryAfterMs);
       return;
     }
-    if (
-      messageWithDeliveryMetadata(
-        history.messages,
-        WORKSHOP_IDEA_EVENT_TYPE,
-        context.deliveryId,
-      )
-    ) {
+    const alreadyPosted = messageWithDeliveryMetadata(
+      history.messages,
+      WORKSHOP_IDEA_EVENT_TYPE,
+      context.deliveryId,
+    );
+    if (alreadyPosted) {
+      // Metadata dedupe still guards the post; make sure the durable binding
+      // exists too (a retry after a crash between post and record).
+      await ctx.runMutation(internal.scholarSuggestions.recordWorkshopSlackRoot, {
+        suggestionId: args.suggestionId,
+        channelId,
+        threadTs: alreadyPosted.ts!,
+      });
       return;
     }
 
@@ -223,14 +355,318 @@ export const postWorkshopIdea = internalAction({
       metadata,
       markdown: true,
     });
-    if (!posted.ok) await scheduleRetry(posted.retryAfterMs);
+    if (!posted.ok) {
+      await scheduleRetry(posted.retryAfterMs);
+      return;
+    }
+    if (posted.ts) {
+      await ctx.runMutation(internal.scholarSuggestions.recordWorkshopSlackRoot, {
+        suggestionId: args.suggestionId,
+        channelId: posted.channel ?? channelId,
+        threadTs: posted.ts,
+      });
+    }
   },
 });
+
+/**
+ * The durable #workshop root ↔ idea thread binding, in the same table the
+ * family Slack bridge uses. It is what lets a scholar's in-app reply land in
+ * the idea's own Slack thread. (Inbound staff replies still resolve through
+ * the root's metadata — parentMessages.ingestInboundSlackReply hands these
+ * rows back as non-family.) Idempotent on (channel, ts).
+ */
+export const recordWorkshopSlackRoot = internalMutation({
+  args: {
+    suggestionId: v.id("scholarSuggestions"),
+    channelId: v.string(),
+    threadTs: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const suggestion = await ctx.db.get(args.suggestionId);
+    if (!suggestion) return null;
+    const threadId = await ensureWorkshopThreadForSuggestion(
+      ctx,
+      suggestion,
+      Date.now(),
+    );
+    if (!threadId) return null;
+    // The #workshop root quotes the scholar's words, so the thread's OPENING
+    // scholar message now also lives in Slack — withdrawing it in the app
+    // can't recall that copy (copiedOutside). Posted and reconciled alike.
+    const opening = (
+      await ctx.db
+        .query("parentMessages")
+        .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+        .collect()
+    )
+      .filter((message) => message.authorType === "scholar")
+      .sort((a, b) => (a.sentAt ?? a._creationTime) - (b.sentAt ?? b._creationTime))[0];
+    if (opening && opening.copiedToSlackAt === undefined) {
+      await ctx.db.patch(opening._id, { copiedToSlackAt: Date.now() });
+    }
+    const existing = await ctx.db
+      .query("parentSlackThreads")
+      .withIndex("by_channel_thread", (q) =>
+        q.eq("channelId", args.channelId).eq("threadTs", args.threadTs),
+      )
+      .first();
+    if (existing) {
+      return existing.parentThreadId === threadId ? existing._id : null;
+    }
+    return await ctx.db.insert("parentSlackThreads", {
+      parentThreadId: threadId,
+      channelId: args.channelId,
+      threadTs: args.threadTs,
+      lastNotifiedAt: Date.now(),
+    });
+  },
+});
+
+/**
+ * What a scholar's in-app reply looks like in the idea's #workshop thread —
+ * labelled as the scholar's own words from the app, so no staffer mistakes it
+ * for a colleague. The bot posts it, and slackBot ignores bot-authored
+ * messages, so it can never be re-ingested as a staff reply (no echo loop).
+ */
+function workshopScholarReplySlackText(
+  scholarName: string | undefined | null,
+  body: string,
+  attachmentCount: number,
+): string {
+  const trimmed = body.trim();
+  const clipped = trimmed.length > MAX_SLACK_IDEA_CHARS
+    ? `${trimmed.slice(0, MAX_SLACK_IDEA_CHARS)}…`
+    : trimmed;
+  const quoted = clipped
+    ? `> ${escapeSlackText(clipped).replace(/\r?\n/g, "\n> ")}`
+    : "";
+  const attached =
+    attachmentCount > 0
+      ? `_${attachmentCount === 1 ? "1 attachment" : `${attachmentCount} attachments`} — open it in Rabbithole_`
+      : "";
+  return [
+    `↩ **${escapeSlackText(shortScholarName(scholarName))}** replied in the app:`,
+    quoted,
+    attached,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export const scholarReplySlackContext = internalQuery({
+  args: { messageId: v.id("parentMessages") },
+  handler: async (ctx, { messageId }) => {
+    const message = await ctx.db.get(messageId);
+    if (!message || message.authorType !== "scholar" || message.retractedAt) {
+      return null;
+    }
+    const thread = await ctx.db.get(message.threadId);
+    if (!thread || thread.kind !== "workshop" || !thread.suggestionId) return null;
+    const scholar = await scholarForThread(ctx, thread);
+    if (!scholar || !thread.institutionId) return null;
+    // First-party only, exactly like the #workshop post itself.
+    const institution = await ctx.db.get(thread.institutionId);
+    if (!institution?.isPrimary) return null;
+    const channelId = process.env.SLACK_WORKSHOP_CHANNEL_ID?.trim();
+    const roots = await ctx.db
+      .query("parentSlackThreads")
+      .withIndex("by_parent_thread", (q) => q.eq("parentThreadId", thread._id))
+      .collect();
+    const root = roots
+      .filter((row) => !channelId || row.channelId === channelId)
+      .sort((a, b) => b.lastNotifiedAt - a.lastNotifiedAt)[0];
+    const suggestion = await ctx.db.get(thread.suggestionId);
+    if (!suggestion) return null;
+    const attachments = (
+      await ctx.db
+        .query("parentMessageAttachments")
+        .withIndex("by_message", (q) => q.eq("messageId", message._id))
+        .collect()
+    ).filter((attachment) => attachment.retractedAt === undefined);
+    return {
+      // Null for an idea posted before roots were recorded (or migrated):
+      // the action then finds the root by its delivery metadata.
+      root: root ? { channelId: root.channelId, threadTs: root.threadTs } : null,
+      suggestionId: suggestion._id,
+      deliveryId: workshopDeliveryId(suggestion._id),
+      createdAt: suggestion.createdAt,
+      text: workshopScholarReplySlackText(
+        scholar.name,
+        message.body,
+        attachments.length,
+      ),
+    };
+  },
+});
+
+/** Slack metadata `event_type` on a scholar's forwarded Workshop reply. */
+const WORKSHOP_REPLY_EVENT_TYPE = "rabbithole_workshop_scholar_reply";
+
+function workshopReplyDeliveryId(messageId: Id<"parentMessages">): string {
+  return `workshop-reply:${messageId}`;
+}
+
+/**
+ * A scholar's in-app reply on an idea → that idea's #workshop Slack thread.
+ * Never a silent drop: a root that can't be found yet (the idea's own post may
+ * still be retrying) or a failed post retries on the same backoff as the idea
+ * post, and the final failure is logged as an error.
+ */
+export const forwardScholarReplyToSlack = internalAction({
+  args: { messageId: v.id("parentMessages"), attempt: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const token = process.env.SLACK_BOT_TOKEN;
+    const channelId = process.env.SLACK_WORKSHOP_CHANNEL_ID?.trim();
+    if (!token || !channelId) return;
+    const context = await ctx.runQuery(
+      internal.scholarSuggestions.scholarReplySlackContext,
+      { messageId: args.messageId },
+    );
+    if (!context) return;
+    const attempt = args.attempt ?? 0;
+    const retryOrGiveUp = async (reason: string, retryAfterMs?: number) => {
+      const baseDelay = WORKSHOP_RETRY_DELAYS_MS[attempt];
+      if (baseDelay === undefined) {
+        console.error(
+          `Workshop scholar reply ${args.messageId} never reached #workshop (idea ${context.suggestionId}): ${reason} — it is in the app only.`,
+        );
+        return;
+      }
+      await ctx.scheduler.runAfter(
+        Math.max(baseDelay, retryAfterMs ?? 0),
+        internal.scholarSuggestions.forwardScholarReplyToSlack,
+        { messageId: args.messageId, attempt: attempt + 1 },
+      );
+    };
+    let root = context.root;
+    if (!root) {
+      // A legacy/migrated idea (or one whose post hasn't landed yet): find its
+      // #workshop root the way postWorkshopIdea dedupes, by the delivery id in
+      // the root's metadata, and record it so the next reply skips the search.
+      const history = await fetchConversationHistory(token, channelId, {
+        oldest: String(Math.max(0, Math.floor(context.createdAt / 1000) - 60)),
+      });
+      const found = history.ok
+        ? messageWithDeliveryMetadata(
+            history.messages,
+            WORKSHOP_IDEA_EVENT_TYPE,
+            context.deliveryId,
+          )
+        : undefined;
+      if (!found?.ts) {
+        await retryOrGiveUp(
+          history.ok
+            ? "no #workshop root found"
+            : `history read failed: ${history.error ?? "unknown"}`,
+          history.retryAfterMs,
+        );
+        return;
+      }
+      root = { channelId, threadTs: found.ts };
+      await ctx.runMutation(internal.scholarSuggestions.recordWorkshopSlackRoot, {
+        suggestionId: context.suggestionId,
+        channelId: root.channelId,
+        threadTs: root.threadTs,
+      });
+    }
+    // Each forwarded reply carries its own delivery id in Slack metadata, so a
+    // retry after an ambiguous outcome (Slack took the post but the response
+    // was lost) reconciles against the thread instead of posting it twice.
+    const deliveryId = workshopReplyDeliveryId(args.messageId);
+    if (attempt > 0) {
+      const replies = await fetchConversationReplies(
+        token,
+        root.channelId,
+        root.threadTs,
+      );
+      if (!replies.ok) {
+        await retryOrGiveUp(
+          `thread read failed: ${replies.error ?? "unknown"}`,
+          replies.retryAfterMs,
+        );
+        return;
+      }
+      if (
+        messageWithDeliveryMetadata(
+          replies.messages,
+          WORKSHOP_REPLY_EVENT_TYPE,
+          deliveryId,
+        )
+      ) {
+        await ctx.runMutation(internal.scholarSuggestions.markReplyCopiedToSlack, {
+          messageId: args.messageId,
+        });
+        return;
+      }
+    }
+    const posted = await postMessage(token, {
+      channel: root.channelId,
+      threadTs: root.threadTs,
+      text: context.text,
+      markdown: true,
+      metadata: {
+        event_type: WORKSHOP_REPLY_EVENT_TYPE,
+        event_payload: { delivery_id: deliveryId },
+      },
+    });
+    if (!posted.ok) {
+      await retryOrGiveUp(`post failed: ${posted.error ?? "unknown"}`, posted.retryAfterMs);
+      return;
+    }
+    await ctx.runMutation(internal.scholarSuggestions.markReplyCopiedToSlack, {
+      messageId: args.messageId,
+    });
+  },
+});
+
+/** Stamp that a scholar's reply now also lives in Slack (see copiedOutside). */
+export const markReplyCopiedToSlack = internalMutation({
+  args: { messageId: v.id("parentMessages") },
+  handler: async (ctx, { messageId }) => {
+    const message = await ctx.db.get(messageId);
+    if (message && message.copiedToSlackAt === undefined) {
+      await ctx.db.patch(messageId, { copiedToSlackAt: Date.now() });
+    }
+  },
+});
+
+/**
+ * An idea's conversation state, read from its Workshop thread: whether any
+ * staff message exists (`answered`) and whether the scholar spoke last
+ * (`owesReply` — a brand-new idea, or a follow-up after a reply). An idea
+ * whose thread hasn't been backfilled yet falls back to its legacy
+ * `staffResponse`.
+ */
+async function ideaConversation(ctx: QueryCtx, row: Doc<"scholarSuggestions">) {
+  const linked = row.threadId ? await ctx.db.get(row.threadId) : null;
+  // A thread left behind at a school the scholar has moved away from is not
+  // this idea's conversation any more (the next write opens a fresh one).
+  const thread = linked && (await scholarForThread(ctx, linked)) ? linked : null;
+  if (!thread) {
+    return {
+      thread: null,
+      facts: null,
+      answered: !!row.staffResponse,
+      owesReply: !row.staffResponse,
+    };
+  }
+  const facts = await scholarThreadFacts(ctx, thread);
+  return {
+    thread,
+    facts,
+    answered: facts.hasStaffMessage,
+    owesReply: facts.lastVisible
+      ? facts.lastVisible.authorType === "scholar"
+      : !facts.hasStaffMessage,
+  };
+}
 
 /** A staff-facing suggestion row joined with its scholar's display name +
  * username (the queue + the aide tool both need to name the child). */
 async function joinScholar(ctx: QueryCtx, row: Doc<"scholarSuggestions">) {
   const scholar = await ctx.db.get(row.scholarId);
+  const conversation = await ideaConversation(ctx, row);
   return {
     _id: row._id,
     scholarId: row.scholarId,
@@ -244,8 +680,13 @@ async function joinScholar(ctx: QueryCtx, row: Doc<"scholarSuggestions">) {
     refined: row.refined,
     distilled: row.distilled,
     archivedAt: row.archivedAt,
-    answered: !!row.staffResponse,
-    staffResponse: row.staffResponse,
+    answered: conversation.answered,
+    // The scholar spoke last — a new idea, or a follow-up after a reply.
+    needsReply: conversation.owesReply,
+    // A card mirroring a scholar's bug report rather than an idea.
+    bugReport: !!row.bugReportId,
+    // The idea's Workshop conversation (open it in /teacher/messages).
+    threadId: row.threadId ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     // Extended Education (program-guest) scholars' rows carry a tag so the
@@ -272,11 +713,7 @@ export const createMine = authedMutation({
     const scholarId = ctx.user._id;
 
     // Soft cap: too many open ideas is a prioritization moment, not a bug.
-    const open = await ctx.db
-      .query("scholarSuggestions")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
-      .filter((q) => q.eq(q.field("archivedAt"), undefined))
-      .collect();
+    const open = await openIdeas(ctx, scholarId);
     if (open.length >= MAX_OPEN_SUGGESTIONS) {
       throw new Error(
         `You've already got ${MAX_OPEN_SUGGESTIONS} ideas open in the Workshop — that's the most at once. Let's see what happens with those first. Which one matters most to you?`,
@@ -292,6 +729,8 @@ export const createMine = authedMutation({
       createdAt: now,
       updatedAt: now,
     });
+    const idea = await ctx.db.get(suggestionId);
+    if (idea) await ensureWorkshopThreadForSuggestion(ctx, idea, now);
 
     await fanOutWorkshopIdea(ctx, {
       suggestionId,
@@ -348,11 +787,7 @@ export const captureFromChat = internalMutation({
 
     // Soft cap, same number as the composer — the thinking partner helps the
     // scholar prioritize rather than piling on. Nothing is written at the cap.
-    const open = await ctx.db
-      .query("scholarSuggestions")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
-      .filter((q) => q.eq(q.field("archivedAt"), undefined))
-      .collect();
+    const open = await openIdeas(ctx, scholarId);
     if (open.length >= MAX_OPEN_SUGGESTIONS) {
       return { status: "at_cap", cap: MAX_OPEN_SUGGESTIONS };
     }
@@ -374,6 +809,8 @@ export const captureFromChat = internalMutation({
       createdAt: now,
       updatedAt: now,
     });
+    const idea = await ctx.db.get(suggestionId);
+    if (idea) await ensureWorkshopThreadForSuggestion(ctx, idea, now);
 
     await fanOutWorkshopIdea(ctx, {
       suggestionId,
@@ -399,18 +836,55 @@ export const listMine = authedQuery({
       .collect();
     return await Promise.all(
       rows.map(async (row) => {
+        // DEPRECATED fields kept for clients still reading them.
         const responder = row.staffResponse
           ? await ctx.db.get(row.staffResponse.authorId)
           : null;
-        return { ...row, responderName: responder?.name ?? null };
+        const conversation = await ideaConversation(ctx, row);
+        let lastMessage: {
+          authorName: string;
+          body: string;
+          mine: boolean;
+          at: number;
+        } | null = null;
+        const last = conversation.facts?.lastVisible ?? null;
+        if (last) {
+          const mine = last.authorUserId === ctx.user._id;
+          const author = last.authorUserId
+            ? await ctx.db.get(last.authorUserId)
+            : null;
+          const attachments = (
+            await ctx.db
+              .query("parentMessageAttachments")
+              .withIndex("by_message", (q) => q.eq("messageId", last._id))
+              .collect()
+          ).filter((attachment) => attachment.retractedAt === undefined);
+          lastMessage = {
+            authorName: mine
+              ? "You"
+              : userDisplayName(author, "The Rabbithole team"),
+            body: previewOf(last.body) || attachmentPreview(attachments),
+            mine,
+            at: last.sentAt ?? last._creationTime,
+          };
+        }
+        return {
+          ...row,
+          responderName: responder?.name ?? null,
+          threadId: conversation.thread?._id ?? null,
+          lastMessage,
+          unread: conversation.facts?.scholarUnread ?? false,
+          answered: conversation.answered,
+        };
       }),
     );
   },
 });
 
 /**
- * Ideas that still OWE A REPLY — not archived by the scholar, and no human has
- * written back yet — oldest first, joined with each scholar's name + username.
+ * Ideas that still OWE A REPLY — not archived by the scholar, and the scholar
+ * spoke last in the idea's thread (nobody has written back yet, or the
+ * scholar answered a reply) — oldest first, joined with each scholar's name + username.
  * Backs the teacher-dashboard queue (the aide tool reads through the internal
  * sibling below, since it runs in an action with a mapped principal, not a
  * Convex-auth identity).
@@ -420,11 +894,10 @@ export const listOpenForStaff = teacherQuery({
   handler: async (ctx) => {
     // Indexed on the un-archived rows only — an archived idea is off the
     // plate, and a global scan would grow without bound as the table does.
-    let rows = await ctx.db
+    const rows = await ctx.db
       .query("scholarSuggestions")
       .withIndex("by_archived", (q) => q.eq("archivedAt", undefined))
       .collect();
-    rows = rows.filter((r) => !r.staffResponse);
     rows.sort((a, b) => a.createdAt - b.createdAt);
     // Institution boundary (CLAUDE.md § Multi-tenancy): a role check alone is a
     // cross-tenant leak, so a teacher only sees ideas from scholars in their
@@ -440,7 +913,8 @@ export const listOpenForStaff = teacherQuery({
       includeProgramGuests: true,
     });
     const visible = rows.filter((r) => allowed.has(r.scholarId));
-    return await Promise.all(visible.map((row) => joinScholar(ctx, row)));
+    const joined = await Promise.all(visible.map((row) => joinScholar(ctx, row)));
+    return joined.filter((row) => row.needsReply);
   },
 });
 
@@ -512,10 +986,8 @@ export const listForStaffInternal = internalQuery({
     }
     if (args.filter === "archived") {
       rows = rows.filter((r) => !!r.archivedAt);
-    } else if (args.filter === "answered") {
-      rows = rows.filter((r) => !r.archivedAt && !!r.staffResponse);
-    } else if (args.filter === "needs_reply") {
-      rows = rows.filter((r) => !r.archivedAt && !r.staffResponse);
+    } else if (args.filter === "answered" || args.filter === "needs_reply") {
+      rows = rows.filter((r) => !r.archivedAt);
     }
 
     // Scope to the lens BEFORE joinScholar — never resolve a child's name +
@@ -523,19 +995,23 @@ export const listForStaffInternal = internalQuery({
     rows = rows.filter((r) => inLens(r.scholarId));
 
     rows.sort((a, b) => a.createdAt - b.createdAt);
-    return await Promise.all(rows.map((row) => joinScholar(ctx, row)));
+    const joined = await Promise.all(rows.map((row) => joinScholar(ctx, row)));
+    if (args.filter === "answered") return joined.filter((row) => row.answered);
+    if (args.filter === "needs_reply") return joined.filter((row) => row.needsReply);
+    return joined;
   },
 });
 
 /**
- * Shared core for storing a human reply on an idea — used by both the aide
- * tool's `respond` (internal, bot-mapped author) and the dashboard's
- * `respondAsStaff` (teacherMutation, the signed-in teacher). `authorId` must
- * be teacher+ (checked here as defense-in-depth).
+ * Shared core for posting a human reply on an idea — used by the aide tool's
+ * `respond` (internal, bot-mapped author), the dashboard's `respondAsStaff`
+ * (teacherMutation, the signed-in teacher) and the #workshop Slack thread.
+ * `authorId` must be teacher+ (checked here as defense-in-depth).
  *
- * A reply CHANGES NO STATE. It is a comment; whether the idea is still on the
- * scholar's plate is theirs to say (`archivedAt`). This is why there is no
- * `close` here any more.
+ * A reply is a MESSAGE in the idea's Workshop thread (authorType "teacher"),
+ * appended after whatever is already there — never an overwrite, never a
+ * string glued onto a previous reply. It CHANGES NO STATE: whether the idea is
+ * still on the scholar's plate is theirs to say (`archivedAt`).
  */
 async function respondCore(
   ctx: MutationCtx,
@@ -555,6 +1031,8 @@ async function respondCore(
           allowedScholarIds: Set<Id<"users">> | undefined;
           scholarLensResolved: boolean | undefined;
         };
+    /** Transport provenance ("via Slack") for the staff-facing badge. */
+    source?: "slack";
   },
 ) {
   const author = await ctx.db.get(args.authorId);
@@ -595,24 +1073,41 @@ async function respondCore(
     throw new Error("Suggestion not found");
   }
 
-  // Human edits to an already-replied idea overwrite the reply — fine, but
-  // worth a log line so an accidental overwrite is traceable. (The Slack
-  // thread path appends rather than replacing; this covers the aide/dashboard.)
-  if (suggestion.staffResponse) {
-    console.log(
-      `scholarSuggestions.respond: overwriting the reply on already-answered ${args.suggestionId}`,
-    );
+  const now = Date.now();
+  const threadId = await ensureWorkshopThreadForSuggestion(ctx, suggestion, now);
+  const thread = threadId ? await ctx.db.get(threadId) : null;
+  const threadScholar = thread ? await scholarForThread(ctx, thread) : null;
+  if (!thread || !threadScholar) {
+    // No institution to anchor a conversation to — same refusal shape.
+    throw new Error("Suggestion not found");
   }
-
-  await ctx.db.patch(args.suggestionId, {
-    staffResponse: { authorId: args.authorId, body, at: Date.now() },
-    updatedAt: Date.now(),
+  // The lens above is a VISIBILITY rule; posting requires the Workshop team
+  // rule itself (a teacher/school admin at the scholar's school, or a platform
+  // admin). A global-teacher account whose only standing at that school is
+  // base staff or curriculum could otherwise write into a thread it can't
+  // read. Same refusal shape as a nonexistent id.
+  if (!(await staffCanReachScholar(ctx, author, threadScholar, "workshop")).ok) {
+    throw new Error("Suggestion not found");
+  }
+  const priorFacts = await scholarThreadFacts(ctx, thread);
+  await postScholarThreadMessage(ctx, {
+    thread,
+    scholar: threadScholar,
+    authorType: "teacher",
+    authorUserId: args.authorId,
+    body,
+    source: args.source,
+    now,
   });
+  await ctx.db.patch(args.suggestionId, { updatedAt: now });
 
-  const scholar = await ctx.db.get(suggestion.scholarId);
   const scholarFirstName =
-    scholar?.name?.trim().split(/\s+/)[0] ?? "the scholar";
-  return { title: suggestion.title, scholarFirstName };
+    threadScholar.name?.trim().split(/\s+/)[0] ?? "the scholar";
+  return {
+    title: suggestion.title,
+    scholarFirstName,
+    appended: priorFacts.hasStaffMessage,
+  };
 }
 
 /**
@@ -691,12 +1186,11 @@ export type WorkshopSlackReplyResult =
  * Semantics, decided deliberately:
  *  - **Never changes the idea's state**, because no reply does any more: the
  *    `heard`/`answered` enum is retired and only the scholar can put an idea
- *    away (`archivedAt`). The scholar hears back either way — delivery keys off
- *    `staffResponse`.
- *  - **A second reply APPENDS.** `respondCore` overwrites wholesale, which
- *    would silently destroy an earlier reply the child may already have been
- *    shown. A thread is a conversation; keeping both turns reads correctly to
- *    a kid ("I'll take a look." → "fixed it!").
+ *    away (`archivedAt`).
+ *  - **Every reply is its own message** in the idea's Workshop thread (source
+ *    "slack"), after whatever is already there — the scholar sees each turn
+ *    in their Messages and can answer back, and their answer comes back into
+ *    this same Slack thread.
  *  - **Every staff reply in the thread reaches the child.** That IS the
  *    feature; it also means the thread is not a staff-room. The ✅ ack on the
  *    Slack side makes that visible on every message.
@@ -727,26 +1221,19 @@ export const respondFromSlackThread = internalMutation({
     const existing = await ctx.db.get(suggestionId);
     if (!existing) return { status: "not_found" };
 
-    // EXACT match only. A suffix test (`prior.endsWith(body)`) looks like a
-    // safe dedupe and is data loss: a follow-up that happens to be a trailing
-    // substring of the accumulated reply ("you soon." after "…get back to you
-    // soon.") would replace the whole conversation with the fragment. Slack
-    // retries are already deduped by event id upstream (slackBot.claimEvent),
-    // so there is no repeat this needs to catch anyway.
-    const prior = existing.staffResponse?.body.trim();
-    const appended = !!prior && prior !== body;
-    const composed = appended ? `${prior}\n\n${body}` : body;
-
+    // Each Slack reply is its own message in the idea's thread. Slack retries
+    // are already deduped by event id upstream (slackBot.claimEvent).
     try {
       const result = await respondCore(ctx, {
         suggestionId,
         authorId: args.authorId,
-        body: composed,
+        body,
         lens: { via: "userAccess" },
+        source: "slack",
       });
       return {
         status: "recorded",
-        appended,
+        appended: result.appended,
         title: result.title,
         scholarFirstName: result.scholarFirstName,
       };
@@ -798,13 +1285,9 @@ export const setArchivedMine = authedMutation({
 
     // Bringing an idea back can push the scholar over the five-open cap — say
     // so plainly rather than silently exceeding it, and name the number the way
-    // the composer does.
-    if (!args.archived) {
-      const open = await ctx.db
-        .query("scholarSuggestions")
-        .withIndex("by_scholar", (q) => q.eq("scholarId", ctx.user._id))
-        .filter((q) => q.eq(q.field("archivedAt"), undefined))
-        .collect();
+    // the composer does. A bug-report card is not an idea, so it never waits.
+    if (!args.archived && !suggestion.bugReportId) {
+      const open = await openIdeas(ctx, ctx.user._id);
       if (open.length >= MAX_OPEN_SUGGESTIONS) {
         throw new Error(
           `You've already got ${MAX_OPEN_SUGGESTIONS} ideas out — that's the most at once. Archive one first to make room for this one.`,

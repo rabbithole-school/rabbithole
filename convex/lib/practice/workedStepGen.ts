@@ -787,3 +787,388 @@ export function decimalDivideSteps(
   }
   return steps.length >= 2 ? steps : [];
 }
+
+// ── Discrete math: combinatorics ─────────────────────────────────────────────
+// The break-node families PR #2527 shipped as bare {stem, answer} generators.
+// Every value below is recomputed from the SAME operands the template drew, so
+// the final step is answer-consistent by construction; earlier steps name the
+// conceptual move without ever asserting the final value (verified by the
+// gradeable-leak sweep in workedStepGen.test.ts).
+
+/** P(n, r): place `r` of `n` in order. The conceptual move is recognising that
+ *  order matters (so multiply the `r` descending factors from `n`); the final
+ *  move is the product. Two genuine moves. */
+export function permutationsSteps(n: number, r: number, answer: TypedAnswer): WorkedStep[] {
+  const factors = Array.from({ length: r }, (_, i) => n - i);
+  const product = factors.join(" × ");
+  return [
+    {
+      text: `Order matters here, so multiply ${r} factors counting down from ${n}: ${product}.`,
+      blankText: `Write the ${r} factors counting down from ${n}: ?`,
+    },
+    {
+      text: `Multiply them: ${product} = ${formatAnswer(answer)}.`,
+      blankText: `Multiply ${product}: ?`,
+    },
+  ];
+}
+
+/** Generalized pigeonhole: `n` items over `k` groups forces some group to hold
+ *  at least ⌈n/k⌉. State the principle (spread evenly, the leftover forces one
+ *  group higher), then round up — the value only appears in the final step. */
+export function pigeonholeSteps(n: number, k: number, answer: TypedAnswer): WorkedStep[] {
+  return [
+    {
+      // Honest whether or not k divides n: with a leftover the fullest group
+      // sits above the even share; with none it sits exactly at it. "At least
+      // the even share, rounded up" covers both, so no seed misteaches.
+      text: `Spread the ${n} as evenly as possible over the ${k} groups — the fullest group can never hold less than the even share, rounded up.`,
+      blankText: `Spread ${n} as evenly as possible over ${k} groups — what bounds the fullest group? (the even share, rounded up)`,
+    },
+    {
+      text: `So the fullest group holds at least ⌈${n} ÷ ${k}⌉ = ${formatAnswer(answer)}.`,
+      blankText: `Round ${n} ÷ ${k} up to a whole number: ?`,
+    },
+  ];
+}
+
+/** Counting principle: `n1` outcomes then `n2` outcomes → n1 × n2 total. */
+export function countListOutcomesSteps(n1: number, n2: number, answer: TypedAnswer): WorkedStep[] {
+  return [
+    {
+      text: `Each of the ${n1} first outcomes can pair with each of the ${n2} second outcomes.`,
+      blankText: `How do ${n1} first outcomes combine with ${n2} second outcomes? (pair each with each)`,
+    },
+    {
+      text: `Multiply the counts: ${n1} × ${n2} = ${formatAnswer(answer)}.`,
+      blankText: `Multiply ${n1} × ${n2}: ?`,
+    },
+  ];
+}
+
+// ── Discrete math: number theory ─────────────────────────────────────────────
+
+const NT_GCD = (a: number, b: number): number => (b === 0 ? Math.abs(a) : NT_GCD(b, a % b));
+
+/** Every divisor of n, ascending (1, …, n). */
+function divisorsOf(n: number): number[] {
+  const out: number[] = [];
+  for (let d = 1; d <= n; d++) if (n % d === 0) out.push(d);
+  return out;
+}
+
+/** The gap between consecutive primes is the difference — name the move, then
+ *  subtract. */
+export function primeGapSteps(p1: number, p2: number, answer: TypedAnswer): WorkedStep[] {
+  return [
+    {
+      text: `The gap between two consecutive primes is how far apart they sit — subtract the smaller from the larger.`,
+      blankText: `What is the gap between consecutive primes? (larger minus smaller)`,
+    },
+    {
+      text: `Subtract: ${p2} − ${p1} = ${formatAnswer(answer)}.`,
+      blankText: `Subtract ${p2} − ${p1}: ?`,
+    },
+  ];
+}
+
+/** Count twin-prime pairs (p, p+2) below `u`: list the pairs, then count them.
+ *  The pair list is prose (no single recoverable value), so it never leaks the
+ *  count even when a listed prime equals it. */
+export function twinPrimesSteps(u: number, answer: TypedAnswer): WorkedStep[] {
+  const pairs: string[] = [];
+  for (let p = 2; p + 2 < u; p++) {
+    if (isPrimeLocal(p) && isPrimeLocal(p + 2)) pairs.push(`(${p}, ${p + 2})`);
+  }
+  return [
+    {
+      text: `List the twin-prime pairs (p, p+2) with both primes below ${u}: ${pairs.join(", ")}.`,
+      blankText: `List the twin-prime pairs below ${u}: ?`,
+    },
+    {
+      text: `Count the pairs: ${formatAnswer(answer)}.`,
+      blankText: `Count the pairs you listed: ?`,
+    },
+  ];
+}
+
+function isPrimeLocal(n: number): boolean {
+  if (n < 2) return false;
+  for (let d = 2; d * d <= n; d++) if (n % d === 0) return false;
+  return true;
+}
+
+/** Classify n from its positive-factor count. */
+export function primeCompositeSteps(
+  n: number,
+  classification: "Prime" | "Composite",
+): WorkedStep[] {
+  const divisors = divisorsOf(n);
+  return [
+    {
+      text: `List every whole number that divides ${n} exactly: ${divisors.join(", ")}.`,
+      blankText: `List every factor of ${n}: ?`,
+    },
+    {
+      text: `${n} has ${divisors.length} positive factors, so it is ${classification}.`,
+      blankText: `Count the factors of ${n}: ? — so is ${n} prime or composite?`,
+    },
+  ];
+}
+
+/** Read an exponent off a given prime factorization. When the asked prime has
+ *  an EXPLICIT exponent, the rule ("read the small raised number") scaffolds
+ *  without answering. When the asked exponent is the implicit 1, the only rule
+ *  that helps IS the answer ("no raised number means 1") — there is no honest
+ *  scaffold, so return [] and let the coach carry it, matching the
+ *  intermediate-equals-answer precedents above. */
+export function primeFactorizationExponentSteps(
+  prime: number,
+  factorizationText: string,
+  answer: TypedAnswer,
+): WorkedStep[] {
+  if (answer.type === "integer" && answer.value === 1) return [];
+  return [
+    {
+      text: `A prime's exponent is the small raised number written just after it in the factorization.`,
+      blankText: `Where do you read a prime's exponent? (the small raised number after it)`,
+    },
+    {
+      text: `In ${factorizationText}, the exponent of ${prime} is ${formatAnswer(answer)}.`,
+      blankText: `Read the exponent of ${prime} in ${factorizationText}: ?`,
+    },
+  ];
+}
+
+/** Remainder of n ÷ {2, 5, 10}. Genuine decomposition would be artificial (the
+ *  remainder is a one-glance last-digit fact), so this is a reveal-only rule
+ *  restatement + the labelled result — the last digit's VALUE is never shown, so
+ *  the mod-10 case does not hand back the answer. */
+export function divisibilityRuleSteps(n: number, divisor: number, answer: TypedAnswer): WorkedStep[] {
+  return [
+    {
+      text: `For ${divisor}, only the last digit of ${n} decides the remainder — the earlier digits are already multiples of ${divisor}.`,
+      blankText: `Which digit of ${n} decides the remainder when dividing by ${divisor}? (the last one)`,
+    },
+    {
+      text: `So ${n} ÷ ${divisor} leaves remainder ${formatAnswer(answer)}.`,
+      blankText: `What remainder does ${n} ÷ ${divisor} leave? ?`,
+    },
+  ];
+}
+
+/** Common factors of a and b = factors of their gcd. Three genuine moves: the
+ *  common factors are exactly the divisors of the gcd; find that gcd, list its
+ *  divisors, count. The gcd is stated inside a longer clause (not a lone
+ *  `= gcd`), so it is never recovered as the answer even when gcd equals the
+ *  count. */
+export function commonFactorsSteps(a: number, b: number, answer: TypedAnswer): WorkedStep[] {
+  const g = NT_GCD(a, b);
+  const divisors = divisorsOf(g);
+  return [
+    {
+      text: `A common factor of ${a} and ${b} must divide both, so it divides their greatest common factor — find that first.`,
+      blankText: `What must every common factor of ${a} and ${b} divide? (their gcd)`,
+    },
+    {
+      text: `gcd(${a}, ${b}) is ${g}, and its divisors are ${divisors.join(", ")}.`,
+      blankText: `Find gcd(${a}, ${b}) and list its divisors: ?`,
+    },
+    {
+      text: `Count the common factors: ${formatAnswer(answer)}.`,
+      blankText: `Count the divisors of the gcd: ?`,
+    },
+  ];
+}
+
+// ── Exponents / two-step expressions ─────────────────────────────────────────
+
+/** b^e as repeated multiplication: expand into e copies of b, then multiply. */
+export function exponentRepeatedMultSteps(base: number, exponent: number, answer: TypedAnswer): WorkedStep[] {
+  const expansion = Array.from({ length: exponent }, () => String(base)).join(" × ");
+  return [
+    {
+      text: `${base}^${exponent} means ${exponent} copies of ${base} multiplied together: ${expansion}.`,
+      blankText: `Write ${base}^${exponent} as repeated multiplication: ?`,
+    },
+    {
+      text: `Multiply them out: ${expansion} = ${formatAnswer(answer)}.`,
+      blankText: `Multiply ${expansion}: ?`,
+    },
+  ];
+}
+
+/** A two-step expression where the ×/÷ part is done before the +/− part.
+ *  `highExpr` (e.g. "6 × 4") evaluates to `highResult`; then `lowLead lowOp
+ *  highResult` gives the answer. When the intermediate equals the answer there
+ *  is no honest scaffold (the first step would print the answer) — return [].*/
+export function twoStepExpressionSteps(
+  highExpr: string,
+  highResult: number,
+  lowLead: number,
+  lowOp: "+" | "−",
+  answer: TypedAnswer,
+): WorkedStep[] {
+  if (answer.type === "integer" && answer.value === highResult) return [];
+  const verb = lowOp === "+" ? "add" : "subtract";
+  return [
+    {
+      text: `Multiplication and division come before addition and subtraction, so do ${highExpr} = ${highResult} first.`,
+      blankText: `Work out the × or ÷ part (${highExpr}) first: ?`,
+    },
+    {
+      text: `Then ${verb}: ${lowLead} ${lowOp} ${highResult} = ${formatAnswer(answer)}.`,
+      blankText: `Now ${verb} ${lowLead} ${lowOp} ${highResult}: ?`,
+    },
+  ];
+}
+
+// ── Modular arithmetic (remainder cycles) ────────────────────────────────────
+
+/** Clock hours: (start + hours), then wrap around a 12-hour face. Emits steps
+ *  only when the sum actually exceeds 12 (otherwise no wrap happens and the sum
+ *  IS the answer — reveal-only). */
+export function clockRemainderSteps(start: number, hours: number, answer: TypedAnswer): WorkedStep[] {
+  const sum = start + hours;
+  if (sum <= 12) return [];
+  return [
+    {
+      text: `Add the hours to the start: ${start} + ${hours} = ${sum}.`,
+      blankText: `Add ${start} + ${hours}: ?`,
+    },
+    {
+      text: `Every 12 hours the clock returns to the same place, so subtract full 12s from ${sum}: ${formatAnswer(answer)} o'clock.`,
+      blankText: `Wrap ${sum} around a 12-hour clock: ?`,
+    },
+  ];
+}
+
+/** Day of week: (day + daysLater), then wrap around a 7-day week. daysLater is
+ *  always ≥ 20 here, so the week always wraps. */
+export function weekdayRemainderSteps(day: number, daysLater: number, answer: TypedAnswer): WorkedStep[] {
+  const total = day + daysLater;
+  return [
+    {
+      text: `Add the days to the start: ${day} + ${daysLater} = ${total}.`,
+      blankText: `Add ${day} + ${daysLater}: ?`,
+    },
+    {
+      text: `Every 7 days returns to the same weekday, so subtract full weeks from ${total}: day ${formatAnswer(answer)}.`,
+      blankText: `Wrap ${total} around a 7-day week: ?`,
+    },
+  ];
+}
+
+// ── Place value ──────────────────────────────────────────────────────────────
+
+/** Which of two three-digit numbers is larger. A genuine decomposition would
+ *  have to name the winner in a non-final step, so this is a reveal-only rule
+ *  (compare digit by digit from the left) + the labelled result. */
+export function compareGreaterSteps(answer: TypedAnswer): WorkedStep[] {
+  return [
+    {
+      text: `Compare digit by digit from the hundreds place; the first place where the digits differ decides which number is larger.`,
+      blankText: `How do you compare two three-digit numbers? (left to right, first differing digit wins)`,
+    },
+    {
+      text: `The larger number is ${formatAnswer(answer)}.`,
+      blankText: `Which number is larger? ?`,
+    },
+  ];
+}
+
+/** a + b within 20 with a carry, taught by making ten: take (10 − a) from b to
+ *  reach 10, then add what is left. */
+export function addWithin20MakeTenSteps(a: number, b: number, answer: TypedAnswer): WorkedStep[] {
+  const need = 10 - a;
+  const leftover = b - need;
+  return [
+    {
+      text: `Take ${need} from ${b} to bring ${a} up to ten: ${a} + ${need} = 10, with ${leftover} left over.`,
+      blankText: `How much of ${b} makes ${a} reach ten? (${need}, leaving ${leftover})`,
+    },
+    {
+      text: `Add what is left to ten: 10 + ${leftover} = ${formatAnswer(answer)}.`,
+      blankText: `Add 10 + ${leftover}: ?`,
+    },
+  ];
+}
+
+// ── Discrete math: multiple-choice (graph theory + logic) ────────────────────
+// choiceItem() carries no workedSteps parameter (a parallel lane owns adding
+// one), so these are attached at the call site with `{ ...choiceItem(...),
+// ...withWorkedSteps(steps) }`. The final step names the correct CHOICE LABEL
+// (not a number — formatAnswer of a multipleChoice answer is "choice N"); the
+// answerLabel is passed in from the template. Earlier steps state the criterion
+// WITHOUT the answer's label words, so they never preview the verdict.
+
+/** A cycle graph on `n` vertices is 2-colourable exactly when `n` is even.
+ *  `answerLabel` is the correct choice ("bipartite" / "not bipartite"). */
+export function cycleBipartiteSteps(n: number, answerLabel: string): WorkedStep[] {
+  const parity = n % 2 === 0 ? "even" : "odd";
+  return [
+    {
+      text: `Walking a ring, the colours must alternate; they only close up consistently when the number of vertices is even.`,
+      blankText: `When can you 2-colour a ring of vertices? (when the count is even)`,
+    },
+    {
+      text: `${n} is ${parity}, so the cycle is ${answerLabel}.`,
+      blankText: `Is a ${n}-vertex cycle bipartite? ?`,
+    },
+  ];
+}
+
+/** The degree sequence: find each vertex's degree, sort high→low, write it.
+ *  Reveal-only steps (naming the two moves), because printing the degrees risks
+ *  showing the sorted tuple itself. `answerLabel` is the correct choice string. */
+export function degreeSequenceSteps(answerLabel: string): WorkedStep[] {
+  return [
+    {
+      text: `A vertex's degree is how many edges touch it — count that for every vertex.`,
+      blankText: `What is a vertex's degree? (the number of edges touching it)`,
+    },
+    {
+      text: `List those degrees from largest to smallest.`,
+      blankText: `In what order does a degree sequence list the degrees? (largest to smallest)`,
+    },
+    {
+      text: `The degree sequence is ${answerLabel}.`,
+      blankText: `Write the sorted degree sequence: ?`,
+    },
+  ];
+}
+
+/** Negation: a general rule (flip to the exact opposite, nothing added) + the
+ *  labelled negation. Reveal-only — the negation is a recognition task. */
+export function negationSteps(statement: string, answerLabel: string): WorkedStep[] {
+  return [
+    {
+      text: `A negation flips a statement to its exact opposite — "all" becomes "some are not", "is" becomes "is not" — and adds nothing else.`,
+      blankText: `What does a negation do to a statement? (flip it to the exact opposite)`,
+    },
+    {
+      text: `The negation of "${statement}" is "${answerLabel}".`,
+      blankText: `Write the negation of "${statement}": ?`,
+    },
+  ];
+}
+
+/** Parity of a sum of odd/even parts: the sum's parity is the parity of the
+ *  NUMBER of odd parts; compare that to the target's parity. `answerLabel` is
+ *  "possible" / "impossible". */
+export function parityProofSteps(target: number, answerLabel: string): WorkedStep[] {
+  return [
+    {
+      text: `Each odd part flips the running total's parity and each even part leaves it alone, so the sum's parity is the parity of how many odd parts there are.`,
+      blankText: `What sets the parity of the sum? (how many odd parts there are)`,
+    },
+    {
+      text: `Compare that parity to ${target}'s parity.`,
+      blankText: `What do you compare the sum's parity against? (the target ${target})`,
+    },
+    {
+      text: `The parities ${answerLabel === "possible" ? "match" : "do not match"}, so reaching ${target} is ${answerLabel}.`,
+      blankText: `Can the parts add to ${target}? ?`,
+    },
+  ];
+}

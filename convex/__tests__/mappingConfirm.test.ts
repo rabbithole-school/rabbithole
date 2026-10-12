@@ -15,8 +15,8 @@
  *     left all return `retry: false` (the cap paths).
  */
 
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -28,9 +28,20 @@ const modules = (
   import.meta as ImportMeta & { glob: (p: string) => Record<string, () => Promise<unknown>> }
 ).glob("../**/*.ts");
 
-type Tester = ReturnType<typeof convexTest>;
+type Tester = TestConvex<typeof schema>;
 
 const WHOLE = "whole-number-arithmetic";
+
+let sharedT: Tester;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
 
 async function seedScholar(t: Tester, username: string) {
   return await t.run(async (ctx) =>
@@ -131,8 +142,7 @@ async function mapAllCorrect(
 
 describe("mapping band — confirm before you cap (submitMappingAnswer)", () => {
   test("a first typed miss returns retry:true + a FRESH confirm item on the SAME skill", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_confirm_retry");
     const asScholar = await asUser(t, scholar);
 
@@ -150,8 +160,7 @@ describe("mapping band — confirm before you cap (submitMappingAnswer)", () => 
   });
 
   test("a correct confirm supersedes the slip — frontier matches a clean run (retry:false)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
 
     // Scholar A: slip the first item, confirm CORRECT, then map the rest correct.
     const slipper = await seedScholar(t, "map_confirm_slip");
@@ -190,8 +199,7 @@ describe("mapping band — confirm before you cap (submitMappingAnswer)", () => 
   });
 
   test("a second miss on the node caps — retry:false", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_confirm_two_miss");
     const asScholar = await asUser(t, scholar);
 
@@ -205,8 +213,7 @@ describe("mapping band — confirm before you cap (submitMappingAnswer)", () => 
   });
 
   test("an honest don't-know is the fast path — caps immediately, retry:false", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_confirm_idk");
     const asScholar = await asUser(t, scholar);
 
@@ -218,8 +225,7 @@ describe("mapping band — confirm before you cap (submitMappingAnswer)", () => 
   });
 
   test("no confirm budget left ⇒ a first miss caps immediately (retry:false)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "map_confirm_no_budget");
     const asScholar = await asUser(t, scholar);
 

@@ -20,6 +20,60 @@ import {
 } from "./seeds";
 import { maybeAwardUnitBadge } from "./badgeAward";
 
+/** "A scholar did this" — the one provenance vocabulary (T12). */
+export type ScholarMarkSource = NonNullable<Doc<"activityCompletions">["source"]>;
+export type ScholarMarkAction = NonNullable<Doc<"activityCompletions">["action"]>;
+
+/** True when the row is a scholar's own homework mark (container / web Done). */
+export function isScholarHomeworkMark(
+  row: Pick<Doc<"activityCompletions">, "source" | "action">,
+): boolean {
+  return (
+    row.source === "scholar_home" &&
+    row.action === "scholar_marked_homework_done"
+  );
+}
+
+/**
+ * Can a teacher record this activity done for an assignment's scholars through
+ * the group mark-done path (`markCompleteForGroup` / the aide's
+ * `mark_class_activity_done`)? Lesson-anchored activities always can. The one
+ * lesson-less exception is ad-hoc offline or web HOMEWORK (a read-aloud, a
+ * video link): it has an explicit assignment scope, and nothing the scholar
+ * does records a completion for it — lesson-less web work is refused by
+ * `markComplete` and `webActivitySessions.finalize` alike. Nothing downstream
+ * needs the lesson: the completion core leaves lessonId/unitId unset and the
+ * unit badge / seed reconcilers no-op. The end-of-day check-in reads this too,
+ * so it never asks a teacher a question the write can't act on.
+ */
+export function teacherCanMarkCompleteForGroup(
+  assignment: Doc<"assignments">,
+  activity: Doc<"activities">,
+): boolean {
+  if (activity.lessonId) return true;
+  return (
+    assignment.kind === "adHocDispatch" &&
+    (activity.kind === "offline" || activity.kind === "web") &&
+    (assignment.activitySchedule ?? []).some(
+      (entry) =>
+        String(entry.activityId) === String(activity._id) &&
+        entry.mode === "homework",
+    )
+  );
+}
+
+/**
+ * The scholar-side twin of `teacherCanMarkCompleteForGroup`: the kinds whose
+ * homework happens off the app, so nothing the scholar does records completion
+ * and their own "I did it" (offline container) / Done (link-out web host) is the
+ * only scholar write (TRA-458). Online work completes through the tutor.
+ */
+export function scholarCanSelfMarkHomeworkKind(
+  activity: Pick<Doc<"activities">, "kind">,
+): boolean {
+  return activity.kind === "offline" || activity.kind === "web";
+}
+
 /**
  * Idempotently upsert a `(scholar, activity)` completion row, scoped to the
  * session's assignment when there is one. Mirrors the exact dedupe the two
@@ -45,10 +99,15 @@ export async function upsertActivityCompletion(
     // two can't disagree about a session-scoped completion.
     assignmentId?: Id<"assignments">;
     note?: string;
-    // Set only by an intentional scholar action from the take-home plan.
-    // Other completion paths retain their existing, unstamped provenance.
-    source?: "scholar_home";
-    action?: "scholar_marked_take_home_done";
+    // Set only by an intentional scholar self-mark (take-home plan, offline
+    // homework "I did it", link-out web Done). Every OTHER write — a teacher,
+    // the tutor, a rubric pass, a met goal — is someone or something vouching
+    // for the work, so when it lands on a row the scholar self-marked it
+    // CLEARS that provenance (the "marked it" chip and the scholar's own undo
+    // go away). Default-on, so a future caller can't forget; only passing a
+    // `source` opts out.
+    source?: ScholarMarkSource;
+    action?: ScholarMarkAction;
   },
 ): Promise<{ completionId: Id<"activityCompletions"> | null; created: boolean }> {
   const { scholarId, activityId, sessionId, note } = args;
@@ -131,6 +190,9 @@ export async function upsertActivityCompletion(
       sessionId: sessionId ?? existing.sessionId,
       assignmentId: assignmentId ?? existing.assignmentId,
       note: note ?? existing.note,
+      ...(!args.source && existing.source
+        ? { source: undefined, action: undefined }
+        : {}),
     });
     return { completionId: existing._id, created: false };
   }
@@ -224,10 +286,17 @@ export async function reconcileActivityCompletion(
     sessionId?: Id<"sessions">;
     assignmentId?: Id<"assignments">;
     note?: string;
-    source?: "scholar_home";
-    action?: "scholar_marked_take_home_done";
+    source?: ScholarMarkSource;
+    action?: ScholarMarkAction;
   },
 ): Promise<{ completionId: Id<"activityCompletions"> | null; created: boolean }> {
+  // A FREE PLAY session (sessions.freePlay, TRA-489) is the scholar's own
+  // version after the assignment is done: it counts toward nothing, so no path
+  // may record a completion, badge, or seed flip from it.
+  if (args.sessionId) {
+    const session = await ctx.db.get(args.sessionId);
+    if (session?.freePlay === true) return { completionId: null, created: false };
+  }
   // 1. Canonical event first — the ledger everything else projects from.
   const result = await upsertActivityCompletion(ctx, args);
   if (!result.completionId) return result;

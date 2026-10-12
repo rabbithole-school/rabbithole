@@ -80,6 +80,7 @@ export function parseActivityDeck(json: string | undefined | null): Deck | null 
  */
 export function useDeckAssetResolver(
   deck: Deck | null,
+  activityId: Id<"activities">,
 ): (assetId: string) => string | null {
   const assetIds = useMemo(() => {
     if (!deck) return [] as Id<"_storage">[];
@@ -94,8 +95,8 @@ export function useDeckAssetResolver(
   }, [deck]);
 
   const assetUrls = useQuery(
-    api.files.getUrls,
-    assetIds.length > 0 ? { storageIds: assetIds } : "skip",
+    api.activityResources.presentationAssetUrls,
+    assetIds.length > 0 ? { activityId, storageIds: assetIds } : "skip",
   );
 
   return useCallback(
@@ -176,7 +177,7 @@ export function TeacherDeckEditor({
     optimistic && (!serverDeck || serverDeck.revision < optimistic.revision)
       ? optimistic
       : serverDeck;
-  const resolveAsset = useDeckAssetResolver(deck);
+  const resolveAsset = useDeckAssetResolver(deck, activityId);
 
   const onChange = useCallback(
     (next: Deck) => {
@@ -402,9 +403,15 @@ const NOOP = () => {};
  * space. The canvas letterboxes the fixed 1280x720 slide inside the viewport, so
  * a deck looks identical here and in the editor.
  */
-export function TeacherDeckPresenter({ deck }: { deck: Deck }) {
+export function TeacherDeckPresenter({
+  deck,
+  activityId,
+}: {
+  deck: Deck;
+  activityId: Id<"activities">;
+}) {
   const [index, setIndex] = useState(0);
-  const resolveAsset = useDeckAssetResolver(deck);
+  const resolveAsset = useDeckAssetResolver(deck, activityId);
 
   const count = deck.slides.length;
   const clamped = Math.min(index, Math.max(0, count - 1));

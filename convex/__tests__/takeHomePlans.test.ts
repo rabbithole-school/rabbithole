@@ -161,6 +161,21 @@ async function seedPlanWorld(t: ReturnType<typeof convexTest>) {
 }
 
 describe("takeHomePlans", () => {
+  test("does not promise a Special Delivery while automatic printing is paused", async () => {
+    const t = convexTest(schema, modules);
+    const world = await seedPlanWorld(t);
+    await t.run((ctx) =>
+      ctx.db.patch(world.institutionId, { isPrimary: true }),
+    );
+    const asScholar = await withUser(t, world.scholarId);
+
+    const plan = await asScholar.query(api.takeHomePlans.forSelf, {
+      now: Date.now(),
+    });
+
+    expect(plan).toMatchObject({ isPrimary: true, printsTonight: false });
+  });
+
   test("does not add a dormant Quest before it has a session to open", async () => {
     const t = convexTest(schema, modules);
     const world = await seedPlanWorld(t);
@@ -474,6 +489,39 @@ describe("takeHomePlans", () => {
     expect(await t.run((ctx) => ctx.db.get(world.questSessionId))).toMatchObject({
       isArchived: false,
     });
+  });
+
+  test("Keep it open stops today's close-out asking, with no side effect", async () => {
+    const t = convexTest(schema, modules);
+    const world = await seedPlanWorld(t);
+    const asScholar = await withUser(t, world.scholarId);
+
+    const before = await asScholar.query(api.takeHomePlans.forSelf, { now: Date.now() });
+    expect(before.suggestions.length).toBeGreaterThan(1);
+    for (const item of before.suggestions) {
+      await asScholar.mutation(api.takeHomePlans.keepSuggestionOpen, {
+        suggestion:
+          item.kind === "activity"
+            ? { kind: "activity", sessionId: item.sessionId }
+            : { kind: "quest", unitId: item.unitId },
+      });
+    }
+
+    const plan = await asScholar.query(api.takeHomePlans.forSelf, { now: Date.now() });
+    expect(plan.suggestions).toEqual([]);
+    // Not "marked done", not on a list, nothing archived or completed.
+    expect(plan.resolvedToday).toEqual([]);
+    expect(plan.selected).toEqual([]);
+    expect(await t.run((ctx) => ctx.db.get(world.questSessionId))).toMatchObject({
+      isArchived: false,
+    });
+    expect(await t.run((ctx) => ctx.db.query("activityCompletions").collect())).toHaveLength(0);
+    // Asking again is a no-op, not a second row.
+    expect(
+      await asScholar.mutation(api.takeHomePlans.keepSuggestionOpen, {
+        suggestion: { kind: "quest", unitId: world.questUnitId },
+      }),
+    ).toBeNull();
   });
 
   test("idempotently adds a present Quest and recreates it after removal", async () => {

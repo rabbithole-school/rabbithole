@@ -20,6 +20,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
   DOCUMENT_KIND_GROUPS,
   documentKindSpec,
+  documentKindUsesExtraction,
   visibleUploadKinds,
   type DocumentKindSpec,
 } from "@/convex/lib/documentKinds";
@@ -106,10 +107,15 @@ export function ScholarDocumentUploadModal({
       visibleUploadKinds(
         user?.role,
         healthFormsAvailable,
-        false,
+        user?.hasSchoolOperationsAccess === true,
         user?.hasHealthManagementAccess === true,
       ),
-    [user?.role, user?.hasHealthManagementAccess, healthFormsAvailable],
+    [
+      user?.role,
+      user?.hasSchoolOperationsAccess,
+      user?.hasHealthManagementAccess,
+      healthFormsAvailable,
+    ],
   );
   const healthAvailable = staffView?.canUploadHealthDocuments ?? false;
   // Two of the five health slots only exist when the family's own answers call
@@ -311,13 +317,13 @@ export function ScholarDocumentUploadModal({
                           group === "Health record" && !healthAvailable
                         }
                       >
-                        {options.map((option) => (
+                        {options.map((opt) => (
                           <option
-                            key={option.kind}
-                            value={option.kind}
-                            disabled={!kindIsAttachable(option.kind)}
+                            key={opt.kind}
+                            value={opt.kind}
+                            disabled={!kindIsAttachable(opt.kind)}
                           >
-                            {option.label}
+                            {opt.label}
                           </option>
                         ))}
                       </optgroup>
@@ -404,7 +410,9 @@ export function ScholarDocumentUploadModal({
                 <Text fontSize="xs" color="charcoal.400" fontFamily="body">
                   {isHealth
                     ? "Filed straight onto the health record — no AI reads it. The family's signed answers and signature are left exactly as they are, and this upload is recorded against your name."
-                    : "The file will be extracted and redacted automatically. The redacted summary is what downstream AI sees — the raw text stays teacher-only."}
+                    : documentKindUsesExtraction(kind)
+                      ? "The file will be extracted and redacted automatically. The redacted summary is what downstream AI sees — the raw text stays teacher-only."
+                      : "Stored as-is on the scholar's Documents tab — no AI reads it, and this upload is recorded against your name."}
                 </Text>
               </VStack>
             </Dialog.Body>

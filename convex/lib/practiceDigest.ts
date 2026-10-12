@@ -391,9 +391,9 @@ function byCohortTitle(
   return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
 }
 
-/** Turn a list of labels into "*a*", "*a* and *b*", or "*a*, *b* and N more". */
+/** Turn a list of labels into "**a**", "**a** and **b**", or "**a**, **b** and N more". */
 function named(labels: string[] | undefined, max = 2): string {
-  const items = (labels ?? []).filter(Boolean).map((l) => `*${l}*`);
+  const items = (labels ?? []).filter(Boolean).map((l) => `**${l}**`);
   if (items.length === 0) return "";
   if (items.length === 1) return items[0];
   if (items.length <= max) {
@@ -492,11 +492,11 @@ export function renderScholarNote(s: PracticeScholarDigestRow, now: number): str
   const sentences: string[] = [];
 
   if (state === "not_placed") {
-    return `${emoji} *${name}* hasn't taken a placement yet, so practice can't begin — placing them is the unblocker.`;
+    return `${emoji} **${name}** hasn't taken a placement yet, so practice can't begin — placing them is the unblocker.`;
   }
 
   if (state === "quiet") {
-    let lead = `${emoji} *${name}* was quiet this week`;
+    let lead = `${emoji} **${name}** was quiet this week`;
     lead += s.lastPracticedAt
       ? ` — last practiced ${relativeDay(s.lastPracticedAt, now)}.`
       : " — no practice recorded yet.";
@@ -516,7 +516,7 @@ export function renderScholarNote(s: PracticeScholarDigestRow, now: number): str
 
   if (state === "flying") {
     const wins = winPhrases(s);
-    let lead = `${emoji} *${name}* had a strong week — practiced ${days} of 7 days`;
+    let lead = `${emoji} **${name}** had a strong week — practiced ${days} of 7 days`;
     lead += wins.length > 0 ? `, ${joinAnd(wins)}.` : ".";
     sentences.push(lead);
     if (front) sentences.push(`Working now at the edge on ${front}.`);
@@ -525,7 +525,7 @@ export function renderScholarNote(s: PracticeScholarDigestRow, now: number): str
   }
 
   if (state === "stuck") {
-    let lead = `${emoji} *${name}* put in ${days} of 7 days, but nothing has crossed into fluent yet`;
+    let lead = `${emoji} **${name}** put in ${days} of 7 days, but nothing has crossed into fluent yet`;
     if (s.frictionSkillLabel && (s.frictionMisses ?? 0) > 0) {
       lead += ` — the friction is on ${named([s.frictionSkillLabel])} (${s.frictionMisses} missed attempts). Worth a check-in.`;
     } else if (front) {
@@ -540,7 +540,7 @@ export function renderScholarNote(s: PracticeScholarDigestRow, now: number): str
 
   // steady
   const wins = winPhrases(s);
-  let lead = `${emoji} *${name}* kept at it — practiced ${days} of 7 days`;
+  let lead = `${emoji} **${name}** kept at it — practiced ${days} of 7 days`;
   lead += wins.length > 0 ? `, ${joinAnd(wins)}.` : ".";
   sentences.push(lead);
   if (front) sentences.push(`Working on ${front}.`);
@@ -601,7 +601,7 @@ function sumScholars(
 }
 
 function renderElsewhereReference(reference: PracticeElsewhereDigestRow): string {
-  return `↳ *${reference.name}* — practiced ${reference.count}× in [${reference.subject}](${reference.link})`;
+  return `↳ **${reference.name}** — practiced ${reference.count}× in [${reference.subject}](${reference.link})`;
 }
 
 function renderCohort(cohort: PracticeCohortDigestRow, now: number): string[] {
@@ -615,7 +615,7 @@ function renderCohort(cohort: PracticeCohortDigestRow, now: number): string[] {
     cohort.dailyGoalMinutes ? `${cohort.dailyGoalMinutes} min/day` : null,
   ].filter((x): x is string => !!x);
 
-  lines.push(`*${cohort.title}*${meta.length > 0 ? ` · ${meta.join(" · ")}` : ""}`);
+  lines.push(`**${cohort.title}**${meta.length > 0 ? ` · ${meta.join(" · ")}` : ""}`);
 
   if (scholars.length === 0 && elsewhere.length === 0) {
     lines.push("No scholars in this cohort yet.");
@@ -642,7 +642,7 @@ export function computePracticeDigest(input: PracticeDigestInput): PracticeDiges
   const activeCohorts = cohorts.filter((c) => c.scholars.length > 0);
 
   const lines: string[] = [
-    `🧭 *Practice Portrait — week of ${isoWeekKey(input.now)}*`,
+    `🧭 **Practice Portrait — week of ${isoWeekKey(input.now)}**`,
     "_One portrait per scholar — measured only against their own record._",
   ];
 
@@ -677,7 +677,7 @@ export function computePracticeDigest(input: PracticeDigestInput): PracticeDiges
 
 function renderPriorityTopic(topic: MathSkillsPriorityTopic): string {
   const label = escapeSlackText(topic.label.trim() || topic.nodeKey);
-  const linked = topic.link ? `[${label}](${topic.link})` : `*${label}*`;
+  const linked = topic.link ? `[${label}](${topic.link})` : `**${label}**`;
   const marker = {
     practice: "",
     acute: "🟠 ",
@@ -694,7 +694,7 @@ function renderPriorityTopicEvidence(
 ): string | undefined {
   if (!topic.narrative) return undefined;
   const label = escapeSlackText(topic.label.trim() || topic.nodeKey);
-  const linked = topic.link ? `[${label}](${topic.link})` : `*${label}*`;
+  const linked = topic.link ? `[${label}](${topic.link})` : `**${label}**`;
   return `  • ${linked} — ${escapeSlackText(topic.narrative)}`;
 }
 
@@ -814,10 +814,10 @@ export function computeMathSkillsUpdate(
     0,
   );
   const lines = [
-    `🎯 *Math skills — week of ${isoWeekKey(input.now)}*`,
+    `🎯 **Math skills — week of ${isoWeekKey(input.now)}**`,
     "_Each scholar's own week first, then the topics worth a 1:1 — 🔴 returned across sittings · 🟠 practice brake tripped · unmarked = repeated misses. Due reviews are automatic._",
   ];
-  const threadLines = ["*Evidence behind this week's topics*"];
+  const threadLines = ["**Evidence behind this week's topics**"];
   let hasThreadEvidence = false;
 
   if (scholars.length === 0) {
@@ -836,14 +836,14 @@ export function computeMathSkillsUpdate(
 
   for (const cohort of cohorts) {
     lines.push("");
-    lines.push(`*👥 ${escapeSlackText(cohort.title)}*`);
+    lines.push(`**👥 ${escapeSlackText(cohort.title)}**`);
     const cohortWins = renderCohortWins([
       ...cohort.scholarsWithTopics,
       ...cohort.activeWithoutTopics,
     ]);
     if (cohortWins) lines.push(cohortWins);
     for (const scholar of cohort.scholarsWithTopics) {
-      lines.push(`• *${escapeSlackText(safeName(scholar))}*`);
+      lines.push(`• **${escapeSlackText(safeName(scholar))}**`);
       const context = renderMathScholarWeekContext(scholar);
       if (context) lines.push(`  ${context}`);
       for (const topic of scholar.priorityTopics ?? []) {
@@ -859,7 +859,7 @@ export function computeMathSkillsUpdate(
         }
         threadLines.push("");
         threadLines.push(
-          `*${escapeSlackText(cohort.title)} · ${escapeSlackText(safeName(scholar))}*`,
+          `**${escapeSlackText(cohort.title)} · ${escapeSlackText(safeName(scholar))}**`,
         );
         threadLines.push(...evidence);
       }

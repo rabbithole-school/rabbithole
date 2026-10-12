@@ -2,6 +2,7 @@ import { sessionModeForActivityKind } from "../../lib/activityKinds";
 import { internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
+import { isUsableVibecodeStarterApp } from "./vibecodeStarter";
 
 type SetupResult = {
   seededArtifact: boolean;
@@ -89,23 +90,68 @@ export async function ensureSessionActivitySetup(
   const needsCanvas =
     args.activity.deliverable?.kind === "text" ||
     args.activity.deliverable?.kind === "artifact";
+  let starterSnapshot:
+    | {
+        title: string;
+        html: string;
+        appAssetIds?: Id<"_storage">[];
+        updatedAt?: number;
+        appAi?: Doc<"customApps">["appAi"];
+      }
+    | undefined;
+  if (
+    args.activity.kind === "vibecode" &&
+    args.activity.scholarsStartFrom === "starter"
+  ) {
+    if (args.activity.starterAppId) {
+      const starterApp = await ctx.db.get(args.activity.starterAppId);
+      if (isUsableVibecodeStarterApp(starterApp)) {
+        starterSnapshot = {
+          title: starterApp.name,
+          html: starterApp.html,
+          appAssetIds: starterApp.appAssetIds,
+          updatedAt: starterApp.updatedAt,
+          appAi: starterApp.appAi,
+        };
+      }
+    }
+  }
   let seededArtifact = false;
-  if (needsCanvas) {
+  if (starterSnapshot || needsCanvas) {
     const existingArtifact = await ctx.db
       .query("artifacts")
       .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
       .first();
     if (!existingArtifact) {
-      await ctx.db.insert("artifacts", {
-        sessionId: args.sessionId,
-        title: args.activity.title,
-        content: "",
-        lastEditedBy: "scholar",
-        type:
-          args.activity.deliverable?.kind === "artifact"
-            ? ("code" as const)
-            : ("text" as const),
-      });
+      if (starterSnapshot) {
+        await ctx.db.insert("artifacts", {
+          sessionId: args.sessionId,
+          title: starterSnapshot.title,
+          content: starterSnapshot.html,
+          lastEditedBy: "ai",
+          revision: 0,
+          type: "code",
+          language: "html",
+          appAssetIds: starterSnapshot.appAssetIds,
+          // Snapshot the character/judges with the HTML: an older session
+          // keeps the spec it was played with if the starter changes later.
+          appAi: starterSnapshot.appAi,
+        });
+        await ctx.db.patch(args.sessionId, {
+          vibecodeStarterUsedAt: starterSnapshot.updatedAt,
+        });
+      } else {
+        await ctx.db.insert("artifacts", {
+          sessionId: args.sessionId,
+          title: args.activity.title,
+          content: "",
+          lastEditedBy: "scholar",
+          type:
+            args.activity.deliverable?.kind === "artifact"
+              ? ("code" as const)
+              : ("text" as const),
+        });
+      }
       seededArtifact = true;
     }
   }

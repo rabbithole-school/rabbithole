@@ -7,13 +7,13 @@ import {
   Text,
   View,
 } from "react-native";
-import { Image } from "expo-image";
 import { router, useFocusEffect } from "expo-router";
 import * as Haptics from "expo-haptics";
 import { useQuery } from "convex/react";
 
 import { api } from "@/lib/convex";
 import { fonts, useColors, type Colors } from "@/theme";
+import { LicenseCardImage } from "@/components/LicenseCardImage";
 import {
   calculatorLicenseCardPresentation,
   type CalculatorLicenseChipTone,
@@ -224,8 +224,10 @@ function MiniFactGrid({
  *
  * What this surface refuses to be: a score, a threshold, a peer comparison, a
  * streak, a red "behind" state, or an in-app version of the Calculator License
- * Test. The test is offline and teacher-proctored. Badge art stays a small
- * decorative celebration next to the title — never a second credential UI.
+ * Test. The test is offline and teacher-proctored. Once licensed, the
+ * credential row shows the license card itself (the badge image, rendered
+ * from the printed card's design) beside Issued / Proctor — the ONE rendering
+ * of the credential, matching the web card; no medallion by the title.
  */
 
 function formatIssuedDate(value: number) {
@@ -270,38 +272,6 @@ function CredentialField({
       <Text style={styles.fieldValue} numberOfLines={1}>
         {value}
       </Text>
-    </View>
-  );
-}
-
-/** Celebration art only, and only once there is a credential to celebrate. */
-function BadgeMark({
-  badge,
-  styles,
-}: {
-  badge: { imageUrl: string | null; artStatus: string; icon: string };
-  styles: ReturnType<typeof makeStyles>;
-}) {
-  const generating = badge.artStatus === "generating";
-  return (
-    <View
-      style={styles.badgeMark}
-      accessibilityElementsHidden
-      importantForAccessibility="no-hide-descendants"
-      pointerEvents="none"
-    >
-      {badge.imageUrl ? (
-        <Image
-          source={{ uri: badge.imageUrl }}
-          style={styles.badgeImage}
-          contentFit="contain"
-          alt=""
-        />
-      ) : generating ? (
-        <ActivityIndicator size="small" />
-      ) : (
-        <Text style={styles.badgeEmoji}>{badge.icon}</Text>
-      )}
     </View>
   );
 }
@@ -355,12 +325,9 @@ export function ScholarCalculatorLicenseCard() {
         <StatusChip label={card.chip.label} tone={card.chip.tone} styles={styles} />
       </View>
 
-      <View style={styles.titleRow}>
-        {badge ? <BadgeMark badge={badge} styles={styles} /> : null}
-        <Text style={styles.title} accessibilityRole="header">
-          {card.title}
-        </Text>
-      </View>
+      <Text style={styles.title} accessibilityRole="header">
+        {card.title}
+      </Text>
 
       <View style={styles.statusRow}>
         <Text style={styles.statusValue}>{card.status.value}</Text>
@@ -376,19 +343,31 @@ export function ScholarCalculatorLicenseCard() {
       <Text style={styles.cue}>{card.cue}</Text>
 
       {card.showCredentialFields && status.license ? (
-        <View style={styles.fields}>
-          <CredentialField
-            label="Issued"
-            value={formatIssuedDate(status.license.issuedAt)}
-            styles={styles}
-          />
-          {status.license.issuedByName ? (
-            <CredentialField
-              label="Proctor"
-              value={status.license.issuedByName}
-              styles={styles}
+        <View style={styles.credentialRow}>
+          {badge ? (
+            <LicenseCardImage
+              imageUrl={badge.imageUrl}
+              width={168}
+              generating={badge.artStatus === "generating"}
+              icon={badge.icon}
+              showSpinner={false}
+              alt="Your Calculator License card"
             />
           ) : null}
+          <View style={styles.credentialFields}>
+            <CredentialField
+              label="Issued"
+              value={formatIssuedDate(status.license.issuedAt)}
+              styles={styles}
+            />
+            {status.license.issuedByName ? (
+              <CredentialField
+                label="Proctor"
+                value={status.license.issuedByName}
+                styles={styles}
+              />
+            ) : null}
+          </View>
         </View>
       ) : null}
 
@@ -459,23 +438,14 @@ function makeStyles(c: Colors) {
     chipText: { fontFamily: fonts.bold, fontSize: 11.5, lineHeight: 16 },
     chipTextOn: { color: c.teal },
     chipTextNeutral: { color: c.charcoalMuted },
-    titleRow: {
+    // The license card beside its Issued / Proctor fields (licensed only).
+    credentialRow: {
       flexDirection: "row",
+      flexWrap: "wrap",
       alignItems: "center",
-      gap: 10,
+      gap: 16,
     },
-    badgeMark: {
-      width: 36,
-      height: 36,
-      flexShrink: 0,
-      borderRadius: 18,
-      overflow: "hidden",
-      alignItems: "center",
-      justifyContent: "center",
-      backgroundColor: c.gray50,
-    },
-    badgeImage: { width: 36, height: 36 },
-    badgeEmoji: { fontSize: 20, lineHeight: 26 },
+    credentialFields: { gap: 8, flexShrink: 1 },
     title: {
       flexShrink: 1,
       fontFamily: fonts.bold,
@@ -615,12 +585,6 @@ function makeStyles(c: Colors) {
       fontSize: 12,
       lineHeight: 16,
       color: c.charcoalMuted,
-    },
-    fields: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      columnGap: 24,
-      rowGap: 8,
     },
     field: { minWidth: 110, flexShrink: 1 },
     fieldLabel: {

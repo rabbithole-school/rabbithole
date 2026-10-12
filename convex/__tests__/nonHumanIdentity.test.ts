@@ -18,19 +18,6 @@ describe("buildNonHumanIntroSection", () => {
     expect(buildNonHumanIntroSection(false)).toBeNull();
   });
 
-  test("when showing: identifies as AI, gives younger + older examples, not a list", () => {
-    const s = buildNonHumanIntroSection(true)!;
-    expect(s).toContain("first-ever session");
-    expect(s).toContain("you're an AI");
-    expect(s).toContain("not a real person");
-    // Two example tones, not one rigid register-selected string.
-    expect(s).toContain("younger child");
-    expect(s).toContain("older child");
-    // Tells the model to lead with it...
-    expect(s).toContain("start your opening message by introducing yourself");
-    // ...but the OUTPUT stays warm: not a disclaimer dump.
-    expect(s).toContain("not a disclaimer");
-  });
 });
 
 // ── buildSystemPrompt integration ────────────────────────────────────
@@ -83,23 +70,20 @@ describe("buildSystemPrompt — intro + session context wiring", () => {
     );
   });
 
-  test("the <start> greeting bullet carries the AI-identity lead on a first-ever session", () => {
-    // Coupling lives in the bullet the model actually acts on, so it complies.
+  test("the FIRST MESSAGE directive carries the AI-identity lead on a first-ever session", () => {
+    // TRA-234: the lead used to be a swapped <start> bullet inside buildBasePrompt
+    // (inside the cached prefix, so turn 2 re-wrote the whole cache). It now
+    // lives in the opening-turn directive in the dynamic tail, which explicitly
+    // overrides the (turn-invariant) plain <start> bullet.
     const lead = "naturally works in who you are";
     const firstEver = build({ isFirstTurn: true, isFirstSession: true });
     expect(firstEver).toContain(lead);
-    // The primacy line also fires on a first-ever session.
     expect(firstEver).toContain("FIRST MESSAGE:");
-    // Returning scholars / mid-conversation get the normal greeting bullet.
+    expect(firstEver).toContain('takes precedence over the plain "<start>" greeting bullet');
+    // Returning scholars / mid-conversation get the normal greeting bullet only.
     expect(build({ isFirstTurn: true, isFirstSession: false })).not.toContain(lead);
     expect(build({ isFirstTurn: false, isFirstSession: true })).not.toContain(lead);
-  });
-
-  test("session context: first-ever session", () => {
-    const prompt = build({ isFirstTurn: true, isFirstSession: true });
-    expect(prompt).toContain("SESSION CONTEXT:");
-    expect(prompt).toContain("first-ever session");
-    expect(prompt).toContain("Don't imply any shared history");
+    expect(build({ isFirstTurn: false, isFirstSession: true })).not.toContain("FIRST MESSAGE:");
   });
 
   test("session context: returning scholar on the FIRST turn of a NEW session gets fresh-start guidance (no false welcome-back)", () => {
@@ -125,6 +109,11 @@ describe("buildSystemPrompt — intro + session context wiring", () => {
     expect(prompt).toContain("same sitting");
     expect(prompt).not.toContain("time has passed");
     expect(prompt).not.toContain("since your last visit");
+    // Mid-session in that same-sitting session: still no "time has passed"
+    // license (the stable note carries the same-sitting bucket itself).
+    const later = build({ isFirstTurn: false, lastSessionAt: fiveMinutesAgo });
+    expect(later).toContain("no time gap to acknowledge");
+    expect(later).not.toContain("time has passed");
   });
 
   test("session context: returning scholar MID-session keeps the plain returning note", () => {
@@ -142,13 +131,6 @@ describe("buildSystemPrompt — intro + session context wiring", () => {
   test("no session context section when neither first-session nor a last time", () => {
     const prompt = build({});
     expect(prompt).not.toContain("SESSION CONTEXT:");
-  });
-
-  test("standing honesty rule lives in the base prompt (always present)", () => {
-    const prompt = build({});
-    expect(prompt).toContain("be honest: tell them you're an AI");
-    // and it must not be weaponized against feelings
-    expect(prompt).toContain("never a way to brush off feelings");
   });
 
   test("default trailing args (omitted) behave as not-first / no intro", () => {

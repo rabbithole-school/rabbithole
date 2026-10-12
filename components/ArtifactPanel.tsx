@@ -16,6 +16,8 @@ import {
   hasArtifactDraftConflict,
   hasIncomingArtifactConflict,
 } from "@/shared/artifactDraftStore";
+import type { CaptureAppSnapshot } from "@/hooks/useAppStateIframeBridge";
+import type { AppTutorRequest } from "@/shared/appTutorRequest";
 
 // ──────────────────────────────────────────────────────────────────────
 // Pending-saves flush registry
@@ -37,12 +39,17 @@ export { flushAllArtifactSaves } from "./artifactSaveRegistry";
 import { ProcessPanel } from "./ProcessPanel";
 import type { ProcessDefinition, ProcessStep } from "./ProcessPanel";
 import { CodeArtifactViewer } from "./CodeArtifactViewer";
+import { DictationMicButton } from "./DictationMicButton";
 import { ArtifactDeliverableButton } from "./ArtifactDeliverableButton";
 import { PhotoDeliverablePanel } from "./PhotoDeliverablePanel";
 import { MapArtifactView } from "./geomap/MapArtifactView";
 import { SlidesArtifactView, EmptyDeckSlidesEditor } from "./slides/SlidesArtifactView";
 import { ManipulativeArtifactView } from "./manipulative/ManipulativeArtifactView";
 import { parseStoredMapArtifact } from "@/lib/geomap/stored";
+import {
+  activityResourceEmbedUrl,
+  youtubeVideoId,
+} from "@/shared/activityResourceEmbed";
 
 interface ArtifactDoc {
   _id: string;
@@ -55,8 +62,8 @@ interface ArtifactDoc {
 }
 
 // Mapbox public token (Next inlines NEXT_PUBLIC_* at build). Present in every
-// deployed environment (Vercel Production/Preview/Development on both rabbithole
-// and rhtest); absent only in a local checkout that hasn't set it, where GeoMap
+// deployed environment (Vercel Production/Preview/Development); absent only in
+// a local checkout that hasn't set it, where GeoMap
 // falls back to its friendly offline state. Read at MODULE scope because the
 // component below shadows the global `process` with a `process` prop
 // (ProcessDefinition).
@@ -73,6 +80,10 @@ interface ArtifactPanelProps {
   onCreateArtifact: () => void;
   onDeleteArtifact: (id: string) => void | Promise<void>;
   onSyncChange?: (synced: boolean) => void;
+  onSnapshotCaptureReady?: (capture: CaptureAppSnapshot | null) => void;
+  onAskTutor?: (request: AppTutorRequest) => void | Promise<void>;
+  /** A character exchange or judgment finished in the app (host → tutor queue). */
+  onAppAiTurn?: () => void;
   /** When true, the Check button on each artifact is disabled —
    *  clicking it would otherwise no-op silently because
    *  SessionInterface.handleSend bails while a previous stream is
@@ -146,6 +157,9 @@ export function ArtifactPanel({
   onCreateArtifact,
   onDeleteArtifact,
   onSyncChange,
+  onSnapshotCaptureReady,
+  onAskTutor,
+  onAppAiTurn,
   onSubmitArtifact,
   isStreaming = false,
   isAiCheckingRubric = false,
@@ -263,12 +277,15 @@ export function ArtifactPanel({
   };
 
   // Extract YouTube video ID for embed
-  const youtubeVideoId = youtubeUrl ? extractYouTubeId(youtubeUrl) : null;
+  const youtubeEmbedId = youtubeUrl ? youtubeVideoId(youtubeUrl) : null;
+  const youtubeEmbedUrl = youtubeUrl
+    ? activityResourceEmbedUrl({ kind: "video", url: youtubeUrl })
+    : null;
 
   // Neither section has content. For a kind-aware deliverable, tell the truth
   // about what the scholar is meant to produce instead of the generic
   // "No documents yet" text panel (which is only honest for text/artifact).
-  if (!hasProcess && !hasArtifacts && !youtubeVideoId) {
+  if (!hasProcess && !hasArtifacts && !youtubeEmbedId) {
     const kind = deliverableContext?.deliverableSpec.kind;
     // Photo: a real capture + submit surface (Phase 1).
     if (kind === "photo" && deliverableContext) {
@@ -343,7 +360,7 @@ export function ArtifactPanel({
   return (
     <Flex flex={1} flexDir="column" overflow="hidden" bg="gray.50" gap={4} px={4} pt={1} pb={3}>
       {/* ── YouTube video embed ── */}
-      {youtubeVideoId && (
+      {youtubeEmbedId && youtubeEmbedUrl && (
         <Box flexShrink={0} pt={2}>
           <Box
             borderRadius="lg"
@@ -355,9 +372,9 @@ export function ArtifactPanel({
             <iframe
               width="100%"
               height="100%"
-              src={`https://www.youtube.com/embed/${youtubeVideoId}`}
+              src={youtubeEmbedUrl}
               title="Video"
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allow="encrypted-media; fullscreen"
               allowFullScreen
               style={{ border: "none", display: "block" }}
             />
@@ -593,6 +610,10 @@ export function ArtifactPanel({
                   );
                 }}
                 onSyncChange={onSyncChange}
+                onSnapshotCaptureReady={onSnapshotCaptureReady}
+                onAskTutor={onAskTutor}
+                onAppAiTurn={onAppAiTurn}
+                appAiEnabled={!mapReadOnly}
               />
             ) : (
               <ArtifactEditor
@@ -610,16 +631,24 @@ export function ArtifactPanel({
                   );
                 }}
                 onSyncChange={onSyncChange}
+                // Owner-editable text only: the dictation mic replaces the
+                // tutor's retired typing accommodation, so it never shows in a
+                // teacher remote / read-only view.
+                showDictation={!mapReadOnly}
               />
             )}
           </Flex>
           {/* A `manipulative` artifact is an ad-hoc, ungraded poke-able model —
               it must NEVER show the active activity's deliverable "Check my
               work" button (that would log a learning record against a thing the
-              tutor dropped mid-chat). map/slides/text/code behavior is unchanged. */}
+              tutor dropped mid-chat). A map or slides deliverable's flair and
+              check belong to its map/deck only — scoping them to a side
+              document open in another tab showed that document's (empty) flair
+              and checked the wrong work (TRA-339). */}
           {deliverableContext &&
-            (deliverableContext.deliverableSpec.kind === "map"
-              ? activeArtifact.type === "map"
+            (deliverableContext.deliverableSpec.kind === "map" ||
+            deliverableContext.deliverableSpec.kind === "slides"
+              ? activeArtifact.type === deliverableContext.deliverableSpec.kind
               : activeArtifact.type !== "map" &&
                 activeArtifact.type !== "manipulative") && (
             <Flex justify="center" pt={3} flexShrink={0}>
@@ -750,15 +779,47 @@ export function ArtifactPanel({
 }
 
 // Single document editor
+/**
+ * Splice dictated speech into the writing surface at `selection`, replacing
+ * any selected range; with no selection (`null`) it appends to the end. A
+ * single space is added on each side only when the insertion butts against
+ * non-whitespace, so a phrase lands as its own word without doubling spaces
+ * or swallowing an existing paragraph break. Returns the next content and
+ * where the caret should sit after it, so the scholar keeps typing right
+ * where the speech ended.
+ */
+export function insertDictatedText(
+  content: string,
+  transcript: string,
+  selection: { start: number; end: number } | null,
+): { content: string; caret: number } {
+  const text = transcript.trim();
+  if (!text) return { content, caret: selection?.end ?? content.length };
+  const start = selection ? Math.min(selection.start, selection.end) : content.length;
+  const end = selection ? Math.max(selection.start, selection.end) : content.length;
+  const before = content.slice(0, start);
+  const after = content.slice(end);
+  const lead = before && !/\s$/.test(before) ? " " : "";
+  const trail = after && !/^\s/.test(after) ? " " : "";
+  return {
+    content: `${before}${lead}${text}${trail}${after}`,
+    caret: start + lead.length + text.length,
+  };
+}
+
 function ArtifactEditor({
   artifact,
   onSave,
   onSyncChange,
+  showDictation = false,
 }: {
   artifact: ArtifactDoc;
   onSave: (updates: { content?: string; title?: string; baseRevision?: number }) => Promise<ArtifactSaveResult>;
   onDelete?: () => void;
   onSyncChange?: (synced: boolean) => void;
+  /** Show the dictation mic — true only for the scholar editing their own
+   *  document (false in teacher remote / read-only view). */
+  showDictation?: boolean;
 }) {
   const [draftController] = useState(() =>
     createArtifactDraftController(artifact._id),
@@ -779,6 +840,13 @@ function ArtifactEditor({
   const revisionRef = useRef(artifact.revision ?? 0);
   const conflictRef = useRef(restoredConflict);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // The writing surface + the caret to splice dictated speech into. The
+  // caret is captured on blur (clicking the mic blurs the textarea), so a
+  // dictation lands where the scholar left the cursor; null until they've
+  // placed one, in which case dictation appends.
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const caretRef = useRef<{ start: number; end: number } | null>(null);
 
   // Stable refs to current values so the registered flush closure
   // always sees the latest typed text, regardless of when it fires.
@@ -901,6 +969,10 @@ function ArtifactEditor({
         setShowUpdateBanner(true);
         persistDraft();
       } else {
+        // Adopting content that differs from the draft invalidates the saved
+        // caret offsets; a dictation that lands afterwards appends rather
+        // than splicing into (or over) text it was never aimed at.
+        if (artifact.content !== localContentRef.current) caretRef.current = null;
         localContentRef.current = artifact.content;
         setLocalContent(artifact.content);
         conflictRef.current = false;
@@ -922,8 +994,7 @@ function ArtifactEditor({
     }
   }, [artifact.title]);
 
-  const handleContentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const newContent = e.target.value;
+  const commitContent = (newContent: string) => {
     localContentRef.current = newContent;
     setLocalContent(newContent);
     if (!conflictRef.current) setShowUpdateBanner(false);
@@ -937,6 +1008,31 @@ function ArtifactEditor({
         setSaveError("Couldn’t save your draft. It is still here—try again.");
       }
     }, 500);
+  };
+
+  const handleContentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    commitContent(e.target.value);
+  };
+
+  // Dictation flows through the SAME commit path as typing, so the save
+  // stamps lastEditedBy="scholar" and the optimistic-concurrency handling is
+  // untouched. The spoken text is spliced at the caret; then focus + caret
+  // are restored so the scholar can keep typing right after it.
+  const handleDictation = (transcript: string) => {
+    const { content: next, caret } = insertDictatedText(
+      localContentRef.current,
+      transcript,
+      caretRef.current,
+    );
+    commitContent(next);
+    caretRef.current = { start: caret, end: caret };
+    requestAnimationFrame(() => {
+      const node = textareaRef.current;
+      if (node) {
+        node.focus();
+        node.setSelectionRange(caret, caret);
+      }
+    });
   };
 
   useEffect(() => {
@@ -1015,8 +1111,15 @@ function ArtifactEditor({
 
       <Box flex={1} overflow="hidden" px={3}>
         <Textarea
+          ref={textareaRef}
           value={localContent}
           onChange={handleContentChange}
+          onBlur={(e) => {
+            caretRef.current = {
+              start: e.target.selectionStart,
+              end: e.target.selectionEnd,
+            };
+          }}
           placeholder="Start writing"
           resize="none"
           h="100%"
@@ -1030,28 +1133,20 @@ function ArtifactEditor({
         />
       </Box>
 
-      <Text
-        fontSize="xs"
-        fontFamily="heading"
-        color="charcoal.300"
-        px={6}
-        py={1}
-        flexShrink={0}
-      >
-        {wordCount} {wordCount === 1 ? "word" : "words"}
-      </Text>
+      <HStack px={6} py={1} flexShrink={0} justify="space-between" align="center">
+        <Text fontSize="xs" fontFamily="heading" color="charcoal.300">
+          {wordCount} {wordCount === 1 ? "word" : "words"}
+        </Text>
+        {showDictation && (
+          <DictationMicButton
+            size="sm"
+            ariaLabel="Dictate into your writing"
+            onTranscript={handleDictation}
+          />
+        )}
+      </HStack>
     </Flex>
   );
-}
-
-function extractYouTubeId(url: string): string | null {
-  const watchMatch = url.match(/(?:youtube\.com\/watch\?.*v=)([a-zA-Z0-9_-]{11})/);
-  if (watchMatch) return watchMatch[1];
-  const shortMatch = url.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);
-  if (shortMatch) return shortMatch[1];
-  const embedMatch = url.match(/youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/);
-  if (embedMatch) return embedMatch[1];
-  return null;
 }
 
 /**

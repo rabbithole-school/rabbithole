@@ -1,5 +1,5 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -259,5 +259,70 @@ describe("clearMyEmail — self-service removal", () => {
   test("requires authentication", async () => {
     const t = convexTest(schema, modules);
     await expect(t.mutation(api.users.clearMyEmail, {})).rejects.toThrow();
+  });
+});
+
+// ── auth:signIn — the magic-link REQUEST leg (security review S13) ────────
+//
+// The response must not say whether an address has an account: an unknown
+// address gets the same `{ started: true }` as a real one, and nothing is
+// written or sent. A real account still gets its code, up to the hourly cap.
+describe("auth:signIn magic-link request", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  const request = (t: ReturnType<typeof convexTest>, email: string) =>
+    t.action(api.auth.signIn, { provider: "magic-link", params: { email } });
+  const codes = (t: ReturnType<typeof convexTest>) =>
+    t.run(async (ctx) => await ctx.db.query("authVerificationCodes").collect());
+
+  test("an unknown email answers started and writes and sends nothing", async () => {
+    vi.stubEnv("SITE_URL", "https://example.test");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const t = convexTest(schema, modules);
+    expect(await request(t, "nobody@example.test")).toEqual({ started: true });
+    expect(await codes(t)).toHaveLength(0);
+    const accounts = await t.run(async (ctx) => await ctx.db.query("authAccounts").collect());
+    expect(accounts).toHaveLength(0);
+    // Without AUTH_RESEND_KEY a send is a console.warn with the address.
+    expect(warn.mock.calls.flat().join(" ")).not.toContain("nobody@example.test");
+  });
+
+  test("staff sign-in still works: a real account gets a code", async () => {
+    vi.stubEnv("SITE_URL", "https://example.test");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const t = convexTest(schema, modules);
+    await seedUser(t, "staff", "test-staffer", "test.staffer@example.test");
+    expect(await request(t, "test.staffer@example.test")).toEqual({ started: true });
+    expect(await codes(t)).toHaveLength(1);
+    expect(warn.mock.calls.flat().join(" ")).toContain("test.staffer@example.test");
+  });
+
+  test("a duplicate account for one email still answers started, without an error", async () => {
+    vi.stubEnv("SITE_URL", "https://example.test");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const t = convexTest(schema, modules);
+    await seedUser(t, "staff", "test-staffer", "test.staffer@example.test");
+    await seedUser(t, "teacher", "test-staffer-2", "test.staffer@example.test");
+    expect(await request(t, "test.staffer@example.test")).toEqual({ started: true });
+    expect(await codes(t)).toHaveLength(1);
+  });
+
+  test("a sixth request in the hour answers started but issues no new code", async () => {
+    vi.stubEnv("SITE_URL", "https://example.test");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const t = convexTest(schema, modules);
+    await seedUser(t, "staff", "test-staffer", "test.staffer@example.test");
+    for (let i = 0; i < 5; i++) await request(t, "test.staffer@example.test");
+    const [fifth] = await codes(t);
+    expect(await request(t, "test.staffer@example.test")).toEqual({ started: true });
+    const [after] = await codes(t);
+    expect(after._id).toBe(fifth._id);
   });
 });

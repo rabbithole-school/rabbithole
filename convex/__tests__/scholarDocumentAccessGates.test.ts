@@ -337,7 +337,13 @@ describe("every public scholarDocuments export refuses operations staff", () => 
   // document list, which returns the health half only and never reads a
   // scholarDocuments row on their behalf. Adding to this list is a privacy
   // decision, which is exactly why it has to be made here in the open.
-  const NON_TEACHER_CALLABLE = new Set(["listDocumentsForStaff"]);
+  const NON_TEACHER_CALLABLE = new Set([
+    "listDocumentsForStaff",
+    // Returns a bare storage upload URL (no scholar data); the kind and the
+    // scholar are gated in `registerUpload`, which the loop below still
+    // proves refuses a teacher-only kind.
+    "generateUploadUrl",
+  ]);
 
   type Invocation = {
     kind: "query" | "mutation";
@@ -502,5 +508,138 @@ describe("every public scholarDocuments export refuses operations staff", () => 
       ctx2.db.query("scholarDocuments").collect(),
     );
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe("operations staff reach exactly the administrative kinds they may file", () => {
+  // The registry's `capability: "operations"` rows (incident reports, transfer
+  // records, conference notes, doctor's notes, report cards) are the front
+  // office's own filings, so the same staffer may see, download and delete
+  // them — and still never an assessment. Widening THIS set is the privacy
+  // decision; it is made in lib/documentKinds.ts, and this test pins it.
+  async function seedOpsWorld(t: TestCtx) {
+    const institutionId = await seedInstitution(t);
+    const teacherId = await seedUser(t, "teacher", "ops-teacher", institutionId);
+    await grantMembership(t, teacherId, "teacher", institutionId);
+    const fixtures = await seedDocumentFixture(t, teacherId, institutionId);
+    const incidentId = await t.run(async (ctx) => {
+      const fileStorageId = await ctx.storage.store(
+        new Blob(["incident"], { type: "application/pdf" }),
+      );
+      return await ctx.db.insert("scholarDocuments", {
+        scholarId: fixtures.scholarId,
+        kind: "incident_report",
+        format: "file",
+        title: "Playground incident",
+        fileStorageId,
+        fileMimeType: "application/pdf",
+        fileSizeBytes: 8,
+        uploadedBy: teacherId,
+        processingStatus: "ready",
+        feedsTutor: false,
+      });
+    });
+    const opsStaffId = await seedUser(t, "staff", "ops-only-staff", institutionId);
+    await grantMembership(t, opsStaffId, "staff", institutionId);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("staffCapabilityGrants", {
+        granteeUserId: opsStaffId,
+        institutionId,
+        capability: "school:operations",
+        grantedBy: teacherId,
+        grantedAt: Date.now(),
+      });
+    });
+    const opsStaff = await withUser(t, opsStaffId);
+    return { ...fixtures, incidentId, opsStaff, opsStaffId };
+  }
+
+  test("the merged list shows the incident report and never the assessment", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedOpsWorld(t);
+    const list = await w.opsStaff.query(api.scholarDocuments.listDocumentsForStaff, {
+      scholarId: w.scholarId,
+    });
+    expect(list.canReadScholarDocuments).toBe(false);
+    expect(list.documents.map((d) => d.kind)).toEqual(["incident_report"]);
+  });
+
+  test("per-document reads and the delete follow the same kind rule", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedOpsWorld(t);
+
+    const incident = await w.opsStaff.query(api.scholarDocuments.get, {
+      documentId: w.incidentId,
+    });
+    expect(incident?.kind).toBe("incident_report");
+    expect(
+      await w.opsStaff.query(api.scholarDocuments.getDownloadUrl, {
+        documentId: w.incidentId,
+      }),
+    ).toBeTruthy();
+    await w.opsStaff.mutation(api.scholarDocuments.logDownload, {
+      documentId: w.incidentId,
+    });
+
+    for (const name of ["get", "getDownloadUrl", "getExtractedText", "auditLogForDocument"] as const) {
+      await expect(
+        w.opsStaff.query(api.scholarDocuments[name], { documentId: w.documentId }),
+      ).rejects.toThrow(DENIAL_ERROR);
+    }
+    await expect(
+      w.opsStaff.mutation(api.scholarDocuments.deleteDocument, {
+        documentId: w.documentId,
+      }),
+    ).rejects.toThrow(DENIAL_ERROR);
+    // The raw text and the audit trail stay teacher-only even for their own kinds.
+    await expect(
+      w.opsStaff.query(api.scholarDocuments.getExtractedText, {
+        documentId: w.incidentId,
+      }),
+    ).rejects.toThrow(DENIAL_ERROR);
+
+    await w.opsStaff.mutation(api.scholarDocuments.deleteDocument, {
+      documentId: w.incidentId,
+    });
+    const kinds = await t.run(async (ctx) =>
+      (await ctx.db.query("scholarDocuments").collect()).map((r) => r.kind),
+    );
+    expect(kinds).toEqual(["assessment"]);
+  });
+
+  test("uploads from the profile obey the registry too", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedOpsWorld(t);
+    // The profile upload's first step must work for them too.
+    expect(
+      await w.opsStaff.mutation(api.scholarDocuments.generateUploadUrl, {}),
+    ).toMatch(/^https?:\/\//);
+    const storageId = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob(["note"], { type: "application/pdf" })),
+    );
+    await expect(
+      w.opsStaff.mutation(api.scholarDocuments.registerUpload, {
+        scholarId: w.scholarId,
+        kind: "assessment",
+        title: "Never",
+        fileStorageId: storageId,
+      }),
+    ).rejects.toThrow(DENIAL_ERROR);
+    const { documentId } = await w.opsStaff.mutation(
+      api.scholarDocuments.registerUpload,
+      {
+        scholarId: w.scholarId,
+        kind: "doctor_note",
+        title: "Excuse note",
+        fileStorageId: storageId,
+      },
+    );
+    const row = await t.run((ctx) => ctx.db.get(documentId));
+    expect(row).toMatchObject({
+      kind: "doctor_note",
+      uploadedBy: w.opsStaffId,
+      processingStatus: "ready",
+      feedsTutor: false,
+    });
   });
 });

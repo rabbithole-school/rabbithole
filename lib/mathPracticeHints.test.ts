@@ -9,7 +9,6 @@ const coveredSkillKeys = [
   "lcm",
   "divisibility_rules_3_9",
   "divisibility_rules_2_5_10",
-  "prime_composite",
   "prime_or_composite",
   "prime_factorization",
   "factors_and_multiples",

@@ -1,38 +1,51 @@
+import { getFunctionName } from "convex/server";
 import { describe, expect, it, vi } from "vitest";
 
-import type { Id } from "@/lib/convex";
-import { reportReturnedToRabbithole } from "../appUnlockClient";
+import { nudgeDeviceAppProjection } from "../appUnlockClient";
 
-const TARGET = {
-  externalAppId: "external_app_sheets" as Id<"externalApps">,
-  deviceId: "device-uuid",
-  leaseToken: "lease-1",
-};
+describe("nudgeDeviceAppProjection", () => {
+  it("asks the backend to converge THIS iPad, and names no app", async () => {
+    // The server owns app identity under the projection — the client stops
+    // requesting a specific one, so a device id is the whole payload.
+    const mutation = vi.fn().mockResolvedValue({ nudged: true });
 
-describe("reportReturnedToRabbithole", () => {
-  it("tells the backend which iPad came back", async () => {
-    const mutation = vi.fn().mockResolvedValue({ marked: true, expiresAt: 1 });
-
-    await expect(reportReturnedToRabbithole({ mutation }, TARGET)).resolves.toBe(
-      true,
-    );
+    await expect(
+      nudgeDeviceAppProjection({ mutation }, "device-uuid"),
+    ).resolves.toBe(true);
     expect(mutation).toHaveBeenCalledTimes(1);
-    expect(mutation.mock.calls[0]?.[1]).toEqual({
-      deviceId: "device-uuid",
-      leaseToken: "lease-1",
-    });
+    expect(mutation.mock.calls[0]?.[1]).toEqual({ deviceId: "device-uuid" });
   });
 
-  it("swallows the rejection when there is no session to return from", async () => {
-    const mutation = vi.fn().mockRejectedValue(new Error("no active session"));
+  it("binds the backend function by its current name", async () => {
+    // The one rename point: if this string drifts from convex/deviceAppUnlock.ts
+    // every cold launch silently waits for the reconciler's own cron instead.
+    const mutation = vi.fn().mockResolvedValue({ nudged: false });
+
+    await nudgeDeviceAppProjection({ mutation }, "device-uuid");
+
+    expect(getFunctionName(mutation.mock.calls[0]?.[0])).toBe(
+      "deviceAppUnlock:nudgeProjection",
+    );
+  });
+
+  it("reports an iPad the projection does not cover without failing", async () => {
+    const mutation = vi.fn().mockResolvedValue({ nudged: false });
+
+    await expect(
+      nudgeDeviceAppProjection({ mutation }, "device-uuid"),
+    ).resolves.toBe(false);
+  });
+
+  it("swallows a transport failure — the nudge is latency, not correctness", async () => {
+    // The reconciler's cron converges the device regardless, so a launch must
+    // never fail because the hint did. This is the ORDINARY offline path, so it
+    // must also stay silent in the logs.
+    const mutation = vi.fn().mockRejectedValue(new Error("network down"));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    // A scholar who backgrounded Rabbithole without launching anything must not
-    // see an error, and the caller must not have to guard the call site. This is
-    // the ORDINARY path, so it must also stay silent in the logs.
-    await expect(reportReturnedToRabbithole({ mutation }, TARGET)).resolves.toBe(
-      false,
-    );
+    await expect(
+      nudgeDeviceAppProjection({ mutation }, "device-uuid"),
+    ).resolves.toBe(false);
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
   });

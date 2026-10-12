@@ -129,7 +129,7 @@ function connectionNeighborsEdge(
 }
 
 function oneLiner(edge: StoryEdgeInput): string {
-  return `*${edge.hook}* — _${edge.fromLabel}→${edge.toLabel}_`;
+  return `**${edge.hook}** — _${edge.fromLabel}→${edge.toLabel}_`;
 }
 
 function pluralize(n: number, one: string, many: string): string {
@@ -181,7 +181,7 @@ export function computeStoryDigestSection(input: StoryDigestInput): StoryDigestS
 
   const empty = deltas.length === 0 && leaps.length === 0;
 
-  const lines: string[] = ["📚 *Stories*"];
+  const lines: string[] = ["📚 **Stories**"];
 
   if (empty) {
     // Quiet window: one calm line, not an empty scaffold. The curation totals
@@ -210,7 +210,7 @@ export function computeStoryDigestSection(input: StoryDigestInput): StoryDigestS
     for (const p of PROVENANCE_ORDER) {
       const list = deltasByProvenance.get(p);
       if (!list || list.length === 0) continue;
-      lines.push(`  *${PROVENANCE_LABEL[p]}*`);
+      lines.push(`  **${PROVENANCE_LABEL[p]}**`);
       for (const e of list) lines.push(`  • ${oneLiner(e)}`);
     }
   }
@@ -220,7 +220,7 @@ export function computeStoryDigestSection(input: StoryDigestInput): StoryDigestS
   if (leaps.length > 0) {
     lines.push(`_Story-adjacent leaps (${leaps.length}) — worth reading the transcript:_`);
     for (const leap of leaps) {
-      lines.push(`  • *${leap.scholarName}*: ${leap.description} _(near: ${leap.nearHook})_`);
+      lines.push(`  • **${leap.scholarName}**: ${leap.description} _(near: ${leap.nearHook})_`);
     }
   }
 

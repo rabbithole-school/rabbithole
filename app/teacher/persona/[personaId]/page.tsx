@@ -4,7 +4,7 @@
  * DEPRECATED (anti-parasocial, 2026-06): the persona editor route is retired —
  * personas are no longer an active building block (the tutor must not "become"
  * a character). The `personas` table + data are preserved, but this route now
- * just redirects to the Curriculum tab. See TODO.html ("Reimagine personas").
+ * just redirects to the Curriculum tab. See the retired TODO.html ("Reimagine personas").
  */
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";

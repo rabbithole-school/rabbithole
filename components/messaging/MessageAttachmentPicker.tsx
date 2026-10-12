@@ -44,7 +44,9 @@ export type PendingFamilyMessageAttachment =
   };
 
 export function useFamilyMessageAttachments() {
-  const generateUploadUrl = useMutation(api.files.generateUploadUrl);
+  const generateUploadUrl = useMutation(
+    api.parentMessages.generateAttachmentUploadUrl,
+  );
   const registerUpload = useMutation(
     api.parentMessages.registerAttachmentUpload,
   );
@@ -82,11 +84,24 @@ export function useFamilyMessageAttachments() {
       setError("");
       try {
         for (const file of files) {
+          let reservationId:
+            | Id<"parentMessageUploadReservations">
+            | undefined;
           const upload = await uploadMessageAttachment<Id<"_storage">>(
             file,
-            generateUploadUrl,
+            async () => {
+              const reserved = await generateUploadUrl({
+                sizeBytes: file.size,
+              });
+              reservationId = reserved.reservationId;
+              return reserved.uploadUrl;
+            },
           );
-          const { attachmentId } = await registerUpload(upload);
+          if (!reservationId) throw new Error("The upload was not reserved.");
+          const { attachmentId } = await registerUpload({
+            ...upload,
+            reservationId,
+          });
           setAttachments((current) => {
             const next = [...current, { ...upload, attachmentId }];
             pendingRef.current = next;

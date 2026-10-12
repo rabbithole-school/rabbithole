@@ -149,3 +149,18 @@ describe("parentMessageChannels — template parameter flattening", () => {
     expect(param).toContain("Line one. Line two.");
   });
 });
+
+describe("renderOffPortalText — links", () => {
+  test("spells out a labelled link's URL", () => {
+    const text = renderOffPortalText({
+      authorType: "teacher",
+      authorName: "Ms. Kawena",
+      childName: null,
+      body: "Book here: [Conference sign-up](https://calendar.app.google/abc)",
+      portalUrl: "https://example.com/parent",
+    });
+    expect(text).toContain(
+      "Book here: Conference sign-up (https://calendar.app.google/abc)",
+    );
+  });
+});

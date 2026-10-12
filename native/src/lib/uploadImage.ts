@@ -1,4 +1,11 @@
-import { uploadAsync, FileSystemUploadType } from "expo-file-system/legacy";
+import {
+  cacheDirectory,
+  deleteAsync,
+  EncodingType,
+  FileSystemUploadType,
+  uploadAsync,
+  writeAsStringAsync,
+} from "expo-file-system/legacy";
 
 import type { Id } from "@/lib/convex";
 
@@ -34,3 +41,26 @@ export async function uploadFileUri(
 
 // Existing image callers retain their focused name; capture stations also send video.
 export const uploadImageUri = uploadFileUri;
+
+export async function uploadImageDataUrl(
+  uploadUrl: string,
+  dataUrl: string,
+): Promise<Id<"_storage">> {
+  const match = /^data:(image\/(?:jpeg|png));base64,(.+)$/.exec(dataUrl);
+  if (!match) throw new Error("Image was not a JPEG or PNG data URL");
+  if (!cacheDirectory) throw new Error("No cache directory is available");
+  const extension = match[1] === "image/png" ? "png" : "jpg";
+  const uri =
+    `${cacheDirectory}app-snapshot-${Date.now()}-` +
+    `${Math.random().toString(36).slice(2)}.${extension}`;
+  await writeAsStringAsync(uri, match[2], {
+    encoding: EncodingType.Base64,
+  });
+  try {
+    return await uploadFileUri(uploadUrl, uri, match[1]);
+  } finally {
+    await deleteAsync(uri, { idempotent: true }).catch((error) =>
+      console.warn("[image] temporary upload cleanup failed", error),
+    );
+  }
+}

@@ -1,6 +1,6 @@
 import { convexTest } from "convex-test";
 import type { ActivityKind } from "../../lib/activityKinds";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   buildClassDigestSystemPrompt,
   normalizeClassDigestToolInput,
@@ -8,19 +8,12 @@ import {
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
-import { SCHOLAR_PRONOUN_GUIDANCE } from "../lib/scholarPronouns";
 
 const modules = (
   import.meta as ImportMeta & {
     glob: (pattern: string) => Record<string, () => Promise<unknown>>;
   }
 ).glob("../**/*.ts");
-
-test("class digest prompt uses the shared scholar-pronoun fallback", () => {
-  expect(buildClassDigestSystemPrompt("cohort")).toContain(
-    SCHOLAR_PRONOUN_GUIDANCE,
-  );
-});
 
 // ── fixtures (copied verbatim from the other test files) ──
 async function seedUser(
@@ -93,14 +86,15 @@ const auto = (
 ) => t.run((ctx) => ctx.runMutation(internal.classDigests.maybeAutoGenerate, args));
 
 describe("normalizeClassDigestToolInput", () => {
-  test("coerces malformed LLM array fields to empty arrays", () => {
+  test("coerces malformed field shapes to empty arrays and drops/coerces malformed entries", () => {
     const scholarId = "scholar" as Id<"users">;
     const sessionId = "session" as Id<"sessions">;
     const roster = new Map([
       [String(scholarId), { scholarId, name: "Test Scholar", sessionId }],
     ]);
 
-    const digest = normalizeClassDigestToolInput(
+    // Non-array fields (wrong shape entirely) coerce to empty arrays.
+    const wrongShape = normalizeClassDigestToolInput(
       {
         headline: "Class landed on a shared insight",
         summary: "The cohort clustered around one idea.",
@@ -110,23 +104,16 @@ describe("normalizeClassDigestToolInput", () => {
       },
       roster,
     );
-
-    expect(digest).toEqual({
+    expect(wrongShape).toEqual({
       headline: "Class landed on a shared insight",
       summary: "The cohort clustered around one idea.",
       themes: [],
       moments: [],
       discussionPrompts: [],
     });
-  });
 
-  test("drops malformed moment entries and coerces invalid kinds", () => {
-    const scholarId = "scholar" as Id<"users">;
-    const sessionId = "session" as Id<"sessions">;
-    const roster = new Map([
-      [String(scholarId), { scholarId, name: "Test Scholar", sessionId }],
-    ]);
-
+    // Arrays with malformed/unrostered entries drop those entries and coerce
+    // invalid kinds/lengths on the survivors.
     const digest = normalizeClassDigestToolInput(
       {
         headline: "A".repeat(250),
@@ -302,6 +289,109 @@ describe("classDigests.maybeAutoGenerate", () => {
       ctx.db.query("classDigests").first(),
     );
     expect(row?.status).toBe("pending");
+  });
+
+  test("does not re-drive a fresh pending digest (still in flight)", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar");
+    const { assignmentId, activityId, lessonId, unitId } =
+      await seedAssignmentWithActivity(t, teacher, [scholar]);
+    await t.run((ctx) =>
+      ctx.db.insert("activityCompletions", {
+        scholarId: scholar,
+        activityId,
+        lessonId,
+        unitId,
+        assignmentId,
+        completedAt: Date.now(),
+      }),
+    );
+    await t.run((ctx) =>
+      ctx.db.insert("classDigests", {
+        scope: "activity",
+        assignmentId,
+        activityId,
+        status: "pending",
+        pendingSince: Date.now() - 30_000, // well under the stale bound
+      }),
+    );
+    const res = await auto(t, { scope: "activity", assignmentId, activityId });
+    expect(res.scheduled).toBe(false);
+  });
+
+  test("re-drives a pending digest stuck past PENDING_STALE_MS (killed generate action)", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar");
+    const { assignmentId, activityId, lessonId, unitId } =
+      await seedAssignmentWithActivity(t, teacher, [scholar]);
+    await t.run((ctx) =>
+      ctx.db.insert("activityCompletions", {
+        scholarId: scholar,
+        activityId,
+        lessonId,
+        unitId,
+        assignmentId,
+        completedAt: Date.now(),
+      }),
+    );
+    // A pending row from an action that was killed (timeout/deploy/crash)
+    // before it could reach setReady/setError — well past the 10-min action
+    // runtime cap, so nothing legitimate can still be in flight.
+    await t.run((ctx) =>
+      ctx.db.insert("classDigests", {
+        scope: "activity",
+        assignmentId,
+        activityId,
+        status: "pending",
+        pendingSince: Date.now() - 11 * 60_000,
+      }),
+    );
+    const res = await auto(t, { scope: "activity", assignmentId, activityId });
+    expect(res.scheduled).toBe(true);
+    const row = await t.run((ctx) => ctx.db.query("classDigests").first());
+    expect(row?.status).toBe("pending");
+  });
+
+  test("a legacy pending row with no pendingSince falls back to _creationTime", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar");
+    const { assignmentId, activityId, lessonId, unitId } =
+      await seedAssignmentWithActivity(t, teacher, [scholar]);
+    await t.run((ctx) =>
+      ctx.db.insert("activityCompletions", {
+        scholarId: scholar,
+        activityId,
+        lessonId,
+        unitId,
+        assignmentId,
+        completedAt: Date.now(),
+      }),
+    );
+    // Row predates `pendingSince` entirely — _creationTime is its only
+    // timestamp, and a brand-new row is well within the stale bound.
+    await t.run((ctx) =>
+      ctx.db.insert("classDigests", {
+        scope: "activity",
+        assignmentId,
+        activityId,
+        status: "pending",
+      }),
+    );
+    const res = await auto(t, { scope: "activity", assignmentId, activityId });
+    expect(res.scheduled).toBe(false);
+
+    // …and once _creationTime is past the bound, the same row is re-driven.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      const later = await auto(t, { scope: "activity", assignmentId, activityId });
+      expect(later.scheduled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -825,4 +915,192 @@ describe("classDigests source-watermark staleness", () => {
     const scheduled = await auto(t, { scope: "cohort", assignmentId });
     expect(scheduled.scheduled).toBe(false); // not regenerated on watermark
   });
+});
+
+describe("a completion invalidates the digest", () => {
+  // The finding: one scholar, one activity, one completion — and the frozen
+  // Debrief digest said "No activities in this dispatch are marked finished
+  // yet" forever, because `sourceWatermark` tracked analyses and messages
+  // only. The Run page (activityCompletions) is the canonical record; the
+  // digest has to notice when it disagrees.
+  async function readyDigest(
+    t: ReturnType<typeof convexTest>,
+    teacher: Id<"users">,
+    assignmentId: Id<"assignments">,
+    activityId: Id<"activities">,
+  ) {
+    const asTeacher = await withUser(t, teacher);
+    await asTeacher.mutation(api.classDigests.requestActivityDigest, {
+      assignmentId,
+      activityId,
+    });
+    await t.run((ctx) =>
+      ctx.runMutation(internal.classDigests.setReady, {
+        scope: "activity",
+        assignmentId,
+        activityId,
+        headline: "Nobody has finished yet.",
+        summary: "A read written before the work landed.",
+        themes: [],
+        moments: [],
+        discussionPrompts: [],
+      }),
+    );
+    return asTeacher;
+  }
+
+  test("stamps a completion watermark at generation time", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar");
+    const { assignmentId, activityId, lessonId, unitId } =
+      await seedAssignmentWithActivity(t, teacher, [scholar]);
+    await t.run((ctx) =>
+      ctx.db.insert("activityCompletions", {
+        scholarId: scholar,
+        activityId,
+        lessonId,
+        unitId,
+        assignmentId,
+        completedAt: Date.now() - 1000,
+      }),
+    );
+    await readyDigest(t, teacher, assignmentId, activityId);
+
+    const snapshot = await t.run(async (ctx) => {
+      const row = await ctx.db.query("classDigests").first();
+      return row?.sourceSnapshot;
+    });
+    expect(snapshot?.latestCompletionAt).toBeGreaterThan(0);
+    expect(snapshot?.completedCount).toBe(1);
+  });
+
+  test("a completion after generation marks the digest stale and names the scholar count", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar");
+    const { assignmentId, activityId, lessonId, unitId } =
+      await seedAssignmentWithActivity(t, teacher, [scholar]);
+    // Generated with nothing finished, so its headline is honest at write time.
+    const asTeacher = await readyDigest(t, teacher, assignmentId, activityId);
+
+    const before = await asTeacher.query(api.classDigests.getActivityDigest, {
+      assignmentId,
+      activityId,
+    });
+    expect(before!.digest!.stale).toBe(false);
+
+    // The scholar finishes — offline, so no session message or analysis moves.
+    await t.run((ctx) =>
+      ctx.db.insert("activityCompletions", {
+        scholarId: scholar,
+        activityId,
+        lessonId,
+        unitId,
+        assignmentId,
+        completedAt: Date.now(),
+      }),
+    );
+
+    const after = await asTeacher.query(api.classDigests.getActivityDigest, {
+      assignmentId,
+      activityId,
+    });
+    expect(after!.digest!.stale).toBe(true);
+    expect(after!.digest!.completionsSince).toBe(1);
+    expect(after!.current.completedCount).toBe(1);
+  });
+
+  test("a completion on a DIFFERENT activity leaves this activity's digest fresh", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar");
+    const { assignmentId, activityId, lessonId, unitId } =
+      await seedAssignmentWithActivity(t, teacher, [scholar]);
+    const otherActivityId = await t.run((ctx) =>
+      ctx.db.insert("activities", {
+        lessonId,
+        title: "Another activity",
+        kind: "online",
+        order: 1,
+      }),
+    );
+    const asTeacher = await readyDigest(t, teacher, assignmentId, activityId);
+    await t.run((ctx) =>
+      ctx.db.insert("activityCompletions", {
+        scholarId: scholar,
+        activityId: otherActivityId,
+        lessonId,
+        unitId,
+        assignmentId,
+        completedAt: Date.now(),
+      }),
+    );
+
+    const res = await asTeacher.query(api.classDigests.getActivityDigest, {
+      assignmentId,
+      activityId,
+    });
+    // Activity scope filters completions to its own activity — a sibling's
+    // completion is not this digest's business.
+    expect(res!.digest!.stale).toBe(false);
+    expect(res!.digest!.completionsSince).toBe(0);
+  });
+
+  test("the cohort digest notices a completion anywhere in the dispatch", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar");
+    const { assignmentId, activityId, lessonId, unitId } =
+      await seedAssignmentWithActivity(t, teacher, [scholar]);
+    const asTeacher = await withUser(t, teacher);
+    await asTeacher.mutation(api.classDigests.requestCohortDigest, {
+      assignmentId,
+    });
+    await t.run((ctx) =>
+      ctx.runMutation(internal.classDigests.setReady, {
+        scope: "cohort",
+        assignmentId,
+        headline: "Today's read.",
+        summary: "Written before anyone finished.",
+        themes: [],
+        moments: [],
+        discussionPrompts: [],
+      }),
+    );
+    await t.run((ctx) =>
+      ctx.db.insert("activityCompletions", {
+        scholarId: scholar,
+        activityId,
+        lessonId,
+        unitId,
+        assignmentId,
+        completedAt: Date.now(),
+      }),
+    );
+
+    const res = await asTeacher.query(api.classDigests.getCohortDigest, {
+      assignmentId,
+    });
+    expect(res!.digest!.stale).toBe(true);
+    expect(res!.digest!.completionsSince).toBe(1);
+  });
+});
+
+describe("the digest prompt never narrates completion", () => {
+  // The digest body used to be INSTRUCTED to report completion — the SCOPE
+  // paragraph carried "No activities in this dispatch are marked finished yet"
+  // as an example, and the model copied it verbatim. Completion has one
+  // canonical rendering (the run record + the digest's own count line); prose
+  // that restates it can only ever contradict it later.
+  for (const scope of ["activity", "cohort"] as const) {
+    test(`${scope} prompt forbids it and carries no completion example`, () => {
+      const prompt = buildClassDigestSystemPrompt(scope);
+      expect(prompt).toContain("NEVER narrate completion");
+      expect(prompt.toLowerCase()).not.toContain("marked finished");
+      // The old headline example ("11 of 13 finished — …") modeled exactly the
+      // sentence shape the instruction now forbids.
+      expect(prompt).not.toMatch(/\d+ of \d+ finished/);
+    });
+  }
 });

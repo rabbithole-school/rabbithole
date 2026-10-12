@@ -14,6 +14,8 @@
 // Until those are set, the code path is exercised by tests; nothing leaves the
 // building.
 
+import { messagePlainText } from "../../lib/messageLinks";
+
 export type OffPortalChannel = "whatsapp" | "sms";
 
 /**
@@ -177,7 +179,7 @@ export function renderOffPortalText(opts: {
   return [
     who,
     "",
-    opts.body,
+    messagePlainText(opts.body),
     ...(attachmentLines.length > 0
       ? ["", "Attachments:", ...attachmentLines]
       : []),

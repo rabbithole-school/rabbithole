@@ -567,4 +567,39 @@ describe("chatInstruction resolver and lifecycle", () => {
     expect(state.event?.completedAt).toBeTypeOf("number");
     expect(state.handbacks).toHaveLength(1);
   });
+
+  test("the replacement placeholder carries the live streamId so a render check binds", async () => {
+    const t = convexTest(schema, modules);
+    const { scholarId, sessionId, assistantMessageId } = await setup(t);
+    await seedInstruction(t);
+    const streamId = "live-stream-abc";
+    await t.run((ctx) => ctx.db.patch(assistantMessageId, { streamId }));
+
+    const result = await t.mutation(
+      internal.chatInstruction.serveChatInstruction,
+      {
+        sessionId,
+        scholarId,
+        currentMessageId: assistantMessageId,
+        contentSoFar: "Let's do it.",
+        skill: "decimals",
+        platform: "web",
+      },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected the instruction to be served");
+
+    const replacement = await t.run((ctx) => ctx.db.get(result.newMessageId));
+    expect(replacement?.streamId).toBe(streamId);
+
+    // A stream-bound render check now binds to the post-split placeholder.
+    await expect(
+      t.mutation(internal.sessions.requestRenderCheck, {
+        sessionId,
+        streamId,
+        messageId: result.newMessageId,
+        checkId: "check-1",
+      }),
+    ).resolves.toMatchObject({ requestedAt: expect.any(Number) });
+  });
 });

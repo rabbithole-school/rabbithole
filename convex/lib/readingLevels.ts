@@ -79,6 +79,39 @@ export function isPreReader(level: string | null | undefined): boolean {
 }
 
 /**
+ * The early-reader tier: a graded level from K through 2.9 — a scholar who can
+ * decode but reads at a K–2 level. Unlike `pre-reader` this is not a separate
+ * stored value; it is a band of the ordinary grade levels that swaps the generic
+ * reading-level sentence for the early-reader register
+ * (`buildEarlyReaderSection`). Pre-readers are NOT early readers (they get their
+ * own register), and an unset level is neither.
+ */
+export function isEarlyReader(
+  level: string | null | undefined,
+): level is string {
+  if (!level || !VALID_SET.has(level)) return false;
+  if (level === "K") return true;
+  if (level === "college") return false;
+  return Number.parseFloat(level) < 3;
+}
+
+/**
+ * Does this scholar get the young-reader TURN RULES — short turns, one
+ * question, no text menus, voice-first repair (TRA-501)?
+ *
+ * The ONE seam for "who gets these rules". Today it is every pre-reader and
+ * early reader (K–2.9). The talk/read/write split (TRA-503) re-points it at
+ * the new read/write levels ("read below reader, or write by voice") without
+ * touching its callers: the tutor prompt's reading-level slot and the
+ * completion-closing pool both ask this, never the tier predicates directly.
+ */
+export function needsYoungReaderTurnRules(
+  level: string | null | undefined,
+): boolean {
+  return isPreReader(level) || isEarlyReader(level);
+}
+
+/**
  * Is `level` a value a teacher may assign — one of the canonical grade bands OR
  * the pre-reader tier?
  */

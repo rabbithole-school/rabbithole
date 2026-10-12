@@ -1,7 +1,7 @@
 "use client";
 
 import { HStack, Box, Text, Button, Menu } from "@chakra-ui/react";
-import { Eye, Plus, PencilSimple, NotePencil, Upload, FileDoc, Medal } from "@phosphor-icons/react";
+import { Eye, Plus, PencilSimple, NotePencil, Upload, FileDoc, Medal, UsersThree } from "@phosphor-icons/react";
 import { useQuery } from "convex/react";
 import { GooglePickerButton } from "@/components/GooglePickerButton";
 import type { ScholarAddAction } from "@/components/ScholarProfile";
@@ -16,7 +16,12 @@ import { type Scholar, timeAgo } from "./types";
 // ScholarFocusHeader (avatar · name · age · grade) at its compact scale, with
 // this surface's own subordinate facts — @username · status · reading level —
 // and the single first-class "+ Add" menu (note / report / upload / link
-// Google Doc / award badge) plus "View as" in its actions slot. This is the
+// Google Doc / award badge) plus the two "View as" previews in its actions
+// slot — the scholar's own home (`/scholar?remote=`) and the family's parent
+// portal for this scholar (`/parent?remote=`: the non-sensitive learning
+// record a teacher already reads, never the family-only forms/health/
+// messages). Both are teacher-only — an operations-only staffer may not read
+// the learning record in either form. This is the
 // per-scholar identity that used to live in the left rail before the rail
 // became a scholar switcher. (The aide is now the global header Robot →
 // docked panel, not a per-scholar toggle here.)
@@ -139,7 +144,7 @@ export function ScholarIdHead({
                     <Text fontWeight="600" fontSize="sm" color="navy.500">Upload a file</Text>
                     <Text fontSize="xs" color="charcoal.400">
                       {isOperationsOnly
-                        ? "A health record document — PDF or photo."
+                        ? "An administrative or health record document — PDF or photo."
                         : "PDF or image."}
                     </Text>
                   </Box>
@@ -188,7 +193,23 @@ export function ScholarIdHead({
               _hover={{ bg: "gray.50" }}
             >
               <Eye />
-              View as
+              View as scholar
+            </Button>
+          </a>
+        )}
+        {!isOperationsOnly && (
+          <a href={`/parent?remote=${scholarId}`} target="_blank" rel="noopener" style={{ textDecoration: "none" }}>
+            <Button
+              size="xs"
+              variant="outline"
+              color="charcoal.500"
+              borderColor="gray.200"
+              fontFamily="heading"
+              fontWeight="600"
+              _hover={{ bg: "gray.50" }}
+            >
+              <UsersThree />
+              View as parent
             </Button>
           </a>
         )}

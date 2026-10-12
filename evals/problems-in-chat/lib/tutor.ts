@@ -19,7 +19,12 @@
  * server → client contract), and records the served item for the judge/sim.
  */
 import Anthropic from "@anthropic-ai/sdk";
-import { MODELS } from "../../../convex/lib/models";
+import type { AideEffort } from "../../../convex/lib/aideModel";
+import type { ModelId } from "../../../convex/lib/models";
+import {
+  TUTOR_DEFAULT_MODEL,
+  tutorRuntime,
+} from "../../../convex/lib/tutorModel";
 import { gradeTemplateItem } from "../../../convex/lib/practice/session";
 import {
   buildChatPracticeSection,
@@ -34,7 +39,10 @@ import { withRetry } from "./util";
 
 const anthropic = new Anthropic();
 
-export const TUTOR_MODEL = process.env.TUTOR_MODEL || MODELS.SONNET;
+export const TUTOR_MODEL = process.env.TUTOR_MODEL || TUTOR_DEFAULT_MODEL;
+const runtime = tutorRuntime(TUTOR_MODEL as ModelId);
+export const TUTOR_EFFORT: AideEffort | undefined =
+  (process.env.TUTOR_EFFORT as AideEffort | undefined) || runtime.effort;
 
 /**
  * A minimal Socratic tutor preamble — enough that the tutor behaves like
@@ -182,10 +190,11 @@ export async function tutorTurn(
     const msg = await withRetry(() =>
       anthropic.messages.create({
         model: TUTOR_MODEL,
-        max_tokens: 500,
+        max_tokens: runtime.maxTokens,
         system,
         tools: [ANTHROPIC_TOOL],
         messages,
+        ...(TUTOR_EFFORT ? { output_config: { effort: TUTOR_EFFORT } } : {}),
       }),
     );
     const toolUses = msg.content.filter(

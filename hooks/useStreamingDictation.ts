@@ -12,6 +12,7 @@ import {
 } from "@/lib/realtimeTranscriptionProtocol";
 import { voiceMark } from "@/lib/voicePerf";
 import { useVoiceDictation } from "@/hooks/useVoiceDictation";
+import { claimMic, releaseMic, useIsMicBusy } from "@/hooks/micOwner";
 
 type DictationState = "idle" | "recording" | "transcribing";
 
@@ -109,6 +110,13 @@ export function useStreamingDictation(
   const [isTooLoud, setIsTooLoud] = useState(false);
   const [hasSpeech, setHasSpeech] = useState(false);
   const [fallbackActive, setFallbackActive] = useState(false);
+  // Stable per-instance token for the shared single-owner mic registry. The
+  // embedded `legacy` hook carries its OWN token; the streaming path releases
+  // this one before handing off so the legacy claim can succeed.
+  const [micToken] = useState<symbol>(() => Symbol("streamingDictation"));
+  // True only when a token from ANOTHER surface (writing box / handoff) holds
+  // the mic. In fallback mode we surface `legacy.isMicBusy` via the spread.
+  const streamingMicBusy = useIsMicBusy(micToken);
 
   const mintTranscriptionSecret = useAction(
     api.realtimeTranscription.mintTranscriptionSecret,
@@ -190,7 +198,11 @@ export function useStreamingDictation(
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     stopLevelMonitor();
-  }, [stopLevelMonitor, reportTranscriptionUsage, sessionId]);
+    // Every terminal path funnels through here, so this is also the one place
+    // to drop the single-owner mic claim (idempotent — a no-op if we never
+    // claimed, e.g. the WebRTC path failed before adoption).
+    releaseMic(micToken);
+  }, [stopLevelMonitor, reportTranscriptionUsage, sessionId, micToken]);
 
   const closeTransport = useCallback(() => {
     clearTimers();
@@ -457,6 +469,15 @@ export function useStreamingDictation(
           mediaStream.getTracks().forEach((track) => track.stop());
           return;
         }
+        // Single-owner mic: claim now that the WebRTC stream is adopted. If
+        // another surface's recorder holds the mic, stop this stream and bail
+        // silently (no error) — same posture as the legacy path.
+        if (!claimMic(micToken)) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+          finishedRef.current = true;
+          setDictationState("idle");
+          return;
+        }
         streamRef.current = mediaStream;
         captureStartRef.current = performance.now();
         startLevelMonitor(mediaStream);
@@ -608,6 +629,7 @@ export function useStreamingDictation(
       emitDiagnostic,
       getSecret,
       legacy,
+      micToken,
       onTranscript,
       setDictationState,
       startBackupRecorder,
@@ -697,6 +719,7 @@ export function useStreamingDictation(
     error,
     isTooLoud,
     hasSpeech,
+    isMicBusy: streamingMicBusy,
     toggleRecording,
     startRecording,
     stopRecording,

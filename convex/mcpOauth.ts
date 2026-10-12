@@ -55,6 +55,9 @@ export function isAcceptableRedirectUri(uri: string): boolean {
   return false;
 }
 
+/** Cap on outstanding auth codes a revoke deletes in one transaction. */
+const MAX_CODES_BURNED_ON_REVOKE = 256;
+
 /**
  * RFC 7591 dynamic client registration. Unauthenticated by spec — anyone
  * may register a client, because a client grants NOTHING by itself: data
@@ -355,5 +358,26 @@ export const revokeMySession = authedMutation({
       )
       .unique();
     if (consent) await ctx.db.delete(consent._id);
+
+    // Burn any outstanding, unconsumed authorization codes for this
+    // user+client too. Without this, a code minted (e.g. from a second
+    // consent tab, or a client that requested one but hasn't exchanged it
+    // yet) just before the revoke survives it — it's a *different* row from
+    // the mcpSessions one being revoked here — and can still be exchanged
+    // for a brand-new session up to its 10-minute TTL later, silently
+    // re-granting the access the user just revoked. `by_user` bounds this
+    // to the caller's own (small, short-lived) codes.
+    const outstandingCodes = await ctx.db
+      .query("mcpOauthCodes")
+      .withIndex("by_user_client", (q) =>
+        q.eq("userId", ctx.user._id).eq("clientId", row.clientId),
+      )
+      // Bounded so a pile of minted codes can't push the revoke itself past
+      // transaction limits; codes live 10 minutes, so this is far above any
+      // real backlog for one client.
+      .take(MAX_CODES_BURNED_ON_REVOKE);
+    for (const codeRow of outstandingCodes) {
+      await ctx.db.delete(codeRow._id);
+    }
   },
 });

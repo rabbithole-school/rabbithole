@@ -43,6 +43,7 @@ import { ExpressionEditor } from "@/components/practice/ExpressionEditor";
 import { ExpressionKeypad } from "@/components/practice/ExpressionKeypad";
 import { useExpressionTemplate } from "@/hooks/useExpressionTemplate";
 import { useExpressionTemplateKeyboard } from "@/hooks/useExpressionTemplateKeyboard";
+import { useOfferLedger } from "@/hooks/useOfferLedger";
 
 type Probe = {
   itemId: string;
@@ -66,6 +67,7 @@ export function ReprobeOffer({
   scholarId,
   strand,
   domain,
+  ledgerEnabled,
   onStart,
   onResolved,
 }: {
@@ -73,6 +75,8 @@ export function ReprobeOffer({
   /** The strand the engine flagged for a jump-ahead (from reprobeCandidates). */
   strand: string;
   domain?: string;
+  /** False in teacher remote / rehearsal — no offer-ledger writes. */
+  ledgerEnabled: boolean;
   /** Called once, the instant the kid taps "Jump ahead" — before any network
    *  round-trip. Lets the parent settle a still-pending Moments story card:
    *  the completion arbiter's contract is that STARTING any bonus continuation
@@ -85,6 +89,10 @@ export function ReprobeOffer({
 }) {
   const convex = useConvex();
   const submit = useMutation(api.practiceSkills.submitReprobe);
+  const ledger = useOfferLedger(ledgerEnabled);
+  useEffect(() => {
+    ledger.shown("reprobe");
+  }, [ledger]);
 
   const [phase, setPhase] = useState<"offer" | "probing" | "submitting" | "result">("offer");
   const [probe, setProbe] = useState<Probe | null>(null);
@@ -119,10 +127,11 @@ export function ReprobeOffer({
   );
 
   const start = useCallback(() => {
+    ledger.settle("reprobe", "accepted");
     onStart?.();
     setPhase("probing");
     void advance([]);
-  }, [advance, onStart]);
+  }, [advance, onStart, ledger]);
 
   // A unit-bearing probe ("…in cubic centimeters"): the unit is part of the
   // answer, so this card widens its key allowlist, offers the unit keys, and
@@ -244,7 +253,14 @@ export function ReprobeOffer({
           <Button colorPalette="orange" onClick={start}>
             Jump ahead <ArrowRight />
           </Button>
-          <Button variant="ghost" color="#8a6d2a" onClick={onResolved}>
+          <Button
+            variant="ghost"
+            color="#8a6d2a"
+            onClick={() => {
+              ledger.settle("reprobe", "declined");
+              onResolved();
+            }}
+          >
             Keep going here
           </Button>
         </HStack>

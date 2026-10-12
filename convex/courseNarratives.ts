@@ -4,6 +4,7 @@ import { internal } from "./_generated/api";
 import { Doc, Id } from "./_generated/dataModel";
 import { teacherQuery, teacherMutation } from "./lib/customFunctions";
 import { requireActiveScholarAccess } from "./lib/access";
+import { requirePeriodForScholar } from "./reportingPeriods";
 import { gatherWorkingLevel } from "./workingLevel";
 import { isValidRating } from "./lib/pcm";
 
@@ -119,6 +120,7 @@ export const open = teacherMutation({
   },
   handler: async (ctx, args) => {
     await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
+    await requirePeriodForScholar(ctx, args.periodId, args.scholarId);
     const existing = await ctx.db
       .query("courseNarratives")
       .withIndex("by_scholar_period", (q) =>
@@ -425,6 +427,7 @@ export const openInternal = internalMutation({
     subject: v.string(),
   },
   handler: async (ctx, args) => {
+    await requirePeriodForScholar(ctx, args.periodId, args.scholarId);
     const rows = await ctx.db
       .query("courseNarratives")
       .withIndex("by_scholar_period", (q) =>

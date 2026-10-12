@@ -1,5 +1,5 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { grantInstitutionMembership, seedTestInstitution } from "./institutionTestHelpers";
 import { api } from "../_generated/api";
@@ -13,6 +13,22 @@ const modules = (
 ).glob("../**/*.ts");
 
 // ── buildBadgePrompt: pure, deterministic ─────────────────────────────
+
+// Minting a badge schedules generateBadgeArt with runAfter(0), and convex-test
+// fires scheduled functions on real timers. With no image API key that action
+// flips artStatus to "failed", so on a loaded host it could land before a test
+// read the row and see "generating" (TRA-416; parked #3888 and #3917 on the
+// merge gate). Faking the timers keeps the scheduled art job from running;
+// these tests check the mint, not the art.
+beforeEach(() => {
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+  });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("buildBadgePrompt", () => {
   test("patch style is a wordless embroidered mission patch themed on the title", () => {

@@ -762,7 +762,7 @@ export const runTickChunk = internalAction({
           source: "world_automaton",
           role: ROLES.SCHOLAR,
           model: input.modelId,
-          usage: waveUsage,
+          usage: { ...waveUsage, cacheWrite1hTokens: 0 },
           sessionId: input.sessionId,
           institutionId,
         });
@@ -874,7 +874,7 @@ export const runTickChunk = internalAction({
           source: "world_automaton",
           role: ROLES.SCHOLAR,
           model: claim.input.modelId,
-          usage: error.unrecordedUsage,
+          usage: { ...error.unrecordedUsage, cacheWrite1hTokens: 0 },
           sessionId: claim.input.sessionId,
           institutionId,
         });

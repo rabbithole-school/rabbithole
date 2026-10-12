@@ -1,43 +1,39 @@
 "use node";
 
 // Generative manipulative theme-icon art — the one place that talks to the
-// image model AND post-processes the result, so it's a "use node" action (PNG
-// decode + chroma-key need Node's zlib via pngjs). Same pipeline as quest-badge
-// art (convex/badgeArtActions.ts): build a fill-icon prompt on a flat green
-// screen → Gemini → strip the green to real transparency → store → patch the
-// row. Fire-and-forget from the resolver `ensure` mutation.
+// image model AND post-processes the result, so it's a "use node" action (the
+// downscale needs Node's zlib via pngjs). Same pipeline as quest-badge art
+// (convex/badgeArtActions.ts): build a fill-icon prompt → GPT-Image-2.5, which
+// returns real alpha → downscale to sprite size → store → patch the row.
+// Fire-and-forget from the resolver `ensure` mutation.
 
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { buildThemeIconPrompt } from "./lib/themeIconArt";
-import { geminiGenerateImage } from "./lib/gemini";
+import { openaiGenerateImage } from "./lib/openaiImage";
+import { openaiImageUsageKey } from "./lib/models";
 import { recordImageUsage } from "./usage";
 import { toStorageBlob } from "./lib/imageBytes";
-import { removeGreenScreen, downscaleTransparentPng } from "./lib/chromaImage";
-import {
-  GEMINI_IMAGE_MODEL,
-  GEMINI_IMAGE_QUOTA_FALLBACK_MODEL,
-} from "./lib/models";
+import { downscaleTransparentPng } from "./lib/spriteImage";
 
 /** Longer-edge cap for a theme icon. It tiles at ~30–64px; 256 stays crisp on
  *  retina while making the stored PNG a small, fast first paint. */
 export const THEME_ICON_MAX_DIM = 256;
 
+/** A theme icon is never shown above ~64px, so the cheap tier is the honest
+ *  one: "low" is a quarter of "medium"'s image-output tokens and the difference
+ *  is invisible once the 1024px render is boxed down to THEME_ICON_MAX_DIM. */
+const THEME_ICON_QUALITY = "low" as const;
+
 export const generateThemeIcon = internalAction({
   args: {
     id: v.id("manipulativeThemeIcons"),
-    modelOverride: v.optional(
-      v.union(
-        v.literal(GEMINI_IMAGE_MODEL),
-        v.literal(GEMINI_IMAGE_QUOTA_FALLBACK_MODEL),
-      ),
-    ),
     preserveExistingOnFailure: v.optional(v.boolean()),
   },
   handler: async (
     ctx,
-    { id, modelOverride, preserveExistingOnFailure },
+    { id, preserveExistingOnFailure },
   ): Promise<{ status: "ready"; model: string } | { status: "failed" }> => {
     const row = await ctx.runQuery(
       internal.manipulativeThemeIcons.getForGeneration,
@@ -58,11 +54,8 @@ export const generateThemeIcon = internalAction({
         ? row.label
         : row.displayLabel;
       const prompt = buildThemeIconPrompt(promptLabel);
-      const image = await geminiGenerateImage([{ text: prompt }], {
-        aspectRatio: "1:1",
-        ...(modelOverride
-          ? { model: modelOverride }
-          : { quotaFallbackModel: GEMINI_IMAGE_QUOTA_FALLBACK_MODEL }),
+      const image = await openaiGenerateImage(prompt, {
+        quality: THEME_ICON_QUALITY,
       });
       if (!image) {
         if (!preserveExistingOnFailure) {
@@ -74,23 +67,26 @@ export const generateThemeIcon = internalAction({
         return { status: "failed" };
       }
 
-      void recordImageUsage(ctx, { source: "theme-icon", model: image.model });
+      void recordImageUsage(ctx, {
+        source: "theme-icon",
+        model: openaiImageUsageKey(image.model, image.quality),
+      });
 
-      // Strip the chroma-green background to real transparency. On a decode/key
-      // hiccup, fall back to the raw image (a green-square icon beats a hard fail
-      // that would leave the label stuck pending).
-      let bytes: Uint8Array = image.bytes;
-      let mime = image.mimeType;
-      try {
-        // Theme icons tile small (~30–64px). Cap the stored PNG so the sprite's
-        // first paint isn't a hundreds-of-KB download of invisible detail.
-        bytes = removeGreenScreen(image.bytes, { maxDim: THEME_ICON_MAX_DIM });
-        mime = "image/png";
-      } catch (err) {
-        console.error("[themeIcon] chroma-key failed; storing raw image", err);
-      }
+      // The model already returned alpha; all that is left is size. Theme icons
+      // tile small (~30–64px), so cap the stored PNG — a 1024px render is ~800KB
+      // of detail nobody ever sees.
+      //
+      // A decode failure here is NOT recoverable and must not be swallowed. The
+      // old pipeline could fall back to storing the raw bytes, because those
+      // bytes were a valid image that had merely failed to be keyed. Now the
+      // only way this throws is that the response was not a decodable PNG at
+      // all, so storing it would publish a permanently broken asset and mark
+      // the row ready — worse than failing and letting the label retry.
+      const bytes = downscaleTransparentPng(image.bytes, THEME_ICON_MAX_DIM);
 
-      const imageStorageId = await ctx.storage.store(toStorageBlob(bytes, mime));
+      const imageStorageId = await ctx.storage.store(
+        toStorageBlob(bytes, "image/png"),
+      );
       await ctx.runMutation(internal.manipulativeThemeIcons.setArt, {
         id,
         imageStorageId,
@@ -116,24 +112,20 @@ export const generateThemeIcon = internalAction({
 });
 
 /**
- * Model-pinned regeneration for a precise cache-key list.
+ * Re-mint a precise cache-key list, one label at a time.
  *
  * Probe one label before a batch:
- *   npx convex run manipulativeThemeIconActions:generateLabelsWithModel \
- *     '{"labels":["world:coral reef ecosystem:fish"],"model":"gemini-3.1-flash-image-preview"}'
+ *   npx convex run manipulativeThemeIconActions:regenerateLabels \
+ *     '{"labels":["world:coral reef ecosystem:fish"]}'
  *
- * Ready assets remain live if the requested model fails, so a future
- * newer-model regeneration cannot replace a working fallback with a blank.
+ * Ready assets remain live if generation fails, so a re-mint can never replace
+ * working art with a blank.
  */
-export const generateLabelsWithModel = internalAction({
+export const regenerateLabels = internalAction({
   args: {
     labels: v.array(v.string()),
-    model: v.union(
-      v.literal(GEMINI_IMAGE_MODEL),
-      v.literal(GEMINI_IMAGE_QUOTA_FALLBACK_MODEL),
-    ),
   },
-  handler: async (ctx, { labels, model }) => {
+  handler: async (ctx, { labels }) => {
     const results: Array<{
       label: string;
       status: "ready" | "failed" | "invalid";
@@ -153,13 +145,12 @@ export const generateLabelsWithModel = internalAction({
           internal.manipulativeThemeIconActions.generateThemeIcon,
           {
             id: prepared.id,
-            modelOverride: model,
             preserveExistingOnFailure: prepared.preserveExisting,
           },
         );
         results.push({ label, ...result });
       } catch (error) {
-        console.error(`[themeIcon] model-pinned generation failed for ${label}`, error);
+        console.error(`[themeIcon] re-mint failed for ${label}`, error);
         results.push({ label, status: "failed" });
       }
     }

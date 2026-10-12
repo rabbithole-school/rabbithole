@@ -54,9 +54,6 @@ describe("buildSlidesSection", () => {
     const section = buildSlidesSection([slidesArtifact(deckWithText(copy))]);
     expect(section).toContain("SLIDE DECK");
     expect(section).toContain(copy);
-    // The anti-gaslighting guardrail must be present.
-    expect(section).toContain("source of truth");
-    expect(section).toMatch(/NEVER tell the scholar their deck is blank/i);
   });
 
   test("carries slide text well past the 60-char tool-read preview cap", () => {

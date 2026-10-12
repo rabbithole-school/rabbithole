@@ -6,6 +6,13 @@ const DAY_MS = 24 * HOUR_MS;
 export const STORY_TRANSITION_WINDOW_MS = DAY_MS;
 export const STORY_OFFER_COOLDOWN_MS = 20 * HOUR_MS;
 export const STORY_REOFFER_RESERVE_MS = 45 * DAY_MS;
+// Cross-domain seed cards have NO age window. A topic mints once per scholar
+// ever, so any window strands every seed that ages out before a card slot comes
+// round — the measured prod funnel (79 fired : 6 carded : 1 followed,
+// 2026-09-18) was mostly that, and the 7-day window that replaced the old 24h
+// one still stranded the September backlog. An ACTIVE seed that was never
+// settled or reserved stays eligible; newest-first selection keeps fresh seeds
+// ahead, and the 20h cooldown keeps it to one card a day at most.
 
 export type StoryMomentOutcome = Doc<"momentEvents">["outcome"];
 
@@ -64,6 +71,49 @@ export function isStoryEdgeReserved(
   return (
     isTerminalStoryMomentOutcome(event.outcome) ||
     event.offeredAt >= reserveCutoff
+  );
+}
+
+/**
+ * Whether a cross-domain seed may take the done-screen card now. `events` must
+ * hold every ledger event inside the 45-day reserve window (the cooldown and
+ * reserve reads) AND every SEED event at any age: with no age window, a seed
+ * settled long ago is only kept off the card by seeing its terminal event.
+ */
+export function isEligibleCrossDomainSeedMoment(
+  seed: Pick<Doc<"seeds">, "_id" | "status" | "suggestionType">,
+  events: ReadonlyArray<
+    Pick<
+      Doc<"momentEvents">,
+      "kind" | "seedId" | "offeredAt" | "outcome"
+    > & { trigger?: Doc<"momentEvents">["trigger"] }
+  >,
+  now: number,
+): boolean {
+  if (
+    seed.status !== "active" ||
+    seed.suggestionType !== "cross_domain"
+  ) {
+    return false;
+  }
+
+  if (
+    events.some(
+      // Quests-list answers never spend the done-screen rarity budget.
+      (event) =>
+        event.trigger !== "quests_list" &&
+        event.offeredAt >= storyOfferCooldownCutoff(now),
+    )
+  ) {
+    return false;
+  }
+
+  const reserveCutoff = storyReofferReserveCutoff(now);
+  return !events.some(
+    (event) =>
+      event.kind === "seed" &&
+      event.seedId === seed._id &&
+      isStoryEdgeReserved(event, reserveCutoff),
   );
 }
 

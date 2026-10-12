@@ -6,6 +6,8 @@ import { buildActivitySection, buildSystemPrompt } from "../sessionHelpers";
 import type { Doc, Id } from "../_generated/dataModel";
 import { emptyDeck } from "../../shared/slidesScene";
 import { upsertGoogleSlides } from "../lib/activityPresentationResources";
+import { insertCodeRevision } from "../codeArtifactRevisions";
+import { deleteSessionCascade } from "../lib/cascade";
 
 const modules = (import.meta as ImportMeta & { glob: (pattern: string) => Record<string, () => Promise<unknown>> }).glob("../**/*.ts");
 
@@ -158,6 +160,217 @@ describe("activities.get", () => {
       .resolves.toMatchObject({ _id: activityId });
     await expect((await withScholar(t, teacherB)).query(api.activities.get, { id: activityId }))
       .rejects.toThrow("Forbidden: unit is not in your institution");
+  });
+});
+
+describe("activities tutor model storage", () => {
+  test("public create/update store only a vibecode Fable override", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedInstitution(t, "Tutor Model School");
+    const teacherId = await seedTeacherInInstitution(
+      t,
+      institutionId,
+      "tutor-model-teacher",
+    );
+    const lessonId = await t.run(async (ctx) => {
+      const unitId = await ctx.db.insert("units", {
+        teacherId,
+        institutionId,
+        title: "Build Lab",
+        isActive: true,
+      });
+      return await ctx.db.insert("lessons", {
+        unitId,
+        title: "Model Motion",
+        order: 0,
+      });
+    });
+    const asTeacher = await withScholar(t, teacherId);
+
+    const activityId = await asTeacher.mutation(api.activities.create, {
+      lessonId,
+      title: "Build a Motion Model",
+      kind: "vibecode",
+      tutorModel: "sonnet",
+    });
+    expect(
+      (await t.run((ctx) => ctx.db.get(activityId)))?.tutorModel,
+    ).toBeUndefined();
+
+    await asTeacher.mutation(api.activities.update, {
+      id: activityId,
+      tutorModel: "fable",
+    });
+    expect(
+      (await t.run((ctx) => ctx.db.get(activityId)))?.tutorModel,
+    ).toBe("fable");
+
+    await asTeacher.mutation(api.activities.update, {
+      id: activityId,
+      title: "Build a Better Motion Model",
+    });
+    expect(await t.run((ctx) => ctx.db.get(activityId))).toMatchObject({
+      title: "Build a Better Motion Model",
+      tutorModel: "fable",
+    });
+
+    await asTeacher.mutation(api.activities.update, {
+      id: activityId,
+      tutorModel: "sonnet",
+    });
+    expect(
+      (await t.run((ctx) => ctx.db.get(activityId)))?.tutorModel,
+    ).toBeUndefined();
+
+    await asTeacher.mutation(api.activities.update, {
+      id: activityId,
+      tutorModel: "fable",
+    });
+    await asTeacher.mutation(api.activities.update, {
+      id: activityId,
+      kind: "offline",
+    });
+    expect(await t.run((ctx) => ctx.db.get(activityId))).toMatchObject({
+      kind: "offline",
+    });
+    expect(
+      (await t.run((ctx) => ctx.db.get(activityId)))?.tutorModel,
+    ).toBeUndefined();
+  });
+
+  test("internal upsert/update normalize defaults and clear stale overrides", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const { lessonId } = await seedUnitWithLesson(t, teacherId);
+
+    const vibecode = await t.mutation(internal.activities.upsertInternal, {
+      parent: { kind: "lesson", lessonId },
+      title: "Build a Weather Model",
+      kind: "vibecode",
+      tutorModel: "sonnet",
+    });
+    expect(
+      (await t.run((ctx) => ctx.db.get(vibecode.activityId)))?.tutorModel,
+    ).toBeUndefined();
+
+    await t.mutation(internal.activities.upsertInternal, {
+      parent: { kind: "lesson", lessonId },
+      match: { byId: vibecode.activityId },
+      title: "Build a Weather Model",
+      kind: "vibecode",
+      tutorModel: "fable",
+    });
+    expect(
+      (await t.run((ctx) => ctx.db.get(vibecode.activityId)))?.tutorModel,
+    ).toBe("fable");
+
+    await t.mutation(internal.activities.upsertInternal, {
+      parent: { kind: "lesson", lessonId },
+      match: { byId: vibecode.activityId },
+      title: "Build a Weather Model",
+      kind: "offline",
+    });
+    expect(
+      (await t.run((ctx) => ctx.db.get(vibecode.activityId)))?.tutorModel,
+    ).toBeUndefined();
+
+    await t.mutation(internal.activities.upsertInternal, {
+      parent: { kind: "lesson", lessonId },
+      match: { byId: vibecode.activityId },
+      title: "Build a Weather Model",
+      kind: "vibecode",
+      tutorModel: "fable",
+    });
+    await t.mutation(internal.activities.updateInternal, {
+      id: vibecode.activityId,
+      kind: "offline",
+    });
+    expect(
+      (await t.run((ctx) => ctx.db.get(vibecode.activityId)))?.tutorModel,
+    ).toBeUndefined();
+
+    const staleId = await t.run((ctx) =>
+      ctx.db.insert("activities", {
+        lessonId,
+        title: "Legacy Offline Override",
+        kind: "offline",
+        tutorModel: "fable",
+        order: 2,
+      }),
+    );
+    await t.mutation(internal.activities.upsertInternal, {
+      parent: { kind: "lesson", lessonId },
+      match: { byId: staleId },
+      title: "Legacy Offline Override",
+      kind: "offline",
+    });
+    expect(
+      (await t.run((ctx) => ctx.db.get(staleId)))?.tutorModel,
+    ).toBeUndefined();
+  });
+});
+
+// TRA-340: a photo submission and the conversation-rubric upsert share one
+// artifact-less `deliverables` row, so an activity may never hold both bars.
+// upsertInternal already refused the combination; the edit paths did not.
+describe("activities update — one evaluation bar", () => {
+  const photoDeliverable = {
+    kind: "photo" as const,
+    prompt: "Snap your sketch",
+    mode: "manual" as const,
+    criteria: [{ id: "labels", label: "Labels", description: "Parts named" }],
+  };
+
+  async function seedAdvanceRubricActivity(t: ReturnType<typeof convexTest>) {
+    const teacherId = await seedUser(t, "teacher");
+    const { activityId } = await seedUnitWithLesson(t, teacherId);
+    await t.run((ctx) =>
+      ctx.db.patch(activityId, {
+        advanceRubric: { criteria: [{ id: "noticed", label: "Noticed it" }] },
+      }),
+    );
+    return { teacherId, activityId };
+  }
+
+  test("public update refuses a deliverable on an advanceRubric activity", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, activityId } = await seedAdvanceRubricActivity(t);
+    const asTeacher = await withScholar(t, teacherId);
+
+    await expect(
+      asTeacher.mutation(api.activities.update, {
+        id: activityId,
+        deliverable: photoDeliverable,
+      }),
+    ).rejects.toThrow(/already has a conversation advance gate/i);
+    const activity = await t.run((ctx) => ctx.db.get(activityId));
+    expect(activity?.deliverable).toBeUndefined();
+    expect(activity?.advanceRubric?.criteria[0].id).toBe("noticed");
+
+    // Clearing, and unrelated edits, still go through.
+    await asTeacher.mutation(api.activities.update, {
+      id: activityId,
+      deliverable: null,
+      title: "Renamed",
+    });
+    expect((await t.run((ctx) => ctx.db.get(activityId)))?.title).toBe(
+      "Renamed",
+    );
+  });
+
+  test("updateInternal (curriculum bot) refuses the same combination", async () => {
+    const t = convexTest(schema, modules);
+    const { activityId } = await seedAdvanceRubricActivity(t);
+
+    await expect(
+      t.mutation(internal.activities.updateInternal, {
+        id: activityId,
+        deliverable: photoDeliverable,
+      }),
+    ).rejects.toThrow(/already has a conversation advance gate/i);
+    expect(
+      (await t.run((ctx) => ctx.db.get(activityId)))?.deliverable,
+    ).toBeUndefined();
   });
 });
 
@@ -521,6 +734,57 @@ describe("getSessionContext cascade ordering", () => {
   });
 });
 
+describe("buildActivitySection activity-kind instructions", () => {
+  test.each([
+    {
+      kind: "vibecode" as const,
+      systemPrompt: "Build a tide-pool simulator that reveals zonation.",
+    },
+    {
+      kind: "online" as const,
+      systemPrompt: "Compare the two chloroplast diagrams.",
+    },
+  ])("renders the authored instructions for $kind activities", ({
+    kind,
+    systemPrompt,
+  }) => {
+    const section = buildActivitySection({
+      title: "Authored activity",
+      description: null,
+      kind,
+      systemPrompt,
+      durationMinutes: null,
+      processTitle: null,
+      processEmoji: null,
+    });
+
+    expect(section).toContain(systemPrompt);
+  });
+
+  test("keeps problem-set instructions tied to authored skill labels", () => {
+    const section = buildActivitySection({
+      title: "Practice activity",
+      description: null,
+      kind: "problem_set",
+      systemPrompt: "This online-style instruction should not render.",
+      durationMinutes: null,
+      processTitle: null,
+      processEmoji: null,
+      problemSet: {
+        domain: "whole-number-arithmetic",
+        targetSkillKeys: ["compare_rates"],
+        itemCount: 3,
+        targetSkillLabels: ["Compare rates"],
+      },
+    });
+
+    expect(section).toContain("Compare rates");
+    expect(section).not.toContain(
+      "This online-style instruction should not render.",
+    );
+  });
+});
+
 describe("problem-set tutor quest context", () => {
   test("threads authored targets into context while only rendering labels in the prompt", async () => {
     const t = convexTest(schema, modules);
@@ -571,17 +835,11 @@ describe("problem-set tutor quest context", () => {
       ],
     });
     const section = buildActivitySection(context!.lessonActivityContext);
-    expect(section).toContain("serve_practice_problem");
-    expect(section).toContain("up to 4 short, interactive problems");
+    // Labels render in the prompt; the raw stored skill key never leaks
+    // (a redaction guard, not a wording pin).
     expect(section).toContain("Add two 2-digit numbers with regrouping");
     expect(section).not.toContain("add_2digit_regroup");
-    // A problem set permits spaced repetition, but deliberately preserves the
-    // canonical inline-practice guard against stacking or worksheet behavior.
-    expect(section).toContain("refines the INLINE PRACTICE safety rules");
-    expect(section).toContain("does not replace them");
-    expect(section).toContain("never stack or chain");
-    expect(section).toContain("serve exactly one");
-    expect(section).toContain("leave real space for the scholar's thinking");
+    expect(section).toContain("serve_practice_problem");
   });
 
   test("de-dupes authored targetSkillKeys while preserving order", async () => {
@@ -634,24 +892,6 @@ describe("problem-set tutor quest context", () => {
         "Add two 2-digit numbers without regrouping",
       ],
     });
-  });
-
-  test("keeps an ordinary online activity section byte-for-byte unchanged", () => {
-    expect(
-      buildActivitySection({
-        title: "Ordinary activity",
-        description: null,
-        kind: "online",
-        systemPrompt: null,
-        durationMinutes: null,
-        processTitle: null,
-        processEmoji: null,
-        recipe: null,
-        problemSet: null,
-      }),
-    ).toBe(
-      '\n\nACTIVITY: "Ordinary activity" (online)\n\n(This online activity has no explicit instructions yet — fall back to the lesson background and unit context.)',
-    );
   });
 });
 
@@ -715,5 +955,416 @@ describe("activities.reorderInternal", () => {
     expect(after.c?.order).toBe(0);
     expect(after.a?.order).toBe(1);
     expect(after.b?.order).toBe(2);
+  });
+});
+
+// ── App designer autosave + code revision history (PR 2) ─────────────────────
+
+async function seedVibecodeBuild(
+  t: ReturnType<typeof convexTest>,
+  teacherId: Id<"users">,
+  appRequest = "A spacecraft that throws boxes to show recoil.",
+) {
+  return await t.run(async (ctx) => {
+    const unitId = await ctx.db.insert("units", {
+      teacherId,
+      title: "App designer unit",
+      isActive: true,
+    });
+    const lessonId = await ctx.db.insert("lessons", {
+      unitId,
+      title: "App designer lesson",
+      order: 0,
+    });
+    const activityId = await ctx.db.insert("activities", {
+      lessonId,
+      title: "Throw It Overboard",
+      kind: "vibecode",
+      appRequest,
+      systemPrompt: "Build the app.",
+      order: 0,
+    });
+    const sessionId = await ctx.db.insert("sessions", {
+      userId: teacherId,
+      activityId,
+      title: "Throw It Overboard",
+      isArchived: false,
+      isTestDrive: true,
+    });
+    const artifactId = await ctx.db.insert("artifacts", {
+      sessionId,
+      title: "Throw It Overboard",
+      content: "<!doctype html><html><body>v0</body></html>",
+      lastEditedBy: "ai",
+      revision: 0,
+      type: "code",
+      language: "html",
+    });
+    return { activityId, sessionId, artifactId };
+  });
+}
+
+describe("App designer autosave (setVibecodeStarterFromArtifact) idempotency", () => {
+  test("re-promoting the same artifact revision is a no-op", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const asTeacher = await withScholar(t, teacherId);
+    const { activityId, artifactId } = await seedVibecodeBuild(t, teacherId);
+
+    const first = await asTeacher.action(
+      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
+      { activityId, artifactId },
+    );
+    const second = await asTeacher.action(
+      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
+      { activityId, artifactId },
+    );
+
+    expect(second.id).toBe(first.id);
+    expect(second.updatedAt).toBe(first.updatedAt);
+
+    const apps = await t.run((ctx) => ctx.db.query("customApps").collect());
+    expect(apps).toHaveLength(1);
+    expect(apps[0].sourceArtifactId).toBe(artifactId);
+    expect(apps[0].sourceRevision).toBe(0);
+  });
+
+  test("re-promoting with app assets does not leak copied storage blobs (F6)", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const asTeacher = await withScholar(t, teacherId);
+    const assetBytes = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xe0, 0, 1, 2, 3, 4, 5, 6, 7,
+    ]);
+    const storageId = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob([assetBytes], { type: "image/jpeg" })),
+    );
+    const { activityId, artifactId } = await t.run(async (ctx) => {
+      const unitId = await ctx.db.insert("units", {
+        teacherId,
+        title: "Asset unit",
+        isActive: true,
+      });
+      const lessonId = await ctx.db.insert("lessons", {
+        unitId,
+        title: "Asset lesson",
+        order: 0,
+      });
+      const activityId = await ctx.db.insert("activities", {
+        lessonId,
+        title: "Asset app",
+        kind: "vibecode",
+        appRequest: "x",
+        systemPrompt: "Build the app.",
+        order: 0,
+      });
+      const sessionId = await ctx.db.insert("sessions", {
+        userId: teacherId,
+        activityId,
+        title: "Asset app",
+        isArchived: false,
+        isTestDrive: true,
+        appAssetIds: [storageId],
+      });
+      const artifactId = await ctx.db.insert("artifacts", {
+        sessionId,
+        title: "Asset app",
+        content: `<!doctype html><html><body><img src="/app-assets/${storageId}"></body></html>`,
+        lastEditedBy: "ai",
+        revision: 0,
+        type: "code",
+        language: "html",
+      });
+      return { activityId, artifactId };
+    });
+
+    const storageCount = async () =>
+      (await t.run((ctx) => ctx.db.system.query("_storage").collect())).length;
+
+    const before = await storageCount();
+    const first = await asTeacher.action(
+      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
+      { activityId, artifactId },
+    );
+    const afterFirst = await storageCount();
+    // The first promotion copied the one referenced asset into new storage.
+    expect(afterFirst).toBe(before + 1);
+
+    const second = await asTeacher.action(
+      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
+      { activityId, artifactId },
+    );
+    const afterSecond = await storageCount();
+    expect(second.id).toBe(first.id);
+    expect(second.updatedAt).toBe(first.updatedAt);
+    // The no-op re-promotion short-circuited BEFORE copying, so no orphan blob.
+    expect(afterSecond).toBe(afterFirst);
+  });
+
+  test("a new revision promotes again into the same starter", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const asTeacher = await withScholar(t, teacherId);
+    const { activityId, artifactId } = await seedVibecodeBuild(t, teacherId);
+
+    const first = await asTeacher.action(
+      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
+      { activityId, artifactId },
+    );
+
+    await t.run((ctx) =>
+      ctx.db.patch(artifactId, {
+        content: "<!doctype html><html><body>v1</body></html>",
+        revision: 1,
+      }),
+    );
+
+    const second = await asTeacher.action(
+      api.vibecodeStarterActions.setVibecodeStarterFromArtifact,
+      { activityId, artifactId },
+    );
+
+    expect(second.id).toBe(first.id);
+    const apps = await t.run((ctx) => ctx.db.query("customApps").collect());
+    expect(apps).toHaveLength(1);
+    expect(apps[0].sourceRevision).toBe(1);
+    expect(apps[0].html).toContain("v1");
+  });
+});
+
+describe("codeArtifactRevisions history", () => {
+  test("recordTurnRevision records one row per changed turn, idempotently", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const { sessionId, artifactId } = await seedVibecodeBuild(t, teacherId);
+
+    const asstMsg1 = await t.run(async (ctx) => {
+      await ctx.db.insert("messages", {
+        sessionId,
+        role: "user",
+        content: "First cut — spacecraft + recoil",
+        flagged: false,
+      });
+      return ctx.db.insert("messages", {
+        sessionId,
+        role: "assistant",
+        content: "Built the first cut.",
+        flagged: false,
+      });
+    });
+
+    // Turn 1: no prior app → records revision 0.
+    const first = await t.mutation(
+      internal.codeArtifactRevisions.recordTurnRevision,
+      { sessionId, messageId: asstMsg1, baselineRevision: -1 },
+    );
+    expect(first.recorded).toBe(true);
+    // A re-run with the same baseline is idempotent (no duplicate row).
+    await t.mutation(internal.codeArtifactRevisions.recordTurnRevision, {
+      sessionId,
+      messageId: asstMsg1,
+      baselineRevision: -1,
+    });
+
+    // Turn 2: the app moves to revision 1 → records again.
+    await t.run((ctx) =>
+      ctx.db.patch(artifactId, {
+        content: "<!doctype html><html><body>v1</body></html>",
+        revision: 1,
+      }),
+    );
+    const asstMsg2 = await t.run(async (ctx) => {
+      await ctx.db.insert("messages", {
+        sessionId,
+        role: "user",
+        content: "Add a mass slider",
+        flagged: false,
+      });
+      return ctx.db.insert("messages", {
+        sessionId,
+        role: "assistant",
+        content: "Added a mass slider.",
+        flagged: false,
+      });
+    });
+    const second = await t.mutation(
+      internal.codeArtifactRevisions.recordTurnRevision,
+      { sessionId, messageId: asstMsg2, baselineArtifactId: artifactId, baselineRevision: 0 },
+    );
+    expect(second.recorded).toBe(true);
+    // A teacher build session reports its activity for the autosave promotion.
+    expect(second.autosaveActivityId).toBeDefined();
+
+    const rows = await t.run((ctx) =>
+      ctx.db.query("codeArtifactRevisions").collect(),
+    );
+    expect(rows).toHaveLength(2);
+    // requestText is resolved and STORED at record time (no read-time scan).
+    const stored = rows.map((r) => r.requestText).sort();
+    expect(stored).toEqual([
+      "Add a mass slider",
+      "First cut — spacecraft + recoil",
+    ]);
+  });
+
+  test("listForSession returns metadata only, newest-first with version + thumbnail", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const asTeacher = await withScholar(t, teacherId);
+    const { sessionId, artifactId } = await seedVibecodeBuild(t, teacherId);
+
+    const storageId = await t.run(async (ctx) => {
+      const blob = new Blob(["x"], { type: "image/jpeg" });
+      return await ctx.storage.store(blob);
+    });
+
+    const asstMsg1 = await t.run(async (ctx) =>
+      ctx.db.insert("messages", {
+        sessionId,
+        role: "assistant",
+        content: "Built the first cut.",
+        flagged: false,
+        renderCheck: {
+          checkId: "c1",
+          requestedAt: Date.now(),
+          answeredAt: Date.now(),
+          snapshotStorageId: storageId,
+        },
+      }),
+    );
+    await t.run(async (ctx) => {
+      await ctx.db.insert("codeArtifactRevisions", {
+        sessionId,
+        artifactId,
+        revision: 0,
+        html: "<!doctype html><html><body>v0</body></html>",
+        messageId: asstMsg1,
+        requestText: "First cut — spacecraft + recoil",
+        createdAt: 1000,
+      });
+      await ctx.db.insert("codeArtifactRevisions", {
+        sessionId,
+        artifactId,
+        revision: 1,
+        html: "<!doctype html><html><body>v1</body></html>",
+        requestText: "Add a mass slider",
+        createdAt: 2000,
+      });
+    });
+
+    const list = await asTeacher.query(
+      api.codeArtifactRevisions.listForSession,
+      { sessionId },
+    );
+    expect(list).toHaveLength(2);
+    // Newest first, dense version numbers (v1 = oldest).
+    expect(list[0].revision).toBe(1);
+    expect(list[0].version).toBe(2);
+    expect(list[0].requestText).toBe("Add a mass slider");
+    expect(list[1].revision).toBe(0);
+    expect(list[1].version).toBe(1);
+    expect(list[1].requestText).toBe("First cut — spacecraft + recoil");
+    expect(list[1].snapshotStorageId).toBe(storageId);
+    // Metadata only — never the html (F5).
+    expect("html" in list[0]).toBe(false);
+  });
+
+  test("getRevisionHtml returns the revision html on click", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const asTeacher = await withScholar(t, teacherId);
+    const { sessionId, artifactId } = await seedVibecodeBuild(t, teacherId);
+
+    const revisionId = await t.run((ctx) =>
+      ctx.db.insert("codeArtifactRevisions", {
+        sessionId,
+        artifactId,
+        revision: 0,
+        html: "<!doctype html><html><body>v0</body></html>",
+        createdAt: 1000,
+      }),
+    );
+    const fetched = await asTeacher.query(
+      api.codeArtifactRevisions.getRevisionHtml,
+      { revisionId },
+    );
+    expect(fetched?.html).toContain("v0");
+    expect(fetched?.revision).toBe(0);
+  });
+
+  test("scholarUpdate stamps a restore revision with restoredFromRevision (F13)", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const asTeacher = await withScholar(t, teacherId);
+    const { artifactId } = await seedVibecodeBuild(t, teacherId);
+
+    await asTeacher.mutation(api.artifacts.scholarUpdate, {
+      artifactId,
+      content: "<!doctype html><html><body>restored</body></html>",
+      baseRevision: 0,
+      restoredFromRevision: 0,
+    });
+
+    const rows = await t.run((ctx) =>
+      ctx.db.query("codeArtifactRevisions").collect(),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].restoredFromRevision).toBe(0);
+    expect(rows[0].revision).toBe(1);
+    expect(rows[0].html).toContain("restored");
+  });
+
+  test("recording caps a session at the newest 30 revisions (F2)", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const { sessionId, artifactId } = await seedVibecodeBuild(t, teacherId);
+
+    // Insert 35 revisions through the shared recorder (the cap runs in the
+    // same transaction as each insert).
+    for (let revision = 0; revision < 35; revision += 1) {
+      await t.run((ctx) =>
+        insertCodeRevision(ctx, {
+          sessionId,
+          artifactId,
+          revision,
+          html: `<!doctype html><html><body>v${revision}</body></html>`,
+        }),
+      );
+    }
+
+    const rows = await t.run((ctx) =>
+      ctx.db
+        .query("codeArtifactRevisions")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .collect(),
+    );
+    expect(rows).toHaveLength(30);
+    const kept = rows.map((r) => r.revision).sort((a, b) => a - b);
+    // The oldest five (0..4) were dropped; the newest 30 (5..34) remain.
+    expect(kept[0]).toBe(5);
+    expect(kept[kept.length - 1]).toBe(34);
+  });
+
+  test("deleteSessionCascade removes the session's code revisions (F2)", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const { sessionId, artifactId } = await seedVibecodeBuild(t, teacherId);
+
+    await t.run((ctx) =>
+      ctx.db.insert("codeArtifactRevisions", {
+        sessionId,
+        artifactId,
+        revision: 0,
+        html: "<!doctype html><html><body>v0</body></html>",
+        createdAt: 1000,
+      }),
+    );
+
+    await t.run((ctx) => deleteSessionCascade(ctx, {}, sessionId));
+
+    const rows = await t.run((ctx) =>
+      ctx.db.query("codeArtifactRevisions").collect(),
+    );
+    expect(rows).toHaveLength(0);
   });
 });

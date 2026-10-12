@@ -9,6 +9,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { raiseAlert } from "./alerts";
 import { requireAnthropicApiKey } from "./lib/anthropic";
 import { siteUrl, scholarPath, scholarSlug, withBase } from "./lib/channels";
+import { timeZoneForScholar } from "./lib/institutionTime";
 import { MODELS } from "./lib/models";
 import { ROLES } from "./lib/roles";
 import { PATTERN_PHRASING } from "./lib/practice/errorFlags";
@@ -23,11 +24,15 @@ import {
   buildBreakerOutcomeReply,
   buildStuckAlertBody,
   type BreakerTelemetry,
+  type BreakerSkillState,
+  type RepeatBreakerEvidence,
+  BREAKER_REPEAT_WINDOW_MS,
   STUCK_SITTING_SCAN_LIMIT,
   tallyPracticeSitting,
   type PracticeSitting,
   type StuckAlertMiss,
 } from "./lib/practice/stuckAlertBody";
+import { proficiencyFromReps } from "./lib/practice/scheduler";
 import {
   buildPracticeStuckUserMessage,
   normalizePracticeStuckDiagnosis,
@@ -57,6 +62,7 @@ type StuckAlertEvidence = {
   username?: string;
   institutionId?: Id<"institutions">;
   breaker?: BreakerTelemetry;
+  repeatBreaker?: RepeatBreakerEvidence;
 };
 
 const missValidator = v.object({
@@ -119,6 +125,12 @@ const evidenceValidator = v.object({
           ),
         }),
       ),
+    }),
+  ),
+  repeatBreaker: v.optional(
+    v.object({
+      priorEpisodeAts: v.array(v.number()),
+      timeZone: v.string(),
     }),
   ),
 });
@@ -272,6 +284,48 @@ export const gatherEvidence = internalQuery({
     const crossingBreaker = crossingAttempt?.breaker;
     const crossingLifecycle = crossingAttempt?.breakerLifecycle;
 
+    // Same-node breaker re-trip: how many earlier breaker episodes this scholar
+    // tripped on the very node that just paused them, inside the repeat window.
+    // The crossing attempt's nodeKey IS its triggerNodeKey (see practiceSkills.ts
+    // where breakerLifecycle is patched onto the trigger row). `by_scholar_node_
+    // createdAt` already serves per-(scholar, node) history, so this reuses it —
+    // no new table or index. Prior episodes are the earlier rows on that node
+    // carrying their own breakerLifecycle; the current row is excluded by _id.
+    let repeatBreaker: RepeatBreakerEvidence | undefined;
+    const triggerNodeKey =
+      crossingLifecycle?.triggerNodeKey ?? crossingAttempt?.nodeKey;
+    if (crossingAttempt && triggerNodeKey) {
+      const anchorAt =
+        crossingLifecycle?.triggeredAt ??
+        crossingAttempt.createdAt ??
+        crossingAttempt._creationTime;
+      const windowStart = anchorAt - BREAKER_REPEAT_WINDOW_MS;
+      const priorRows = await ctx.db
+        .query("practiceAttempts")
+        .withIndex("by_scholar_node_createdAt", (q) =>
+          q
+            .eq("scholarId", args.scholarId)
+            .eq("nodeKey", triggerNodeKey)
+            .gte("createdAt", windowStart)
+            .lt("createdAt", anchorAt),
+        )
+        .collect();
+      const priorEpisodeAts = priorRows
+        .filter(
+          (row) =>
+            row._id !== crossingAttempt._id &&
+            row.breakerLifecycle?.version === 2 &&
+            row.breakerLifecycle.triggerNodeKey === triggerNodeKey,
+        )
+        .map((row) => row.breakerLifecycle!.triggeredAt);
+      if (priorEpisodeAts.length > 0) {
+        repeatBreaker = {
+          priorEpisodeAts,
+          timeZone: await timeZoneForScholar(ctx, args.scholarId),
+        };
+      }
+    }
+
     return {
       misses,
       ...(sitting ? { sitting } : {}),
@@ -280,6 +334,7 @@ export const gatherEvidence = internalQuery({
       ...(scholar.institutionId
         ? { institutionId: scholar.institutionId }
         : {}),
+      ...(repeatBreaker ? { repeatBreaker } : {}),
       ...(crossingBreaker || crossingLifecycle
         ? {
             breaker: {
@@ -536,6 +591,7 @@ export const raise = internalMutation({
             misses: args.evidence.misses,
             sitting: args.evidence.sitting,
             breaker: args.evidence.breaker,
+            repeatBreaker: args.evidence.repeatBreaker,
             fallbackSkillLabel: args.fallbackSkillLabel,
             now: Date.now(),
           }),
@@ -639,9 +695,63 @@ export const claimOutcome = internalMutation({
       return null;
     }
 
+    let skillState: BreakerSkillState | undefined = alert.practiceOutcomeSkillState;
+    if (!skillState) {
+      const triggerSkillKey = trigger.breakerLifecycle.triggerNodeKey;
+      const [mastery, node] = await Promise.all([
+        ctx.db
+          .query("practiceMastery")
+          .withIndex("by_scholar_skill", (q) =>
+            q.eq("scholarId", trigger.scholarId).eq("skillKey", triggerSkillKey),
+          )
+          .first(),
+        ctx.db
+          .query("knowledgeNodes")
+          .withIndex("by_nodeKey", (q) => q.eq("nodeKey", triggerSkillKey))
+          .first(),
+      ]);
+      const repetitionBefore = trigger.repetitionBefore ?? 0;
+      const halfLifeAtTrigger =
+        trigger.halfLifeAfter ?? trigger.halfLifeBefore ?? 0;
+      const repetition = mastery?.repetition ?? 0;
+      const halfLifeDays = mastery?.halfLifeDays ?? 0;
+      // A delayed first claim must not attribute later practice to this episode.
+      // Missing historical baselines are unknown, not an assumed fresh start.
+      const episodeProgressKnown =
+        mastery !== null &&
+        mastery.updatedAt <= lastActivityAt &&
+        trigger.repetitionBefore !== undefined &&
+        (trigger.halfLifeAfter !== undefined ||
+          trigger.halfLifeBefore !== undefined);
+      const freshAttempt = lifecycle.freshResult
+        ? await ctx.db.get(lifecycle.freshResult.attemptId)
+        : null;
+      skillState = {
+        label: node?.label ?? triggerSkillKey,
+        proficiency: proficiencyFromReps(repetition),
+        missStreak: mastery?.missStreak ?? 0,
+        progressed:
+          episodeProgressKnown &&
+          (repetition > repetitionBefore || halfLifeDays > halfLifeAtTrigger),
+        episodeProgressKnown,
+        brandNew: episodeProgressKnown && repetitionBefore === 0,
+        firstCorrectAnswer:
+          repetitionBefore === 0 &&
+          repetition > repetitionBefore &&
+          freshAttempt?.correct === true &&
+          freshAttempt.retry !== true &&
+          freshAttempt.scholarId === trigger.scholarId &&
+          freshAttempt.nodeKey === triggerSkillKey &&
+          freshAttempt.createdAt !== undefined &&
+          freshAttempt.createdAt >= lifecycle.triggeredAt &&
+          freshAttempt.createdAt <= lastActivityAt,
+      };
+    }
+
     const deliveryId = `practice-outcome:${alert._id}`;
     const claimId = `${deliveryId}:${now}`;
     await ctx.db.patch(alert._id, {
+      practiceOutcomeSkillState: skillState,
       practiceOutcomeClaim: { claimId, deliveryId, claimedAt: now },
     });
     return {
@@ -661,6 +771,7 @@ export const claimOutcome = internalMutation({
           lifecycle: trigger.breakerLifecycle,
         },
         alert.practiceDiagnosis,
+        skillState,
       ),
     };
   },

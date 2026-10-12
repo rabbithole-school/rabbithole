@@ -11,14 +11,22 @@ const StampPop = new Keyframe({
   100: { opacity: 1, transform: [{ scale: 1 }] },
 });
 
+/** Row placement: just inside a hairline list row's top-right corner. */
+const ROW_PLACEMENT = { top: 10, right: 12 } as const;
+
 export function PracticeVerdictStamp({
   feedback,
   shell,
   label,
   announcement,
+  placement = "card",
 }: {
   feedback: PracticeCardFeedback;
   shell: PracticeShellStyles;
+  /** "card" (default) overhangs the card's top-right corner; "row" sits just
+   *  inside a list row's top-right (a row in a clipped list surface has no
+   *  room for the overhang). Web twin: VerdictStamp's `placement`. */
+  placement?: "card" | "row";
   /** Overrides the visible stamp text (default "Correct" / "Not quite") —
    *  e.g. placement's honest "I haven't learned this yet" earns its own
    *  non-judgmental "Noted" rather than reusing "Not quite" (a don't-know is
@@ -41,7 +49,11 @@ export function PracticeVerdictStamp({
     <Reanimated.View
       key={feedback}
       entering={reduceMotion ? undefined : StampPop.duration(260)}
-      style={[shell.stamp, correct ? shell.stampCorrect : shell.stampMiss]}
+      style={[
+        shell.stamp,
+        placement === "row" && ROW_PLACEMENT,
+        correct ? shell.stampCorrect : shell.stampMiss,
+      ]}
       pointerEvents="none"
       accessibilityLabel={a11yLabel}
       accessibilityLiveRegion="polite"

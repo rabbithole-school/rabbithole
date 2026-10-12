@@ -210,6 +210,9 @@ function Harness({
     onQueuedCount,
     onDispatchCompleted: () => {},
     onAnswerQueued,
+    provisionalGrade: () => ({ correct: false }),
+    onHeld: () => {},
+    onProvisionalRetracted: () => {},
   });
   const initial = useMemo(
     () => newPracticeState({ scholarId: String(SCHOLAR), itemCount: 1, itemId: "item-1" }),
@@ -832,6 +835,55 @@ describe("usePracticeMachine (native binding seams)", () => {
     await act(async () => tree.unmount());
   });
 
+  // TRA-250: every practice item echoes the list it was served from —
+  // "challenge" for the opt-in tail, "required" otherwise; a legacy queued
+  // entry without the field is forwarded without it.
+  it("forwards servedLane (challenge or required) to submitAnswer, and omits it for a legacy entry", async () => {
+    handlers.submitAnswer.mockResolvedValue({ correct: true });
+    const { handle, tree } = await mount(true);
+    await act(async () => {
+      handle.current!.send({
+        type: "ui:submit",
+        answer: "4",
+        clientEventId: "evt-challenge",
+        entry: { ...entry("evt-challenge"), servedLane: "challenge" },
+      });
+    });
+    expect(handlers.submitAnswer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        clientEventId: "evt-challenge",
+        servedLane: "challenge",
+      }),
+    );
+    await act(async () => tree.unmount());
+
+    handlers.submitAnswer.mockClear();
+    const second = await mount(true);
+    await act(async () => {
+      second.handle.current!.send({
+        type: "ui:submit",
+        answer: "4",
+        clientEventId: "evt-required",
+        entry: { ...entry("evt-required"), servedLane: "required" },
+      });
+    });
+    expect(handlers.submitAnswer.mock.calls[0][0]).toMatchObject({ servedLane: "required" });
+    await act(async () => second.tree.unmount());
+
+    handlers.submitAnswer.mockClear();
+    const third = await mount(true);
+    await act(async () => {
+      third.handle.current!.send({
+        type: "ui:submit",
+        answer: "4",
+        clientEventId: "evt-legacy",
+        entry: entry("evt-legacy"),
+      });
+    });
+    expect(handlers.submitAnswer.mock.calls[0][0]).not.toHaveProperty("servedLane");
+    await act(async () => third.tree.unmount());
+  });
+
   it("reinstalls only the server-pinned easy item without inventing unavailability", async () => {
     const episode = pinnedEasyEpisode();
     handlers.breakerEasyFinishSession.mockResolvedValueOnce({
@@ -873,6 +925,46 @@ describe("usePracticeMachine (native binding seams)", () => {
     );
     consoleError.mockRestore();
     await act(async () => mismatch.tree.unmount());
+  });
+
+  it("does not reinstall the fresh item already on screen when a re-hydrate re-issues it (TRA-376)", async () => {
+    const episode = {
+      triggerAttemptId: "attempt-9",
+      recoveryAvailable: true,
+      triggerItemId: "item-trigger",
+      triggerNodeKey: "node-9",
+      domain: "whole-number-arithmetic",
+      missStreak: 3,
+      flow: {
+        stage: "fresh" as const,
+        repair: "done" as const,
+        coachUsed: false,
+      },
+      repairStepIndex: 1,
+      freshItemId: "item-fresh",
+      easyItemId: null,
+    };
+    handlers.breakerRecoverySession.mockResolvedValue({
+      items: [{ itemId: "item-fresh" }],
+    });
+    const mounted = await mount(true);
+    // Cold mount: the fresh item is not on screen yet, so the host installs it.
+    await act(async () => {
+      mounted.handle.current!.send({ type: "hydrate:breaker", episode });
+    });
+    expect(mounted.onBreakerItem).toHaveBeenCalledTimes(1);
+    expect(mounted.handle.current!.state.item.itemId).toBe("item-fresh");
+
+    // An in-place round trip re-hydrates the same episode and re-issues the
+    // serve for the item the scholar may be mid-answer on.
+    await act(async () => {
+      mounted.handle.current!.send({ type: "hydrate:noBreakerForRun" });
+      mounted.handle.current!.send({ type: "hydrate:breaker", episode });
+    });
+    expect(handlers.breakerRecoverySession).toHaveBeenCalledTimes(2);
+    expect(mounted.onBreakerItem).toHaveBeenCalledTimes(1);
+    expect(mounted.handle.current!.state.item.itemId).toBe("item-fresh");
+    await act(async () => mounted.tree.unmount());
   });
 
   it("releases a transient easy-finish failure for exact retry", async () => {

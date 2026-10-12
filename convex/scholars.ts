@@ -1,7 +1,10 @@
 import { v } from "convex/values";
 import { authedQuery, scholarAdminQuery, teacherMutation, teacherQuery } from "./lib/customFunctions";
 import { internalQuery, internalMutation } from "./_generated/server";
-import { isNonTeachingOperationsRole } from "./lib/roles";
+import {
+  isNonTeachingOperationsRole,
+  isScholarAdminRole,
+} from "./lib/roles";
 import { requireScholarAdminOrSelf } from "./lib/auth";
 import {
   requireActiveScholarAccess,
@@ -173,6 +176,15 @@ export const getProfile = authedQuery({
         // Chronological grade notch (Knowledge Tree). Roster info, not a
         // measurement — not redacted from operations staff.
         gradeLevel: scholar.gradeLevel ?? null,
+        // Staff-only, and NOT returned on a self-read: a scholar opening their
+        // own profile must not find staff's note about them in their own
+        // record. Gated on the CALLER'S ROLE, not on `isScholarAdmin` — that
+        // flag comes from canUserAccessScholar, which grants a scholar access
+        // to themselves, so it is true on exactly the self-read this must
+        // exclude (caught by scholarPronounsField.test.ts).
+        pronouns: isScholarAdminRole(ctx.user.role)
+          ? (scholar.pronouns ?? null)
+          : null,
         enrollmentStanding: scholar.enrollmentStanding ?? "enrolled",
         externalSchoolName: scholar.externalSchoolName ?? null,
         // Which institution (school) the scholar belongs to. Roster info, not

@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -18,8 +18,29 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
+let sharedT: TestConvex<typeof schema> | null = null;
+let userCounter = 0;
+
+function nextUsername(prefix: string) {
+  userCounter += 1;
+  return `${prefix}${userCounter}`;
+}
+
+function sharedSeeded() {
+  if (!sharedT) {
+    throw new Error("shared convex test harness not initialized");
+  }
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
+
 async function seedUser(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   role: Doc<"users">["role"] = "scholar",
   overrides: Partial<Doc<"users">> = {},
 ) {
@@ -28,14 +49,14 @@ async function seedUser(
     return seedStaffWithMembership(t, {
       institutionId,
       name: overrides.name ?? `Test ${role}`,
-      username: overrides.username ?? `test${role}`,
+      username: overrides.username ?? nextUsername(`test${role}`),
     });
   }
   if (role === "scholar") {
     const userId = await seedScholarInInstitution(t, {
       institutionId,
       name: overrides.name ?? `Test ${role}`,
-      username: overrides.username ?? `test${role}`,
+      username: overrides.username ?? nextUsername(`test${role}`),
     });
     await t.run((ctx) =>
       ctx.db.patch(userId, {
@@ -48,7 +69,7 @@ async function seedUser(
   return t.run((ctx) =>
     ctx.db.insert("users", {
       name: overrides.name ?? `Test ${role}`,
-      username: overrides.username ?? `test${role}`,
+      username: overrides.username ?? nextUsername(`test${role}`),
       role,
       readingLevel: overrides.readingLevel,
       image: overrides.image,
@@ -56,7 +77,7 @@ async function seedUser(
   );
 }
 
-async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function withUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) =>
     ctx.db.insert("authSessions", {
       userId,
@@ -71,7 +92,7 @@ async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 
 const SUB_SKILL = "subtract_2digit_regroup";
 
-async function insertBorrowItem(t: ReturnType<typeof convexTest>) {
+async function insertBorrowItem(t: TestConvex<typeof schema>) {
   return t.run(async (ctx) =>
     ctx.db.insert("practiceItems", {
       skillKey: SUB_SKILL,
@@ -85,7 +106,7 @@ async function insertBorrowItem(t: ReturnType<typeof convexTest>) {
   );
 }
 
-async function insertConverseItem(t: ReturnType<typeof convexTest>) {
+async function insertConverseItem(t: TestConvex<typeof schema>) {
   return t.run(async (ctx) =>
     ctx.db.insert("practiceItems", {
       skillKey: SUB_SKILL,
@@ -105,20 +126,24 @@ async function insertConverseItem(t: ReturnType<typeof convexTest>) {
   );
 }
 
-async function attempts(t: ReturnType<typeof convexTest>, scholarId: Id<"users">) {
+async function attempts(t: TestConvex<typeof schema>, scholarId: Id<"users">) {
   const rows = await t.run(async (ctx) => ctx.db.query("practiceAttempts").collect());
   return rows.filter((row) => row.scholarId === scholarId);
 }
 
-async function errorEvents(t: ReturnType<typeof convexTest>, scholarId: Id<"users">) {
+async function errorEvents(t: TestConvex<typeof schema>, scholarId: Id<"users">) {
   const rows = await t.run(async (ctx) => ctx.db.query("practiceErrorEvents").collect());
   return rows.filter((row) => row.scholarId === scholarId);
 }
 
 describe("practiceAttempts", () => {
+  beforeAll(async () => {
+    sharedT = convexTest(schema, modules);
+    await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+  });
+
   test("a multiplication fact attempt updates its canonical fact-fluency row", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const skillKey = "mult_facts_7_8_9";
@@ -171,10 +196,8 @@ describe("practiceAttempts", () => {
       latencyMedianMs: 1_250,
     });
   });
-
   test("a correct graded attempt logs one row with the item identity", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const itemDocId = await insertBorrowItem(t);
@@ -205,10 +228,8 @@ describe("practiceAttempts", () => {
     expect(logged[0].stemSnapshot).toBeUndefined();
     expect(logged[0].expectedAnswer).toBeUndefined();
   });
-
   test("replays one logical submission without a second attempt or mastery transition", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const itemDocId = await insertBorrowItem(t);
@@ -236,10 +257,8 @@ describe("practiceAttempts", () => {
     );
     expect(mastery?.repetition).toBe(1);
   });
-
   test("rejects a client submission id reused for a different answer", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const itemDocId = await insertBorrowItem(t);
@@ -261,10 +280,8 @@ describe("practiceAttempts", () => {
     ).rejects.toThrow("reused for a different answer");
     expect(await attempts(t, scholarId)).toHaveLength(1);
   });
-
   test("rejects a client submission id reused with different replay semantics", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const itemDocId = await insertBorrowItem(t);
@@ -289,10 +306,8 @@ describe("practiceAttempts", () => {
     ).rejects.toThrow("reused for a different answer");
     expect(await attempts(t, scholarId)).toHaveLength(1);
   });
-
   test("grandfathers replay flips from unversioned cached clients", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const itemDocId = await insertBorrowItem(t);
@@ -313,10 +328,8 @@ describe("practiceAttempts", () => {
     expect(duplicate).toEqual(first);
     expect(await attempts(t, scholarId)).toHaveLength(1);
   });
-
   test("a wrong graded attempt logs correct:false and preserves practiceErrorEvents", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const itemDocId = await insertBorrowItem(t);
@@ -353,10 +366,8 @@ describe("practiceAttempts", () => {
       pattern: "SMALLER_FROM_LARGER",
     });
   });
-
   test("a multiple-choice attempt stores the tapped label, not its wire index", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const itemDocId = await insertConverseItem(t);
@@ -376,10 +387,8 @@ describe("practiceAttempts", () => {
       expectedAnswer: "If the ground is wet, then it rains",
     });
   });
-
   test("a grade-only retry records a flagged diagnostic row without disturbing the first attempt", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const itemDocId = await insertBorrowItem(t);
@@ -423,10 +432,8 @@ describe("practiceAttempts", () => {
     expect(mastery).toHaveLength(1);
     expect(mastery[0].repetition).toBe(0);
   });
-
   test("a don't-know attempt records the don't-know reason and request time", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const itemDocId = await insertBorrowItem(t);
@@ -457,8 +464,7 @@ describe("practiceAttempts", () => {
     expect(logged[0].answerText).toBeUndefined();
   });
   test("a scholar's working attaches to their missed attempt, and only to a miss", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const itemDocId = await insertBorrowItem(t);
@@ -496,10 +502,8 @@ describe("practiceAttempts", () => {
     });
     expect(again.attached).toBe(false);
   });
-
   test("a teacher-preview call never attaches working to the scholar's attempt", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const teacherId = await seedUser(t, "teacher", {
@@ -546,10 +550,8 @@ describe("practiceAttempts", () => {
     expect(mine.attached).toBe(true);
     expect((await attempts(t, scholarId))[0].workImageId).toBe(imageId);
   });
-
   test("working never attaches to a correct attempt, or to an item with none", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const itemDocId = await insertBorrowItem(t);
@@ -593,10 +595,8 @@ describe("practiceAttempts", () => {
     ).toBe(false);
     expect((await attempts(t, scholarId))[0].workImageId).toBeUndefined();
   });
-
   test("recentMissesForNode is teacher-only — the scholar's own read is empty", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const teacherId = await seedUser(t, "teacher", { username: "tworking" });
@@ -639,10 +639,8 @@ describe("practiceAttempts", () => {
     expect(theirs.misses).toHaveLength(1);
     expect(theirs.misses[0].workImageUrl).toBeTruthy();
   });
-
   test("recentMissesForNode returns the snapshot + the correlated error pattern", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const teacherId = await seedUser(t, "teacher", { username: "tmisses" });
@@ -669,10 +667,8 @@ describe("practiceAttempts", () => {
       errorPattern: "Subtracts the smaller digit from the larger in each column — regrouping not yet stable.",
     });
   });
-
   test("recentMissesForNode collapses repeated retries of the same stuck item, keeping only the newest", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedUser(t);
     const asScholar = await withUser(t, scholarId);
     const teacherId = await seedUser(t, "teacher", { username: "tstuck" });
@@ -724,10 +720,8 @@ describe("practiceAttempts", () => {
     expect(theirs.misses).toHaveLength(2);
     expect(theirs.misses.map((m) => m.stemSnapshot)).toEqual(["81 - 47 = ?", "52 - 38 = ?"]);
   });
-
   test("recentAttemptsForDomain paginates every domain attempt newest-first", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedUser(t);
     const teacherId = await seedUser(t, "teacher", { username: "t-feed" });
     const asTeacher = await withUser(t, teacherId);
@@ -829,10 +823,8 @@ describe("practiceAttempts", () => {
     });
     expect(second.page[0].expectedAnswer).toBeUndefined();
   });
-
   test("recentAttemptsForDomain never pins an error pattern on a correct retry, keeps '0' answers, and skips legacy no-domain rows", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedUser(t);
     const teacherId = await seedUser(t, "teacher", { username: "t-feed2" });
     const asTeacher = await withUser(t, teacherId);
@@ -898,10 +890,8 @@ describe("practiceAttempts", () => {
       stemSnapshot: "5 - 5 = ?",
     });
   });
-
   test("recentAttemptsForDomain returns an exhausted empty page for a domain with no attempts, and denies the scholar's own read", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedUser(t);
     const teacherId = await seedUser(t, "teacher", { username: "t-feed3" });
     const asTeacher = await withUser(t, teacherId);
@@ -925,10 +915,8 @@ describe("practiceAttempts", () => {
       }),
     ).rejects.toThrow("Forbidden: teacher or admin role required");
   });
-
   test("recentAttemptsForDomain denies teachers outside the scholar's institution", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedUser(t);
     const otherInstitutionId = await seedTestInstitution(t, {
       slug: "other-practice-feed-school",

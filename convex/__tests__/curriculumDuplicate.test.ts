@@ -3,6 +3,10 @@ import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
+import {
+  seedStaffWithMembership,
+  seedTestInstitution,
+} from "./institutionTestHelpers";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -171,6 +175,218 @@ describe("curriculum node duplication", () => {
     expect(copy?.googleSlidesUrl).toBeUndefined();
     expect(copy?.referencedResourceIds).toEqual([resourceId]);
     expect(trailing?.order).toBe(3);
+  });
+
+  test("activities.forkToMyUnit creates independent curriculum and starter rows", async () => {
+    const t = convexTest(schema, modules);
+    const sourceTeacherId = await seedUser(
+      t,
+      "teacher",
+      "source-activity-teacher",
+    );
+    const callerId = await seedUser(t, "teacher", "forking-activity-teacher");
+    const fixture = await t.run(async (ctx) => {
+      const unitId = await ctx.db.insert("units", {
+        teacherId: sourceTeacherId,
+        title: "Shared Physics",
+        isActive: true,
+      });
+      const lessonId = await ctx.db.insert("lessons", {
+        unitId,
+        title: "Forces",
+        order: 0,
+      });
+      const starterAppId = await ctx.db.insert("customApps", {
+        token: "source-starter-token",
+        name: "Force explorer",
+        kind: "static",
+        status: "live",
+        html: "<!doctype html><p>Original app</p>",
+        origin: "starter",
+        createdBy: sourceTeacherId,
+        updatedAt: 123,
+      });
+      const activityId = await ctx.db.insert("activities", {
+        lessonId,
+        title: "Force explorer",
+        description: "Explore how force changes motion.",
+        kind: "vibecode",
+        systemPrompt: "Ask for a prediction before each trial.",
+        appRequest: "Build a cart simulator.",
+        tutorModel: "fable",
+        starterAppId,
+        scholarsStartFrom: "starter",
+        order: 0,
+      });
+      return { activityId, starterAppId };
+    });
+    const sourceBefore = await t.run((ctx) => ctx.db.get(fixture.activityId));
+    const starterBefore = await t.run((ctx) =>
+      ctx.db.get(fixture.starterAppId),
+    );
+
+    const result = await (
+      await withUser(t, callerId)
+    ).mutation(api.activities.forkToMyUnit, {
+      activityId: fixture.activityId,
+    });
+
+    const state = await t.run(async (ctx) => {
+      const activity = await ctx.db.get(result.activityId);
+      return {
+        unit: await ctx.db.get(result.unitId),
+        lesson: await ctx.db.get(result.lessonId),
+        activity,
+        starter: activity?.starterAppId
+          ? await ctx.db.get(activity.starterAppId)
+          : null,
+        source: await ctx.db.get(fixture.activityId),
+        sourceStarter: await ctx.db.get(fixture.starterAppId),
+      };
+    });
+
+    expect(state.unit).toMatchObject({
+      teacherId: callerId,
+      title: "Force explorer Lab",
+      isActive: true,
+    });
+    expect(state.lesson).toMatchObject({
+      unitId: result.unitId,
+      title: "Explore Force explorer",
+    });
+    expect(state.activity).toMatchObject({
+      lessonId: result.lessonId,
+      title: "Force explorer",
+      description: "Explore how force changes motion.",
+      kind: "vibecode",
+      systemPrompt: "Ask for a prediction before each trial.",
+      appRequest: "Build a cart simulator.",
+      tutorModel: "fable",
+      scholarsStartFrom: "starter",
+    });
+    expect(state.activity?.starterAppId).not.toBe(fixture.starterAppId);
+    expect(state.starter).toMatchObject({
+      name: "Force explorer",
+      kind: "static",
+      status: "live",
+      html: "<!doctype html><p>Original app</p>",
+      origin: "starter",
+      createdBy: callerId,
+    });
+    expect(state.starter?.token).not.toBe("source-starter-token");
+    expect(state.source).toEqual(sourceBefore);
+    expect(state.sourceStarter).toEqual(starterBefore);
+  });
+
+  test("activities.forkToMyUnit reuses the same-title activity in its Lab lesson", async () => {
+    const t = convexTest(schema, modules);
+    const sourceTeacherId = await seedUser(
+      t,
+      "teacher",
+      "source-refork-teacher",
+    );
+    const callerId = await seedUser(t, "teacher", "reforking-teacher");
+    const activityId = await t.run(async (ctx) => {
+      const unitId = await ctx.db.insert("units", {
+        teacherId: sourceTeacherId,
+        title: "Shared Circuits",
+        isActive: true,
+      });
+      const lessonId = await ctx.db.insert("lessons", {
+        unitId,
+        title: "Current",
+        order: 0,
+      });
+      const starterAppId = await ctx.db.insert("customApps", {
+        token: "source-circuit-token",
+        name: "Circuit explorer",
+        kind: "static",
+        status: "live",
+        html: "<!doctype html><p>Circuits</p>",
+        origin: "starter",
+        createdBy: sourceTeacherId,
+        updatedAt: 123,
+      });
+      return await ctx.db.insert("activities", {
+        lessonId,
+        title: "Circuit explorer",
+        kind: "vibecode",
+        starterAppId,
+        order: 0,
+      });
+    });
+    const asCaller = await withUser(t, callerId);
+
+    const first = await asCaller.mutation(api.activities.forkToMyUnit, {
+      activityId,
+    });
+    const second = await asCaller.mutation(api.activities.forkToMyUnit, {
+      activityId,
+    });
+
+    const state = await t.run(async (ctx) => ({
+      activities: await ctx.db
+        .query("activities")
+        .withIndex("by_lesson", (q) => q.eq("lessonId", first.lessonId))
+        .collect(),
+      callerStarters: (await ctx.db.query("customApps").collect()).filter(
+        (app) => app.createdBy === callerId,
+      ),
+    }));
+
+    expect(second).toEqual(first);
+    expect(state.activities.map((activity) => activity._id)).toEqual([
+      first.activityId,
+    ]);
+    expect(state.callerStarters).toHaveLength(1);
+  });
+
+  test("activities.forkToMyUnit rejects a caller from another institution", async () => {
+    const t = convexTest(schema, modules);
+    const institutionA = await seedTestInstitution(t, {
+      name: "Moli School",
+      slug: "fork-source-school",
+      isPrimary: true,
+    });
+    const institutionB = await seedTestInstitution(t, {
+      name: "Kona Tutoring",
+      slug: "fork-caller-school",
+    });
+    const sourceTeacherId = await seedStaffWithMembership(t, {
+      institutionId: institutionA,
+      name: "Lehua Torres",
+      username: "fork-source-staff",
+    });
+    const callerId = await seedStaffWithMembership(t, {
+      institutionId: institutionB,
+      name: "Noe Alana",
+      username: "fork-foreign-caller",
+    });
+    const activityId = await t.run(async (ctx) => {
+      const unitId = await ctx.db.insert("units", {
+        teacherId: sourceTeacherId,
+        institutionId: institutionA,
+        title: "Institution A Physics",
+        isActive: true,
+      });
+      const lessonId = await ctx.db.insert("lessons", {
+        unitId,
+        title: "Forces",
+        order: 0,
+      });
+      return await ctx.db.insert("activities", {
+        lessonId,
+        title: "Force explorer",
+        kind: "online",
+        order: 0,
+      });
+    });
+
+    await expect(
+      (
+        await withUser(t, callerId)
+      ).mutation(api.activities.forkToMyUnit, { activityId }),
+    ).rejects.toThrow(/forbidden|institution/i);
   });
 
   test("lessons.duplicate deep-copies activities and preserves sibling order", async () => {
@@ -581,6 +797,9 @@ describe("curriculum node duplication", () => {
     ).rejects.toThrow(/forbidden/i);
     await expect(
       asScholar.mutation(api.activities.duplicate, { activityId }),
+    ).rejects.toThrow(/forbidden/i);
+    await expect(
+      asScholar.mutation(api.activities.forkToMyUnit, { activityId }),
     ).rejects.toThrow(/forbidden/i);
   });
 });

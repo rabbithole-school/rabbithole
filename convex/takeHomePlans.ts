@@ -10,7 +10,13 @@ import {
 } from "./lib/access";
 import { ROLES, isPlatformAdminRole, isTeacherRole } from "./lib/roles";
 import { timeZoneForInstitution } from "./lib/institutionTime";
-import { nextOpenSchoolDayKey, prevOpenSchoolDayKey } from "./lib/schoolDays";
+import {
+  nextOpenSchoolDayKey,
+  nextOpenSchoolDayKeys,
+  prevOpenSchoolDayKey,
+} from "./lib/schoolDays";
+import { bestNextQuestionForScholar } from "./lib/questionQueue";
+import { liveQuestionHomework } from "./lib/questionHomework";
 import {
   homeworkForScholar,
   homeworkForScholarFromAssignments,
@@ -25,6 +31,8 @@ import {
   dayKeyForTimezone,
 } from "../shared/institutionDay";
 import { filterHomeworkForNow } from "../shared/scholarHomeNow";
+
+let specialDeliveryAutoPrintingEnabled = false;
 
 const suggestionValidator = v.union(
   v.object({
@@ -333,14 +341,18 @@ async function suggestions(
     .collect();
   const resolvedActivityIds = new Set(
     priorRows.flatMap((item) =>
-      item.resolution === "activity_completed" && item.activityId
+      (item.resolution === "activity_completed" ||
+        (item.resolution === "kept_open" && item.kind === "activity")) &&
+      item.activityId
         ? [String(item.activityId)]
         : [],
     ),
   );
   const resolvedUnitIds = new Set(
     priorRows.flatMap((item) =>
-      item.resolution === "quest_closed" && item.unitId
+      (item.resolution === "quest_closed" ||
+        (item.resolution === "kept_open" && item.kind === "quest")) &&
+      item.unitId
         ? [String(item.unitId)]
         : [],
     ),
@@ -494,13 +506,12 @@ async function composePlan(
   ctx: QueryCtx,
   context: ScholarContext,
   homework: ScholarHomework,
-  // The teacher card grid renders ONLY `assigned` + `selected`, so its whole-
-  // view read passes `lean` to skip the expensive `suggestions` pass (which
-  // scans every session for the scholar and re-walks quest history) and the
-  // `resolvedToday` read. ONE composition seam — never a forked lean copy (T1);
-  // the skipped fields are simply returned empty, and buildTonightPlanRows drops
-  // them anyway, so a lean row is byte-identical to a full row in the shape it
-  // actually returns.
+  // The teacher Prep table reads `assigned` from here (and `resolvedToday`
+  // directly), so its whole-view read passes `lean` to skip the expensive
+  // `suggestions` pass (which scans every session for the scholar and re-walks
+  // quest history). ONE composition seam — never a forked lean copy (T1); the
+  // skipped fields are simply returned empty, and buildTonightPlanRows never
+  // returns them.
   opts: { lean?: boolean } = {},
 ) {
   const [selected, nextOpenDayKey] = await Promise.all([
@@ -523,7 +534,8 @@ async function composePlan(
     timeZone: context.timeZone,
     dayKey: context.dayKey,
     isPrimary: context.isPrimary,
-    printsTonight: context.isPrimary,
+    printsTonight:
+      context.isPrimary && specialDeliveryAutoPrintingEnabled,
     takeHomePeriod:
       nextOpenDayKey &&
       !dayKeysShareCalendarWeek(context.dayKey, nextOpenDayKey)
@@ -645,13 +657,85 @@ async function groupInstitutionAccessible(
 }
 
 /**
- * Build the per-scholar tonight rows for a set of already-authorized scholars —
- * the shared core of the group prep board and the whole-view prep grid, so the
- * two can never derive a scholar's list two ways (T1). Collects assignments ONCE
+ * Question homework a teacher set for a day BEYOND the Due window (TRA-476).
+ * `assigned` follows the scholar's own Due window (overdue / today / next
+ * school day), so "Assign…" for Thursday would otherwise make the question
+ * leave the row's next-question line with nothing replacing it. These are the
+ * live homework entries `assignedItems` left out, narrowed to seed-backed
+ * question homework through THE live predicate (`liveQuestionHomework`), so a
+ * teacher sees what they just set. Plain homework due later is not a question
+ * and stays off this row, as before. Bounded: one `activities.get` per
+ * out-of-window entry (a handful), then `liveQuestionHomework`'s indexed
+ * `by_seed` read.
+ */
+async function laterQuestionHomework(
+  ctx: QueryCtx,
+  scholarId: Id<"users">,
+  homework: ScholarHomework,
+  assigned: readonly {
+    assignmentId: Id<"assignments">;
+    activityId: Id<"activities">;
+  }[],
+) {
+  const inWindow = new Set(
+    assigned.map((item) => `${item.assignmentId}:${item.activityId}`),
+  );
+  const out: {
+    id: string;
+    assignmentId: Id<"assignments">;
+    activityId: Id<"activities">;
+    label: string;
+    meta: string | null;
+    dueAt: number;
+  }[] = [];
+  for (const item of homework) {
+    if (item.completedByMe || item.dueAt == null) continue;
+    if (inWindow.has(`${item.assignmentId}:${item.activityId}`)) continue;
+    const activity = await ctx.db.get(item.activityId);
+    if (!activity?.seedId) continue;
+    const live = await liveQuestionHomework(ctx, scholarId, activity.seedId);
+    if (!live || live.activityId !== item.activityId) continue;
+    out.push({
+      id: `later:${item.assignmentId}:${item.activityId}`,
+      assignmentId: item.assignmentId,
+      activityId: item.activityId,
+      label: item.activityTitle ?? "(removed activity)",
+      meta: item.unitTitle ?? null,
+      dueAt: item.dueAt,
+    });
+  }
+  return out;
+}
+
+/** How many upcoming open school days a Prep row offers in its "Assign…" menu
+ *  (the first is usually tomorrow; "Pick a date…" covers the rest). */
+const ASSIGN_DAY_OPTIONS = 3;
+
+/** A Prep row's single best next question: the top QUESTION row of the
+ *  scholar's one ranked queue, read bounded by `bestNextQuestionForScholar`
+ *  (same evaluation + ranker as `questionQueueForScholar`, the rows their
+ *  Quests list and Prep "Keep going" show). Teacher-suggested quests are not
+ *  questions, so they never fill this slot. */
+function bestNextQuestion(
+  row: Awaited<ReturnType<typeof bestNextQuestionForScholar>>,
+): { seedId: Id<"seeds">; emoji: string; prompt: string } | null {
+  return row ? { seedId: row.seedId, emoji: row.emoji, prompt: row.question.prompt } : null;
+}
+
+/**
+ * Build the per-scholar Prep rows for a set of already-authorized scholars —
+ * the shared core of the group read and the whole-view Homework table, so the
+ * two can never derive a scholar's row two ways (T1). Collects assignments ONCE
  * for the whole set and partitions per scholar (never a full assignment-table
  * scan per scholar), then composes each row with the SAME `composePlan` the
- * scholar's own card uses. The caller owns the access gate; this takes an
+ * scholar's own Prep uses. The caller owns the access gate; this takes an
  * already-filtered scholar list.
+ *
+ * A row is what a teacher needs at Scholar's Prep: what is DUE (the scholar's
+ * Due list), what they CLOSED today (their "Done today?" close-outs), their one
+ * best NEXT question with the open school days it can be assigned for, and
+ * last night's outcome. The retired tonight plan ("Chosen" items, notes) is no
+ * longer a teacher fact — the scholar can no longer choose items.
  */
 async function buildTonightPlanRows(
   ctx: QueryCtx,
@@ -676,6 +760,24 @@ async function buildTonightPlanRows(
     allAssignments,
     sorted.map((s) => s._id),
   );
+  // The "Assign…" day options are an institution fact; a roster can span
+  // institutions, so compute once per (institution, local day), not per row.
+  const assignDaysCache = new Map<string, Promise<string[]>>();
+  const assignDaysFor = (context: ScholarContext) => {
+    const key = `${context.institutionId}:${context.dayKey}`;
+    let days = assignDaysCache.get(key);
+    if (!days) {
+      days = nextOpenSchoolDayKeys(
+        ctx,
+        context.institutionId,
+        context.dayKey,
+        context.timeZone,
+        ASSIGN_DAY_OPTIONS,
+      );
+      assignDaysCache.set(key, days);
+    }
+    return days;
+  };
 
   return Promise.all(
     sorted.map(async (scholar) => {
@@ -690,9 +792,13 @@ async function buildTonightPlanRows(
           // A staffer's visible roster can legitimately span institutions, so
           // the day-boundary clock is a PER-ROW fact, never one for the view.
           timeZone: plan.timeZone,
+          dayKey: plan.dayKey,
           emptyList: true,
           assigned: plan.assigned,
-          selected: plan.selected,
+          closedToday: plan.resolvedToday as ResolvedToday[],
+          later: [] as Awaited<ReturnType<typeof laterQuestionHomework>>,
+          bestNext: null as ReturnType<typeof bestNextQuestion>,
+          assignDays: [] as string[],
           lastNight: [] as Awaited<ReturnType<typeof lastNightOutcome>>,
         };
       }
@@ -702,12 +808,16 @@ async function buildTonightPlanRows(
         byScholar.get(String(scholar._id)) ?? [],
         context.nowMs,
       );
-      const [plan, lastNight] = await Promise.all([
-        // Lean: the card renders only assigned + selected, so skip the
-        // suggestions/resolvedToday work. buildTonightPlanRows already drops
-        // those fields, so the row is identical — one composition seam (T1).
+      const [plan, closedToday, lastNight, best, assignDays] = await Promise.all([
+        // Lean: skip the suggestions scan (the scholar's own "Done today?"
+        // prompt); the teacher reads only what they already closed.
         composePlan(ctx, context, homework, { lean: true }),
+        resolvedToday(ctx, context),
         lastNightOutcome(ctx, context, homework),
+        // Bounded: only the top row, never the scholar's whole queue — this
+        // runs per scholar inside a subscribed whole-roster query.
+        bestNextQuestionForScholar(ctx, scholar._id),
+        assignDaysFor(context),
       ]);
       return {
         scholarId: scholar._id,
@@ -715,11 +825,20 @@ async function buildTonightPlanRows(
         username: scholar.username ?? null,
         image: scholar.image ?? null,
         timeZone: plan.timeZone,
-        // A neutral property of the same read: nothing on the list yet. Not a
-        // red alert — an empty list can simply mean nothing is due (T6/T7).
-        emptyList: plan.assigned.length === 0 && plan.selected.length === 0,
+        dayKey: plan.dayKey,
+        // A neutral property of the same read: nothing due. Not a red alert —
+        // an empty Due list can simply mean nothing is due (T6/T7).
+        emptyList: plan.assigned.length === 0,
         assigned: plan.assigned,
-        selected: plan.selected,
+        closedToday,
+        later: await laterQuestionHomework(
+          ctx,
+          scholar._id,
+          homework,
+          plan.assigned,
+        ),
+        bestNext: bestNextQuestion(best),
+        assignDays,
         lastNight,
       };
     }),
@@ -793,6 +912,7 @@ export const forVisibleScholarsAsTeacher = teacherQuery({
 });
 
 /** The small self-only projection used by canonical Quest cards for pin state. */
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const pinningForSelf = authedQuery({
   args: { now: v.number() },
   handler: async (ctx, args) => {
@@ -838,6 +958,7 @@ export const pinningForSelf = authedQuery({
   },
 });
 
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const addSuggestion = authedMutation({
   args: { suggestion: suggestionValidator },
   handler: async (ctx, args) => {
@@ -1053,6 +1174,47 @@ export const resolveSuggestion = authedMutation({
   },
 });
 
+/**
+ * "Keep it open" on the Scholar's Prep "Done today?" close-out — the sibling
+ * of `resolveSuggestion` that changes nothing about the work itself. It only
+ * records the answer for today (`resolution: "kept_open"`), so the close-out
+ * stops asking about that activity/quest until tomorrow. No completion, no
+ * archive, nothing to undo; `resolvedToday` ignores these rows.
+ */
+export const keepSuggestionOpen = authedMutation({
+  args: { suggestion: suggestionValidator },
+  handler: async (ctx, args) => {
+    const context = await scholarContext(ctx, ctx.user);
+    if (!context) throw new Error("Only scholars can edit a take-home plan");
+    const selected = await selectedItems(ctx, context);
+    const candidates = await suggestions(
+      ctx,
+      context,
+      selected,
+      await homeworkForScholar(ctx, context.scholar._id, context.nowMs),
+    );
+    const suggestion = args.suggestion;
+    const candidate = candidates.find((item) =>
+      suggestion.kind === "activity"
+        ? item.kind === "activity" && item.sessionId === suggestion.sessionId
+        : item.kind === "quest" && item.unitId === suggestion.unitId,
+    );
+    // Already answered today (or no longer open): nothing to record.
+    if (!candidate) return null;
+    return await ctx.db.insert("takeHomePlanItems", {
+      scholarId: context.scholar._id,
+      institutionId: context.institutionId,
+      dayKey: context.dayKey,
+      kind: candidate.kind,
+      ...(candidate.kind === "activity"
+        ? { activityId: candidate.activityId, sessionId: candidate.sessionId }
+        : { unitId: candidate.unitId }),
+      resolution: "kept_open",
+      resolvedAt: Date.now(),
+    });
+  },
+});
+
 export const undoResolveSuggestion = authedMutation({
   args: { itemId: v.id("takeHomePlanItems") },
   handler: async (ctx, args) => {
@@ -1099,6 +1261,7 @@ export const undoResolveSuggestion = authedMutation({
  * Start one canonical teacher-suggested Quest and attach its new session to
  * today's plan in the same mutation.
  */
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const startSeedInPlan = authedMutation({
   args: { seedId: v.id("seeds") },
   handler: async (ctx, args) => {
@@ -1135,6 +1298,7 @@ export const startSeedInPlan = authedMutation({
  * the take-home plan. Creation remains owned by `units.createQuest` /
  * `sessions.startUnit`; this is intentionally only the idempotent plan seam.
  */
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const addSessionToPlan = authedMutation({
   args: { sessionId: v.id("sessions") },
   handler: async (ctx, args) => {
@@ -1194,6 +1358,7 @@ export const addSessionToPlan = authedMutation({
   },
 });
 
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const addNote = authedMutation({
   args: { text: v.string() },
   handler: async (ctx, args) => {
@@ -1211,6 +1376,7 @@ export const addNote = authedMutation({
   },
 });
 
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const editNote = authedMutation({
   args: { itemId: v.id("takeHomePlanItems"), text: v.string() },
   handler: async (ctx, args) => {
@@ -1224,6 +1390,7 @@ export const editNote = authedMutation({
   },
 });
 
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const setNoteChecked = authedMutation({
   args: { itemId: v.id("takeHomePlanItems"), checked: v.boolean() },
   handler: async (ctx, args) => {
@@ -1236,6 +1403,7 @@ export const setNoteChecked = authedMutation({
 });
 
 /** Remove the choice itself so eligible work can return to the suggestion pool. */
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const removeItem = authedMutation({
   args: { itemId: v.id("takeHomePlanItems") },
   handler: async (ctx, args) => {
@@ -1246,6 +1414,7 @@ export const removeItem = authedMutation({
   },
 });
 
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const markActivityDone = authedMutation({
   args: { itemId: v.id("takeHomePlanItems") },
   handler: async (ctx, args) => {
@@ -1293,6 +1462,7 @@ export const markActivityDone = authedMutation({
   },
 });
 
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const undoMarkActivityDone = authedMutation({
   args: { itemId: v.id("takeHomePlanItems") },
   handler: async (ctx, args) => {
@@ -1328,6 +1498,7 @@ export const undoMarkActivityDone = authedMutation({
   },
 });
 
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const closeQuest = authedMutation({
   args: { itemId: v.id("takeHomePlanItems") },
   handler: async (ctx, args) => {
@@ -1371,6 +1542,7 @@ export const closeQuest = authedMutation({
   },
 });
 
+// Kept for installed iPad builds; delete after the next /ipad-release (TRA-475).
 export const undoCloseQuest = authedMutation({
   args: { itemId: v.id("takeHomePlanItems") },
   handler: async (ctx, args) => {

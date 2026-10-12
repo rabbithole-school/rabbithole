@@ -871,3 +871,52 @@ describe("sessions.finishedForScholar — finished work you can keep working on"
     expect(finished).toHaveLength(0);
   });
 });
+
+describe("reopen is bounded to its school day — Home and Finished never both lose it", () => {
+  // Scholar bug report 2026-09-23: tapping "Review" on a finished quest stamped
+  // reopenedAt, and the quest then sat on Home as "3 of 3 · Continue" forever.
+  test("a reopened finished session is on Home today, then falls back to Finished", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher-day", "teacher");
+    const scholarId = await seedUser(t, "scholar-day");
+    const { unitId, lessonId, activityId } = await seedUnitWithActivity(
+      t,
+      teacherId,
+    );
+    const { sessionId } = await seedFinishedWork(t, {
+      scholarId,
+      unitId,
+      lessonId,
+      activityId,
+      archived: false,
+    });
+    const asScholar = await withUser(t, scholarId);
+    const onHome = async () =>
+      (await asScholar.query(api.scholarPlate.activeForMe, {})).rows.some(
+        (r) => String(r.sessionId ?? "") === String(sessionId),
+      );
+    const inFinished = async () =>
+      (await asScholar.query(api.sessions.finishedForScholar, {})).some(
+        (r) => String(r._id) === String(sessionId),
+      );
+
+    await asScholar.mutation(api.sessions.reopen, { id: sessionId });
+    expect(await onHome()).toBe(true);
+    expect(await inFinished()).toBe(false);
+
+    // Two days later, with no work since the reopen: back to Finished only.
+    const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    await t.run(async (ctx) =>
+      ctx.db.patch(sessionId, { reopenedAt: twoDaysAgo }),
+    );
+    expect(await onHome()).toBe(false);
+    expect(await inFinished()).toBe(true);
+
+    // Working in it today keeps it on Home for the rest of today.
+    await t.run(async (ctx) =>
+      ctx.db.patch(sessionId, { lastMessageAt: Date.now() }),
+    );
+    expect(await onHome()).toBe(true);
+    expect(await inFinished()).toBe(false);
+  });
+});

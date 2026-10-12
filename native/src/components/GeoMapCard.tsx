@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import { SymbolView } from "expo-symbols";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import { useMutation, useQuery } from "convex/react";
 
@@ -71,9 +73,14 @@ export function GeoMapCard({
   onCommit,
   onAskCheck,
   commitBusy = false,
+  fill = false,
 }: {
   sessionId: Id<"sessions">;
   activityId?: Id<"activities">;
+  /** Beside the chat (the landscape panel) the card fills the height its
+   *  parent gives it instead of the fixed inline height, so the map uses the
+   *  free space without making the panel scroll. */
+  fill?: boolean;
   /** Send a scholar-voice turn so the tutor reacts to the current pins. Reuses
    *  the session screen's send+stream path. */
   onCommit?: (text: string) => void;
@@ -89,6 +96,7 @@ export function GeoMapCard({
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const [actionBusy, setActionBusy] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [setupRepairFailed, setSetupRepairFailed] = useState(false);
 
   const artifacts = useQuery(api.artifacts.getBySession, { sessionId });
@@ -207,6 +215,8 @@ export function GeoMapCard({
   const handleCommit = async () => {
     if (commitDisabled || !mapArtifact) return;
     void Haptics.selectionAsync();
+    // The tutor answers in the chat, which the full-screen map covers.
+    setExpanded(false);
     setActionBusy(true);
     try {
       if (criteriaFailed) {
@@ -274,25 +284,79 @@ export function GeoMapCard({
   // is the no-token / offline / registry-overlay fallback (COMMON: the
   // tokenless state is what renders when EXPO_PUBLIC_MAPBOX_TOKEN is absent).
   if (MAPBOX_TOKEN && stored && specFullyNativeRenderable) {
+    const map = (
+      <GeoMapNative
+        // The card header already names the map; the in-map title chip
+        // repeated it and, in the narrow panel, ran into the
+        // Satellite/Terrain/Map toggle.
+        compact
+        spec={stored.spec}
+        scholarPins={scholarPins}
+        onPinDrop={handlePinDrop}
+        onPinRemove={handlePinRemove}
+        onPinsClear={handlePinsClear}
+        token={MAPBOX_TOKEN}
+      />
+    );
     return (
-      <View style={styles.inlineCard}>
+      <View style={[styles.inlineCard, fill && styles.inlineCardFill]}>
         <View style={styles.inlineHeader}>
           <Text style={styles.eyebrow}>MAP</Text>
           <Text style={styles.inlineTitle} numberOfLines={1}>
             {title}
           </Text>
+          <Pressable
+            onPress={() => setExpanded(true)}
+            hitSlop={10}
+            accessibilityRole="button"
+            accessibilityLabel="Expand map to full screen"
+            style={({ pressed }) => [styles.expandButton, pressed && styles.commitButtonPressed]}
+          >
+            <SymbolView
+              name="arrow.up.left.and.arrow.down.right"
+              size={16}
+              tintColor={colors.charcoalMuted}
+            />
+          </Pressable>
         </View>
-        <View style={styles.mapWrap}>
-          <GeoMapNative
-            spec={stored.spec}
-            scholarPins={scholarPins}
-            onPinDrop={handlePinDrop}
-            onPinRemove={handlePinRemove}
-            onPinsClear={handlePinsClear}
-            token={MAPBOX_TOKEN}
-          />
+        {/* One live map at a time: the full-screen copy replaces the inline
+            one while open, so pins and camera never run in two renderers. */}
+        <View style={[styles.mapWrap, fill && styles.mapWrapFill]}>
+          {expanded ? null : map}
         </View>
         {commitFooter}
+        <Modal
+          visible={expanded}
+          animationType="slide"
+          presentationStyle="fullScreen"
+          supportedOrientations={["landscape", "portrait"]}
+          onRequestClose={() => setExpanded(false)}
+        >
+          {/* A Modal renders outside the app's SafeAreaProvider, where
+              SafeAreaView reads zero insets and the header slides under the
+              status bar; give the modal its own provider. */}
+          <SafeAreaProvider>
+          <SafeAreaView style={styles.fullscreen} edges={["top", "bottom"]}>
+            <View style={styles.inlineHeader}>
+              <Text style={styles.eyebrow}>MAP</Text>
+              <Text style={styles.inlineTitle} numberOfLines={1}>
+                {title}
+              </Text>
+              <Pressable
+                onPress={() => setExpanded(false)}
+                hitSlop={10}
+                accessibilityRole="button"
+                accessibilityLabel="Close full-screen map"
+                style={({ pressed }) => [styles.closeButton, pressed && styles.commitButtonPressed]}
+              >
+                <Text style={styles.closeButtonText}>Done</Text>
+              </Pressable>
+            </View>
+            <View style={styles.mapWrapFill}>{expanded ? map : null}</View>
+            {commitFooter}
+          </SafeAreaView>
+          </SafeAreaProvider>
+        </Modal>
       </View>
     );
   }
@@ -344,7 +408,7 @@ export function GeoMapCard({
  * carry "map" (that field widening lands with the backend lane), so widen the
  * access rather than compare against the current literal union.
  */
-function isMapArtifact(artifact: Doc<"artifacts">): boolean {
+export function isMapArtifact(artifact: Doc<"artifacts">): boolean {
   return (artifact.type as string | undefined) === "map";
 }
 
@@ -384,6 +448,24 @@ function makeStyles(colors: ColorSet) {
       width: "100%",
       backgroundColor: colors.bgSubtle,
     },
+    mapWrapFill: { flex: 1, height: undefined, minHeight: 240, width: "100%", backgroundColor: colors.bgSubtle },
+    inlineCardFill: { flex: 1, marginBottom: 0 },
+    expandButton: {
+      width: 32,
+      height: 32,
+      borderRadius: 16,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: colors.bgSubtle,
+    },
+    fullscreen: { flex: 1, backgroundColor: colors.bg },
+    closeButton: {
+      paddingHorizontal: 14,
+      paddingVertical: 7,
+      borderRadius: 14,
+      backgroundColor: colors.bgSubtle,
+    },
+    closeButtonText: { fontSize: 15, fontFamily: fonts.semibold, color: colors.navy },
     commitFooter: {
       flexDirection: "row",
       justifyContent: "flex-end",

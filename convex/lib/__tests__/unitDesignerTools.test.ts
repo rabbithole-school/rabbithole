@@ -112,84 +112,6 @@ describe("assembleUnitDesignerTools", () => {
     expect(new Set(got).size).toBe(got.length);
   });
 
-  test("the open unit is named in the assign tools' descriptions", async () => {
-    const tools = await assembleUnitDesignerTools(ctx, emit, {
-      teacherId: "u_t" as Id<"users">,
-      unitId: "unit_1" as Id<"units">,
-      role: ROLES.TEACHER,
-      unitTitle: "Tide Pool Ecosystems",
-    });
-    // `description` isn't on every arm of the heterogeneous tool union (the
-    // Anthropic-hosted web tools have none), so narrow to this tool's shape.
-    const d =
-      (tools.find((t) => t.name === "assign_unit")! as unknown as {
-        description?: string;
-      }).description ?? "";
-    expect(d).toContain('The unit currently in scope is "Tide Pool Ecosystems"');
-    expect(d).toContain("unitId unit_1");
-  });
-
-  test("the Simulator vocabulary remains discoverable while world identifiers stay stable", async () => {
-    const tools = await assembleUnitDesignerTools(ctx, emit, {
-      teacherId: "u_t" as Id<"users">,
-      unitId: "unit_1" as Id<"units">,
-      role: ROLES.TEACHER,
-    });
-    const catalog = tools.find((t) => t.name === "list_simulator_templates")! as unknown as {
-      description?: string;
-    };
-    const create = tools.find((t) => t.name === "create_simulator_activity")! as unknown as {
-      name: string;
-      description?: string;
-    };
-
-    expect(catalog.description).toContain("Simulator activity");
-    expect(create.description).toContain("simulator activity");
-    expect(create.name).toBe("create_simulator_activity");
-    expect(create.description).not.toContain("World Workbench");
-  });
-
-  test("activity authoring teaches private quality maps and complete flair details", async () => {
-    const tools = await assembleUnitDesignerTools(ctx, emit, {
-      teacherId: "u_t" as Id<"users">,
-      unitId: "unit_1" as Id<"units">,
-      role: ROLES.TEACHER,
-    });
-    const create = tools.find((t) => t.name === "create_activity")! as unknown as {
-      description: string;
-      input_schema: {
-        properties: {
-          deliverable: {
-            description: string;
-            properties: {
-              criteria: {
-                items: {
-                  properties: {
-                    label: { description: string };
-                  };
-                };
-              };
-            };
-          };
-        };
-      };
-    };
-
-    expect(create.description).toContain("private quality map");
-    expect(create.description).toContain("NOT a scholar checklist or a completion gate");
-    expect(create.description).toContain(
-      "its label and description shown together",
-    );
-    expect(create.description).not.toContain("scholar sees a checklist");
-    expect(create.input_schema.properties.deliverable.description).toContain(
-      "It does not gate activity completion",
-    );
-    expect(
-      create.input_schema.properties.deliverable.properties.criteria.items.properties.label
-        .description,
-    ).toContain("Short criterion name");
-  });
-
   test("curriculum_designer gets unit CRUD + web tools but NO scholar records or groups", async () => {
     const got = await names(ROLES.CURRICULUM_DESIGNER);
     for (const t of UNIT_CRUD) expect(got).toContain(t);
@@ -206,6 +128,87 @@ describe("assembleUnitDesignerTools", () => {
     // Running a cohort reads the roster and puts work in front of real kids —
     // teacher/admin only, so the bot must keep refusing this honestly.
     for (const t of ASSIGNMENT_TOOLS) expect(got).not.toContain(t);
+  });
+
+  test("create_activity exposes and threads the tutor model preference", async () => {
+    const runMutation = vi.fn().mockResolvedValue({
+      activityId: "activity_1",
+      existed: false,
+      kind: "vibecode",
+      deliverableAttached: false,
+      advanceRubricAttached: false,
+    });
+    const actionCtx = {
+      runQuery: vi
+        .fn()
+        .mockResolvedValueOnce({
+          unrestricted: false,
+          scholarIds: [],
+          lensLabel: "Test school",
+        })
+        .mockResolvedValueOnce({
+          unit: {
+            title: "Build Lab",
+            subject: "Science",
+            gradeLevel: null,
+            bigIdea: null,
+            essentialQuestions: [],
+            enduringUnderstandings: [],
+          },
+          lessons: [
+            {
+              _id: "lesson_1",
+              title: "Model Motion",
+              strand: "core",
+              processTitle: null,
+              processEmoji: null,
+              processId: null,
+              activities: [],
+            },
+          ],
+          processes: [],
+        }),
+      runMutation,
+    } as unknown as ActionCtx;
+    const tools = await assembleUnitDesignerTools(actionCtx, emit, {
+      teacherId: "u_t" as Id<"users">,
+      unitId: "unit_1" as Id<"units">,
+      role: ROLES.TEACHER,
+    });
+    const tool = tools.find(
+      (candidate) => candidate.name === "create_activity",
+    )! as unknown as {
+        input_schema: {
+          properties: {
+            tutorModel: {
+              description: string;
+              enum: readonly ["sonnet", "fable"];
+            };
+          };
+        };
+        run: (input: Record<string, unknown>) => Promise<string>;
+      };
+
+    expect(tool.input_schema.properties.tutorModel.enum).toEqual([
+      "sonnet",
+      "fable",
+    ]);
+
+    await tool.run({
+      lessonTitle: "Model Motion",
+      title: "Build a Motion Model",
+      kind: "vibecode",
+      systemPrompt: "Build an app that reveals how velocity changes.",
+      tutorModel: "fable",
+    });
+
+    expect(runMutation).toHaveBeenCalledWith(
+      internal.activities.upsertInternal,
+      expect.objectContaining({
+        kind: "vibecode",
+        tutorModel: "fable",
+      }),
+    );
   });
 });
 

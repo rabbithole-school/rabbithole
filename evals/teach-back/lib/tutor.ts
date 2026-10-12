@@ -15,7 +15,7 @@
  *
  * Tool handling: the two teach-back tools do not compute anything in the eval
  * (there is no Convex here) — they just hand the model the SAME guidance string
- * the live /project-stream handler returns (teachBackStartGuidance /
+ * the live /session-stream handler returns (teachBackStartGuidance /
  * TEACH_BACK_FINISH_GUIDANCE), which is what actually steers the tutor into the
  * novice stance. We record which tool fired (and the conceptLabel) for the
  * judge + the grader.

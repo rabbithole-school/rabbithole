@@ -125,7 +125,15 @@ async function ensureCompletion(
       q.eq("scholarId", scholarId).eq("activityId", activityId),
     )
     .collect();
-  if (rows.some((c) => sameAssignment(c.assignmentId, assignmentId))) return;
+  const existing = rows.find((c) => sameAssignment(c.assignmentId, assignmentId));
+  if (existing) {
+    // Paper evidence now backs a scholar's own "I did it": it stops reading as
+    // a self-mark on the Run page, and the scholar can no longer undo it.
+    if (existing.source) {
+      await ctx.db.patch(existing._id, { source: undefined, action: undefined });
+    }
+    return;
+  }
   const { lessonId, unitId } = await activityAncestors(ctx, activityId);
   await ctx.db.insert("activityCompletions", {
     scholarId,

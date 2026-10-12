@@ -60,6 +60,16 @@ const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const FILE_ACCEPT =
   "application/pdf,image/png,image/jpeg,image/gif,image/webp,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.rtf,application/rtf,text/rtf,.txt,.md,text/plain,text/markdown";
 
+/**
+ * Mirrors `isMaterialActivityResource` (convex/lib/activityPresentationResources.ts),
+ * which takes a full Doc and so isn't usable on a `listForActivity` row. That query
+ * already filters to material rows, so this is a belt-and-braces guard: if the query
+ * ever widens, presentation decks still must not sprout a family-sharing control.
+ */
+function isMaterialSourceKind(kind: string) {
+  return kind === "file" || kind === "link" || kind === "video";
+}
+
 function humanizeSourceTitle(value: string) {
   const title = value
     .replace(/\.[^.]+$/, "")
@@ -226,6 +236,9 @@ export function ResourcesEditor({
     }
   });
   const remove = useMutation(api.activityResources.remove);
+  const setFamilyVisibility = useMutation(
+    api.activityResources.setFamilyVisibility,
+  );
   const retry = useMutation(api.activityResources.retryExtraction);
   const setReferencedResources = useMutation(
     api.activityResources.setReferencedResources,
@@ -381,6 +394,27 @@ export function ResourcesEditor({
     const next = renameDraft.trim();
     if (next) await rename({ resourceId, title: next, ...editScope });
     setRenamingId(null);
+  };
+
+  const toggleFamilyVisibility = async (
+    resourceId: Id<"activityResources">,
+    current: "staff_only" | "families",
+  ) => {
+    setBusy(`visibility-${String(resourceId)}`);
+    try {
+      await setFamilyVisibility({
+        resourceId,
+        familyVisibility: current === "families" ? "staff_only" : "families",
+        ...editScope,
+      });
+    } catch (error) {
+      toaster.error({
+        title: "Couldn’t update family sharing",
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBusy(null);
+    }
   };
 
   const toggleReference = async (resourceId: Id<"activityResources">) => {
@@ -572,6 +606,8 @@ export function ResourcesEditor({
               {resources.map((resource, index) => {
                 const status = resource.extractionStatus;
                 const isRenaming = renamingId === resource._id;
+                const familyVisibility =
+                  resource.familyVisibility ?? "staff_only";
                 return (
                   <SortableResourceRow
                     key={resource._id}
@@ -646,6 +682,20 @@ export function ResourcesEditor({
                         </Text>
                       )}
                     </Stack>
+                    {isMaterialSourceKind(resource.source.kind) && (
+                      <FamilyVisibilityButton
+                        title={resource.title}
+                        familyVisibility={familyVisibility}
+                        busy={busy === `visibility-${String(resource._id)}`}
+                        disabled={busy !== null || renamingId !== null}
+                        onToggle={() =>
+                          void toggleFamilyVisibility(
+                            resource._id,
+                            familyVisibility,
+                          )
+                        }
+                      />
+                    )}
                     <HStack gap={0} flexShrink={0}>
                       {resource.url && (
                         <IconButton
@@ -703,6 +753,43 @@ export function ResourcesEditor({
         />
       )}
     </Stack>
+  );
+}
+
+/**
+ * The family-sharing control for one material. Same idiom as the canonical
+ * family-sharing toggle on scholar work (`ScannerPanel`, `DeliverableWorkActions`):
+ * one small violet button that is both the state indicator and the control —
+ * outline when staff-only, filled-subtle once families can see it. No second glyph.
+ */
+function FamilyVisibilityButton({
+  title,
+  familyVisibility,
+  busy,
+  disabled,
+  onToggle,
+}: {
+  title: string;
+  familyVisibility: "staff_only" | "families";
+  busy: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  const shared = familyVisibility === "families";
+  const label = shared ? "Shared with families" : "Share with families";
+  return (
+    <Button
+      size="xs"
+      flexShrink={0}
+      variant={shared ? "subtle" : "outline"}
+      colorPalette="violet"
+      disabled={disabled}
+      aria-label={`${label}: ${title}`}
+      onClick={onToggle}
+    >
+      {busy && <Spinner size="xs" />}
+      {label}
+    </Button>
   );
 }
 

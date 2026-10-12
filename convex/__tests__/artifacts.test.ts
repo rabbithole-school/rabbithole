@@ -172,3 +172,249 @@ describe("text artifact revisions", () => {
     });
   });
 });
+
+describe("App designer G3: scholarUpdate autosaves to the activity starter", () => {
+  async function seedBuildFixture(
+    t: ReturnType<typeof convexTest>,
+    options: { isTestDrive: boolean; ownerRole: "teacher" | "scholar"; appRequest?: string | null },
+  ) {
+    return await t.run(async (ctx) => {
+      const teacherId = await ctx.db.insert("users", {
+        name: "Build Teacher",
+        username: `build-teacher-${Math.random()}`,
+        role: "teacher",
+      });
+      const ownerId =
+        options.ownerRole === "teacher"
+          ? teacherId
+          : await ctx.db.insert("users", {
+              name: "Build Scholar",
+              username: `build-scholar-${Math.random()}`,
+              role: "scholar",
+            });
+      const unitId = await ctx.db.insert("units", {
+        teacherId,
+        title: "Build unit",
+        isActive: true,
+      });
+      const lessonId = await ctx.db.insert("lessons", {
+        unitId,
+        title: "Build lesson",
+        order: 0,
+      });
+      const activityId = await ctx.db.insert("activities", {
+        lessonId,
+        title: "Build activity",
+        kind: "vibecode",
+        order: 0,
+        ...(options.appRequest === null
+          ? {}
+          : { appRequest: options.appRequest ?? "Build a counter app" }),
+      });
+      const sessionId = await ctx.db.insert("sessions", {
+        userId: ownerId,
+        activityId,
+        title: "Build rehearsal",
+        isArchived: false,
+        ...(options.isTestDrive ? { isTestDrive: true } : {}),
+      });
+      const artifactId = await ctx.db.insert("artifacts", {
+        sessionId,
+        title: "Counter app",
+        content: "<!doctype html><html><body>v1</body></html>",
+        lastEditedBy: "ai",
+        revision: 0,
+        type: "code",
+        language: "html",
+      });
+      return { teacherId, ownerId, activityId, sessionId, artifactId };
+    });
+  }
+
+  async function scheduledAutosaves(t: ReturnType<typeof convexTest>) {
+    return await t.run(async (ctx) =>
+      (await ctx.db.system.query("_scheduled_functions").collect()).filter((f) =>
+        f.name.includes("autosaveStarterFromArtifact"),
+      ),
+    );
+  }
+
+  test("a teacher's manual edit on a build session schedules the promotion", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, activityId, artifactId } = await seedBuildFixture(t, {
+      isTestDrive: true,
+      ownerRole: "teacher",
+    });
+    const asTeacher = t.withIdentity({ subject: teacherId });
+
+    expect(
+      await asTeacher.mutation(api.artifacts.scholarUpdate, {
+        artifactId,
+        content: "<!doctype html><html><body>v2</body></html>",
+        baseRevision: 0,
+      }),
+    ).toEqual({ ok: true, revision: 1 });
+
+    const scheduled = await scheduledAutosaves(t);
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0].args[0]).toMatchObject({
+      sessionId: expect.any(String),
+      callerUserId: teacherId,
+      activityId,
+      artifactId,
+    });
+  });
+
+  test("a Restore (restoredFromRevision) on a build session also schedules the promotion", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, artifactId } = await seedBuildFixture(t, {
+      isTestDrive: true,
+      ownerRole: "teacher",
+    });
+    const asTeacher = t.withIdentity({ subject: teacherId });
+
+    await asTeacher.mutation(api.artifacts.scholarUpdate, {
+      artifactId,
+      content: "<!doctype html><html><body>restored</body></html>",
+      baseRevision: 0,
+      restoredFromRevision: 1,
+    });
+
+    expect(await scheduledAutosaves(t)).toHaveLength(1);
+  });
+
+  test("a scholar session does NOT schedule the promotion", async () => {
+    const t = convexTest(schema, modules);
+    const { ownerId, artifactId } = await seedBuildFixture(t, {
+      isTestDrive: false,
+      ownerRole: "scholar",
+    });
+    const asScholar = t.withIdentity({ subject: ownerId });
+
+    expect(
+      await asScholar.mutation(api.artifacts.scholarUpdate, {
+        artifactId,
+        content: "<!doctype html><html><body>edited</body></html>",
+        baseRevision: 0,
+      }),
+    ).toEqual({ ok: true, revision: 1 });
+
+    expect(await scheduledAutosaves(t)).toHaveLength(0);
+  });
+
+  test("a build session whose activity has no appRequest does NOT schedule", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, artifactId } = await seedBuildFixture(t, {
+      isTestDrive: true,
+      ownerRole: "teacher",
+      appRequest: null,
+    });
+    const asTeacher = t.withIdentity({ subject: teacherId });
+
+    await asTeacher.mutation(api.artifacts.scholarUpdate, {
+      artifactId,
+      content: "<!doctype html><html><body>v2</body></html>",
+      baseRevision: 0,
+    });
+
+    expect(await scheduledAutosaves(t)).toHaveLength(0);
+  });
+});
+
+describe("App designer P3: deleteArtifact is gated by the workshop verdict", () => {
+  async function seedDeleteFixture(
+    t: ReturnType<typeof convexTest>,
+    editAccess: "always" | "never" | "afterCompletion",
+    ownerRole: "scholar" | "teacher" = "scholar",
+  ) {
+    return await t.run(async (ctx) => {
+      const teacherId = await ctx.db.insert("users", {
+        name: "Del Teacher",
+        username: `del-teacher-${Math.random()}`,
+        role: "teacher",
+      });
+      const ownerId =
+        ownerRole === "teacher"
+          ? teacherId
+          : await ctx.db.insert("users", {
+              name: "Del Scholar",
+              username: `del-scholar-${Math.random()}`,
+              role: "scholar",
+            });
+      const unitId = await ctx.db.insert("units", {
+        teacherId,
+        title: "Del unit",
+        isActive: true,
+      });
+      const lessonId = await ctx.db.insert("lessons", {
+        unitId,
+        title: "Del lesson",
+        order: 0,
+      });
+      const activityId = await ctx.db.insert("activities", {
+        lessonId,
+        title: "Del activity",
+        kind: "vibecode",
+        order: 0,
+        editAccess,
+      });
+      const sessionId = await ctx.db.insert("sessions", {
+        userId: ownerId,
+        activityId,
+        title: "Del session",
+        isArchived: false,
+        sessionMode: "vibecode",
+      });
+      const artifactId = await ctx.db.insert("artifacts", {
+        sessionId,
+        title: "App",
+        content: "<!doctype html><html><body>App</body></html>",
+        lastEditedBy: "ai",
+        revision: 1,
+        type: "code",
+        language: "html",
+      });
+      return { teacherId, ownerId, artifactId };
+    });
+  }
+
+  async function artifactExists(
+    t: ReturnType<typeof convexTest>,
+    artifactId: Awaited<ReturnType<typeof seedDeleteFixture>>["artifactId"],
+  ) {
+    return await t.run(async (ctx) => (await ctx.db.get(artifactId)) !== null);
+  }
+
+  test("a scholar pinned to Play (never) cannot delete the code app", async () => {
+    const t = convexTest(schema, modules);
+    const { ownerId, artifactId } = await seedDeleteFixture(t, "never");
+    const asScholar = t.withIdentity({ subject: ownerId });
+
+    await expect(
+      asScholar.mutation(api.artifacts.deleteArtifact, { artifactId }),
+    ).rejects.toThrow(/Edit is not available/);
+    expect(await artifactExists(t, artifactId)).toBe(true);
+  });
+
+  test("a scholar with Edit allowed (always) can delete the code app", async () => {
+    const t = convexTest(schema, modules);
+    const { ownerId, artifactId } = await seedDeleteFixture(t, "always");
+    const asScholar = t.withIdentity({ subject: ownerId });
+
+    await asScholar.mutation(api.artifacts.deleteArtifact, { artifactId });
+    expect(await artifactExists(t, artifactId)).toBe(false);
+  });
+
+  test("a teacher-role caller is never gated, even under never", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, artifactId } = await seedDeleteFixture(
+      t,
+      "never",
+      "teacher",
+    );
+    const asTeacher = t.withIdentity({ subject: teacherId });
+
+    await asTeacher.mutation(api.artifacts.deleteArtifact, { artifactId });
+    expect(await artifactExists(t, artifactId)).toBe(false);
+  });
+});

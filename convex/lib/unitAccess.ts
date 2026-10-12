@@ -31,10 +31,18 @@ export async function institutionIdForUnitAuthor(
     return (await scholarInstitutionId(ctx, userId)) ??
       (await primaryInstitution(ctx))?._id;
   }
-  if (user.institutionId) return user.institutionId;
-
+  // A STAFF author's school is their active STAFF MEMBERSHIP — not
+  // `users.institutionId`, which is the SCHOLAR projection (a learner's home
+  // school). Those disagree on a dual-role account: someone who teaches at one
+  // school and learns at another. Reading the scholar field first stamped
+  // their authored units with the school they LEARN at, filing a teacher's
+  // curriculum into someone else's tenant. `users.institutionId` stays as the
+  // fallback for legacy staff who were never backfilled into memberships,
+  // which is the only case it was ever meant to cover.
   const activeMembership = await resolveActiveMembership(ctx, user);
   if (activeMembership?.institutionId) return activeMembership.institutionId;
+
+  if (user.institutionId) return user.institutionId;
 
   return (await primaryInstitution(ctx))?._id;
 }

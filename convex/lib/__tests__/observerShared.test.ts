@@ -4,9 +4,11 @@ import {
   buildObserverUserMessage,
   buildObserverTranscript,
   buildObserverTranscriptBlocks,
+  groundAlertExcerpt,
   groundSessionSignalEvidence,
   parseObserverResponse,
   type ObserverContentBlock,
+  type ObserverHistoryMessage,
 } from "../observerShared";
 import type { ImageContentPart } from "../imageBytes";
 import { SCHOLAR_NAME_PRONOUN_HINT } from "../scholarPronouns";
@@ -28,6 +30,16 @@ const textOf = (blocks: ObserverContentBlock[]) =>
     .filter((b): b is { type: "text"; text: string } => b.type === "text")
     .map((b) => b.text)
     .join("\n\n");
+
+const alertMessage = (
+  message: Partial<ObserverHistoryMessage>,
+): ObserverHistoryMessage => ({
+  id: "m1",
+  sourceRole: "user",
+  role: "user",
+  content: "",
+  ...message,
+});
 
 describe("buildObserverTranscript", () => {
   test("empty history → empty string", () => {
@@ -82,6 +94,21 @@ describe("buildObserverTranscript", () => {
     );
   });
 
+  test("a Magic Corners redraw is not attributed to the tutor", () => {
+    const out = buildObserverTranscript([
+      {
+        role: "user",
+        content: "",
+        generatedImage: true,
+        magicRedraw: true,
+        imagePrompt: "an Arctic food web with a polar bear",
+      },
+    ]);
+
+    expect(out).not.toContain("TUTOR");
+    expect(out).toContain("an Arctic food web with a polar bear");
+  });
+
   test("a generated image preserves its original generation prompt as context metadata", () => {
     const out = buildObserverTranscript([
       {
@@ -132,6 +159,189 @@ describe("buildObserverTranscript", () => {
     expect(out).toContain("SCHOLAR: m3");
     expect(out).toContain("SCHOLAR: m4");
     expect(out).not.toContain("SCHOLAR: m2");
+  });
+});
+
+describe("buildObserverTranscript — attributed turns", () => {
+  test("a spoken scholar turn is attributed differently from a typed one", () => {
+    const transcript = buildObserverTranscript([
+      { id: "m1", role: "user", content: "twelve", inputModality: "typed" },
+      { id: "m2", role: "user", content: "Badwa", inputModality: "spoken" },
+      { id: "m3", role: "assistant", content: "Say more?" },
+    ]);
+    const [typed, spoken, tutor] = transcript.split("\n\n");
+    expect(typed).toBe("[m1] SCHOLAR: twelve");
+    expect(spoken).toBe("[m2] SCHOLAR (spoken): Badwa");
+    expect(tutor).toBe("[m3] TUTOR: Say more?");
+  });
+
+  test("an unmarked scholar turn keeps its existing attribution", () => {
+    expect(
+      buildObserverTranscript([{ id: "m1", role: "user", content: "twelve" }]),
+    ).toBe("[m1] SCHOLAR: twelve");
+  });
+
+  test("an app-triggered turn is not attributed to the scholar", () => {
+    expect(
+      buildObserverTranscript([
+        {
+          id: "m1",
+          role: "user",
+          content: "Check my orbit",
+          inputModality: "app",
+        },
+      ]),
+    ).toBe("[m1] APP BUTTON (not scholar speech): Check my orbit");
+  });
+});
+
+describe("groundAlertExcerpt", () => {
+  const history: ObserverHistoryMessage[] = [
+    alertMessage({
+      id: "m1",
+      content: "i still don't get it, this makes no sense",
+      inputModality: "typed",
+    }),
+    alertMessage({
+      id: "m2",
+      sourceRole: "assistant",
+      role: "assistant",
+      content: "That's a great instinct — let's try a smaller piece.",
+    }),
+    alertMessage({
+      id: "m3",
+      content: "Badwa",
+      inputModality: "spoken",
+    }),
+  ];
+
+  test("a genuine typed quote passes through verbatim, unlabelled", () => {
+    expect(groundAlertExcerpt("this makes no sense", history)).toEqual({
+      excerpt: "this makes no sense",
+      inputModality: "typed",
+    });
+  });
+
+  test("a quote from a dictated turn is kept but marked spoken", () => {
+    expect(groundAlertExcerpt("Badwa", history)).toEqual({
+      excerpt: "Badwa",
+      inputModality: "spoken",
+    });
+  });
+
+  test("a quote that appears in no scholar message is dropped", () => {
+    expect(
+      groundAlertExcerpt("i have no idea what any of this means", history),
+    ).toBeNull();
+  });
+
+  test("a paraphrase of a real scholar turn is dropped", () => {
+    expect(groundAlertExcerpt("it still doesn't make sense", history)).toBeNull();
+  });
+
+  test("the TUTOR's words never ground as a scholar quote", () => {
+    expect(groundAlertExcerpt("That's a great instinct", history)).toBeNull();
+  });
+
+  test("a tool/system row transported as role \"user\" never grounds", () => {
+    const laundering = [
+      alertMessage({
+        id: "s1",
+        sourceRole: "system",
+        role: "user",
+        content: "[Instruction served: Regrouping warm-up]",
+      }),
+    ];
+    expect(
+      groundAlertExcerpt("Instruction served: Regrouping warm-up", laundering),
+    ).toBeNull();
+  });
+
+  test("an app-triggered request never grounds as the scholar's words", () => {
+    expect(
+      groundAlertExcerpt("Check my orbit", [
+        alertMessage({
+          id: "app1",
+          content: "Check my orbit",
+          inputModality: "app",
+        }),
+      ]),
+    ).toBeNull();
+  });
+
+  test("a tutor-generated image row never grounds", () => {
+    const generated = [
+      alertMessage({
+        id: "g1",
+        sourceRole: "tool",
+        role: "user",
+        content: "a diagram of a number line",
+        generatedImage: true,
+      }),
+    ];
+    expect(groundAlertExcerpt("a diagram of a number line", generated)).toBeNull();
+  });
+
+  test("rendering noise is tolerated; the displayed quote is the trimmed one", () => {
+    const noisy = [alertMessage({ content: "I don't get it  at   all" })];
+    expect(groundAlertExcerpt("“I DON’T get it at all…”", noisy)).toEqual({
+      excerpt: "I DON’T get it at all",
+    });
+  });
+
+  test("a missing, empty, or non-string excerpt yields nothing", () => {
+    expect(groundAlertExcerpt(undefined, history)).toBeNull();
+    expect(groundAlertExcerpt("", history)).toBeNull();
+    expect(groundAlertExcerpt("   ", history)).toBeNull();
+    expect(groundAlertExcerpt(42, history)).toBeNull();
+  });
+
+  test("an over-long excerpt is not a short verbatim quote", () => {
+    const long = "x".repeat(600);
+    expect(
+      groundAlertExcerpt(long, [alertMessage({ content: long })]),
+    ).toBeNull();
+  });
+
+  test("an empty scholar turn cannot be the source of a quote", () => {
+    expect(
+      groundAlertExcerpt("anything at all", [
+        alertMessage({ content: "   " }),
+      ]),
+    ).toBeNull();
+  });
+});
+
+describe("groundAlertExcerpt — apostrophes", () => {
+  const history: ObserverHistoryMessage[] = [
+    alertMessage({
+      id: "m1",
+      content: "i cant do this one",
+      inputModality: "typed",
+    }),
+  ];
+
+  test("the model's tidy apostrophe still grounds to the scholar's bare form", () => {
+    expect(groundAlertExcerpt("i can't do this one", history)).toEqual({
+      excerpt: "i can't do this one",
+      inputModality: "typed",
+    });
+  });
+
+  test("the bare form grounds against a scholar who typed the apostrophe", () => {
+    expect(
+      groundAlertExcerpt("i cant do it", [
+        alertMessage({
+          id: "m1",
+          content: "i can't do it",
+          inputModality: "typed",
+        }),
+      ]),
+    ).toEqual({ excerpt: "i cant do it", inputModality: "typed" });
+  });
+
+  test("stripping apostrophes does not blur distinct words", () => {
+    expect(groundAlertExcerpt("i can do this one", history)).toBeNull();
   });
 });
 
@@ -240,6 +450,7 @@ describe("observer app-state evidence", () => {
         scholarId: "scholar-1",
         title: "Counter",
         unitContext: null,
+        origin: { kind: "assigned", label: "Teacher-assigned activity." },
         appStateContext,
       },
     );
@@ -617,9 +828,27 @@ describe("scholar-name pronoun hint", () => {
       [],
       [],
       [],
-      { scholarName: "Marlow Quill", scholarId: "s1", title: "T", unitContext: null },
+      {
+        scholarName: "Marlow Quill",
+        scholarId: "s1",
+        title: "T",
+        unitContext: null,
+        origin: { kind: "scholarStarted", label: "Scholar-started session." },
+      },
       [],
     );
     expect(message).toContain(`## Scholar: Marlow Quill ${SCHOLAR_NAME_PRONOUN_HINT}`);
+  });
+});
+
+describe("OBSERVER_TOOL schema — interests is a top-level output", () => {
+  // Regression: the block was once nested inside `sessionSignals`, where the
+  // model never saw it, and every run returned an empty list while `required`
+  // demanded a property that did not exist.
+  test("interests sits beside sessionSignals, not inside it", () => {
+    const props = OBSERVER_TOOL.input_schema.properties as Record<string, unknown>;
+    expect(Object.keys(props)).toContain("interests");
+    expect(Object.keys(props.sessionSignals as Record<string, unknown>)).not.toContain("interests");
+    expect(OBSERVER_TOOL.input_schema.required).toContain("interests");
   });
 });

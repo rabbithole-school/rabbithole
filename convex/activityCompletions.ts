@@ -7,7 +7,7 @@ import {
   teacherMutation,
 } from "./lib/customFunctions";
 import { requireTeacherOrSelf } from "./lib/auth";
-import { isTeacherRole } from "./lib/roles";
+import { isStaffRole, isTeacherRole } from "./lib/roles";
 import {
   requireActiveScholarAccess,
   filterToAccessibleScholars,
@@ -15,7 +15,13 @@ import {
 import { internalQuery, internalMutation } from "./_generated/server";
 import type { QueryCtx, MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { reconcileActivityCompletion } from "./lib/activityCompletionCore";
+import {
+  isScholarHomeworkMark,
+  reconcileActivityCompletion,
+  scholarCanSelfMarkHomeworkKind,
+  teacherCanMarkCompleteForGroup,
+} from "./lib/activityCompletionCore";
+import { entryTargetsScholar, isLiveEntry, targetsScholar } from "./assignments";
 import { isConversationCompletable } from "./lib/activityCompletionEligibility";
 import type { Id, Doc } from "./_generated/dataModel";
 import { fanOutScholarEvent, fanOutClassEvent, scholarDeepLink } from "./slackNotifications";
@@ -203,7 +209,7 @@ export const markComplete = authedMutation({
       : null;
     await fanOutScholarEvent(ctx, {
       scholarId,
-      text: `*${scholar?.name ?? "A scholar"}* completed *${activity.title}*${unit ? ` (${unit.title})` : ""} — <${scholarDeepLink(scholarId)}|open>`,
+      text: `**${scholar?.name ?? "A scholar"}** completed **${activity.title}**${unit ? ` (${unit.title})` : ""} — <${scholarDeepLink(scholarId)}|open>`,
       subject: assignmentClass?.subject,
     });
 
@@ -352,16 +358,249 @@ export const markCompleteFromTool = internalMutation({
   },
 });
 
+// ── Scholar self-mark for homework the app can't see (TRA-458) ──────────
+//
+// Offline homework (a read-aloud, a reading night) and link-out web homework
+// (a video link) happen off the app, so nothing the scholar does there records
+// a completion. The scholar says "I did it" and we write the SAME completion
+// row a teacher mark writes, stamped with the scholar provenance the take-home
+// plan already uses (`source: "scholar_home"`, one new action literal). The
+// teacher sees a "marked it" chip on the Run page's Done line and can undo it.
+
+type ScholarHomeworkRefusal = {
+  ok: false;
+  reason: "not_yours" | "not_homework" | "ended";
+  message: string;
+};
+
+/**
+ * Resolve the homework entry a scholar is claiming — or say, in scholar-facing
+ * words, why they can't. Same guards as `openOfflineHomework`: the scholar is on
+ * the assignment, the assignment schedules this activity as HOMEWORK aimed at
+ * them (per-scholar `entry.scholarIds`, never a cohort fallback), and the kind
+ * is one the scholar can't otherwise finish (offline, link-out web). `requireLive`
+ * off answers "was this ever mine?" for an ended entry.
+ */
+export async function resolveScholarHomework(
+  ctx: Pick<QueryCtx, "db">,
+  scholarId: Id<"users">,
+  assignmentId: Id<"assignments">,
+  activityId: Id<"activities">,
+  now = Date.now(),
+): Promise<
+  | {
+      ok: true;
+      assignment: Doc<"assignments">;
+      activity: Doc<"activities">;
+      teacherName: string | null;
+    }
+  | ScholarHomeworkRefusal
+> {
+  const assignment = await ctx.db.get(assignmentId);
+  const activity = await ctx.db.get(activityId);
+  if (!assignment || !activity || !targetsScholar(assignment, scholarId)) {
+    return {
+      ok: false,
+      reason: "not_yours",
+      message: "This homework isn't assigned to you.",
+    };
+  }
+  const entries = (assignment.activitySchedule ?? []).filter(
+    (entry) =>
+      String(entry.activityId) === String(activityId) &&
+      entry.mode === "homework" &&
+      entryTargetsScholar(entry, scholarId),
+  );
+  if (entries.length === 0) {
+    return {
+      ok: false,
+      reason: "not_yours",
+      message: "This homework isn't assigned to you.",
+    };
+  }
+  if (!scholarCanSelfMarkHomeworkKind(activity)) {
+    return {
+      ok: false,
+      reason: "not_homework",
+      message: "This one finishes on its own when you do the work.",
+    };
+  }
+  const teacher = await ctx.db.get(assignment.teacherId);
+  const teacherName = teacher?.name ?? null;
+  if (assignment.archivedAt || !entries.some((e) => isLiveEntry(e, now))) {
+    return {
+      ok: false,
+      reason: "ended",
+      message: `This homework has ended, so it can't be marked done. ${teacherName ?? "Your teacher"} can still see it.`,
+    };
+  }
+  return { ok: true, assignment, activity, teacherName };
+}
+
+/**
+ * The ONE write path for a scholar's own homework mark. Shared by the offline
+ * container's "I did it" and the web host's Done (`webActivitySessions.finalize`)
+ * so both stamp the same provenance and fire the same side effects a teacher
+ * mark fires (Slack ping, class digest) — a self-mark counts the same
+ * everywhere; the teacher's chip is the transparency, not a discount.
+ */
+export async function markScholarHomeworkDone(
+  ctx: MutationCtx,
+  scholarId: Id<"users">,
+  args: {
+    assignmentId: Id<"assignments">;
+    activityId: Id<"activities">;
+    note?: string;
+  },
+): Promise<
+  | {
+      ok: true;
+      completionId: Id<"activityCompletions">;
+      created: boolean;
+    }
+  | ScholarHomeworkRefusal
+> {
+  const resolved = await resolveScholarHomework(
+    ctx,
+    scholarId,
+    args.assignmentId,
+    args.activityId,
+  );
+  if (!resolved.ok) return resolved;
+  // Session-less on purpose: the offline container's session is also the scan
+  // container, and a scan being un-filed deletes the completion its session
+  // produced. The scholar's claim must survive that.
+  const { completionId, created } = await reconcileActivityCompletion(ctx, {
+    scholarId,
+    activityId: args.activityId,
+    assignmentId: args.assignmentId,
+    note: args.note,
+    source: "scholar_home",
+    action: "scholar_marked_homework_done",
+  });
+  if (!completionId) throw new Error("Failed to record completion");
+  if (created) {
+    const scholar = await ctx.db.get(scholarId);
+    const assignmentClass = await resolveAssignmentClass(
+      ctx,
+      args.assignmentId,
+      args.activityId,
+    );
+    await fanOutScholarEvent(ctx, {
+      scholarId,
+      text: `**${scholar?.name ?? "A scholar"}** marked **${resolved.activity.title}** done — <${scholarDeepLink(scholarId)}|open>`,
+      subject: assignmentClass?.subject,
+    });
+    await ctx.scheduler.runAfter(0, internal.classDigests.maybeAutoGenerate, {
+      scope: "activity",
+      assignmentId: args.assignmentId,
+      activityId: args.activityId,
+    });
+    await ctx.scheduler.runAfter(0, internal.classDigests.maybeAutoGenerate, {
+      scope: "cohort",
+      assignmentId: args.assignmentId,
+    });
+  }
+  return { ok: true, completionId, created };
+}
+
+/** Offline homework container: "I did it". */
+export const markHomeworkDoneForSelf = authedMutation({
+  args: {
+    assignmentId: v.id("assignments"),
+    activityId: v.id("activities"),
+  },
+  handler: async (ctx, args) => {
+    // A staff account can't "say" a scholar did it — teachers mark from the
+    // Run page. The caller is always the subject here.
+    if (isStaffRole(ctx.user.role)) {
+      return {
+        ok: false as const,
+        reason: "not_yours" as const,
+        message: "Only the scholar can mark their own homework done.",
+      };
+    }
+    return await markScholarHomeworkDone(ctx, ctx.user._id, args);
+  },
+});
+
+/**
+ * Undo the scholar's OWN homework mark. Deletes only a row the scholar's mark
+ * created (matching source + action) — never a teacher's or a scan's (a
+ * confirming scan / teacher mark clears the provenance, so it can't be undone
+ * here). Refused once the homework has ended; the teacher can still undo.
+ */
+export const undoHomeworkDoneForSelf = authedMutation({
+  args: { completionId: v.id("activityCompletions") },
+  handler: async (ctx, args) => {
+    const completion = await ctx.db.get(args.completionId);
+    if (
+      !completion ||
+      completion.scholarId !== ctx.user._id ||
+      !isScholarHomeworkMark(completion) ||
+      !completion.assignmentId
+    ) {
+      return {
+        ok: false as const,
+        reason: "not_yours" as const,
+        message: "This can't be undone here.",
+      };
+    }
+    const resolved = await resolveScholarHomework(
+      ctx,
+      ctx.user._id,
+      completion.assignmentId,
+      completion.activityId,
+    );
+    if (!resolved.ok) return resolved;
+    if (completion.sessionId) {
+      const session = await ctx.db.get(completion.sessionId);
+      if (session?.userId === ctx.user._id && session.activityCompletedAt) {
+        await ctx.db.patch(session._id, {
+          activityCompletedAt: undefined,
+          activityCompletionMessageId: undefined,
+        });
+      }
+    }
+    await ctx.db.delete(completion._id);
+    return { ok: true as const };
+  },
+});
+
 export const unmarkComplete = authedMutation({
   args: {
     activityId: v.id("activities"),
     scholarId: v.optional(v.id("users")),
     sessionId: v.optional(v.id("sessions")),
+    // Session-less, assignment-stamped rows (a class mark, a scholar's own
+    // homework mark) have no session to match through; the Run page's chip
+    // undo names the assignment instead.
+    assignmentId: v.optional(v.id("assignments")),
   },
   handler: async (ctx, args) => {
     const scholarId = args.scholarId ?? ctx.user._id;
     const isTeacher = requireTeacherOrSelf(ctx.user, scholarId);
     if (isTeacher) await requireActiveScholarAccess(ctx, ctx.user, scholarId);
+    if (args.assignmentId) {
+      // The assignment-scoped undo is the Run page chip's — a TEACHER undoing
+      // a row on their own assignment. It matches any row on that assignment
+      // (a class mark, a scan), so a scholar must never reach it: their only
+      // undo is `undoHomeworkDoneForSelf`, which is scoped to their own mark.
+      if (!isTeacher) {
+        throw new Error("Only the teacher can undo a completion on an assignment");
+      }
+      // Same ownership rule as every other Run page write
+      // (`requireOwnedAssignment`: the assignment's own teacher), and the
+      // scholar must be on its roster.
+      const assignment = await ctx.db.get(args.assignmentId);
+      if (!assignment) throw new Error("Assignment not found");
+      if (assignment.teacherId !== ctx.user._id) {
+        throw new Error("Not your assignment");
+      }
+      if (!targetsScholar(assignment, scholarId)) {
+        throw new Error("Scholar is not on this assignment");
+      }
+    }
     const session = args.sessionId ? await ctx.db.get(args.sessionId) : null;
     if (args.sessionId) {
       if (!session) throw new Error("Session not found");
@@ -379,7 +618,11 @@ export const unmarkComplete = authedMutation({
       )
       .collect();
     let existing: Doc<"activityCompletions"> | undefined;
-    if (session?.assignmentId) {
+    if (!session && args.assignmentId) {
+      existing = candidates.find(
+        (c) => String(c.assignmentId ?? "") === String(args.assignmentId),
+      );
+    } else if (session?.assignmentId) {
       existing =
         candidates.find(
           (c) => String(c.assignmentId ?? "") === String(session.assignmentId),
@@ -475,20 +718,11 @@ async function coreMarkCompleteForGroup(
   if (!assignment) throw new Error("Assignment not found");
   const activity = await ctx.db.get(args.activityId);
   if (!activity) throw new Error("Activity not found");
-  const isAdHocOfflineHomework =
-    assignment.kind === "adHocDispatch" &&
-    activity.kind === "offline" &&
-    assignment.activitySchedule?.some(
-      (entry) =>
-        String(entry.activityId) === String(activity._id) &&
-        entry.mode === "homework",
-    );
-  // The one lesson-less completion is ad-hoc offline homework. It has an
-  // explicit assignment scope and no session, so the teacher closes it through
-  // the same roster completion path used for teacher-run offline class work.
-  if (!activity.lessonId && !isAdHocOfflineHomework) {
+  // Lesson-anchored, or the one lesson-less exception (ad-hoc offline/web
+  // homework) — see teacherCanMarkCompleteForGroup.
+  if (!teacherCanMarkCompleteForGroup(assignment, activity)) {
     throw new Error(
-      "markCompleteForGroup is only valid for lesson-anchored activities",
+      "markCompleteForGroup is only valid for lesson-anchored activities or ad-hoc offline/web homework",
     );
   }
 
@@ -530,6 +764,8 @@ async function coreMarkCompleteForGroup(
       // of the same unit with the same scholars (the schema's exact warning).
       assignmentId: args.assignmentId,
       note: args.note,
+      // (No `source`: the teacher is vouching for it, so the core clears a
+      // scholar's earlier self-mark provenance on this row.)
     });
     if (fresh) created++;
   }
@@ -547,7 +783,7 @@ async function coreMarkCompleteForGroup(
       scholarIds: targetIds,
       subject: assignmentClass?.subject,
       makeText: (group) =>
-        `${group.emoji ? `${group.emoji} ` : "🐦 "}*${group.name}* completed *${activity.title}*${unit ? ` (${unit.title})` : ""}`,
+        `${group.emoji ? `${group.emoji} ` : "🐦 "}**${group.name}** completed **${activity.title}**${unit ? ` (${unit.title})` : ""}`,
     });
     // Class Digest: prompt-path auto-(re)generation (debounced + threshold-gated
     // inside maybeAutoGenerate, so firing on the class mark is safe).

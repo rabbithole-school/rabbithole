@@ -36,6 +36,7 @@ export function ScholarReflectionChat({
   );
   const startOpener = useMutation(api.metaChat.startOpener);
   const sendMessage = useMutation(api.metaChat.sendMessage);
+  const requestStop = useMutation(api.metaChat.requestStop);
   const block = useQuery(
     api.metaChat.myPrepTimeBlock,
     purpose === "reflection" ? {} : "skip",
@@ -51,7 +52,7 @@ export function ScholarReflectionChat({
     chatId ? { chatId } : "skip",
     { initialNumItems: 40 },
   );
-  const { streamingContent, streamingMsgId, isStreaming, toolActivity, send } =
+  const { streamingContent, streamingMsgId, isStreaming, toolActivity, send, stop } =
     useAgentStream();
   const [input, setInput] = useState("");
   const openerFiredRef = useRef(false);
@@ -109,14 +110,32 @@ export function ScholarReflectionChat({
 
   const handleSend = async () => {
     const content = input.trim();
-    if (!content || isStreaming || !chatId) return;
+    if (!content || !chatId) return;
     setInput("");
+    // Steering: sending while a reply streams stops it (server loop + local
+    // fetch) and replaces it with this turn — the partial stays on screen
+    // until the new stream starts.
+    if (isStreaming) {
+      if (streamingMsgId) {
+        void requestStop({ messageId: streamingMsgId as Id<"metaMessages"> });
+      }
+      void stop();
+    }
     const { assistantMsgId } = await sendMessage({ chatId, content });
     await send(
       `${convexSiteUrl()}/meta-stream`,
       { chatId, assistantMsgId },
       assistantMsgId,
     );
+  };
+
+  // The composer's Stop control: stop the server loop AND abort the local
+  // fetch, keeping the partial text on screen.
+  const handleStop = () => {
+    if (streamingMsgId) {
+      void requestStop({ messageId: streamingMsgId as Id<"metaMessages"> });
+    }
+    void stop();
   };
 
   const withinWindow = block ? isWithinPrepWindow(block, now) : false;
@@ -127,7 +146,7 @@ export function ScholarReflectionChat({
   const visibleMessages = [...messages]
     .reverse()
     .filter((m) => m.content.trim() !== "")
-    .map((m) => ({ _id: String(m._id), role: m.role, content: m.content }));
+    .map((m) => ({ _id: String(m._id), role: m.role, content: m.content, stopRequestedAt: m.stopRequestedAt }));
 
   return (
     <Flex direction="column" h="full" minH={0}>
@@ -161,6 +180,7 @@ export function ScholarReflectionChat({
         input={input}
         onInputChange={setInput}
         onSend={handleSend}
+        onStop={handleStop}
         placeholder={
           purpose === "reflection"
             ? "Tell me about today…"

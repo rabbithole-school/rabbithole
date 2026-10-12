@@ -20,6 +20,7 @@
  * refusal, and the streaming byte ceiling.
  */
 import { readStateSecret, signState, verifyState } from "./google";
+import { isIntactImage } from "./imageBytes";
 import type { WebImageSearchResult } from "../../shared/slidesScene";
 
 const FETCH_TIMEOUT_MS = 10_000;
@@ -225,6 +226,13 @@ export async function downloadImage(url: string): Promise<Blob> {
   const bytes = await readCappedBytes(response);
   if (bytes.byteLength === 0) {
     throw new Error("Downloaded image has an invalid size");
+  }
+  // A hotlink-blocked host can answer 200 with a broken placeholder, which
+  // renders blank and 400s every model request that carries it (isIntactImage).
+  // Throwing lets downloadWithProxyFallback try Brave's copy, and the tutor's
+  // search_image loop move on to the next result.
+  if (!isIntactImage(bytes)) {
+    throw new Error("Downloaded image is corrupt");
   }
 
   return new Blob([bytes as BlobPart], {

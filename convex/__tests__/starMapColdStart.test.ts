@@ -53,6 +53,27 @@ async function signal(t: ReturnType<typeof convexTest>, scholarId: Id<"users">) 
   );
 }
 
+async function interests(
+  t: ReturnType<typeof convexTest>,
+  scholarId: Id<"users">,
+  labels: string[],
+) {
+  await t.run(async (ctx) =>
+    ctx.db.insert("scholarDossiers", {
+      scholarId,
+      content: "",
+      interests: labels.map((label, index) => ({
+        label,
+        how: "said" as const,
+        dates: [Date.UTC(2026, 8, 3 + index)],
+        sessionIds: [],
+        state: "active" as const,
+        changedBy: "observer" as const,
+      })),
+    }),
+  );
+}
+
 async function connection(t: ReturnType<typeof convexTest>, scholarId: Id<"users">) {
   const sessionId = await t.run(async (ctx) =>
     ctx.db.insert("sessions", { userId: scholarId, title: "s", isArchived: false }),
@@ -76,9 +97,7 @@ describe("maybeChartFirstSky — cold-start auto-trigger", () => {
     // A dismissed constellation star still means we've charted before — never re-chart.
     await seed(t, scholarId, "ai-constellation", "Old star", { status: "dismissed" });
     // Plenty of interest signal, so only the fire-once guard can stop it.
-    await seed(t, scholarId, "ai", "sharks");
-    await seed(t, scholarId, "ai", "redstone");
-    await seed(t, scholarId, "ai", "origami");
+    await interests(t, scholarId, ["sharks", "redstone", "origami"]);
 
     const res = await t.mutation(internal.interpretiveHelpers.maybeChartFirstSky, {
       scholarId,
@@ -90,8 +109,8 @@ describe("maybeChartFirstSky — cold-start auto-trigger", () => {
   test("holds below the floor: thin signal does not chart", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await makeScholar(t);
-    // One interest-seed only → score 1 < floor 3.
-    await seed(t, scholarId, "ai", "sharks");
+    // One structured interest only → score 1 < floor 3.
+    await interests(t, scholarId, ["sharks"]);
 
     const res = await t.mutation(internal.interpretiveHelpers.maybeChartFirstSky, {
       scholarId,
@@ -100,12 +119,10 @@ describe("maybeChartFirstSky — cold-start auto-trigger", () => {
     expect(res.reason).toBe("below-floor");
   });
 
-  test("charts once the floor is cleared (3 harvested interest-seeds)", async () => {
+  test("charts once the floor is cleared (3 structured interests)", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await makeScholar(t);
-    await seed(t, scholarId, "ai", "sharks");
-    await seed(t, scholarId, "ai", "redstone");
-    await seed(t, scholarId, "ai", "origami");
+    await interests(t, scholarId, ["sharks", "redstone", "origami"]);
 
     const res = await t.mutation(internal.interpretiveHelpers.maybeChartFirstSky, {
       scholarId,
@@ -142,28 +159,27 @@ describe("maybeChartFirstSky — cold-start auto-trigger", () => {
 });
 
 describe("gatherInterests — statedInterests (build-from material)", () => {
-  test("surfaces harvested interest-seeds, excludes the generator's own + fixtures", async () => {
+  test("reads dossier interests and never treats seeds as stated interests", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await makeScholar(t);
     await seed(t, scholarId, "ai", "shark biology", { domain: "Biology" });
     await seed(t, scholarId, "teacher", "tide pools");
-    await seed(t, scholarId, "badge_follow", "knot theory");
     await seed(t, scholarId, "ai-constellation", "vampire bat reciprocity");
-    await seed(t, scholarId, "dev-sky", "fixture star");
 
-    const interests = await t.query(internal.interpretiveHelpers.gatherInterests, {
+    const seedOnly = await t.query(internal.interpretiveHelpers.gatherInterests, {
       scholarId,
     });
+    expect(seedOnly.statedInterests).toEqual([]);
 
-    // Build-from list: the kid's/teacher's actual sparks, with domain when present.
-    expect(interests.statedInterests).toContain("shark biology [Biology]");
-    expect(interests.statedInterests).toContain("tide pools");
-    expect(interests.statedInterests).toContain("knot theory");
-    expect(interests.statedInterests).not.toContain("vampire bat reciprocity");
-    expect(interests.statedInterests).not.toContain("fixture star");
+    await interests(t, scholarId, ["rainbows", "Japanese"]);
+    const withDossier = await t.query(
+      internal.interpretiveHelpers.gatherInterests,
+      { scholarId },
+    );
+    expect(withDossier.statedInterests).toEqual(["Japanese", "rainbows"]);
 
     // Anti-repeat list still holds every existing seed topic.
-    expect(interests.existingTopics).toContain("vampire bat reciprocity");
-    expect(interests.existingTopics).toContain("shark biology");
+    expect(withDossier.existingTopics).toContain("vampire bat reciprocity");
+    expect(withDossier.existingTopics).toContain("shark biology");
   });
 });

@@ -34,7 +34,8 @@ import {
   type Role,
 } from "./lib/roles";
 import { isIngestibleMime, imageMediaType } from "./lib/ingestMimes";
-import { bytesToBase64, base64ToBytes, toStorageBlob, detectImageMime, isPdfBytes, type ImageMime } from "./lib/imageBytes";
+import { bytesToBase64, base64ToBytes, toStorageBlob, isIntactImage, isPdfBytes, sniffImageMime, type ImageMime } from "./lib/imageBytes";
+import { readJpegExifOrientation } from "./lib/exifOrientation";
 import { classifyAideUpload } from "./lib/aideUploadMimes";
 import {
   extractDriveFileIds,
@@ -61,6 +62,16 @@ import {
   shortClockLabel,
 } from "./lib/institutionPromptProfile";
 import { SCHOLAR_PRONOUN_GUIDANCE } from "./lib/scholarPronouns";
+import {
+  STAFF_SCHOLAR_RECORDS_SECTION,
+  GROUNDED_CLAIMS_DOCTRINE,
+} from "./lib/staffRecordsDoctrine";
+import {
+  AUDIENCE_DISCLOSURE_DOCTRINE,
+  MULTI_PARTY_ETIQUETTE,
+  audienceContextLine,
+  audienceFromSlackSurface,
+} from "./lib/aideAudience";
 import { makeSlackTools, SLACK_LISTS_SYSTEM_PROMPT_SECTION, writeSurfaceFor, type SlackSurface } from "./lib/slackTools";
 import { emergencyInfoToolForRequest } from "./lib/healthRecordTools";
 import {
@@ -79,7 +90,7 @@ import {
   fetchThreadReplies,
   fetchConversationReplies,
   fetchConversationMembers,
-  fetchConversationKind,
+  fetchConversationShape,
   fetchSlackUserInfo,
   downloadSlackFile,
   setAssistantStatus,
@@ -134,6 +145,10 @@ import {
   UNREPORTED_TOOL_RESULT,
   type ToolActivity,
 } from "./lib/toolActivityGroups";
+import {
+  collectOpaqueIds,
+  repairOpaqueLinks,
+} from "./lib/opaqueLinkRepair";
 
 // When true, render coalesced tool activity INLINE between utterances as
 // subtle Slack "context block" messages (small gray system text, mirroring
@@ -605,9 +620,10 @@ export const MAX_TOTAL_ATTACHMENT_BYTES = 24 * 1024 * 1024;
 const NORMALIZE_MAX_SOURCE_BYTES = 12 * 1024 * 1024;
 
 /**
- * Shrinks an image that's over Anthropic's per-image limit back under it: given
- * a Slack file URL, returns a base64 JPEG under the cap (or null if it couldn't
- * be fetched/decoded/shrunk). Injected into `collectThreadImages` so that
+ * Shrinks an image that's over Anthropic's per-image limit back under it, and
+ * bakes a JPEG's EXIF rotation into upright pixels: given a Slack file URL,
+ * returns an untagged base64 JPEG under the cap (or null if it couldn't be
+ * fetched/decoded/shrunk). Injected into `collectThreadImages` so that
  * function stays a pure, ctx-free, unit-testable value — the real work runs in
  * the node-runtime photon action (convex/slackImageResize.ts), which the default
  * V8 runtime can't host.
@@ -647,34 +663,66 @@ function makeImageNormalizer(ctx: ActionCtx, token: string): ImageNormalizer {
  * back to the text `describeFile` line; download failures likewise fall back.
  * Each unique file id is collected once (a file shared into several messages
  * counts once toward the budget and is emitted once by buildSlackTranscript).
- * Returns the collected map plus the raw bytes it spent, so the document
- * collector can budget against the REST of the shared
- * `MAX_TOTAL_ATTACHMENT_BYTES` ceiling.
+ * When a thread carries more images than fit in one request, the MOST RECENT
+ * win the slots — see the ordering note in the body.
+ * Returns the collected map, the raw bytes it spent (so the document collector
+ * can budget against the REST of the shared `MAX_TOTAL_ATTACHMENT_BYTES`
+ * ceiling), and the ids skipped for capacity rather than failure.
  */
 export async function collectThreadImages(
   token: string,
   thread: SlackMessage[],
   budgetBytes: number = MAX_TOTAL_ATTACHMENT_BYTES,
   normalize?: ImageNormalizer,
-): Promise<{ images: ImageAttachmentMap; bytesUsed: number }> {
+): Promise<{
+  images: ImageAttachmentMap;
+  bytesUsed: number;
+  skippedForCapacity: ReadonlySet<string>;
+}> {
   const images = new Map<string, { mediaType: ImageMime; dataBase64: string }>();
-  const files = thread
-    .flatMap((m) => m.files ?? [])
-    .filter(
-      (f) =>
-        f.url_private_download && imageMediaType(f.mimetype ?? "") !== null,
-    );
+  // Unique image files, NEWEST FIRST. Every turn replays the whole thread, so
+  // collecting oldest-first meant a long-running thread's earliest images held
+  // all MAX_INLINE_IMAGES slots forever and the screenshot someone had JUST
+  // posted to ask about was the one image guaranteed to be dropped. Rendering
+  // is keyed by file id (buildSlackTranscript walks thread order), so this
+  // order decides only WHICH images win the slots, never where they appear.
+  // The cost is prompt-cache churn — a new image evicts an old one, changing a
+  // descriptor early in the transcript — which is the right trade against a
+  // bot that cannot see what it was just asked to look at.
+  // Keyed by file id so each unique file is downloaded once, ordered by its
+  // LAST occurrence: re-sharing an existing Slack file keeps its id, so
+  // first-occurrence order would leave a file someone just re-shared sitting at
+  // its original position and still losing — while the descriptor below tells
+  // them re-posting is the remedy. `Map.set` on a present key keeps the old
+  // position, hence the explicit delete.
+  const uniqueById = new Map<string, NonNullable<SlackMessage["files"]>[number]>();
+  for (const f of thread.flatMap((m) => m.files ?? [])) {
+    if (!f.url_private_download) continue;
+    if (imageMediaType(f.mimetype ?? "") === null) continue;
+    uniqueById.delete(f.id);
+    uniqueById.set(f.id, f);
+  }
+  const files = [...uniqueById.values()].reverse();
+  // Images we never attempted (or decoded but had no room for) because of a
+  // cap, NOT because anything failed. The transcript renders these two cases
+  // with different wording: conflating them is what let the bot read a normal
+  // per-turn limit as a broken download and escalate it as an outage.
+  const skippedForCapacity = new Set<string>();
   let totalBytes = 0;
   let considered = 0;
-  for (const f of files) {
+  for (const [index, f] of files.entries()) {
     // Stop once we've collected our fill of INLINE images — count successes,
     // not candidates, so undownscalable/oversized files ahead of smaller
     // inlineable ones don't burn the budget of slots and crowd them out.
-    if (images.size >= MAX_INLINE_IMAGES) break;
-    // Bound total download/normalize work in a pathological thread (many files
-    // that all fail to collect) without pre-filtering by size.
-    if (considered >= MAX_IMAGE_FILES_CONSIDERED) break;
-    if (images.has(f.id)) continue; // same file shared twice — collect once
+    // Bounding `considered` likewise bounds total download/normalize work in a
+    // pathological thread (many files that all fail to collect).
+    if (
+      images.size >= MAX_INLINE_IMAGES ||
+      considered >= MAX_IMAGE_FILES_CONSIDERED
+    ) {
+      for (const rest of files.slice(index)) skippedForCapacity.add(rest.id);
+      break;
+    }
     considered++;
 
     let mediaType: ImageMime | null = null;
@@ -687,12 +735,30 @@ export async function collectThreadImages(
       if (!blob) continue;
       const bytes = new Uint8Array(await blob.arrayBuffer());
       if (bytes.byteLength <= MAX_IMAGE_BYTES) {
-        // Trust the declared type only insofar as it's a supported raster; sniff
-        // the actual bytes for the media_type Claude receives.
-        const declared = imageMediaType(f.mimetype ?? "");
-        mediaType = detectImageMime(bytes, declared ?? "image/png");
-        dataBase64 = bytesToBase64(bytes);
-        usedBytes = bytes.byteLength;
+        // The media_type Claude receives comes from the bytes, never Slack's
+        // declared type. Every turn replays the whole thread, so bytes Claude
+        // cannot decode (unrecognized, or corrupt — see isIntactImage) would
+        // 400 every later reply in it; they take the failed-download path.
+        const sniffed = sniffImageMime(bytes);
+        if (!sniffed || !isIntactImage(bytes)) continue;
+        // A phone photo is landscape pixels + an EXIF rotation tag, and
+        // consumers disagree about honoring the tag (X ignores it, Instagram
+        // honors it). The marketing lane posts these bytes, so bake the
+        // rotation into upright, untagged pixels; fall back to the raw bytes
+        // if that fails, since the model can still read a tagged photo.
+        const upright =
+          sniffed === "image/jpeg" && readJpegExifOrientation(bytes) !== 1
+            ? await normalize?.({ url: f.url_private_download! })
+            : null;
+        if (upright) {
+          mediaType = upright.mediaType;
+          dataBase64 = upright.dataBase64;
+          usedBytes = Math.floor((upright.dataBase64.length * 3) / 4);
+        } else {
+          mediaType = sniffed;
+          dataBase64 = bytesToBase64(bytes);
+          usedBytes = bytes.byteLength;
+        }
       } else if (bytes.byteLength <= NORMALIZE_MAX_SOURCE_BYTES) {
         // Slack under-reported the size — it's actually over the per-image cap.
         // Downscale it (by URL) instead of dropping it.
@@ -715,12 +781,16 @@ export async function collectThreadImages(
     }
     // else: too large even to attempt — leave it as a text descriptor.
 
-    if (dataBase64 === null || mediaType === null) continue;
-    if (totalBytes + usedBytes > budgetBytes) continue; // shared ceiling
+    if (dataBase64 === null || mediaType === null) continue; // genuine failure
+    if (totalBytes + usedBytes > budgetBytes) {
+      // Decoded fine; there was simply no room left under the shared ceiling.
+      skippedForCapacity.add(f.id);
+      continue;
+    }
     totalBytes += usedBytes;
     images.set(f.id, { mediaType, dataBase64 });
   }
-  return { images, bytesUsed: totalBytes };
+  return { images, bytesUsed: totalBytes, skippedForCapacity };
 }
 
 // Per-file / count caps on PDFs, ADDITIONAL to the shared
@@ -1256,27 +1326,38 @@ const buildSlackSystemPrompt = (
 
 ${SCHOLAR_PRONOUN_GUIDANCE}
 
+${STAFF_SCHOLAR_RECORDS_SECTION}
+
+${GROUNDED_CLAIMS_DOCTRINE}
+
+${AUDIENCE_DISCLOSURE_DOCTRINE}
+
+${MULTI_PARTY_ETIQUETTE}
+
 Health and emergency information is unusually sensitive. For any request about a scholar's emergency information, emergency contacts, allergies, medications, medical conditions, or health record, call get_scholar_emergency_info rather than relying on other records or memory. The tool itself enforces staff role and institution access. It returns details only in a one-to-one DM; in channels and group conversations, relay its private-DM instruction and do not provide health details.
 
-Assignments run a unit for a fixed cohort (the assignment IS the cohort — its roster). To CREATE a new assignment (assign a unit to a cohort that has none yet), use assign_unit — pass the unit title plus a groupName (a saved scholar group, e.g. "the Geckos") or scholarNames; it plans the whole unit and dedupes on unit + exact roster, so don't bounce the teacher to the UI. For one-off work for ONE scholar, use dispatch_activity: it can create a Socratic exploration, assign a specific video/reading URL through the existing web-activity surface, or create targeted practice from exact node keys found with list_practice_nodes. For offline homework, call it with activityKind:'offline' AND mode:'homework'; description must contain the teacher's complete instructions and any reading pasted verbatim. Never invent or summarize missing source material. For "how's it going / who hasn't started / how many submissions for X / open a scholar's project" use get_assignment_progress; to start an activity live for the class right now use push_activity_now (vs schedule_activity, which only plans a future push); roster + lifecycle: set_assignment_scholars / add_assignment_scholars / archive_assignment. Times are epoch-ms${
+Assignments run a unit for a fixed cohort (the assignment IS the cohort — its roster). To CREATE a new assignment (assign a unit to a cohort that has none yet), use assign_unit — pass the unit title plus a groupName (a saved scholar group, e.g. "the Geckos") or scholarNames; it plans the whole unit and dedupes on unit + exact roster, so don't bounce the teacher to the UI. To attach a VIDEO (or a web link) to an activity a cohort ALREADY has, use add_activity_resource — a video's canonical home (a sandboxed youtube-nocookie player card the tutor shares with share_resource, one per cohort, no clock); never dispatch a video that belongs on an existing activity. For one-off work for ONE scholar, use dispatch_activity: it can create a Socratic exploration, dispatch a non-YouTube reading/web URL as a web activity (web is for readings only — a YouTube URL passed as web is auto-rewritten into an online tutor activity with the video attached as a sandboxed resource, so when a teacher wants a video assigned and there is NO existing activity to attach it to, dispatch it and that fallback handles it), or create targeted practice from exact node keys found with list_practice_nodes. For offline homework, call it with activityKind:'offline' AND mode:'homework'; description must contain the teacher's complete instructions and any reading pasted verbatim. Never invent or summarize missing source material. For "how's it going / who hasn't started / how many submissions for X / open a scholar's project" use get_assignment_progress; to start an activity live for the class right now use push_activity_now (vs schedule_activity, which only plans a future push); roster + lifecycle: set_assignment_scholars / add_assignment_scholars / archive_assignment. Times are epoch-ms${
   profile.timeZoneAbbrev ? ` ${profile.timeZoneAbbrev}` : ""
 }.
+After dispatching or pushing a class focus, confirm how long it will stay, explain that it fades after today unless the teacher asked for longer, and invite a correction.
 
 Judging how a scholar or an activity is doing: get_scholar_sessions tags each session with an \`origin\` — \`assigned\` (cohort assignment work) or \`selfInitiated\` (a Quest — independent study — the scholar chose). Check it before you describe a session; never call a self-started Quest "an assigned project". When asked how a session/activity is going or performing, whether a kid is getting value, or what they're really exploring, call get_session_transcript and read the actual conversation — titles + a short preview aren't enough. Assess on the right terms: a self-initiated Quest is judged on genuine curiosity, depth, and value (a kid deep in a self-chosen rabbithole is the goal), not against an assignment bar that doesn't exist. Don't cop out with "no formal assignment, can't assess" — read it and give a specific take.
 
 Math Check-Ins are placement diagnostics, not sessions or ordinary practice. For any request about a scholar's Math Check-In — what the questions were, how they did, how far it has got — call get_scholar_math_checkin. Never infer its existence, questions, or outcomes from generic practice state, sessions, assignments, or web activity. Report it as map progress ("N of M domains mapped"), never as a score; and note that map progress is a lifetime fact, so use the per-domain probes-answered-today counts when asked whether a scholar is working on it right now.
+
+A scholar's Math plan is the teacher-authored Practice scope plus an optional Checkpoint. An explicit Limited plan lists exactly its domains; an explicit Open plan shows domains the scholar has started. Without an explicit plan, a legacy standing assignment supplies the domains, and with neither there may be no domain switcher yet. A "missing tab" is therefore usually policy, not a display bug: call get_scholar_math_plan before diagnosing it or proposing code changes. dispatch_activity and push_activity_now create or surface activities but do NOT add a domain to the Math plan. Change the plan only with set_scholar_math_plan after the teacher confirms the full before → after scope; the teacher can also use Teacher → Math Skills → scholar → "View or edit" Math plan.
 
 When a teacher refers to a cohort by name ("the Seals", "the Geckos"), call list_scholar_groups to resolve who is in it before acting — don't claim you can't see a group; that tool is how you look them up. A group is a saved set of scholars, not an assignment.
 
 You can search the web (web_search) when a question or lesson depends on current events or facts past your training cutoff, and read a specific link a teacher sends (web_fetch) — use them sparingly and cite what you found.
 
 Slack rules:
-- You are NOT obligated to reply to every message, and over-replying is its own failure — a bystander who narrates "sounds good, I'll wait" is just noise. In a shared channel or group DM, when a message is really between other people — it's directed human→human, only NAME-DROPS you (mentions "Rabbithole" as plain text, not an actual @-mention), is a passing remark/thanks, or is asking SOMEONE ELSE to review, comment on, or decide about something (even when that something is work you did) — PREFER the react_only tool (🐰 to wave / +1 the human, 🥕 when someone gave you something genuinely useful, 👍 for a neutral ack, or 'none' to stay completely silent) over composing a reply. Example: "@reviewer can you take a look and send comments?" is the reviewer's to answer — a 👀 or 🐰 is plenty; don't reply that you'll hold or wait. A direct instruction or go-ahead TO you, though, is yours — act on it, don't react-only. Don't insist on the last word. Silence is only ever defensible for a BYSTANDER turn, and that is enforced, not left to your judgement: the tool does not exist in a 1:1 DM at all, and in a channel or group DM it REFUSES (adding no reaction) when you were actually @-mentioned, or when you have a question outstanding that nobody has answered yet — no matter who else the reply name-drops. If it refuses, the turn is yours: answer it. Distinguish the reactions: 👀 (auto-added) already means "I'm working on a reply"; 🐰 means "that's me — thanks for the shout-out" when name-dropped but not tasked; 🥕 is sparing positive reinforcement when a human genuinely improved your work; 👍 is a plain neutral acknowledgement.
+- Staying quiet, mechanically: when the multi-party etiquette above says a turn isn't yours — in a shared channel or group DM, a message directed human→human, one that only NAME-DROPS you (mentions "Rabbithole" as plain text, not an actual @-mention), a passing remark/thanks, or one asking SOMEONE ELSE to review, comment on, or decide about something (even when that something is work you did) — PREFER the react_only tool (🐰 to wave / +1 the human, 🥕 when someone gave you something genuinely useful, 👍 for a neutral ack, or 'none' to stay completely silent) over composing a reply. Example: "@reviewer can you take a look and send comments?" is the reviewer's to answer — a 👀 or 🐰 is plenty; don't reply that you'll hold or wait. A direct instruction or go-ahead TO you, though, is yours — act on it, don't react-only. Don't insist on the last word. Silence is only ever defensible for a BYSTANDER turn, and that is enforced, not left to your judgement: the tool does not exist in a 1:1 DM at all, and in a channel or group DM it REFUSES (adding no reaction) when you were actually @-mentioned, or when you have a question outstanding that nobody has answered yet — no matter who else the reply name-drops. If it refuses, the turn is yours: answer it. Distinguish the reactions: 👀 (auto-added) already means "I'm working on a reply"; 🐰 means "that's me — thanks for the shout-out" when name-dropped but not tasked; 🥕 is sparing positive reinforcement when a human genuinely improved your work; 👍 is a plain neutral acknowledgement.
 - Group threads: each human message is prefixed with the speaker's name. Track who asked what; address people by name when it helps.
 - Offering a choice: whenever you ask someone to pick between several things — search results, files, options — NUMBER them (1., 2., 3.), one per line, so they can reply with just "2". Carry everything the choice depends on (links especially) into the numbered line itself: a bare "2" on the next turn can only be resolved from what your own message said, so a list that numbers nothing, or that names things without their links, leaves you unable to act on the answer.
 - Attachments: images, PDFs, AND text-bearing documents (Word .docx, .rtf, .txt/.md/.csv) a person attaches are shown to you inline — look at them and answer from what you actually see (this works in channels too, not just DMs). Documents we parsed appear as an "[attached document: …]" line followed by their extracted text; very long ones are truncated with a "…[truncated]" marker, so say so rather than guessing at the missing tail. Remaining file types (spreadsheets like .xlsx, archives, other binaries) still appear as a bracketed \`[attached file: …]\` descriptor, not their contents — you can't read those from the descriptor alone. Separately, SAVING a PDF into a scholar's record (the document tools) is DM-only; reading an attachment to answer a question is not.
 - Slack message links: when someone forwards a Slack permalink (a \`…/archives/…/p…\` archive URL), its contents are usually resolved for you automatically and shown inline as "[Resolved a Slack message link …]" — act on it directly (e.g. "implement this <link>"). If a Slack link is referenced but you DON'T see that inline "[Resolved …]" block (e.g. it was linked earlier in the thread, not in the latest message), CALL the read_slack_link tool with the link to fetch it — never claim you can't read Slack links in general. Access follows the SHARER's own Slack membership, so a link only resolves when they can see it; if you instead get a bracketed "[Couldn't read …]" / "[I can only surface …]" note (from the inline block or the tool), relay exactly what it says (e.g. offer to be \`/invite\`d, or note you can only surface links from conversations they're in) — never guess at or fabricate the linked content. (This is Slack-specific; for ordinary public web pages use web_fetch.)
-- Rabbithole is the system of record for the school's own forms — the Health & Emergency Record, the Keiki Cooking Lab liability waiver, Annual program participation, and the Extended Education visiting-student form (the authoritative list of which forms are Rabbithole's own is convex/lib/formRegistry.ts). These are Rabbithole forms, NOT Google Forms: they have no Google Form and no Responses tab, so NEVER tell staff to open a Google Form's Responses tab or click "Link to Sheets", and don't search Google Drive for them. When someone asks who has signed one, what families answered, or for an export/roster of a form, call get_form_responses with the registry form id (e.g. keiki_cooking_lab_liability_waiver). It answers in tiers: signed/outstanding COUNTS in any conversation; the outstanding scholar NAMES only in a private one-to-one conversation (a 1:1 DM or a deliberately-composed private group DM); and, with include_answers set in such a private conversation, the submitted answers exported as a CSV file attached to this thread. In a channel, names and answers are withheld by design — give the counts and add "ask me in a DM for the list or the export"; never promise to paste answers into a channel.
+- Rabbithole is the system of record for the school's own forms — the Health & Emergency Record, the Keiki Cooking Lab liability waiver, the Chuseok Field Trip Permission Slip, the Waimānalo Country Farms Field Trip Permission Slip, the Mōliʻi Gardens Field Trip Permission Slip, Annual program participation, and the Extended Education visiting-student form (the authoritative list of which forms are Rabbithole's own is convex/lib/formRegistry.ts). These are Rabbithole forms, NOT Google Forms: they have no Google Form and no Responses tab, so NEVER tell staff to open a Google Form's Responses tab or click "Link to Sheets", and don't search Google Drive for them. When someone asks who has signed one, what families answered, or for an export/roster of a form, call get_form_responses with the registry form id (e.g. keiki_cooking_lab_liability_waiver). It answers in tiers: signed/outstanding COUNTS in any conversation; the outstanding scholar NAMES only in a private one-to-one conversation (a 1:1 DM or a deliberately-composed private group DM); and, with include_answers set in such a private conversation, the submitted answers exported as a CSV file attached to this thread. In a channel, names and answers are withheld by design — give the counts and add "ask me in a DM for the list or the export"; never promise to paste answers into a channel.
 - Handing back an artifact: you CAN produce files and documents — never say "I can't create files (Sheets or Excel)" or "I can't attach files in Slack." Pick a vehicle and name it, in this order: (1) a file in the thread when a form-export tool offers one — the get_form_responses CSV opens in Excel and imports straight into Google Sheets; (2) create_shared_doc for a document the person will keep editing; (3) a Slack canvas for something to read in-thread; (4) a link to a printable page (a blank printable copy of each Rabbithole form above is at /print/forms/<slug> — e.g. /print/forms/keiki-cooking-lab-liability-waiver — which they open, then Print → Save as PDF) for anything they want on paper or as a PDF. If a vehicle needs a DM or a permission you don't have on this surface, say which one — never claim the capability doesn't exist.
 - Google Drive links: when someone pastes a Drive or Google Docs URL, its text is usually resolved for you automatically and shown inline as "[Resolved a Google Drive link …]" — act on it directly. If a Drive link is referenced but you DON'T see that block (e.g. it was linked earlier in the thread), CALL read_drive_link. NEVER use web_fetch on a docs.google.com or drive.google.com URL — it can't authenticate and only ever sees a sign-in page, so anything you'd say from it would be made up. Files are read with the ASKER's own Google account, so you only ever see what they can. Google Docs/Slides/Sheets and Word/RTF/text files come back as text; PDFs and images in Drive do not (ask them to attach it in Slack instead, where you can see it). If you get a bracketed "[Couldn't …]" note, relay what it says — and when it contains a link in Slack's \`<url|label>\` form, reproduce that markup EXACTLY so it stays clickable; never rewrite it as a bare URL, strip it, or replace it with "go to settings".
 - Finding things in Drive: when someone asks you to find a file in their Google Drive ("find the volcano unit in my drive", "what was that doc called?"), call search_drive — don't tell them to go look for it themselves. It matches on file names first and falls back to contents, and returns links; follow up with read_drive_link on the match you want. If several results could plausibly be it, show the numbered list and ask which number rather than picking one and answering as if you were sure. Search with FEW distinctive words: extra words only narrow it, so if a search comes back empty, retry with a shorter phrase before giving up. search_drive is for a staff member's OWN Drive documents (lesson plans, handouts, a scanned paper form) — NOT for Rabbithole record data like the school forms above; an empty Drive result is never evidence that Rabbithole has no data, so check the Rabbithole tool (get_form_responses) before reporting an absence.
@@ -1284,13 +1365,14 @@ Slack rules:
 - You act with the permissions of the person whose message you're answering. Tools enforce this server-side — if one refuses, relay that plainly.
 - Confirm before writing: before any tool that creates or changes data (directives, seeds, observations, schedule changes, channel linking, password resets, documents), restate exactly what you're about to do and to whom, and get an explicit yes from the requester in this thread — UNLESS their message already specifies the complete action unambiguously (e.g. "log a praise observation on Kai: led cleanup unprompted" may proceed directly).
 - Robotics/program capture mode is an exception to the fully-specified-action shortcut: ALWAYS resolve the target with find_robotics_capture_target, then restate the scholar, program station, and whether mode will start or stop, and wait for explicit confirmation before set_robotics_capture_mode. Starting mode ends automatically at 4:40 PM today; stopping mode leaves existing captures available.
+- Calculator license: "X passed the calculator test" or "give X the calculator license" is a complete ask; call grant_calculator_license directly when the name resolves to exactly one scholar, and ask which scholar if it's ambiguous. Confirm before revoke_calculator_license or a rerecord (re-recording reprints the card).
 - Scribe, not author: the observation / report / dossier tools record the STAFF member's own words and judgment — only ever write what they tell you to or explicitly approve. Never compose, infer, editorialize, or volunteer your OWN observation/report/note, and never proactively "log what you noticed." Your own read of a scholar belongs to the separate observer channel, not this human-authored record. If something seems worth noting, suggest it and let them decide.
 - Credentials (parent enroll links, temporary PINs) are DM-only by design; if asked in a channel, say you can only do that in a DM with you.
 - Keep replies Slack-sized: conversational, short paragraphs, sparse formatting, no headers or giant markdown documents.
 - ${
   shortClockLabel(profile) ? `Times are ${shortClockLabel(profile)}. ` : ""
 }Never invent data — when a tool returns nothing, say so plainly.
-- Staff can pick which Claude model powers you, per person (set_aide_model: fable is the default / opus / sonnet). If someone asks to "use fable", "try opus", or "go back to the normal model", call it — no confirmation needed, it's their own reversible preference. Fable = most capable but pauses to think before answering; Sonnet = fastest + cheapest.`;
+- Staff can pick which Claude model powers you, per person (set_aide_model: default / fable / opus / sonnet). If someone asks to "try opus" or "go back to the normal model", call it — no confirmation needed. "default" CLEARS their pin so they follow the fleet default and keep getting upgrades; the others pin permanently, everywhere, so prefer the default. Only call it when they explicitly ask about models: it trades off speed, thinking-pause, and cost, and is never the fix for how you write. Shorter answers, less commentary, a different tone — that's your prose, so just write differently.`;
 
 // Static cached prefix = the Slack rules + the channel's link/formatting
 // guidance (no tables, absolute links). formattingGuidance("slack") is a
@@ -1382,6 +1464,27 @@ interface ConversationArgs {
    *  on THIS idea rather than matching the root's shortened name + title —
    *  the model never sees the Slack metadata that carries the binding. */
   workshopSuggestionId?: string;
+  /** For a channel: Slack's own word on whether it is private. Undefined
+   *  when Slack didn't say (a DM, a group DM, or a failed lookup). */
+  channelPrivacy?: "private" | "public";
+}
+
+/**
+ * The per-turn line stating a channel's REAL privacy, from Slack. Without it
+ * the model only saw the audience line ("an open conversation anyone with
+ * access can read") and the channel-link tools' "PRIVATE channel only"
+ * wording, and guessed that a private channel "may be open" when confirming a
+ * link. Null when there is nothing to state (not a channel, or Slack didn't
+ * say); the link tools check privacy themselves either way.
+ */
+export function channelPrivacyContextLine(
+  surface: SlackSurface,
+  privacy: "private" | "public" | undefined,
+): string | null {
+  if (surface !== "channel" || !privacy) return null;
+  return privacy === "private"
+    ? "Channel privacy (from Slack): this is a PRIVATE channel; only its members can read it."
+    : "Channel privacy (from Slack): this is a PUBLIC channel; anyone in the workspace can join and read it.";
 }
 
 // Current aide models have ample room for substantial working threads. Keep a
@@ -1485,6 +1588,7 @@ async function runConversation(
     return;
   }
 
+
   // Instant acknowledgement: 👀 on the triggering message before any model
   // work (sub-second; logged no-op until reactions:write is granted).
   await addReaction(token, {
@@ -1505,6 +1609,7 @@ async function runConversation(
   // message. Once set, we suppress the reply stream entirely (no SlackStreamer
   // opens, no empty message posts) and break the tool-loop.
   let reactedOnly = false;
+  const knownOpaqueIds = new Set<string>();
 
   try {
   // The reply streams as one Slack message PER UTTERANCE — the model's text
@@ -1524,6 +1629,7 @@ async function runConversation(
       recipientTeamId: args.teamId ?? undefined,
       recipientUserId: args.authorSlackId,
       startGate,
+      finalize: (text) => repairOpaqueLinks(text, knownOpaqueIds),
     });
 
   // Rebuild the thread as the conversation context.
@@ -1558,6 +1664,7 @@ async function runConversation(
   });
   const images = imageResult?.images;
   const imageBytesUsed = imageResult?.bytesUsed ?? 0;
+  const imagesSkippedForCapacity = imageResult?.skippedForCapacity;
 
   // PDFs: download + base64-encode so the model reads their pages inline
   // (both DM and channel surfaces — reading is orthogonal to sensitivity; the
@@ -1583,10 +1690,19 @@ async function runConversation(
 
   const names = await resolveNames(token, thread, [args.authorSlackId]);
 
-  const institutionId = await ctx.runQuery(
+  // Usage follows the speaker's active membership, the rule usage.ts shares
+  // across producers, so a platform admin's turns stay unattributed.
+  const usageInstitutionId = await ctx.runQuery(
     internal.usage.resolveInstitution,
     { userId: user._id, principal: "staff" },
   );
+  // The school this turn acts in. A platform admin's membership carries no
+  // institution by design, so their home is the primary school, as in the
+  // institution lens. Left null, their DM attachments were never mirrored and
+  // the primary's fleet facts were dropped from their prompt (TRA-454).
+  const institutionId = isPlatformAdminRole(user.role)
+    ? await ctx.runQuery(internal.institutions.primaryInstitutionIdQuery, {})
+    : usageInstitutionId;
 
   let fileRefs: Map<string, string> | undefined =
     args.surface === "dm" && isTeacherRole(user.role)
@@ -1622,6 +1738,7 @@ async function runConversation(
     images,
     documents,
     texts,
+    imagesSkippedForCapacity,
   });
   if (transcript.length === 0 || transcript[transcript.length - 1].role !== "user") {
     return; // nothing answerable (e.g. only system noise)
@@ -2271,6 +2388,7 @@ async function runConversation(
         institutionId: institutionId ?? undefined,
         hasSchoolOperationsAccess,
         hasHealthManagementAccess,
+        appGrantVia: "slack",
         attachFile: async (file) => {
           const uploaded = await uploadFileToSlack(token, {
             channel: args.channelId,
@@ -2316,12 +2434,31 @@ async function runConversation(
         mapped ? `${display} (${mapped.role ?? "scholar"})` : `${display} (not linked)`,
       );
     }
+    const linkedGroup =
+      args.surface !== "dm" && isTeacherRole(role)
+        ? await ctx.runQuery(
+            internal.slackNotifications.linkedGroupForChannel,
+            {
+              callerUserId: user._id,
+              slackChannelId: args.channelId,
+            },
+          )
+        : null;
 
     dynamicContext = [
       `Now: ${hstLabel(Date.now())}.`,
       `Surface: ${surfaceLabel(args.surface)}.`,
+      audienceContextLine(audienceFromSlackSurface(args.surface)),
+      ...[channelPrivacyContextLine(args.surface, args.channelPrivacy)].filter(
+        (line): line is string => line !== null,
+      ),
       `Requester (the person whose latest message you are answering): ${user.name ?? user.username ?? "Unknown"} (${role}).`,
       `Thread participants: ${participantNames.join(", ") || "just the requester"}.`,
+      ...(linkedGroup
+        ? [
+            `This channel is linked to the scholar group ${JSON.stringify(linkedGroup.name)} (${linkedGroup.memberCount} scholars). When the requester says to dispatch, send, push, or assign something to "the kids", "the class", or "them" without naming a group, target THIS group (pass groupName exactly as ${JSON.stringify(linkedGroup.name)}) — do not ask which cohort. Default "dispatch now" delivery is assign_activity_now with mode classFocus; use homework only if they say homework, and schedule_activity only if they give a time. Creating a unit, lesson, and activity and assigning it in one turn is expected — chain the tools, then report the assignment link.`,
+          ]
+        : []),
       ...(emergencyInfoToolForRequest(args.triggerText)
         ? [
             "The latest request is health/emergency-record related. You MUST call get_scholar_emergency_info before answering; do not infer details from other tools.",
@@ -2354,8 +2491,8 @@ async function runConversation(
     const anthropic = new Anthropic({ apiKey: requireAnthropicApiKey() });
 
     // Per-staff aide model preference ("vote with your feet") — the Slack
-    // speaker's users.aideModel over the fleet default. Fable's always-on
-    // thinking gets a raised token cap + a "thinking deeply" status so the
+    // speaker's users.aideModel over the fleet default. Always-on
+    // thinking (Opus 5.5, Fable) gets a raised token cap + a "thinking deeply" status so the
     // long pre-text pause reads as work, not a hang.
     const model = resolveAideModel(user.aideModel);
     const result = await runAideLoop({
@@ -2366,6 +2503,9 @@ async function runConversation(
       messages: transcript,
       tools,
       onText,
+      onToolResult: (_name, result) => {
+        for (const id of collectOpaqueIds(result)) knownOpaqueIds.add(id);
+      },
       onToolUse,
       onThinking: () => setStatus("is thinking deeply…"),
       // React-only: once the model calls react_only, stop the loop cleanly so
@@ -2377,23 +2517,25 @@ async function runConversation(
       // normal multi-tool Slack turn never reaches it.
       maxIterations: SLACK_MAX_TOOL_ITERATIONS,
       label: "slack",
-      // Slack has no model picker — staff switch by asking the bot (the
-      // set_aide_model tool), so the Fable refusal notice must not point at
-      // a nonexistent picker.
-      refusalSwitchHint: 'by asking me to switch (e.g. "use Opus")',
     });
     // A react-only turn intentionally produces no reply — drop any suppressed
     // trailing text so nothing is streamed, posted, or recorded as an
     // assistant message (recordExchange skips empty assistant content).
+    // The persisted copy gets the same opaque-id repair as the posted Slack
+    // text: the Chat tab renders it, and the next turn feeds it back to the
+    // model as history — a mistyped doc id must not survive on either.
     assistantContent = reactedOnly
       ? ""
-      : result.content.slice(discardAssistantContentThrough).trimStart();
+      : repairOpaqueLinks(
+          result.content.slice(discardAssistantContentThrough).trimStart(),
+          knownOpaqueIds,
+        );
     resultModel = result.model;
     resultTokens = result.tokensUsed;
     await recordUsage(ctx, {
       source: "slack-aide",
       role,
-      institutionId,
+      institutionId: usageInstitutionId,
       model: result.model || model,
       usage: result.usage,
     });
@@ -2760,9 +2902,11 @@ async function handleWorkshopIdeaThreadReply(
   );
 
   if (result.status === "recorded") {
-    // The delivery itself is invisible from Slack (it surfaces later, inside
-    // the scholar's own reflection chat), so the ✅ is the ONLY signal that the
-    // reply actually reached a child. Keep it on every recorded reply.
+    // The delivery itself is invisible from Slack (it lands in the scholar's
+    // Messages, in the idea's thread), so the ✅ is the ONLY signal that the
+    // reply actually reached a child. Keep it on every recorded reply. The
+    // scholar's answers come back into this Slack thread as bot posts, which
+    // the `event.bot_id` guard above never re-ingests.
     await addReaction(token, {
       channel: args.channelId,
       timestamp: args.messageTs,
@@ -2781,31 +2925,6 @@ async function handleWorkshopIdeaThreadReply(
       "⚠️ I couldn't match that reply to an open Workshop idea, so nothing was sent to the scholar.",
     );
     return true;
-  }
-  return true;
-}
-
-async function handleDeviceSignOutApprovalReply(
-  ctx: ActionCtx,
-  args: {
-    channelId: string;
-    threadTs: string;
-    slackUserId: string;
-    body: string;
-  },
-): Promise<boolean> {
-  const result = await ctx.runMutation(
-    internal.deviceSignOut.ingestSlackReply,
-    args,
-  );
-  if (!result.handled) return false;
-  const token = process.env.SLACK_BOT_TOKEN;
-  if (token) {
-    await postMessage(token, {
-      channel: args.channelId,
-      threadTs: args.threadTs,
-      text: result.ok ? `✅ ${result.message}` : `⚠️ ${result.message}`,
-    }).catch(() => {});
   }
   return true;
 }
@@ -2854,15 +2973,46 @@ export function messageSurface(channelType: string | undefined): SlackSurface {
  *    channel would strand those notifications in an ad-hoc room.
  */
 export async function mentionSurface(channelId: string): Promise<SlackSurface> {
+  return (await mentionConversation(channelId)).surface;
+}
+
+/**
+ * Which private-or-public a channel is, from a `message` event's
+ * `channel_type`: `"group"` is a private channel and `"channel"` a public one
+ * (Slack's Events API naming). Anything else is not a channel, or unknown.
+ */
+export function messageChannelPrivacy(
+  channelType: string | undefined,
+): "private" | "public" | undefined {
+  if (channelType === "group") return "private";
+  if (channelType === "channel") return "public";
+  return undefined;
+}
+
+/**
+ * `mentionSurface` plus the channel's privacy, from the SAME
+ * conversations.info call (an app_mention carries no `channel_type`).
+ */
+export async function mentionConversation(channelId: string): Promise<{
+  surface: SlackSurface;
+  channelPrivacy?: "private" | "public";
+}> {
   const token = process.env.SLACK_BOT_TOKEN;
-  if (!token) return "channel";
+  if (!token) return { surface: "channel" };
   for (let attempt = 0; attempt < 2; attempt++) {
-    const kind = await fetchConversationKind(token, channelId).catch(
+    const shape = await fetchConversationShape(token, channelId).catch(
       () => null,
     );
-    if (kind) return kind;
+    if (shape) {
+      return {
+        surface: shape.kind,
+        ...(shape.kind === "channel" && shape.privacy
+          ? { channelPrivacy: shape.privacy }
+          : {}),
+      };
+    }
   }
-  return "channel";
+  return { surface: "channel" };
 }
 
 export const handleEvent = internalAction({
@@ -2901,19 +3051,12 @@ export const handleEvent = internalAction({
     if (event.type === "app_mention") {
       if (!event.user || !event.channel || !event.ts) return;
       const botUserId = await resolveSlackBotUserId(payload);
-      if (
-        event.thread_ts &&
-        (await handleDeviceSignOutApprovalReply(ctx, {
-          channelId: event.channel,
-          threadTs: event.thread_ts,
-          slackUserId: event.user,
-          body: event.text ?? "",
-        }))
-      ) {
-        return;
-      }
+      const conversation = await mentionConversation(event.channel);
       await runConversation(ctx, {
-        surface: await mentionSurface(event.channel),
+        surface: conversation.surface,
+        ...(conversation.channelPrivacy
+          ? { channelPrivacy: conversation.channelPrivacy }
+          : {}),
         channelId: event.channel,
         threadTs: event.thread_ts ?? event.ts,
         triggerTs: event.ts,
@@ -3014,19 +3157,8 @@ export const handleEvent = internalAction({
       }
       // A mentioned reply also arrives as app_mention. Parent-message bridges
       // exist only on this message path, so route them first; then let the
-      // app_mention sibling exclusively handle sign-out approval or aide chat.
+      // app_mention sibling exclusively handles aide chat.
       if (botUserId && (event.text ?? "").includes(`<@${botUserId}>`)) return;
-      if (
-        await handleDeviceSignOutApprovalReply(ctx, {
-          channelId: event.channel,
-          threadTs: event.thread_ts,
-          slackUserId: event.user,
-          body: event.text ?? "",
-        })
-      ) {
-        return;
-      }
-
       // A Workshop-idea thread has no `slackThreads` row (the notification is a
       // one-way post), so it must be routed BEFORE the bail below — that bail is
       // exactly where these replies used to vanish.
@@ -3070,8 +3202,10 @@ export const handleEvent = internalAction({
         ).catch(() => null);
         if (!replies?.ok || replies.messages[0]?.user !== botUserId) return;
       }
+      const channelPrivacy = messageChannelPrivacy(event.channel_type);
       await runConversation(ctx, {
         surface,
+        ...(channelPrivacy ? { channelPrivacy } : {}),
         channelId: event.channel,
         threadTs: event.thread_ts,
         triggerTs: event.ts,

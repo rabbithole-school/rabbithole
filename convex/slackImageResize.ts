@@ -22,11 +22,20 @@
 // then leaves the attachment as a text descriptor). Args + return stay tiny (a
 // URL in, a small JPEG out), so this never approaches Convex's function size
 // limits — the multi-MB source never crosses the action boundary.
+//
+// The output is always UPRIGHT pixels with no EXIF: photon ignores the
+// Orientation tag on decode and writes no metadata on encode, so without the
+// explicit remap a phone photo (landscape pixels + tag 6) came out sideways and
+// untagged. The Slack collector also routes under-cap JPEGs that carry a
+// rotating tag through here, so the marketing lane hands Postiz the same
+// upright bytes whatever the photo's size (X ignores the tag; Instagram
+// honors it).
 
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { downloadSlackFile } from "./lib/slackApi";
 import { bytesToBase64 } from "./lib/imageBytes";
+import { orientRgba, readJpegExifOrientation } from "./lib/exifOrientation";
 
 /** Anthropic's per-image ceiling (raw bytes). Kept in step with the Slack
  *  collector's `MAX_IMAGE_BYTES`. */
@@ -64,7 +73,7 @@ export const fetchAndDownscale = internalAction({
         const w = img.get_width();
         const h = img.get_height();
         const scale = Math.min(TARGET_LONG_EDGE / w, TARGET_LONG_EDGE / h, 1);
-        const fitted =
+        const resized =
           scale < 1
             ? photon.resize(
                 img,
@@ -73,6 +82,21 @@ export const fetchAndDownscale = internalAction({
                 photon.SamplingFilter.Lanczos3,
               )
             : img;
+        // Bake the EXIF orientation into the pixels AFTER the resize: the
+        // long-edge box is square, so the order doesn't change the result, and
+        // remapping the fitted raster is far cheaper than the full-res one.
+        const orientation = readJpegExifOrientation(source);
+        let fitted = resized;
+        if (orientation !== 1) {
+          const upright = orientRgba(
+            resized.get_raw_pixels(),
+            resized.get_width(),
+            resized.get_height(),
+            orientation,
+          );
+          fitted = new photon.PhotonImage(upright.pixels, upright.width, upright.height);
+          if (resized !== img) resized.free();
+        }
         try {
           for (const quality of QUALITY_LADDER) {
             const jpeg = fitted.get_bytes_jpeg(quality);

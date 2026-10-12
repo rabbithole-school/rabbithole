@@ -13,7 +13,9 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
  *               admin's own session (`api.impersonation.myImpersonation`)
  *               makes every query re-resolve as the target, read-only.
  * - `inspect` — teacher `?remote=<scholarId>` mode: the teacher stays
- *               themselves but reads a scholar's surface.
+ *               themselves but reads a scholar's surface — the scholar's own
+ *               home (`/scholar`) or the family's parent portal for that
+ *               scholar (`/parent`, "View as parent"). Teacher roles only.
  *
  * `mode` is the single source of truth for "am I looking through someone
  * else's eyes, and how?". Components that need to act on viewing state
@@ -37,12 +39,13 @@ export function useViewingContext({
     isAuthenticated ? {} : "skip",
   );
 
+  const role = user?.role as Role | undefined;
   const isInspecting = !!(
     isAuthenticated &&
     impersonation === null &&
     remoteUserId &&
-    pathname?.startsWith("/scholar") &&
-    isTeacherRole(user?.role as Role | undefined)
+    (pathname?.startsWith("/scholar") || pathname?.startsWith("/parent")) &&
+    isTeacherRole(role)
   );
 
   return useMemo(() => {

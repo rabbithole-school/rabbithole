@@ -11,9 +11,10 @@
  * the scholar straight into an ad-lib session, and fires the background "bake"
  * — threading the chosen path so the quest is designed around that angle (DRY
  * with the seed flow; see review/seed-to-unit-bake-plan.md). "Endless chat"
- * bakes with no chosen angle, exactly like before this menu existed.
+ * bakes with no chosen angle and leaves the live chat alone — it never gets
+ * upgraded into the baked unit's first activity.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation } from "convex/react";
 import {
@@ -38,13 +39,11 @@ import { toaster } from "@/lib/toaster";
 interface CreateQuestDialogProps {
   open: boolean;
   onClose: () => void;
-  prepMode?: boolean;
 }
 
 export function CreateQuestDialog({
   open,
   onClose,
-  prepMode = false,
 }: CreateQuestDialogProps) {
   const router = useRouter();
   const [step, setStep] = useState<"details" | "path">("details");
@@ -55,7 +54,15 @@ export function CreateQuestDialog({
   const createQuest = useMutation(api.units.createQuest);
   const createSession = useMutation(api.sessions.create);
   const scheduleBake = useMutation(api.units.scheduleCustomQuestBake);
-  const addSessionToPlan = useMutation(api.takeHomePlans.addSessionToPlan);
+  // Bumped to abandon an in-flight start (close, unmount): a late
+  // resolve from an abandoned attempt must never navigate or touch state.
+  const attemptRef = useRef(0);
+  useEffect(
+    () => () => {
+      attemptRef.current += 1;
+    },
+    [],
+  );
 
   const reset = () => {
     setStep("details");
@@ -64,8 +71,10 @@ export function CreateQuestDialog({
     setChosen(null);
   };
 
+  // Always closable — even mid-start; closing abandons the pending attempt.
   const handleClose = () => {
-    if (submitting) return;
+    attemptRef.current += 1;
+    setSubmitting(false);
     onClose();
     reset();
   };
@@ -79,16 +88,24 @@ export function CreateQuestDialog({
     if (submitting || !chosen) return;
     const t = title.trim();
     if (!t) return;
+    const attempt = ++attemptRef.current;
+    const live = () => attemptRef.current === attempt;
     setSubmitting(true);
-    try {
+
+    // None of these writes is idempotent (each mints a new unit / session), so
+    // an abandoned attempt stops at the next step rather than finishing a quest
+    // nobody is waiting for.
+    const start = async () => {
       const result = await createQuest({
         title: t,
         description: description.trim() || undefined,
       });
+      if (!live()) return null;
       // Drop the scholar straight into an exploration session on their new
       // quest so they can start chatting with the AI tutor immediately (the
       // unit gives it a title + a completion badge as the container).
       const session = await createSession({ unitId: result.unitId });
+      if (!live()) return null;
       // Fire the background "bake": design a real lesson + activities for this
       // quest and upgrade the session in place once it lands — the scholar
       // never waits for it. "Endless chat" → no chosen angle (a plain bake);
@@ -107,13 +124,14 @@ export function CreateQuestDialog({
       } catch {
         // Non-fatal — the quest still works as an ad-lib exploration.
       }
-      if (prepMode) {
-        await addSessionToPlan({ sessionId: session.id });
-        toaster.success({ title: "Quest added to tonight", description: `"${t}" is ready when you are.` });
-        onClose();
-        reset();
-        return;
-      }
+      if (!live()) return null;
+      return session;
+    };
+
+    try {
+      const session = await start();
+      if (!live() || !session) return;
+      setSubmitting(false);
       router.push(`/scholar/${session.id}`);
       toaster.success({
         title: "Quest created",
@@ -122,12 +140,13 @@ export function CreateQuestDialog({
       onClose();
       reset();
     } catch (e) {
+      if (!live()) return;
+      attemptRef.current += 1;
+      setSubmitting(false);
       toaster.error({
         title: "Couldn't create",
         description: e instanceof Error ? e.message : String(e),
       });
-    } finally {
-      setSubmitting(false);
     }
   };
 
@@ -161,7 +180,7 @@ export function CreateQuestDialog({
                     fontFamily="heading"
                     fontWeight="700"
                   >
-                    {prepMode ? "Shape a new quest" : "What do you want to learn?"}
+                    What do you want to learn?
                   </Heading>
                 ) : (
                   <Heading
@@ -182,7 +201,6 @@ export function CreateQuestDialog({
                   variant="ghost"
                   color="charcoal.400"
                   _hover={{ bg: "gray.100" }}
-                  disabled={submitting}
                 >
                   <X />
                 </IconButton>
@@ -283,7 +301,7 @@ export function CreateQuestDialog({
                     loadingText="Starting…"
                     fontWeight="700"
                   >
-                    {prepMode ? "Create & add to tonight" : "Start exploring →"}
+                    Start exploring →
                   </Button>
                   <Text textAlign="center" fontSize="2xs" color="charcoal.300" mt={2.5}>
                     Every path goes somewhere real — these are just different ways in.

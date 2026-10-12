@@ -27,6 +27,7 @@ import { createAtlasEngine } from "@/lib/atlasEngine";
 import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { MASTERY_STAR_COLOR } from "@/shared/skyTiers";
 import { tapOpensSomething } from "@/components/conceptAtlasTapHint";
+import type { ExploreSeedOptions } from "@/lib/bakePaths";
 
 type Mode = "atlas" | "scholar" | "galaxy";
 
@@ -40,7 +41,7 @@ type SeedMetaWire = {
   strand: string | null;
 };
 
-export function ConceptAtlasView({ lockedScholarId, canCurate = true, height = "560px", fill = false, lockMode, initialMode, onExploreSeed, exploringSeedId, allowFullscreen = false, groupId, selfChartable = false }: { lockedScholarId?: Id<"users">; canCurate?: boolean; height?: string; fill?: boolean; lockMode?: Mode; initialMode?: Mode; onExploreSeed?: (seedId: Id<"seeds">) => void; exploringSeedId?: string | null; allowFullscreen?: boolean; groupId?: string; selfChartable?: boolean } = {}) {
+export function ConceptAtlasView({ lockedScholarId, canCurate = true, height = "560px", fill = false, lockMode, initialMode, onExploreSeed, exploringSeedId, allowFullscreen = false, groupId, selfChartable = false }: { lockedScholarId?: Id<"users">; canCurate?: boolean; height?: string; fill?: boolean; lockMode?: Mode; initialMode?: Mode; onExploreSeed?: (seedId: Id<"seeds">, opts?: ExploreSeedOptions) => void; exploringSeedId?: string | null; allowFullscreen?: boolean; groupId?: string; selfChartable?: boolean } = {}) {
   const locked = !!lockedScholarId;
   const [mode, setMode] = useState<Mode>(lockMode ?? initialMode ?? (locked ? "scholar" : "atlas"));
   const [pickedScholarId, setScholarId] = useState<Id<"users"> | null>(null);
@@ -230,7 +231,14 @@ export function ConceptAtlasView({ lockedScholarId, canCurate = true, height = "
         : seedSel.completed ? "Explore again 🚀"
         : seedSel.visited ? "Resume quest 🚀"
         : "Begin quest 🚀",
-      onClick: () => { setSeedSheetId(null); setFullscreen(false); onExploreSeed?.(seedSel.seedId as Id<"seeds">); },
+      onClick: () => {
+        setSeedSheetId(null);
+        setFullscreen(false);
+        onExploreSeed?.(
+          seedSel.seedId as Id<"seeds">,
+          seedSel.structured ? { skipMenu: true } : undefined,
+        );
+      },
       primary: true,
       loading: exploringSeedId === seedSel.seedId,
     }],
@@ -359,7 +367,19 @@ export function ConceptAtlasView({ lockedScholarId, canCurate = true, height = "
           {" "}<Text as="span" color="violet.500" fontWeight="600">Hover a star to inspect it; click to open its panel. Scroll/pinch to zoom (to the cursor), drag to pan.</Text>
         </Text>
       )}
-      <ConceptDrawer key={drawerConcept ?? "none"} conceptId={canCurate ? drawerConcept : null} forScholarId={mode === "scholar" ? scholarId : undefined} onClose={() => setDrawerConcept(null)} onNavigate={setDrawerConcept} />
+      <ConceptDrawer
+        key={drawerConcept ?? "none"}
+        conceptId={canCurate ? drawerConcept : null}
+        forScholarId={mode === "scholar" ? scholarId : undefined}
+        scope={mode === "galaxy" ? scopeParam : undefined}
+        groupId={
+          mode === "galaxy" && groupId
+            ? (groupId as Id<"scholarGroups">)
+            : undefined
+        }
+        onClose={() => setDrawerConcept(null)}
+        onNavigate={setDrawerConcept}
+      />
       <StarDrawer content={seedContent} onClose={() => setSeedSheetId(null)} />
     </Box>
   );

@@ -26,6 +26,7 @@ import { Box, Button, HStack, Image, Text, VStack } from "@chakra-ui/react";
 import { Compass, MapPin, Check, Camera } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
+import { capPhotoForUpload } from "@/lib/downscalePhoto";
 
 export function PhysicalTaskCard({
   physicalTaskId,
@@ -44,15 +45,8 @@ export function PhysicalTaskCard({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
 
-  // Serving URL for the returned photo (only when one exists → cheap thumbnail).
-  const photoUrl = useQuery(
-    api.files.getUrl,
-    task?.photoStorageId
-      ? { storageId: task.photoStorageId as Id<"_storage"> }
-      : "skip",
-  );
-
   if (task === undefined || task === null) return null;
+  const photoUrl = task.photoUrl;
   const done = task.status === "completed";
 
   const onPickPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -61,11 +55,12 @@ export function PhysicalTaskCard({
     if (!file || !file.type.startsWith("image/")) return;
     setUploading(true);
     try {
+      const photo = await capPhotoForUpload(file);
       const uploadUrl = await generateUploadUrl();
       const res = await fetch(uploadUrl, {
         method: "POST",
-        headers: { "Content-Type": file.type },
-        body: file,
+        headers: { "Content-Type": photo.type || file.type },
+        body: photo,
       });
       const { storageId } = await res.json();
       await attachPhoto({

@@ -338,7 +338,7 @@ describe("prep board read model", () => {
     ).rejects.toThrow(/forbidden/i);
   });
 
-  test("empty-list flag is zero assigned + zero selected for the local dayKey", async () => {
+  test("empty-list flag is zero due homework for the local dayKey", async () => {
     const t = convexTest(schema, modules);
     const world = await seedGroupWorld(t);
     const asTeacher = await withUser(t, world.teacherId);
@@ -349,13 +349,14 @@ describe("prep board read model", () => {
     });
     const byId = new Map(board.scholars.map((s) => [String(s.scholarId), s]));
 
-    // Emma has no assignments and no plan items → neutral empty list.
+    // Emma has no assignments → neutral empty list.
     const emma = byId.get(String(world.emmaId))!;
     expect(emma.emptyList).toBe(true);
     expect(emma.assigned).toHaveLength(0);
-    expect(emma.selected).toHaveLength(0);
+    // The retired tonight plan is not a teacher fact (no "Chosen"/notes).
+    expect("selected" in emma).toBe(false);
 
-    // Leilani has assigned homework (and a note) → not empty.
+    // Leilani has assigned homework → not empty.
     const leilani = byId.get(String(world.leilaniId))!;
     expect(leilani.emptyList).toBe(false);
   });

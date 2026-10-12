@@ -13,7 +13,7 @@
  * list-detail layout already shows the list, no back arrow needed).
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ActivityKind } from "@/lib/activityKinds";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -42,7 +42,6 @@ import {
   Play,
   ArrowClockwise,
   WarningCircle,
-  Sparkle,
 } from "@phosphor-icons/react";
 import { ActivityModeBadge, ActivityModeIcon } from "@/lib/activityMode";
 import { api } from "@/convex/_generated/api";
@@ -67,8 +66,13 @@ import {
 } from "@/components/skeletons/PanelSkeletons";
 import { formatRelative } from "@/lib/relativeTime";
 import { toaster } from "@/lib/toaster";
-import { isClassFocusRunningLong } from "@/shared/roomTurn";
 import {
+  formatRoomTurnTime,
+  isClassFocusRunningLong,
+} from "@/shared/roomTurn";
+import { plannedReleaseArgs } from "@/shared/plannedRelease";
+import {
+  DEFAULT_TIMEZONE,
   dayStartForDayKey,
   dueStatus,
   shiftDayKey,
@@ -131,6 +135,13 @@ type AssignmentData = NonNullable<
 type HomeworkDueDateOptions = NonNullable<
   ReturnType<typeof useQuery<typeof api.assignments.homeworkDueDateOptions>>
 >;
+/** One activity's schedule entry, shaped by the query — never re-declared
+ *  here, so the `planned` flag can't drift away from the server's. */
+type ActivityScheduleRow = NonNullable<
+  NonNullable<
+    ReturnType<typeof useQuery<typeof api.assignments.activityProgress>>
+  >["lessons"][number]["activities"][number]["schedule"]
+>;
 
 function minuteRoundedNow(): number {
   return Math.floor(Date.now() / 60_000) * 60_000;
@@ -178,6 +189,12 @@ function AssignmentPageBody({
 
   const classFocusCount = data.classFocusCount;
   const homeworkCount = data.homeworkCount;
+  // The eyebrow asks a PARTITION question ("sent, or still planned?"), so it
+  // reads `sentCount`, not the chip counts below it. Those two disagree for
+  // an overrun-but-unwrapped class focus: it drops out of the chips (its
+  // window closed) while its row still says "running long".
+  const sentCount = data.sentCount;
+  const plannedCount = data.plannedCount;
   const isArchived = !!data.archivedAt;
 
   const onArchive = async () => {
@@ -201,14 +218,32 @@ function AssignmentPageBody({
     if (!plannedEntry) return;
     setStarting(true);
     try {
+      const releaseArgs = plannedReleaseArgs(
+        {
+          mode: plannedEntry.mode,
+          endsAt: plannedEntry.endsAt ?? null,
+          dueAt: plannedEntry.dueAt ?? null,
+          scholarIds: plannedEntry.scholarIds ?? null,
+        },
+        Date.now(),
+      );
       await pushActivity({
         assignmentId,
         activityId: plannedEntry.activityId,
-        mode: plannedEntry.mode,
-        endsAt: plannedEntry.endsAt,
-        dueAt: plannedEntry.dueAt,
+        ...releaseArgs,
       });
-      toaster.success({ title: "Started — the scholar can see it now" });
+      toaster.success({
+        title: startedToastTitle(
+          plannedEntry.mode,
+          releaseArgs.endsAt,
+          data.timeZone,
+        ),
+      });
+    } catch (error) {
+      toaster.error({
+        title: "Couldn't start that activity",
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setStarting(false);
     }
@@ -240,9 +275,7 @@ function AssignmentPageBody({
           eyebrow={
             isArchived
               ? "Archived assignment"
-              : classFocusCount + homeworkCount === 0
-                ? "Assignment · nothing pushed yet"
-                : "Assignment"
+              : assignmentEyebrow(sentCount, plannedCount)
           }
           title={data.title || data.unitTitle || "Assignment"}
           subtitle={
@@ -523,9 +556,51 @@ function OutlineSection({
     [progress, assignmentId],
   );
   const recentlyTurned = useRecentlyTurnedActivities(liveClassFocusActivities);
+  // Everything on the schedule that hasn't reached a scholar yet. The rows
+  // below each say "planned"; this line says what that COSTS — nobody can start
+  // it yet — and releases the lot, which no single row can do.
+  const plannedActivities = useMemo(
+    () =>
+      (progress?.lessons ?? []).flatMap((l) =>
+        l.activities.flatMap((a) =>
+          a.schedule?.planned
+            ? [{ activityId: a.activityId, schedule: a.schedule }]
+            : [],
+        ),
+      ),
+    [progress],
+  );
 
   if (!progress) {
     return <ActivityProgressSkeleton groups={2} />;
+  }
+  if (progress.lessons.length === 0 && progress.adHocActivities.length > 0) {
+    // An ad-hoc dispatch has no lessons; its schedule is the outline, so the
+    // teacher can see (and undo) who finished it on the same Done line.
+    return (
+      <Stack gap={2}>
+        {progress.adHocActivities.map((a) => (
+          <ActivityRow
+            key={String(a.activityId)}
+            assignmentId={assignmentId}
+            activityId={a.activityId}
+            title={a.title}
+            kind={a.kind}
+            defaultMode={a.defaultMode}
+            schedule={a.schedule}
+            completedCount={a.completedScholarIds.length}
+            completedScholarIds={a.completedScholarIds}
+            selfMarked={a.selfMarked}
+            inProgressCount={a.inProgressCount}
+            notStartedCount={a.notStartedCount}
+            rosterSize={rosterSize}
+            roster={roster}
+            timeZone={timeZone}
+            dueDateOptions={dueDateOptions}
+          />
+        ))}
+      </Stack>
+    );
   }
   if (progress.lessons.length === 0) {
     return (
@@ -536,6 +611,13 @@ function OutlineSection({
   }
   return (
     <Stack gap={4}>
+      {plannedActivities.length > 0 && (
+        <PlannedWorkLine
+          assignmentId={assignmentId}
+          planned={plannedActivities}
+          timeZone={timeZone}
+        />
+      )}
       {progress.lessons.map((l) => (
         <Box key={String(l.lessonId)}>
           <SectionEyebrow>{l.lessonTitle}</SectionEyebrow>
@@ -551,6 +633,7 @@ function OutlineSection({
                 schedule={a.schedule}
                 completedCount={a.completedScholarIds.length}
                 completedScholarIds={a.completedScholarIds}
+                selfMarked={a.selfMarked}
                 inProgressCount={a.inProgressCount}
                 notStartedCount={a.notStartedCount}
                 rosterSize={rosterSize}
@@ -573,6 +656,85 @@ function OutlineSection({
         </Stack>
       )}
     </Stack>
+  );
+}
+
+/**
+ * The planned-work line: one calm sentence above the outline whenever the
+ * schedule holds work that hasn't reached scholars, plus a single release for
+ * the whole set. Deliberately NOT a second badge — the rows already carry the
+ * per-activity state; this carries the consequence and the bulk action.
+ */
+function PlannedWorkLine({
+  assignmentId,
+  planned,
+  timeZone,
+}: {
+  assignmentId: Id<"assignments">;
+  planned: { activityId: Id<"activities">; schedule: ActivityScheduleRow }[];
+  timeZone: string | null;
+}) {
+  const pushActivity = useMutation(api.assignments.pushActivity);
+  const [starting, setStarting] = useState(false);
+
+  const onStartAll = async () => {
+    setStarting(true);
+    try {
+      const now = Date.now();
+      // Sequential on purpose: every push patches the SAME assignment doc, so
+      // firing them together just buys write conflicts and retries.
+      for (const entry of planned) {
+        const releaseArgs = plannedReleaseArgs(entry.schedule, now);
+        await pushActivity({
+          assignmentId,
+          activityId: entry.activityId,
+          ...releaseArgs,
+        });
+      }
+      toaster.success({
+        title: `${planned.length} activities are live now`,
+        description: bulkStartToastDescription(planned, timeZone, now),
+      });
+    } catch (error) {
+      toaster.error({
+        title: "Couldn't start the planned activities",
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  return (
+    <Flex
+      align="center"
+      gap={3}
+      px={3}
+      py={2}
+      bg="gray.50"
+      borderWidth="1px"
+      borderColor="gray.200"
+      borderRadius="lg"
+    >
+      <WarningCircle size={16} color="var(--chakra-colors-charcoal-400)" />
+      <Text fontSize="xs" fontFamily="heading" color="charcoal.600" flex={1}>
+        {plannedWorkNotice(planned.length)}
+      </Text>
+      {planned.length > 1 && (
+        <Button
+          size="xs"
+          bg="violet.500"
+          color="white"
+          _hover={{ bg: "violet.600" }}
+          fontFamily="heading"
+          onClick={() => void onStartAll()}
+          loading={starting}
+        >
+          <Play size={11} weight="fill" style={{ marginRight: 3 }} />
+          Start them all now
+        </Button>
+      )}
+    </Flex>
   );
 }
 
@@ -623,11 +785,96 @@ function formatDueDate(dueAt: number, timeZone: string): string {
     .replace(",", "");
 }
 
+/**
+ * The Run page header's eyebrow.
+ *
+ * Counts SENT (`setAt` stamped) and PLANNED (`setAt` null) separately,
+ * because they are different states of the world and conflating them is
+ * exactly how a teacher ends up believing tonight's homework went out. The
+ * old eyebrow said "nothing pushed yet" above two planned homework rows.
+ *
+ * These two partition the schedule, so pass the server's `sentCount` — NOT
+ * the live chip counts, which answer the narrower "is it holding the class
+ * right now?" and would drop an overrun focus out of both halves.
+ */
+export function assignmentEyebrow(
+  sentCount: number,
+  plannedCount: number,
+): string {
+  if (plannedCount === 0) {
+    return sentCount === 0 ? "Assignment · nothing sent yet" : "Assignment";
+  }
+  const planned = `${plannedCount} planned`;
+  return sentCount === 0
+    ? `Assignment · ${planned}, nothing sent yet`
+    : `Assignment · ${sentCount} sent, ${planned}`;
+}
+
+/**
+ * The one line above the outline when planned work is sitting there. States
+ * the consequence the badges can't.
+ *
+ * "Can't start" and not "can't see": a planned entry DOES surface to the
+ * scholar, as a dated, deliberately non-actionable preview in Coming up
+ * (`ComingUpCard`). What it never does is reach tonight's actionable list or
+ * open — that only happens once release stamps `setAt`. Saying "can't see it"
+ * would be a second, wrong story about the same signal.
+ */
+export function plannedWorkNotice(plannedCount: number): string {
+  return plannedCount === 1
+    ? "1 activity is planned — scholars can't start it yet."
+    : `${plannedCount} activities are planned — scholars can't start them yet.`;
+}
+
 export function homeworkDueToastDescription(
   dueAt: number,
   options: { timeZone: string } | null,
 ): string | undefined {
   return options ? `Due ${formatDueDate(dueAt, options.timeZone)}` : undefined;
+}
+
+function classFocusLiveToast(
+  endsAt: number | null | undefined,
+  timeZone: string | null,
+): string {
+  if (endsAt == null) return "Live now · fades after today";
+  const time = formatRoomTurnTime(endsAt, timeZone ?? DEFAULT_TIMEZONE);
+  return time ? `Live now · until ${time}` : "Live now";
+}
+
+/** Confirmation for releasing a planned entry — says both that it reached
+ * scholars and, for class focus, when it will leave their screen. */
+function startedToastTitle(
+  mode: "classFocus" | "homework",
+  endsAt: number | null | undefined,
+  timeZone: string | null,
+): string {
+  return mode === "homework"
+    ? "Sent — scholars can start it now"
+    : classFocusLiveToast(endsAt, timeZone);
+}
+
+function bulkStartToastDescription(
+  planned: { schedule: ActivityScheduleRow }[],
+  timeZone: string | null,
+  now: number,
+): string | undefined {
+  const focusLabels = Array.from(
+    new Set(
+      planned
+        .filter((entry) => entry.schedule.mode === "classFocus")
+        .map((entry) =>
+          classFocusLiveToast(
+            plannedReleaseArgs(entry.schedule, now).endsAt,
+            timeZone,
+          ),
+        ),
+    ),
+  );
+  if (focusLabels.length === 0) return undefined;
+  return focusLabels.length === 1
+    ? focusLabels[0]
+    : "Class focuses use their planned lifetimes";
 }
 
 function HomeworkDueDatePopover({
@@ -829,6 +1076,7 @@ function ActivityRow({
   schedule,
   completedCount,
   completedScholarIds,
+  selfMarked,
   inProgressCount,
   notStartedCount,
   rosterSize,
@@ -841,17 +1089,10 @@ function ActivityRow({
   title: string;
   kind: ActivityKind;
   defaultMode: "classFocus" | "homework" | "either";
-  schedule: {
-    mode: "classFocus" | "homework";
-    // null = planned (scheduled for later, not yet live to scholars).
-    setAt: number | null;
-    startsAt: number | null;
-    planned: boolean;
-    endsAt: number | null;
-    dueAt: number | null;
-  } | null;
+  schedule: ActivityScheduleRow | null;
   completedCount: number;
   completedScholarIds: string[];
+  selfMarked: { scholarId: Id<"users">; completedAt: number }[];
   inProgressCount: number;
   notStartedCount: number;
   rosterSize: number;
@@ -870,8 +1111,23 @@ function ActivityRow({
   void isOnline;
   void isShareBack;
 
-  const pushed = !!schedule;
+  // Planned vs sent is ONE server-owned bit (`planned` = `setAt` null), and
+  // the row reads it directly. The whole bug was a row that badged any
+  // schedule entry as pushed while the header counted only entries whose
+  // window still held, so two planned homework activities looked exactly
+  // like sent ones and nobody found out until the next morning.
+  //
+  // `sent` is the strict complement of that same bit — NOT a second reading
+  // of liveness. It deliberately stays true for an overrun-but-unwrapped
+  // class focus, which is still on scholars' screens (`isEntryShowing`) even
+  // though its window has closed (`isLiveEntry` false). That entry keeps the
+  // sent badge, picks up the existing "running long" tag below, and keeps
+  // Extend / Wrap — the row must not pretend a focus the class is still
+  // sitting in has vanished, and must never restyle it as planned.
+  const planned = schedule?.planned === true;
+  const sent = !!schedule && !planned;
   const pushedMode = schedule?.mode ?? null;
+  const [starting, setStarting] = useState(false);
   const completionNames = useMemo(
     () => activityCompletionNames(roster, completedScholarIds),
     [roster, completedScholarIds],
@@ -896,10 +1152,9 @@ function ActivityRow({
       assignmentId,
       activityId,
       mode: "classFocus",
-      endsAt: Date.now() + 60 * 60_000,
     });
     toaster.success({
-      title: pushedMode === "classFocus" ? "Refreshed" : "Now class focus",
+      title: classFocusLiveToast(undefined, timeZone),
     });
   };
   const onPushHomework = async (dueAt: number) => {
@@ -913,6 +1168,37 @@ function ActivityRow({
       title: "Sent as homework",
       description: homeworkDueToastDescription(dueAt, dueDateOptions),
     });
+  };
+  // Release this planned entry: the same go-live path the header's ad-hoc
+  // "Start now" already uses (`pushActivity`), so there is exactly one
+  // activation mutation. A planned row on a UNIT assignment used to offer no
+  // way to do this at all — the teacher had to clear it and re-send.
+  const onStartNow = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!schedule) return;
+    setStarting(true);
+    try {
+      const releaseArgs = plannedReleaseArgs(schedule, Date.now());
+      await pushActivity({
+        assignmentId,
+        activityId,
+        ...releaseArgs,
+      });
+      toaster.success({
+        title: startedToastTitle(
+          schedule.mode,
+          releaseArgs.endsAt,
+          timeZone,
+        ),
+      });
+    } catch (error) {
+      toaster.error({
+        title: "Couldn't start that activity",
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setStarting(false);
+    }
   };
   const onClear = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -941,8 +1227,9 @@ function ActivityRow({
   };
 
   // Use a raw Box (not Surface) so we can override the border color
-  // when this activity is currently pushed — Surface intentionally
-  // locks its border.
+  // when this activity is currently LIVE — Surface intentionally locks its
+  // border. A planned entry keeps the neutral border: the colored edge means
+  // "scholars are looking at this", not "it's on the schedule".
   return (
     <Box
       p={3}
@@ -951,9 +1238,9 @@ function ActivityRow({
       shadow="xs"
       borderWidth="1px"
       borderColor={
-        pushedMode === "classFocus"
+        sent && pushedMode === "classFocus"
           ? "violet.300"
-          : pushedMode === "homework"
+          : sent && pushedMode === "homework"
             ? "orange.300"
             : "gray.200"
       }
@@ -998,7 +1285,11 @@ function ActivityRow({
               {title}
             </Text>
             {pushedMode === "classFocus" && (
-              <ActivityModeBadge mode="classFocus" />
+              <ActivityModeBadge
+                mode="classFocus"
+                variant={planned ? "soft" : "solid"}
+                suffix={planned ? " · planned" : ""}
+              />
             )}
             {runningLong && (
               <Badge bg="gray.100" color="charcoal.500" fontFamily="heading" fontSize="2xs">
@@ -1008,26 +1299,33 @@ function ActivityRow({
             {pushedMode === "homework" && (
               <ActivityModeBadge
                 mode="homework"
-                suffix={
+                variant={planned ? "soft" : "solid"}
+                suffix={`${planned ? " · planned" : ""}${
                   schedule?.dueAt && timeZone
                     ? ` · ${dueStatus(schedule.dueAt, now, timeZone)?.phrase ?? ""}`
                     : ""
-                }
+                }`}
               />
             )}
-            {!pushed && defaultMode === "homework" && (
+            {!schedule && defaultMode === "homework" && (
               <Badge bg="gray.100" color="charcoal.500" fontFamily="heading" fontSize="2xs">
                 intended as homework
               </Badge>
             )}
-            {!pushed && defaultMode === "classFocus" && (
+            {!schedule && defaultMode === "classFocus" && (
               <Badge bg="gray.100" color="charcoal.500" fontFamily="heading" fontSize="2xs">
                 intended for class
               </Badge>
             )}
           </HStack>
           <Text fontSize="2xs" color="charcoal.400" fontFamily="heading">
-            {isShareBack ? "Share Back" : isOnline ? "Online activity" : "Offline activity"}
+            {isShareBack
+              ? "Share Back"
+              : isOnline
+                ? "Online activity"
+                : kind === "web"
+                  ? "Web activity"
+                  : "Offline activity"}
             {!isShareBack && rosterSize > 0 && (
               <>
                 {" · "}
@@ -1047,6 +1345,20 @@ function ActivityRow({
             don't toggle expansion. */}
         {!isShareBack && (
           <HStack gap={1} onClick={(e) => e.stopPropagation()}>
+            {planned && (
+              <Button
+                size="xs"
+                bg="violet.500"
+                color="white"
+                _hover={{ bg: "violet.600" }}
+                fontFamily="heading"
+                onClick={onStartNow}
+                loading={starting}
+              >
+                <Play size={11} weight="fill" style={{ marginRight: 3 }} />
+                Start now
+              </Button>
+            )}
             {pushedMode !== "classFocus" && (
               <Button
                 size="xs"
@@ -1068,7 +1380,7 @@ function ActivityRow({
                 onConfirm={onPushHomework}
               />
             )}
-            {pushed && pushedMode === "classFocus" ? (
+            {sent && pushedMode === "classFocus" ? (
               <>
                 <Button
                   size="xs"
@@ -1095,9 +1407,9 @@ function ActivityRow({
                 </Button>
               </>
             ) : (
-              pushed && (
+              schedule && (
                 <>
-                  {pushedMode === "homework" && schedule?.setAt != null && (
+                  {pushedMode === "homework" && (
                     <Button
                       size="xs"
                       variant="ghost"
@@ -1154,13 +1466,22 @@ function ActivityRow({
                 <Text as="span" fontWeight="700">
                   Done:
                 </Text>{" "}
-                {completionNames.done.join(", ") || "No one yet"}
+                <DoneNames
+                  assignmentId={assignmentId}
+                  activityId={activityId}
+                  roster={roster}
+                  completedScholarIds={completedScholarIds}
+                  selfMarked={selfMarked}
+                  timeZone={timeZone}
+                />
               </Text>
               <Text fontSize="xs" color="charcoal.500">
                 <Text as="span" fontWeight="700">
                   Not done:
                 </Text>{" "}
-                {completionNames.notDone.join(", ") || "Everyone"}
+                {/* Empty means everyone finished (the "no one done" case lists
+                    every name), so the fallback reads "No one". */}
+                {completionNames.notDone.join(", ") || "No one"}
               </Text>
             </Stack>
           )}
@@ -1212,6 +1533,93 @@ function ActivityRow({
         initialDueAt={schedule?.dueAt ?? undefined}
       />
     </Box>
+  );
+}
+
+/**
+ * The Run page's "Done:" names, with a quiet "marked it <date>" chip on a
+ * scholar who marked homework done themselves (TRA-458). The count and badge
+ * above are unchanged — a self-mark counts the same; the chip is the
+ * transparency, and its Undo puts the row back on the scholar's Home. The
+ * teacher curates here; they never approve each mark.
+ */
+function DoneNames({
+  assignmentId,
+  activityId,
+  roster,
+  completedScholarIds,
+  selfMarked,
+  timeZone,
+}: {
+  assignmentId: Id<"assignments">;
+  activityId: Id<"activities">;
+  roster: { scholarId: Id<"users">; name: string }[];
+  completedScholarIds: string[];
+  selfMarked: { scholarId: Id<"users">; completedAt: number }[];
+  timeZone: string | null;
+}) {
+  const unmark = useMutation(api.activityCompletions.unmarkComplete);
+  const [undoing, setUndoing] = useState<string | null>(null);
+  const completed = new Set(completedScholarIds.map(String));
+  const done = roster.filter((s) => completed.has(String(s.scholarId)));
+  if (done.length === 0) return <>No one yet</>;
+  const marks = new Map(selfMarked.map((m) => [String(m.scholarId), m]));
+  const onUndo = async (scholarId: Id<"users">, name: string) => {
+    setUndoing(String(scholarId));
+    try {
+      await unmark({ activityId, scholarId, assignmentId });
+      toaster.success({ title: `Back on ${name}'s Home` });
+    } catch (error) {
+      toaster.error({
+        title: "Couldn't undo that",
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setUndoing(null);
+    }
+  };
+  return (
+    <>
+      {done.map((s, index) => {
+        const mark = marks.get(String(s.scholarId));
+        return (
+          <Fragment key={String(s.scholarId)}>
+            {index > 0 && ", "}
+            {s.name}
+            {mark && (
+              <Badge
+                ml={1.5}
+                bg="gray.100"
+                color="charcoal.500"
+                fontFamily="heading"
+                fontSize="2xs"
+                fontWeight="500"
+                gap={1.5}
+              >
+                marked it{" "}
+                {new Intl.DateTimeFormat("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  ...(timeZone ? { timeZone } : {}),
+                }).format(new Date(mark.completedAt))}
+                <chakra.button
+                  type="button"
+                  color="violet.600"
+                  fontWeight="600"
+                  cursor="pointer"
+                  _hover={{ textDecoration: "underline" }}
+                  aria-label={`Undo ${s.name}'s mark`}
+                  disabled={undoing === String(s.scholarId)}
+                  onClick={() => void onUndo(s.scholarId, s.name)}
+                >
+                  Undo
+                </chakra.button>
+              </Badge>
+            )}
+          </Fragment>
+        );
+      })}
+    </>
   );
 }
 
@@ -1555,20 +1963,6 @@ function SubmissionsActivityPanel({
             )}
             {isPortfolio && (
               <AssessScanButton deliverableId={r._id} label="" />
-            )}
-            {isPortfolio && r.magicUrl && (
-              <Button
-                size="2xs"
-                variant="ghost"
-                color="violet.500"
-                _hover={{ color: "violet.600", bg: "violet.50" }}
-                title="✨ View magic version"
-                asChild
-              >
-                <a href={r.magicUrl} target="_blank" rel="noopener noreferrer">
-                  <Sparkle size={12} weight="fill" />
-                </a>
-              </Button>
             )}
             {(r.contentKind === "file" || isPortfolio) && r.fileUrl && (
               <Button

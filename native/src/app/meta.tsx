@@ -20,7 +20,15 @@ import { ChatActivityRow } from "@/components/ChatActivityRow";
 import { useReflectionChat, type ReflectionBubble } from "@/hooks/useReflectionChat";
 import { useVoiceDictation } from "@/hooks/useVoiceDictation";
 import { isWithinPrepTime, formatLocalTimeLabel } from "@/lib/prepTime";
-import { api } from "@/lib/convex";
+import type { FunctionReturnType } from "convex/server";
+import { api, type Id } from "@/lib/convex";
+import {
+  ideaPreview,
+  previewLine,
+  teamStartedWorkshopThreads,
+  teamStarterLine,
+  type ScholarThreadSummary,
+} from "@/lib/scholarMessages";
 import { CHAT_COMPOSER_INPUT } from "@/lib/chatType";
 import { chatBubbleStyles } from "@/lib/chatBubbles";
 import { fonts, palette, useColors } from "@/theme";
@@ -152,7 +160,10 @@ export function ReflectionChat({
           <ChatBubble
             key={b.key}
             bubble={b}
-            live={chat.streaming && isLiveBubble(b, chat.liveAssistantId)}
+            live={
+              (chat.streaming || chat.streamingText.length > 0) &&
+              isLiveBubble(b, chat.liveAssistantId)
+            }
             streamingText={chat.streamingText}
             activity={chat.activity}
             colors={colors}
@@ -174,9 +185,10 @@ export function ReflectionChat({
   const footer = <Text style={styles.chatFooter}>{TEACHER_LINE}</Text>;
   const composer = (
     <ChatComposer
-      disabled={chat.streaming || !chat.ready}
+      disabled={!chat.ready}
       streaming={chat.streaming}
       onSend={chat.send}
+      onStop={chat.stop}
       seed={seed}
       placeholder={
         purpose === "reflection"
@@ -267,6 +279,9 @@ function ChatBubble({
             <Markdown content={bubble.content} color={colors.charcoal} />
           )}
         </View>
+        {!mine && bubble.stopRequestedAt != null && !live ? (
+          <Text style={styles.stopped}>Stopped</Text>
+        ) : null}
       </View>
     </View>
   );
@@ -279,6 +294,7 @@ function ChatComposer({
   disabled,
   streaming,
   onSend,
+  onStop,
   seed,
   placeholder,
   colors,
@@ -287,6 +303,7 @@ function ChatComposer({
   disabled: boolean;
   streaming: boolean;
   onSend: (text: string) => Promise<void>;
+  onStop: () => void;
   seed: { text: string; nonce: number } | null;
   placeholder: string;
   colors: ReturnType<typeof useColors>;
@@ -376,9 +393,23 @@ function ChatComposer({
           multiline
           submitBehavior="submit"
           onSubmitEditing={handleSend}
-          editable={!streaming}
+          editable={!disabled}
         />
-        {!canSend ? (
+        {streaming ? (
+          <Pressable
+            onPress={onStop}
+            hitSlop={8}
+            style={styles.sendBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Stop generating"
+          >
+            <SymbolView
+              name="stop.circle.fill"
+              size={38}
+              tintColor={colors.violet}
+            />
+          </Pressable>
+        ) : !canSend ? (
           <Pressable
             onPress={onMicStart}
             hitSlop={8}
@@ -408,15 +439,15 @@ function ChatComposer({
 // ── The Workshop right-column zones (Behind the curtain · You know best · My
 //    ideas · What's new) + the flag-OFF idea composer ─────────────────────────
 
-/** The element type of a scholar's own idea list (title + whether they put it
- *  away + the single staff reply + resolved responder name). */
-type MyIdea = {
-  _id: string;
-  title: string;
-  archivedAt?: number;
-  responderName: string | null;
-  staffResponse?: { body: string } | null;
-};
+/** One of the scholar's own ideas (scholarSuggestions.listMine): title,
+ *  archive state, and its Workshop conversation — threadId, the latest
+ *  message, unread, answered. */
+type MyIdea = FunctionReturnType<typeof api.scholarSuggestions.listMine>[number];
+
+/** Open a Workshop conversation in the shared Messages screen. */
+function openThread(threadId: Id<"parentThreads">) {
+  router.push({ pathname: "/messages", params: { thread: threadId, kind: "workshop" } });
+}
 
 /** A row of tappable pills that seed the reflection chat's composer (mechanism
  *  a). Shared by Behind the curtain + You know best. */
@@ -447,9 +478,9 @@ function SeedChips({
 }
 
 /** One idea = a self-contained card, separated from its neighbors by SPACING
- *  (never a hairline). An Answered idea collapses to title + chip + chevron;
- *  tapping expands its staff reply as a recessed, indented sub-panel INSIDE the
- *  same card — one click deep. A Sent idea is inert. */
+ *  (never a hairline). The preview line shows the thread's latest message,
+ *  whoever wrote it — that's how a kid tells whose turn it is — and tapping
+ *  opens the conversation (S1). A card with no conversation yet is inert. */
 function IdeaCard({
   idea,
   colors,
@@ -461,69 +492,77 @@ function IdeaCard({
   styles: ReturnType<typeof makeStyles>;
   onSetArchived: (id: string, archived: boolean) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  // "Answered" == a staff reply exists, NOT status === "answered". A staffer
-  // replying in the Slack thread deliberately does not close the idea, and the
-  // kid must still be able to read what they wrote. Parity with
-  // components/WorkshopView.tsx.
-  const answered = !!idea.staffResponse;
-  const canExpand = answered;
+  // "Answered" == a staff message exists in the idea's thread, NOT
+  // status === "answered" (a staffer replying from Slack deliberately does not
+  // close the idea). Server-derived; parity with components/WorkshopView.tsx.
+  const answered = idea.answered;
   const archived = !!idea.archivedAt;
+  const threadId = idea.threadId;
+  const preview = ideaPreview(idea.lastMessage);
 
-  const head = (
-    <View style={styles.ideaHead}>
-      <Text style={styles.ideaTitle}>{idea.title}</Text>
-      <View style={styles.ideaHeadRight}>
-        <View style={[styles.chip, answered ? styles.chipAnswered : styles.chipHeard]}>
-          <Text
-            style={[
-              styles.chipText,
-              answered ? styles.chipTextAnswered : styles.chipTextHeard,
-            ]}
-          >
-            {answered ? "Answered" : "Sent"}
-          </Text>
+  const body = (
+    <>
+      <View style={styles.ideaHead}>
+        <View style={styles.ideaTitleBlock}>
+          {idea.bugReportId ? (
+            <Text style={styles.ideaKind}>Bug report</Text>
+          ) : null}
+          <Text style={styles.ideaTitle}>{idea.title}</Text>
         </View>
-        {canExpand ? (
-          <SymbolView
-            name={expanded ? "chevron.up" : "chevron.down"}
-            size={13}
-            tintColor={colors.charcoalSubtle}
-          />
-        ) : null}
+        <View style={styles.ideaHeadRight}>
+          {idea.unread ? (
+            <View style={styles.unreadDot} accessibilityLabel="New message" />
+          ) : null}
+          <View style={[styles.chip, answered ? styles.chipAnswered : styles.chipHeard]}>
+            <Text
+              style={[
+                styles.chipText,
+                answered ? styles.chipTextAnswered : styles.chipTextHeard,
+              ]}
+            >
+              {answered ? "Answered" : "Sent"}
+            </Text>
+          </View>
+        </View>
       </View>
-    </View>
+      <Text style={styles.ideaPreview} numberOfLines={2}>
+        {preview || "We read every idea, and we write back."}
+      </Text>
+    </>
   );
 
   return (
     <View style={styles.ideaCard}>
-      {canExpand ? (
+      {threadId ? (
         <Pressable
           accessibilityRole="button"
-          accessibilityState={{ expanded }}
-          onPress={() => setExpanded((v) => !v)}
+          accessibilityHint="Opens the conversation"
+          onPress={() => openThread(threadId)}
           style={({ pressed }) => (pressed ? { opacity: 0.85 } : undefined)}
         >
-          {head}
+          {body}
         </Pressable>
       ) : (
-        head
+        body
       )}
-      {canExpand && expanded && idea.staffResponse ? (
-        <View style={styles.responseBlock}>
-          <Text style={styles.responseFrom}>
-            From {idea.responderName ?? "the Rabbithole team"}
-          </Text>
-          <Text style={styles.responseBody}>{idea.staffResponse.body}</Text>
-        </View>
-      ) : null}
 
       {/* The scholar's own lever: the five-open limit is a prioritization
           lesson pointed at THEM, so they decide when a slot frees. Quiet, and
-          LAST in the card — it never competes with the reply. Archive/Restore
-          is the house pair for a scholar; parity with
+          LAST in the card — it never competes with the conversation.
+          Archive/Restore is the house pair for a scholar; parity with
           components/WorkshopView.tsx. */}
-      <View style={styles.ideaFoot}>
+      <View style={[styles.ideaFoot, threadId ? styles.ideaFootSplit : null]}>
+        {threadId ? (
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => openThread(threadId)}
+            hitSlop={8}
+            style={({ pressed }) => [styles.openRow, pressed && { opacity: 0.6 }]}
+          >
+            <Text style={styles.openText}>Open conversation</Text>
+            <SymbolView name="chevron.right" size={11} tintColor={colors.violet} />
+          </Pressable>
+        ) : null}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={archived ? "Restore" : "Archive"}
@@ -540,6 +579,46 @@ function IdeaCard({
   );
 }
 
+/** A Workshop conversation the Rabbithole team started (no idea behind it —
+ *  about a bug report, or a fresh topic). Titled by its opening line. */
+function TeamThreadCard({
+  thread,
+  colors,
+  styles,
+}: {
+  thread: ScholarThreadSummary;
+  colors: ReturnType<typeof useColors>;
+  styles: ReturnType<typeof makeStyles>;
+}) {
+  const preview = previewLine(thread.lastMessageAuthorName, thread.lastMessagePreview);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityHint="Opens the conversation"
+      onPress={() => openThread(thread._id)}
+      style={({ pressed }) => [styles.ideaCard, pressed && { opacity: 0.85 }]}
+    >
+      <View style={styles.ideaHead}>
+        <View style={styles.ideaTitleBlock}>
+          <Text style={styles.ideaKind}>{teamStarterLine(thread.startedByName)}</Text>
+          <Text style={styles.ideaTitle}>{thread.topic ?? thread.title}</Text>
+        </View>
+        <View style={styles.ideaHeadRight}>
+          {thread.unread ? (
+            <View style={styles.unreadDot} accessibilityLabel="New message" />
+          ) : null}
+          <SymbolView name="chevron.right" size={13} tintColor={colors.charcoalSubtle} />
+        </View>
+      </View>
+      {preview ? (
+        <Text style={styles.ideaPreview} numberOfLines={2}>
+          {preview}
+        </Text>
+      ) : null}
+    </Pressable>
+  );
+}
+
 export function IdeasBoard({
   onSpark,
   colors,
@@ -550,6 +629,12 @@ export function IdeasBoard({
   styles: ReturnType<typeof makeStyles>;
 }) {
   const ideas = useQuery(api.scholarSuggestions.listMine, {});
+  // Workshop conversations the team started with this scholar — their own
+  // zone above My ideas, hidden when there are none.
+  const workshopThreads = useQuery(api.scholarMessages.listThreads, {
+    kind: "workshop",
+  });
+  const teamThreads = teamStartedWorkshopThreads(workshopThreads?.threads);
   const whatsNew = useQuery(api.changelog.listRecent, {});
   const flags = useQuery(api.metaChat.workshopFlags, {});
   const createMine = useMutation(api.scholarSuggestions.createMine);
@@ -610,8 +695,24 @@ export function IdeasBoard({
     }
   };
 
+  const teamZone =
+    teamThreads.length > 0 ? (
+      <>
+        <Text style={styles.sectionLabel}>From the team</Text>
+        {teamThreads.map((thread) => (
+          <TeamThreadCard
+            key={thread._id}
+            thread={thread}
+            colors={colors}
+            styles={styles}
+          />
+        ))}
+      </>
+    ) : null;
+
   const myIdeas = (
     <>
+      {teamZone}
       <Text style={styles.sectionLabel}>My ideas</Text>
       {archiveError ? (
         <Text style={[styles.errorText, styles.archiveError]}>{archiveError}</Text>
@@ -902,6 +1003,14 @@ export function makeStyles(c: ReturnType<typeof useColors>) {
     rowTutor: { justifyContent: "flex-start" },
     colMine: { maxWidth: "86%", alignItems: "flex-end" },
     colTutor: { maxWidth: "94%", alignItems: "flex-start" },
+    // The user cut this reply short — muted, sentence-case caption under the
+    // bubble (matches the web transcript's "Stopped").
+    stopped: {
+      marginTop: 3,
+      fontFamily: fonts.regular,
+      fontSize: 12,
+      color: c.charcoalSubtle,
+    },
     // Chat composer
     chatComposer: {
       paddingHorizontal: 16,
@@ -1071,16 +1180,25 @@ export function makeStyles(c: ReturnType<typeof useColors>) {
       justifyContent: "space-between",
       gap: 12,
     },
-    // The right cluster of an idea's head: the status chip + (for Answered) the
-    // expand chevron.
+    // The right cluster of an idea's head: the unread dot + the status chip.
     ideaHeadRight: {
       flexDirection: "row",
       alignItems: "center",
       gap: 8,
       flexShrink: 0,
     },
-    ideaTitle: {
+    ideaTitleBlock: {
       flex: 1,
+    },
+    // Parity with the web card's "Bug report" line (components/WorkshopView.tsx).
+    ideaKind: {
+      fontSize: 12.5,
+      letterSpacing: 0.4,
+      fontFamily: fonts.bold,
+      color: c.charcoalSubtle,
+      marginBottom: 2,
+    },
+    ideaTitle: {
       fontSize: 17,
       fontFamily: fonts.semibold,
       color: c.navy,
@@ -1115,32 +1233,22 @@ export function makeStyles(c: ReturnType<typeof useColors>) {
     chipText: { fontSize: 12, fontFamily: fonts.bold },
     chipTextHeard: { color: c.charcoalMuted },
     chipTextAnswered: { color: palette.green[700] },
-    // The staff reply — a recessed, indented sub-panel INSIDE the idea card
-    // (revealed by tapping an Answered idea). Recessed (subtle fill + hairline)
-    // and indented, so it reads as one-click-deep, never a floating sibling.
-    responseBlock: {
-      marginTop: 12,
-      marginLeft: 12,
-      backgroundColor: c.bgSubtle,
-      borderRadius: 12,
-      borderWidth: 1,
-      borderColor: c.border,
-      paddingHorizontal: 14,
-      paddingVertical: 12,
-    },
-    responseFrom: {
-      fontSize: 12.5,
-      letterSpacing: 0.4,
-      fontFamily: fonts.bold,
-      color: c.charcoalSubtle,
-      marginBottom: 4,
-    },
-    responseBody: {
+    // The latest-message line under an idea's title (S1): whose turn it is.
+    ideaPreview: {
       fontSize: 15,
       lineHeight: 22,
       fontFamily: fonts.regular,
       color: c.charcoalMuted,
     },
+    unreadDot: {
+      width: 9,
+      height: 9,
+      borderRadius: 4.5,
+      backgroundColor: c.violet,
+    },
+    ideaFootSplit: { justifyContent: "space-between", alignItems: "center" },
+    openRow: { flexDirection: "row", alignItems: "center", gap: 4 },
+    openText: { fontSize: 13.5, fontFamily: fonts.bold, color: c.violet },
     // ── What's new ──
     whatsNewDate: {
       fontSize: 12.5,

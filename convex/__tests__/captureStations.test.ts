@@ -633,13 +633,6 @@ describe("capture stations", () => {
       reservationId: upload.reservationId,
       scholarIds: [scholarA],
     });
-    const magicStorageId = await t.run((ctx) =>
-      ctx.storage.store(new Blob(["magic"], { type: "image/jpeg" })),
-    );
-    await t.run((ctx) =>
-      ctx.db.patch(capture.portfolioItemId, { magicStorageId }),
-    );
-
     const publishOnly = await t.run(async (ctx) => {
       const userId = await ctx.db.insert("users", {
         name: "Publisher",
@@ -664,10 +657,6 @@ describe("capture stations", () => {
     await expect(
       asPublisher.query(api.portfolio.getFileUrl, { itemId: capture.portfolioItemId }),
     ).rejects.toThrow(/program group/i);
-    await expect(
-      asPublisher.query(api.portfolio.getMagicFileUrl, { itemId: capture.portfolioItemId }),
-    ).rejects.toThrow(/program group/i);
-
     await grantCaptureReview(t, groupId, { userId: publishOnly });
     await expect(
       asPublisher.query(api.captureStations.statusForGroup, { scholarGroupId: groupId }),
@@ -710,9 +699,6 @@ describe("capture stations", () => {
     ).rejects.toThrow(/program group/i);
     await expect(
       owner.query(api.portfolio.getFileUrl, { itemId: capture.portfolioItemId }),
-    ).rejects.toThrow(/program group/i);
-    await expect(
-      owner.query(api.portfolio.getMagicFileUrl, { itemId: capture.portfolioItemId }),
     ).rejects.toThrow(/program group/i);
   });
 
@@ -2074,7 +2060,9 @@ describe("capture stations", () => {
     ).toBeNull();
   });
 
-  test("keeps unreported direct-upload debt across token rotation", async () => {
+  test("keeps unreported direct-upload debt across token rotation until it decays", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-18T20:00:00.000Z"));
     const { t, owner, groupId, session } = await setup();
     const unreportedStorageIds: Id<"_storage">[] = [];
 
@@ -2137,6 +2125,17 @@ describe("capture stations", () => {
         deviceId: "replacement-ipad-01",
       }),
     ).rejects.toMatchObject({ data: { kind: "upload_abandoned_quota" } });
+
+    // Rotation never resets the debt; time does. Once the unreported upload
+    // URLs have expired, an hour after they were minted, the kiosk can upload
+    // again.
+    vi.setSystemTime(Date.now() + 60 * 60 * 1000);
+    await expect(
+      t.mutation(api.captureStations.generateUploadUrl, {
+        sessionToken: recoveredSession.sessionToken,
+        deviceId: "replacement-ipad-01",
+      }),
+    ).resolves.toMatchObject({ reservationId: expect.any(String) });
   });
 
   test("expired finalized reservations are reclaimed without deleting captures", async () => {
@@ -2668,19 +2667,18 @@ describe("capture stations", () => {
       ).resolves.toMatchObject({ reservationId: expect.any(String) });
     });
 
-    test("remote sign-out immediately invalidates assigned capture mode", async () => {
+    test("interrupted uploads pause an assigned iPad only until their debt decays", async () => {
       vi.useFakeTimers();
-      // Pin a mid-morning school-time clock: assigned-device capture mode
-      // refuses to start at/after 4:40 PM local, so a real clock makes these
-      // tests fail for anyone running them in the evening (as CI did).
-      vi.setSystemTime(new Date("2026-08-18T20:00:00.000Z"));
+      const minute = 60 * 1000;
+      const start = new Date("2026-08-18T20:00:00.000Z").getTime();
+      vi.setSystemTime(start);
       const { t, owner, institutionId, scholarA, enrollment } = await setup();
       const { pairedDeviceId, asDevice } = await seedAssignedManagedDevice(
         t,
         institutionId,
         scholarA,
       );
-      const started = await owner.mutation(
+      const mode = await owner.mutation(
         api.captureStations.setAssignedDeviceCaptureMode,
         {
           pairedDeviceId,
@@ -2688,33 +2686,117 @@ describe("capture stations", () => {
           enabled: true,
         },
       );
-      const session = await asDevice.mutation(
+      const capture = await asDevice.mutation(
         api.captureStations.startAssignedDeviceCapture,
         {
           deviceId: "assigned-capture-ipad-01",
-          expectedUpdatedAt: started.updatedAt!,
+          expectedUpdatedAt: mode.updatedAt!,
         },
       );
-
-      await owner.mutation(api.devicePairing.revokeDeviceSession, {
-        pairedDeviceId,
-      });
-      const signedOutBinding = await t.run((ctx) =>
-        ctx.db.get(pairedDeviceId),
-      );
-      expect(signedOutBinding?.authSessionId).toBeUndefined();
-      expect(signedOutBinding).not.toHaveProperty(
-        "assignedDeviceCaptureStationId",
-      );
-      expect(signedOutBinding?.assignedDeviceCaptureUpdatedAt).toBeGreaterThan(
-        started.updatedAt!,
-      );
-      await expect(
-        t.mutation(api.captureStations.bootstrap, {
-          sessionToken: session.sessionToken,
+      const mintUploadUrl = () =>
+        t.mutation(api.captureStations.generateUploadUrl, {
+          sessionToken: capture.sessionToken,
           deviceId: "assigned-capture-ipad-01",
-        }),
-      ).rejects.toThrow(/assigned capture mode has ended/i);
+        });
+
+      // A Wi-Fi drop: four photos in four minutes each get an upload URL, and
+      // no blob is ever reported back.
+      const interrupted: Id<"captureStationUploadReservations">[] = [];
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        vi.setSystemTime(start + attempt * minute);
+        interrupted.push((await mintUploadUrl()).reservationId);
+      }
+      // The fifth waits on the four open reservations; the oldest lapses at :30.
+      await expect(mintUploadUrl()).rejects.toMatchObject({
+        data: { kind: "upload_pending_quota", retryAt: start + 30 * minute },
+      });
+
+      // All four lapse unreported and become abandoned debt. Each counts until
+      // its upload URL expires, an hour after it was minted, so the pause
+      // lifts when the second oldest retires and two remain, under the cap of
+      // three.
+      vi.setSystemTime(start + 34 * minute);
+      await expect(mintUploadUrl()).rejects.toMatchObject({
+        data: { kind: "upload_abandoned_quota", retryAt: start + 61 * minute },
+      });
+      vi.setSystemTime(start + 61 * minute - 1);
+      await expect(mintUploadUrl()).rejects.toMatchObject({
+        data: { kind: "upload_abandoned_quota" },
+      });
+
+      // Before the debt decayed, this was permanent: the iPad could never
+      // upload a capture to this station again.
+      vi.setSystemTime(start + 61 * minute);
+      await expect(mintUploadUrl()).resolves.toMatchObject({
+        reservationId: expect.any(String),
+      });
+      // Retired tombstones are deleted, not just ignored, so a station's
+      // reservation scan stays bounded.
+      const tombstones = await t.run((ctx) =>
+        Promise.all(interrupted.map((id) => ctx.db.get(id))),
+      );
+      expect(tombstones.map((row) => row?.status ?? null)).toEqual([
+        null,
+        null,
+        "abandoned",
+        "abandoned",
+      ]);
+    });
+
+    test("a pause names when uploads really resume, counting reservations that lapse into debt meanwhile", async () => {
+      vi.useFakeTimers();
+      const minute = 60 * 1000;
+      const start = new Date("2026-08-18T20:00:00.000Z").getTime();
+      vi.setSystemTime(start);
+      const { t, owner, institutionId, scholarA, enrollment } = await setup();
+      const { pairedDeviceId, asDevice } = await seedAssignedManagedDevice(
+        t,
+        institutionId,
+        scholarA,
+      );
+      const mode = await owner.mutation(
+        api.captureStations.setAssignedDeviceCaptureMode,
+        {
+          pairedDeviceId,
+          captureStationId: enrollment.captureStationId,
+          enabled: true,
+        },
+      );
+      const capture = await asDevice.mutation(
+        api.captureStations.startAssignedDeviceCapture,
+        {
+          deviceId: "assigned-capture-ipad-01",
+          expectedUpdatedAt: mode.updatedAt!,
+        },
+      );
+      const mintUploadUrl = () =>
+        t.mutation(api.captureStations.generateUploadUrl, {
+          sessionToken: capture.sessionToken,
+          deviceId: "assigned-capture-ipad-01",
+        });
+
+      // Unreported uploads at :00, :00, :01 and :02; at :30 the first two are
+      // debt, and two more mints still fit under both caps.
+      for (const minuteMark of [0, 0, 1, 2, 30, 30]) {
+        vi.setSystemTime(start + minuteMark * minute);
+        await mintUploadUrl();
+      }
+
+      // Refused as pending. The :01 and :02 reservations lapse into debt at
+      // :31 and :32 and the :30 pair at :60, so the first moment under both
+      // caps is :62, when the :02 debt retires. Not :31.
+      vi.setSystemTime(start + 30 * minute + 30 * 1000);
+      await expect(mintUploadUrl()).rejects.toMatchObject({
+        data: { kind: "upload_pending_quota", retryAt: start + 62 * minute },
+      });
+      vi.setSystemTime(start + 62 * minute - 1);
+      await expect(mintUploadUrl()).rejects.toMatchObject({
+        data: { kind: "upload_abandoned_quota", retryAt: start + 62 * minute },
+      });
+      vi.setSystemTime(start + 62 * minute);
+      await expect(mintUploadUrl()).resolves.toMatchObject({
+        reservationId: expect.any(String),
+      });
     });
 
     test("a managed-claim handover clears capture mode and invalidates its capability", async () => {

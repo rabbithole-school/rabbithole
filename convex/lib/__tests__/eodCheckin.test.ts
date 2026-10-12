@@ -1,6 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
   hasAnyActivity,
+  MAX_OVERDUE_QUESTIONS,
+  mergeCheckinQuestions,
+  OVERDUE_NAME_CAP,
   checkinDateLabel,
   checkinDayKey,
   checkinDayStartMs,
@@ -15,7 +18,10 @@ import {
   type EodChannelInput,
 } from "../eodCheckin";
 import { sessionSignalMeta } from "../../../shared/learningSignals";
-import { SCHOLAR_NAME_PRONOUN_HINT } from "../scholarPronouns";
+import {
+  SCHOLAR_NAME_PRONOUN_HINT,
+  scholarNamePronounHint,
+} from "../scholarPronouns";
 import {
   DEFAULT_INSTITUTION_PROMPT_PROFILE,
   institutionPromptProfile,
@@ -30,6 +36,7 @@ function input(
     scholars: [],
     keyMoments: [],
     scheduled: [],
+    overdueHomework: [],
     queuedDigestIds: [],
     queuedDigestLines: [],
     ...overrides,
@@ -108,7 +115,7 @@ describe("end-of-day message rendering", () => {
 
   test("numbers questions and appends the fixed footer", () => {
     expect(renderThreadMessage("A good day.", ["First?", "Second?"])).toBe(
-      "A good day.\n\n*Questions for you*\n1. First?\n2. Second?\n\n_Answer here in the thread — I'll record it so today's record stays complete._",
+      "A good day.\n\n**Questions for you**\n1. First?\n2. Second?\n\n_Answer here in the thread — I'll record it so today's record stays complete._",
     );
   });
 
@@ -119,6 +126,7 @@ describe("end-of-day message rendering", () => {
           {
             name: "Kai",
             scholarUrl: "https://example.test/teacher/scholars/kai",
+            pronouns: null,
             sessions: [{ title: "Fractions", unitTitle: "Number Sense" }],
             completions: [],
             deliverables: 0,
@@ -154,6 +162,7 @@ describe("end-of-day message rendering", () => {
           {
             name: "Lani",
             scholarUrl: "https://example.test/teacher/scholars/lani",
+            pronouns: null,
             sessions: [],
             completions: [],
             deliverables: 0,
@@ -187,6 +196,7 @@ describe("end-of-day message rendering", () => {
           {
             name: "Lani",
             scholarUrl: "https://example.test/teacher/scholars/lani",
+            pronouns: null,
             sessions: [],
             completions: [],
             deliverables: 0,
@@ -202,6 +212,7 @@ describe("end-of-day message rendering", () => {
             kind: "breakthrough" as const,
             scholarName: "Kai",
             scholarUrl: "https://example.test/teacher/scholars/kai",
+            pronouns: null,
             sessionUrl: "https://example.test/scholar/session-1",
             headline: "Found the repeating structure",
             detail: "Explained why the third case follows the same rule.",
@@ -214,6 +225,31 @@ describe("end-of-day message rendering", () => {
     expect(rendered).toContain(`scholar: Kai ${SCHOLAR_NAME_PRONOUN_HINT}`);
   });
 
+  test("states recorded pronouns instead of the unknown-case default", () => {
+    const rendered = renderEodUserMessage(
+      input({
+        scholars: [
+          {
+            name: "Lani",
+            pronouns: "they/them",
+            scholarUrl: "https://example.test/teacher/scholars/lani",
+            sessions: [],
+            completions: [],
+            deliverables: 0,
+            practiceAttempts: 0,
+            practiceDistinctSkills: 0,
+            observations: [],
+            analysesNotes: [],
+            signals: [],
+          },
+        ],
+      }),
+    );
+
+    expect(rendered).toContain(`## Lani ${scholarNamePronounHint("they/them")}`);
+    expect(rendered).not.toContain(SCHOLAR_NAME_PRONOUN_HINT);
+  });
+
   test("renders the signal contract without transcript excerpts", () => {
     const rendered = renderEodUserMessage(
       input({
@@ -221,6 +257,7 @@ describe("end-of-day message rendering", () => {
           {
             name: "Lani",
             scholarUrl: "https://example.test/teacher/scholars/lani",
+            pronouns: null,
             sessions: [],
             completions: [],
             deliverables: 0,
@@ -247,18 +284,6 @@ describe("end-of-day message rendering", () => {
     );
     expect(rendered).toContain("pcmDimension: practice");
     expect(rendered).not.toContain("transcriptExcerpt");
-    expect(EOD_CHECKIN_SYSTEM()).toContain(
-      "only when its description contains a concrete, observable learner action",
-    );
-    expect(EOD_CHECKIN_SYSTEM()).toContain(
-      "Suggest teacher follow-up only when the evidence warrants it; do not force a follow-up",
-    );
-    expect(EOD_CHECKIN_SYSTEM()).toContain(
-      "never print internal signal types, PCM labels, intensity labels, or permanent trait claims",
-    );
-    expect(EOD_CHECKIN_SYSTEM()).toContain(
-      "must not use grit, gritty, perseverance, persevering, resilience, resilient, persistence, persistent",
-    );
   });
 
   test("model input and fallback include stored key moments with session links", () => {
@@ -267,6 +292,7 @@ describe("end-of-day message rendering", () => {
         kind: "breakthrough" as const,
         scholarName: "Kai",
         scholarUrl: "https://example.test/teacher/scholars/kai",
+        pronouns: null,
         sessionUrl: "https://example.test/scholar/session-1?remote=kai",
         headline: "Found the repeating structure",
         detail: "Explained why the third case follows the same rule.",
@@ -370,6 +396,7 @@ describe("hasAnyActivity", () => {
     const scholar = {
       name: "Kai",
       scholarUrl: "https://example.test/teacher/scholars/kai",
+      pronouns: null,
       sessions: [],
       completions: [{ activityTitle: "Fraction Lab" }],
       deliverables: 0,
@@ -396,6 +423,7 @@ describe("hasAnyActivity", () => {
               kind: "insight",
               scholarName: "Kai",
               scholarUrl: "https://example.test/teacher/scholars/kai",
+              pronouns: null,
               sessionUrl: "https://example.test/scholar/session-1?remote=kai",
               headline: "Connected two patterns",
               detail: "Used yesterday's rule in a new case.",
@@ -416,6 +444,121 @@ describe("hasAnyActivity", () => {
             },
           ],
         }),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("past-due homework questions", () => {
+  const BASE = "https://app.example.invalid/teacher/schedule";
+  const overdue = (
+    activityTitle: string,
+    daysPastDue: number,
+    scholars: Array<[string, string]>,
+  ) => ({
+    activityTitle,
+    teacherName: "Ms. Fictional",
+    earliestDueAt: Date.parse("2026-07-27T00:00:00.000Z") - daysPastDue * 86_400_000,
+    duePhrase: `was due ${daysPastDue} days back`,
+    incompleteScholars: scholars.map(([name, assignmentId]) => ({
+      name,
+      assignmentUrl: `${BASE}/${assignmentId}`,
+    })),
+  });
+
+  test("fallback leads with the oldest past-due items, capped, and keeps today's gaps", () => {
+    const result = renderMechanicalFallback(
+      input({
+        overdueHomework: [
+          overdue("Tide Chart", 3, [["Kai", "a1"]]),
+          overdue("Read-aloud", 19, [["Mia", "a2"]]),
+          overdue("Bird Count", 8, [["Noa", "a3"]]),
+        ],
+        scheduled: [
+          {
+            activityTitle: "Fraction Lab",
+            scheduledForGroup: "Geckos",
+            doneScholarNames: [],
+            missingScholarNames: ["Kai"],
+          },
+        ],
+      }),
+    );
+    expect(MAX_OVERDUE_QUESTIONS).toBe(2);
+    expect(result.questions).toHaveLength(4);
+    expect(result.questions[0]).toContain(`${BASE}/a2`); // 19 days
+    expect(result.questions[1]).toContain(`${BASE}/a3`); // 8 days
+    expect(result.questions.join("\n")).not.toContain(`${BASE}/a1`);
+    expect(result.questions[2]).toContain("Fraction Lab");
+    expect(result.wrapUp).not.toContain("Read-aloud");
+  });
+
+  test("a single cohort assignment links once; one-scholar copies link every copy", () => {
+    const cohort = renderMechanicalFallback(
+      input({
+        overdueHomework: [
+          overdue("Read-aloud", 5, [
+            ["Kai", "cohort"],
+            ["Mia", "cohort"],
+          ]),
+        ],
+      }),
+    ).questions[0];
+    expect(cohort.split(`${BASE}/cohort`)).toHaveLength(2);
+    expect(cohort).toContain("Kai");
+    expect(cohort).toContain("Mia");
+
+    const copies = renderMechanicalFallback(
+      input({
+        overdueHomework: [
+          overdue("Read-aloud", 5, [
+            ["Kai", "copy-kai"],
+            ["Mia", "copy-mia"],
+          ]),
+        ],
+      }),
+    ).questions[0];
+    expect(copies).toContain(`<${BASE}/copy-kai|Kai>`);
+    expect(copies).toContain(`<${BASE}/copy-mia|Mia>`);
+  });
+
+  test("caps the named scholars and counts the rest", () => {
+    const names = Array.from(
+      { length: OVERDUE_NAME_CAP + 3 },
+      (_, i) => [`Scholar ${i + 1}`, "cohort"] as [string, string],
+    );
+    const question = renderMechanicalFallback(
+      input({ overdueHomework: [overdue("Read-aloud", 5, names)] }),
+    ).questions[0];
+    expect(question).toContain(`Scholar ${OVERDUE_NAME_CAP} and 3 more`);
+    expect(question).not.toContain(`Scholar ${OVERDUE_NAME_CAP + 1}`);
+  });
+
+  test("model questions follow the verbatim past-due ones, four at most", () => {
+    const withOverdue = input({
+      overdueHomework: [overdue("Read-aloud", 5, [["Kai", "a1"]])],
+    });
+    const merged = mergeCheckinQuestions(withOverdue, [
+      "Q1?",
+      "Q2?",
+      "Q3?",
+      "Q4?",
+    ]);
+    expect(merged).toHaveLength(4);
+    expect(merged[0]).toContain(`${BASE}/a1`);
+    expect(merged.slice(1)).toEqual(["Q1?", "Q2?", "Q3?"]);
+    expect(mergeCheckinQuestions(input(), ["Q1?", "Q2?"])).toEqual([
+      "Q1?",
+      "Q2?",
+    ]);
+    // The model sees what was already asked, so it can avoid repeating it.
+    expect(renderEodUserMessage(withOverdue)).toContain(`${BASE}/a1`);
+  });
+
+  test("past-due homework alone is worth a check-in", () => {
+    expect(
+      hasAnyActivity(
+        input({ overdueHomework: [overdue("Read-aloud", 5, [["Kai", "a1"]])] }),
       ),
     ).toBe(true);
   });

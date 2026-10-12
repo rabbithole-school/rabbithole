@@ -43,7 +43,8 @@ export type ManipulativeKind =
   | "ruler"
   | "clock"
   | "liquid"
-  | "money";
+  | "money"
+  | "molecule";
 
 /**
  * The closed union as a RUNTIME array — the one place a server-side reader (with
@@ -73,6 +74,7 @@ export const ALL_MANIPULATIVE_KINDS = [
   "clock",
   "liquid",
   "money",
+  "molecule",
 ] as const satisfies readonly ManipulativeKind[];
 
 // Compile-time totality: a new kind added to the union but missing from the
@@ -810,6 +812,49 @@ export interface MoneySpec extends ManipulativeMeta {
   goal?: MoneyGoal;
 }
 
+// ── molecule — PubChem-resolved 2D chemical structure ──────────────────────
+export type MoleculeBondStereo = "none" | "up" | "down" | "either";
+
+export interface MoleculeAtom {
+  el: string;
+  x: number;
+  y: number;
+  z: number;
+}
+
+export interface MoleculeBond {
+  /** Zero-based atom indexes into `atoms`. */
+  a: number;
+  b: number;
+  /** V2000 bond order. The v1 renderer supports single, double, and triple. */
+  order: 1 | 2 | 3;
+  /** V2000 stereo flag, normalized for the cross-platform draw list. */
+  stereo: MoleculeBondStereo;
+}
+
+export type MoleculeHighlight =
+  | { kind: "bridgingOxygen" }
+  | { kind: "element"; el: string };
+
+/**
+ * A real 2D structure resolved server-side from PubChem. The tutor authors only
+ * `query`; `convex/lib/pubchem.ts` replaces that request with this hydrated
+ * shape before the artifact mutation validates and stores it. Renderers never
+ * fetch and never accept model-authored geometry.
+ */
+export interface MoleculeSpec extends ManipulativeMeta {
+  kind: "molecule";
+  query: string;
+  resolvedName: string;
+  cid: number;
+  formula: string;
+  atoms: MoleculeAtom[];
+  bonds: MoleculeBond[];
+  highlight?: MoleculeHighlight;
+  goal?: never;
+  answer?: never;
+}
+
 export type ManipulativeSpec =
   | PartitionSpec
   | NumberLineSpec
@@ -829,7 +874,8 @@ export type ManipulativeSpec =
   | RulerSpec
   | ClockSpec
   | LiquidSpec
-  | MoneySpec;
+  | MoneySpec
+  | MoleculeSpec;
 
 /** True when this spec is a self-correcting challenge (vs a free explainer). */
 export function isChallenge(spec: ManipulativeSpec): boolean {

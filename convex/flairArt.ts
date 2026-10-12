@@ -15,8 +15,8 @@ export type FlairCriterion = {
 
 const FLAIR_ART_VERSION = "bold-v1";
 const MAX_CRITERIA_PER_WRITE = 24;
-const RETRY_DELAY_MS = 15 * 60 * 1000;
-const MAX_GENERATION_ATTEMPTS = 3;
+export const RETRY_DELAY_MS = 15 * 60 * 1000;
+export const MAX_GENERATION_ATTEMPTS = 3;
 
 function normalizeText(value: string | undefined): string {
   return (value ?? "")
@@ -104,6 +104,21 @@ async function activityInstitutionId(
   return author?.institutionId ?? (await primaryInstitutionId(ctx));
 }
 
+/** Start a generation, plus the one check that re-drives it if its action is
+ *  hard-killed before it can mark the row ready or failed — nothing else is
+ *  guaranteed to call `ensureCriteria` for this criterion again. */
+async function scheduleGenerationWithWatchdog(
+  ctx: FlairMutationCtx,
+  id: Id<"flairArt">,
+) {
+  await ctx.scheduler.runAfter(0, internal.flairArtActions.generateFlairArt, { id });
+  await ctx.scheduler.runAfter(
+    RETRY_DELAY_MS,
+    internal.flairArtInternal.retryIfStalled,
+    { id },
+  );
+}
+
 async function ensureCriteria(
   ctx: FlairMutationCtx,
   institutionId: Id<"institutions"> | undefined,
@@ -126,8 +141,12 @@ async function ensureCriteria(
       )
       .unique();
     if (cached) {
+      // A row still "pending" past the retry delay (longer than an action's
+      // 10-minute cap) had its generate action killed before it could mark
+      // the row failed — a deploy or a timeout — so it is as retryable as a
+      // failure. Without this nothing ever re-drives it.
       const canRetry =
-        cached.status === "failed" &&
+        (cached.status === "failed" || cached.status === "pending") &&
         cached.attemptCount < MAX_GENERATION_ATTEMPTS &&
         now - (cached.failedAt ?? cached.lastAttemptAt) >= RETRY_DELAY_MS;
       if (canRetry) {
@@ -138,11 +157,7 @@ async function ensureCriteria(
           failedAt: undefined,
         });
         if (scheduleGeneration) {
-          await ctx.scheduler.runAfter(
-            0,
-            internal.flairArtActions.generateFlairArt,
-            { id: cached._id },
-          );
+          await scheduleGenerationWithWatchdog(ctx, cached._id);
         }
         retried += 1;
       } else {
@@ -163,9 +178,7 @@ async function ensureCriteria(
       createdBy,
     });
     if (scheduleGeneration) {
-      await ctx.scheduler.runAfter(0, internal.flairArtActions.generateFlairArt, {
-        id,
-      });
+      await scheduleGenerationWithWatchdog(ctx, id);
     }
     created += 1;
   }

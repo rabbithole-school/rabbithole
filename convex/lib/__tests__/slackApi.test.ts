@@ -478,6 +478,53 @@ describe("SlackStreamer responsiveness", () => {
       markdown_text: "The scholar changed strategies after checking the result.",
     });
   });
+
+  test("applies finalization before normalizing a completed stream", async () => {
+    const calls = captureAll();
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", {
+      channel: "C1",
+      threadTs: "1.1",
+      recipientUserId: "U1",
+      finalize: (text) => text.replace("wrong-id", "correct-id"),
+    });
+    s.append("See https://docs.google.com/document/d/wrong-id/edit");
+    await s.flush();
+    await s.finish();
+
+    expect(calls.at(-1)!.url).toContain("chat.update");
+    expect(calls.at(-1)!.body.markdown_text).toBe(
+      "See <https://docs.google.com/document/d/correct-id/edit>",
+    );
+  });
+
+  test("applies finalization in the single-message fallback", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      calls.push({ url: String(url), body });
+      const isStart = String(url).includes("startStream");
+      return new Response(
+        JSON.stringify(isStart ? { ok: false, error: "not_allowed" } : { ok: true, ts: "1.2" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+    const { SlackStreamer } = await import("../slackApi");
+    const s = new SlackStreamer("xoxb-tok", {
+      channel: "C1",
+      threadTs: "1.1",
+      recipientUserId: "U1",
+      finalize: (text) => text.replace("wrong-id", "correct-id"),
+    });
+    s.append("See https://docs.google.com/document/d/wrong-id/edit");
+    await s.flush();
+    await s.finish();
+
+    expect(calls.at(-1)!.url).toContain("chat.postMessage");
+    expect(calls.at(-1)!.body.markdown_text).toBe(
+      "See <https://docs.google.com/document/d/correct-id/edit>",
+    );
+  });
 });
 
 describe("SlackStreamer.discard — react-only retract", () => {

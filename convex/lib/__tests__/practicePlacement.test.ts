@@ -4,6 +4,7 @@ import {
   strandOrders,
   nextStrandProbe,
   strandFrontier,
+  affectSafeFirstProbeIndex,
   isStrandConverged,
   probeOutcomeFromKind,
   DEFAULT_PLACEMENT_STRAND,
@@ -307,6 +308,39 @@ describe("placement — probe cap", () => {
   test("the default cap is a small, sane number of probes", () => {
     expect(MAX_PROBES_PER_STRAND).toBeGreaterThanOrEqual(3);
     expect(MAX_PROBES_PER_STRAND).toBeLessThanOrEqual(6);
+  });
+
+  // TRA-92: the densest strands (place-value ~17, number-theory ~16 nodes) sit at
+  // the resolution ceiling. A young-but-fluent scholar (raise-the-ceiling) climbs
+  // the affect-safe grade ring ~one grade per probe, so the per-strand budget —
+  // not a clean log2(n) — bounds how high placement can credit them. This pins the
+  // headroom the 6th probe buys: on a 17-node grade-ascending strand a grade-K
+  // scholar fluent throughout resolves an interior frontier that 5 probes could not.
+  test("the extra probe credits an interior frontier the 5-probe cap could not", () => {
+    const grades = ["K", "K", "1", "1", "2", "2", "3", "3", "4", "4", "5", "5", "6", "6", "7", "7", "8"];
+    const keys = grades.map((_, i) => `n${i}`);
+    const gradeOf = (k: string) => grades[keys.indexOf(k)];
+    const scholarGrade = "K";
+    const creditedFrontier = (maxProbes: number): number => {
+      const outcomes: ProbeOutcome[] = [];
+      const firstProbeTarget = affectSafeFirstProbeIndex(keys, { gradeOf, scholarGrade });
+      for (let g = 0; g < 100; g++) {
+        const p = nextStrandProbe(keys, () => true, outcomes, {
+          maxProbes,
+          firstProbeTarget,
+          gradeOf,
+          scholarGrade,
+        });
+        if (!p) break;
+        outcomes.push(probeOutcomeFromKind(p.probeKey, "correct")); // fluent throughout
+      }
+      return strandFrontier("s", keys, outcomes, 0).frontierIndex;
+    };
+    // Five probes strand the fluent scholar mid-climb; the default cap (6) climbs
+    // one ring-step further and credits an interior frontier five could not reach.
+    expect(creditedFrontier(5)).toBe(11);
+    expect(creditedFrontier(MAX_PROBES_PER_STRAND)).toBe(13);
+    expect(creditedFrontier(MAX_PROBES_PER_STRAND)).toBeGreaterThan(creditedFrontier(5));
   });
 });
 

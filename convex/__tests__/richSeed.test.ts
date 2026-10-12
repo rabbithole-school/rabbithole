@@ -330,6 +330,31 @@ describe("rich cohort seed — schema drift + invariants", () => {
         }),
       ]),
     );
+
+    // The program picker offers Sloane existing Robotics curriculum she can
+    // actually schedule, so the flow is exercisable on seeded data.
+    const asSloane = await withUser(t, sloane!._id);
+    const programUnits = await asSloane.query(api.units.list, {
+      programGroupId: robotics!._id,
+    });
+    expect(programUnits.map((unit) => unit.title)).toEqual(["Robot Builders"]);
+    const [motorTest] = await asSloane.query(
+      api.masterSchedule.searchProgramCurriculum,
+      { groupId: robotics!._id, query: "motor speed" },
+    );
+    // One material, so the dialog's offline-materials gate lets it schedule.
+    expect(motorTest).toMatchObject({
+      kind: "activity",
+      unitId: programUnits[0]._id,
+      materialCount: 1,
+    });
+    if (motorTest?.kind !== "activity") throw new Error("expected an activity hit");
+    await expect(
+      asSloane.mutation(api.assignments.assignProgramActivity, {
+        activityId: motorTest.activityId,
+        scholarGroupId: robotics!._id,
+      }),
+    ).resolves.toMatchObject({ shared: true });
   });
 
   test("weekly timetable mirrors the seeded school cadence", async () => {

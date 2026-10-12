@@ -1,7 +1,11 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
+import { generateAppToken } from "../customApps";
 import { scheduleProblemSetItemGeneration } from "../practiceSkills";
 import { granuleTexts, toKeyedGranules } from "./granules";
+import { institutionIdForUnitAuthor } from "./unitAccess";
+import { normalizeStoredTutorModel } from "./tutorModel";
+import { isUsableVibecodeStarterApp } from "./vibecodeStarter";
 
 export function duplicateUnitDesign(
   source: Doc<"units">,
@@ -41,6 +45,10 @@ export function duplicateUnitDesign(
     gradeLevel: source.gradeLevel,
     mathDomain: source.mathDomain,
     isActive: true,
+    // A copy starts unpublished even when its source is published: it is a
+    // new Draft the teacher is about to change, so scholars meet it only
+    // once it is published or assigned (TRA-490).
+    unpublished: true,
     badgeOnCompletion: source.badgeOnCompletion
       ? { ...source.badgeOnCompletion }
       : undefined,
@@ -94,7 +102,27 @@ export function duplicateActivityDesign(
       ? [...source.probeSkillKeys]
       : undefined,
     game: source.game ? { ...source.game } : undefined,
+    tutorModel:
+      source.kind === "vibecode"
+        ? normalizeStoredTutorModel(source.tutorModel)
+        : undefined,
+    starterAppId: source.starterAppId,
+    scholarsStartFrom: source.scholarsStartFrom,
+    // The model contract travels with the design (duplicate AND fork).
+    buildContract:
+      source.kind === "vibecode" && source.buildContract
+        ? {
+            invariants: [...source.buildContract.invariants],
+            freedoms: [...source.buildContract.freedoms],
+            ...(source.buildContract.gate
+              ? { gate: source.buildContract.gate }
+              : {}),
+          }
+        : undefined,
+    allowSilence:
+      source.kind === "vibecode" ? source.allowSilence : undefined,
     hasScholarAngles: source.hasScholarAngles,
+    assessesWritingMechanics: source.assessesWritingMechanics,
     defaultMode: source.defaultMode,
     deliverable: source.deliverable
       ? {
@@ -189,4 +217,151 @@ export async function remapCopiedActivityReferences(
     }
     if (Object.keys(updates).length > 0) await ctx.db.patch(copyId, updates);
   }
+}
+
+function labUnitTitle(activityTitle: string): string {
+  const title = activityTitle.trim() || "Activity";
+  return /\blab$/i.test(title) ? title : `${title} Lab`;
+}
+
+/**
+ * Fork one activity into curriculum owned by `callerUserId`.
+ *
+ * Unlike the ordinary duplicate operations, this is a portability boundary:
+ * a vibecode starter is cloned into a new `customApps` row so the caller can
+ * edit their fork without changing the source teacher's app.
+ */
+export async function forkActivityIntoOwnedUnit(
+  ctx: MutationCtx,
+  source: Doc<"activities">,
+  callerUserId: Id<"users">,
+  targetUnitId?: Id<"units">,
+) {
+  let unit: Doc<"units"> | null = null;
+  if (targetUnitId) {
+    unit = await ctx.db.get(targetUnitId);
+    if (!unit) throw new Error("Target unit not found");
+    if (unit.teacherId !== callerUserId || unit.authorScholarId) {
+      throw new Error("Forbidden: target unit must be owned by you");
+    }
+  } else {
+    const title = labUnitTitle(source.title);
+    const institutionId = await institutionIdForUnitAuthor(
+      ctx,
+      callerUserId,
+    );
+    const primaryInstitution = (
+      await ctx.db.query("institutions").collect()
+    ).find((institution) => institution.isPrimary);
+    const authoredUnits = await ctx.db
+      .query("units")
+      .withIndex("by_teacher", (q) => q.eq("teacherId", callerUserId))
+      .collect();
+    unit =
+      authoredUnits.find(
+        (candidate) =>
+          !candidate.authorScholarId &&
+          (candidate.institutionId === institutionId ||
+            (candidate.institutionId === undefined &&
+              primaryInstitution?._id === institutionId)) &&
+          candidate.title.trim().toLowerCase() === title.toLowerCase(),
+      ) ?? null;
+    if (!unit) {
+      const unitId = await ctx.db.insert("units", {
+        teacherId: callerUserId,
+        institutionId,
+        title,
+        isActive: true,
+        // Teachers only until published or assigned (TRA-490).
+        unpublished: true,
+      });
+      unit = await ctx.db.get(unitId);
+    }
+  }
+  if (!unit) throw new Error("Could not create target unit");
+
+  const lessonTitle = `Explore ${source.title.trim() || "activity"}`;
+  const lessons = await ctx.db
+    .query("lessons")
+    .withIndex("by_unit", (q) => q.eq("unitId", unit._id))
+    .collect();
+  let lesson: Doc<"lessons"> | null =
+    lessons.find(
+      (candidate) =>
+        candidate.title.trim().toLowerCase() === lessonTitle.toLowerCase(),
+    ) ?? null;
+  if (!lesson) {
+    const lessonId = await ctx.db.insert("lessons", {
+      unitId: unit._id,
+      title: lessonTitle,
+      order: lessons.reduce(
+        (max, candidate) => Math.max(max, candidate.order),
+        -1,
+      ) + 1,
+    });
+    lesson = await ctx.db.get(lessonId);
+  }
+  if (!lesson) throw new Error("Could not create target lesson");
+
+  const activities = await ctx.db
+    .query("activities")
+    .withIndex("by_lesson", (q) => q.eq("lessonId", lesson._id))
+    .collect();
+  const existingActivity = activities.find(
+    (candidate) =>
+      candidate.title.trim().toLowerCase() ===
+      source.title.trim().toLowerCase(),
+  );
+  if (existingActivity) {
+    return {
+      unitId: unit._id,
+      unitTitle: unit.title,
+      lessonId: lesson._id,
+      activityId: existingActivity._id,
+      activityTitle: existingActivity.title,
+    };
+  }
+
+  let starterAppId: Id<"customApps"> | undefined;
+  if (source.starterAppId) {
+    const starter = await ctx.db.get(source.starterAppId);
+    if (!isUsableVibecodeStarterApp(starter)) {
+      throw new Error("Activity starter app is missing or unusable");
+    }
+    starterAppId = await ctx.db.insert("customApps", {
+      token: generateAppToken(),
+      name: starter.name,
+      kind: "static",
+      status: "live",
+      html: starter.html,
+      appAi: starter.appAi,
+      origin: "starter",
+      createdBy: callerUserId,
+      updatedAt: Date.now(),
+    });
+  }
+
+  const activityId = await ctx.db.insert("activities", {
+    ...duplicateActivityDesign(
+      source,
+      lesson._id,
+      activities.reduce(
+        (max, candidate) => Math.max(max, candidate.order),
+        -1,
+      ) + 1,
+    ),
+    appRequest: source.appRequest,
+    starterAppId,
+  });
+  if (source.kind === "problem_set") {
+    await scheduleProblemSetItemGeneration(ctx, activityId);
+  }
+
+  return {
+    unitId: unit._id,
+    unitTitle: unit.title,
+    lessonId: lesson._id,
+    activityId,
+    activityTitle: source.title,
+  };
 }

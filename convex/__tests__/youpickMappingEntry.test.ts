@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -17,13 +17,25 @@ const WHOLE = "whole-number-arithmetic";
 const FRAC = "fraction-arithmetic";
 const PROB = "probability";
 const RATIO = "ratio-proportion-percent";
+const DISCRETE = "discrete-math";
 
 const modules = (import.meta as ImportMeta & { glob: (p: string) => Record<string, () => Promise<unknown>> }).glob(
   "../**/*.ts",
 );
 
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
 async function seedScholar(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   username: string,
   gradeLevel?: string,
 ) {
@@ -37,7 +49,7 @@ async function seedScholar(
   );
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -49,7 +61,7 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 }
 
 /** The first seeded strand of a domain — a valid `choiceHint.strand` value. */
-async function aStrandOf(t: ReturnType<typeof convexTest>, domain: string) {
+async function aStrandOf(t: TestConvex<typeof schema>, domain: string) {
   return await t.run(async (ctx) => {
     const n = await ctx.db
       .query("knowledgeNodes")
@@ -118,7 +130,7 @@ async function mapWholeToDone(asScholar: Awaited<ReturnType<typeof asUser>>, sch
  *  a `complete` row alongside the mastery a real finalize would have written —
  *  mastery alone is shadow placement, which is deliberately still searched. */
 async function markEveryDomainExceptDone(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   scholarId: Id<"users">,
   targetDomain: string,
 ) {
@@ -161,9 +173,56 @@ async function markEveryDomainExceptDone(
 }
 
 describe("Fix lane — You Pick mapping entry (server contract)", () => {
+  test("a first deliberate pick of an unopened elective previews and serves that domain's mapping", async () => {
+    const t = sharedSeeded();
+    const scholar = await seedScholar(t, "youpick_first_elective", "9");
+    const asScholar = await asUser(t, scholar);
+    await markEveryDomainExceptDone(t, scholar, DISCRETE);
+    const strand = await aStrandOf(t, DISCRETE);
+    const choiceHint = { domain: DISCRETE, strand };
+
+    const electivePreview = await preview(asScholar, scholar, {
+      domain: DISCRETE,
+      choiceHint,
+    });
+    expect(electivePreview.mappingPreview).toBe(true);
+    expect(electivePreview.allMapping).toBe(true);
+    expect(mappingLabels(electivePreview.set).length).toBeGreaterThan(0);
+
+    const electiveServe = await serve(asScholar, scholar, {
+      domain: DISCRETE,
+      choiceHint,
+    });
+    const mapping = electiveServe.items.filter((item) => item.lane === "mapping");
+    expect(mapping.length).toBeGreaterThan(0);
+    expect(mapping.every((item) => item.domain === DISCRETE)).toBe(true);
+    expect(electiveServe.allMapping).toBe(true);
+  });
+
+  test("an unopened elective does not defeat the un-hinted all-mapped early-out", async () => {
+    const t = sharedSeeded();
+    const scholar = await seedScholar(t, "youpick_unhinted_elective", "9");
+    const asScholar = await asUser(t, scholar);
+    await markEveryDomainExceptDone(t, scholar, DISCRETE);
+
+    const automaticPreview = await preview(asScholar, scholar, {
+      domain: WHOLE,
+    });
+    expect(automaticPreview.mappingPreview).toBe(false);
+    expect(mappingLabels(automaticPreview.set)).toEqual([]);
+
+    const automaticServe = await serve(asScholar, scholar, { domain: WHOLE });
+    expect(automaticServe.items.some((item) => item.lane === "mapping")).toBe(false);
+    expect(automaticServe.allMapping).toBe(false);
+    expect(
+      await asScholar.query(api.practiceSkills.needsAnyPlacement, {
+        scholarId: scholar,
+      }),
+    ).toBe(false);
+  });
+
   test("automatic opening grade-gates a high-floor domain, while age-appropriate and deliberate entries still open", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
 
     const younger = await seedScholar(t, "automatic_grade_gate", "Grade 3");
     const asYounger = await asUser(t, younger);
@@ -265,8 +324,7 @@ describe("Fix lane — You Pick mapping entry (server contract)", () => {
 
   // ── F1 ────────────────────────────────────────────────────────────────────
   test("F1: a You Pick of an unmapped, prereq-gated domain serves THAT domain's mapping (scoped ceremony), never the global foundational set", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "youpick_f1");
     const asScholar = await asUser(t, scholar);
     const fracStrand = await aStrandOf(t, FRAC);
@@ -297,8 +355,7 @@ describe("Fix lane — You Pick mapping entry (server contract)", () => {
 
   // ── F2 ────────────────────────────────────────────────────────────────────
   test("F2: playlistForScholar previews the SELECTED domain's mapping (differs per tile) and matches what Start serves, label-for-label", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "youpick_f2");
     const asScholar = await asUser(t, scholar);
     const fracStrand = await aStrandOf(t, FRAC);
@@ -353,8 +410,7 @@ describe("Fix lane — You Pick mapping entry (server contract)", () => {
   // {domain, strand} + `includeMapping`), even though its cross-domain prereq is
   // unplaced and a placed foundational domain competes.
   test("F2 (prod shape): foundational placed + a prereq-gated You Pick leads with the SELECTED domain, not the global fallback", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "youpick_f2_prod");
     const asScholar = await asUser(t, scholar);
 
@@ -398,8 +454,7 @@ describe("Fix lane — You Pick mapping entry (server contract)", () => {
 
   // ── F3 ────────────────────────────────────────────────────────────────────
   test("F3: an answer on a STALE `· mapping` probe (its domain already placed) still returns a graded reveal — never a bare no-op that swallows the acknowledgement", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "youpick_f3");
     const asScholar = await asUser(t, scholar);
 
@@ -463,8 +518,7 @@ describe("Fix lane — You Pick mapping entry (server contract)", () => {
       "integers-coordinates",
       "early-algebra",
     ];
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "youpick_reachable_ceiling", "4");
     const asScholar = await asUser(t, scholar);
     await t.run(async (ctx) => {

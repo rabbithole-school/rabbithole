@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  formatVideoDuration,
   isVideoMedia,
   pageCountForRange,
   viewerIndexForKey,
@@ -31,5 +32,15 @@ describe("parent portfolio viewer navigation", () => {
     expect(pageCountForRange({ start: 0, end: 1 })).toBeNull();
     expect(pageCountForRange({ start: 3, end: 2 })).toBeNull();
     expect(pageCountForRange(undefined)).toBeNull();
+  });
+
+  test("formats video durations for the card pill", () => {
+    expect(formatVideoDuration(42_000)).toBe("0:42");
+    expect(formatVideoDuration(725_000)).toBe("12:05");
+    expect(formatVideoDuration(0)).toBe("0:00");
+    expect(formatVideoDuration(3_661_000)).toBe("1:01:01");
+    expect(formatVideoDuration(-1)).toBeNull();
+    expect(formatVideoDuration(null)).toBeNull();
+    expect(formatVideoDuration(undefined)).toBeNull();
   });
 });

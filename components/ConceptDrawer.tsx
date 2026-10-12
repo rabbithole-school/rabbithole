@@ -33,8 +33,32 @@ function Avatar({ name, image, size = 22 }: { name: string; image: string | null
   return <Flex w={`${size}px`} h={`${size}px`} borderRadius="full" bg="violet.100" color="violet.700" fontSize="10px" fontWeight="700" align="center" justify="center" flexShrink={0}>{initials}</Flex>;
 }
 
-export function ConceptDrawer({ conceptId, forScholarId, onClose, onNavigate }: { conceptId: string | null; forScholarId?: Id<"users"> | null; onClose: () => void; onNavigate: (id: string) => void }) {
-  const detail = useQuery(api.concepts.conceptDetail, conceptId ? { conceptId: conceptId as Id<"knowledgeNodes">, ...(forScholarId ? { scholarId: forScholarId } : {}) } : "skip");
+export function ConceptDrawer({
+  conceptId,
+  forScholarId,
+  scope,
+  groupId,
+  onClose,
+  onNavigate,
+}: {
+  conceptId: string | null;
+  forScholarId?: Id<"users"> | null;
+  scope?: string;
+  groupId?: Id<"scholarGroups">;
+  onClose: () => void;
+  onNavigate: (id: string) => void;
+}) {
+  const detail = useQuery(
+    api.concepts.conceptDetail,
+    conceptId
+      ? {
+          conceptId: conceptId as Id<"knowledgeNodes">,
+          ...(forScholarId ? { scholarId: forScholarId } : {}),
+          ...(scope !== undefined ? { scope } : {}),
+          ...(groupId ? { groupId } : {}),
+        }
+      : "skip",
+  );
   const scholars = useQuery(api.concepts.allScholars, conceptId ? {} : "skip");
   const createSeed = useMutation(api.seeds.create);
   const [scholarId, setScholarId] = useState("");

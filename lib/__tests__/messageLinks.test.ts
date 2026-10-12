@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { previewableMessageLink, tokenizeMessageLinks } from "../messageLinks";
+import {
+  messagePlainText,
+  previewableMessageLink,
+  tokenizeMessageLinks,
+} from "../messageLinks";
 
 describe("tokenizeMessageLinks", () => {
   test("preserves text and newlines while peeling sentence punctuation", () => {
@@ -61,6 +65,58 @@ describe("tokenizeMessageLinks", () => {
       ),
     ).toBe(
       "https://drive.google.com/drive/folders/1_l_Bm1TLgDt9P0sGPmgBdV3bAmq5SgNn",
+    );
+  });
+});
+
+describe("labelled links", () => {
+  const body =
+    "Please sign up here:\n\n[Google Calendar Booking](https://calendar.app.google/abc123)\n\nThanks!";
+
+  test("tokenize as one link that keeps its exact source text", () => {
+    const tokens = tokenizeMessageLinks(body);
+    expect(tokens).toEqual([
+      { type: "text", value: "Please sign up here:\n\n" },
+      {
+        type: "link",
+        value: "[Google Calendar Booking](https://calendar.app.google/abc123)",
+        label: "Google Calendar Booking",
+        url: "https://calendar.app.google/abc123",
+      },
+      { type: "text", value: "\n\nThanks!" },
+    ]);
+    expect(tokens.map((token) => token.value).join("")).toBe(body);
+  });
+
+  test("keep balanced parentheses in the URL", () => {
+    expect(
+      tokenizeMessageLinks("[f](https://en.wikipedia.org/wiki/Function_(mathematics)).")[0],
+    ).toMatchObject({
+      type: "link",
+      url: "https://en.wikipedia.org/wiki/Function_(mathematics)",
+    });
+  });
+
+  test("never link a non-HTTP target", () => {
+    const input = "[click](javascript:alert(1)) [x](https:///nohost)";
+    expect(tokenizeMessageLinks(input).some((t) => t.type === "link")).toBe(false);
+  });
+
+  test("never earn a preview card", () => {
+    expect(
+      previewableMessageLink("[Booking](https://calendar.app.google/abc123)"),
+    ).toBeNull();
+  });
+
+  test("flatten to label (url) for plain-text channels, or the label alone", () => {
+    expect(messagePlainText(body)).toBe(
+      "Please sign up here:\n\nGoogle Calendar Booking (https://calendar.app.google/abc123)\n\nThanks!",
+    );
+    expect(messagePlainText(body, { labelsOnly: true })).toBe(
+      "Please sign up here:\n\nGoogle Calendar Booking\n\nThanks!",
+    );
+    expect(messagePlainText("See https://example.com.")).toBe(
+      "See https://example.com.",
     );
   });
 });

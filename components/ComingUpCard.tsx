@@ -17,13 +17,13 @@
  */
 
 import { useEffect, useState } from "react";
-import { useQuery } from "convex/react";
 import { Box, Flex, Stack, Text } from "@chakra-ui/react";
 import { TrendUp } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import { Surface } from "@/components/ui/Surface";
 import { DueChip, StatusChip } from "@/components/ui/DueChip";
 import { ForecastRow } from "@/components/ui/ForecastRow";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import {
   formatComingUpDayHeading,
   formatStartTime,
@@ -115,7 +115,9 @@ export function ComingUpCard({
     const id = setInterval(() => setNow(floorToMinute(Date.now())), MINUTE_MS);
     return () => clearInterval(id);
   }, []);
-  const result = useQuery(api.assignments.comingUpForSelf, {
+  // Smoothed so each minute's re-subscription keeps the card on screen instead
+  // of dropping to `undefined` and vanishing for a round-trip.
+  const result = useSmoothedQuery(api.assignments.comingUpForSelf, {
     now,
     includeWebActivities: true,
   });

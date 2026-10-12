@@ -1,4 +1,5 @@
 /** Default calendar for institutions that predate per-school time zones. */
+// Deployment configuration — see DEPLOYMENT.md (Default time zone).
 export const DEFAULT_TIMEZONE = "Pacific/Honolulu";
 
 const SEARCH_MARGIN_MS = 48 * 60 * 60 * 1000;

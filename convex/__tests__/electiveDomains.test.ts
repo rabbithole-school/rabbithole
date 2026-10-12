@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -26,13 +26,24 @@ const modules = (
 
 const WNA = "whole-number-arithmetic";
 
-async function seedScholar(t: ReturnType<typeof convexTest>, username: string, gradeLevel: string) {
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function seedScholar(t: TestConvex<typeof schema>, username: string, gradeLevel: string) {
   return await t.run(async (ctx) =>
     ctx.db.insert("users", { name: username, username, role: "scholar", gradeLevel }),
   );
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -44,7 +55,7 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 }
 
 async function convergeDomains(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   scholarId: Id<"users">,
   domains: string[],
 ) {
@@ -86,8 +97,7 @@ describe("elective domains — never a forced pre-test", () => {
     // path; a missing elective fold there showed every scholar owing
     // discrete-math on the Math Skills matrix (Sol review 2026-08-19,
     // finding 1). Pin the two derivations to the same answer.
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const institutionId = await seedTestInstitution(t, { slug: "moli-elective" });
     const scholar = await seedScholarInInstitution(t, {
       institutionId,
@@ -117,8 +127,7 @@ describe("elective domains — never a forced pre-test", () => {
   });
 
   test("stays OUT of the check-in denominator even for a grade-9 scholar whose ring covers its every node", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "elective_ring", "9");
     const as = await asUser(t, scholar);
     const map = await as.query(api.practiceSkills.domainMapForScholar, { scholarId: scholar });
@@ -131,8 +140,7 @@ describe("elective domains — never a forced pre-test", () => {
   });
 
   test("map COMPLETION ignores an unopened elective: converging the 8 core domains completes the map", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "elective_complete", "9");
     const core = [
       WNA, "fraction-arithmetic", "probability", "geometry-measurement",
@@ -145,8 +153,7 @@ describe("elective domains — never a forced pre-test", () => {
   });
 
   test("the automatic mixed check-in NEVER serves an unopened elective", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     // Grade 9: every domain incl. discrete-math is inside the scholar's ring —
     // only electivity keeps it out of the automatic band.
     const scholar = await seedScholar(t, "elective_band", "9");
@@ -165,8 +172,7 @@ describe("elective domains — never a forced pre-test", () => {
   });
 
   test("offered as a reachable territory card ONLY once WNA converges", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "elective_offer", "5");
     const as = await asUser(t, scholar);
 
@@ -190,8 +196,7 @@ describe("elective domains — never a forced pre-test", () => {
   });
 
   test("deliberately opening the elective joins M (in_flight precedence) — the accepted consequence", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "elective_open", "5");
     await convergeDomains(t, scholar, [WNA]);
     const as = await asUser(t, scholar);

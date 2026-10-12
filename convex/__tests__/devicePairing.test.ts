@@ -587,6 +587,137 @@ describe("device pairing — code lookup (staff console)", () => {
       scholarUsername: "scholar-b",
     });
   });
+
+  test("a SUSPENDED institution's binding is hidden even from a platform admin", async () => {
+    // The negative twin of the test above, and the TRA-359 regression:
+    // schoolOperationsInstitutionIds answers "all" for a platform admin
+    // WITHOUT loading an institution, so the old `=== "all" || has(...)` form
+    // surfaced a scholar's name from a school every per-institution gate
+    // refuses. Same fixture as above, one patch apart.
+    const t = convexTest(schema, modules);
+    const inst = await seedInstitution(t, "school-b");
+    const registrar = await seedUser(t, "staff");
+    await grantMembership(t, registrar, "staff", inst);
+    await grantSchoolOperations(t, registrar, inst);
+    const scholar = await seedUser(t, "scholar", {
+      name: "Scholar B",
+      username: "scholar-b",
+      institutionId: inst,
+    });
+
+    const first = await registerDevice(t, { deviceId: "ipad-admin-disabled" });
+    await (await withUser(t, registrar)).mutation(
+      api.devicePairing.approvePairingRequest,
+      { requestId: first.requestId, scholarId: scholar },
+    );
+    await exchange(t, first.requestId, first.verifier);
+
+    await t.run((ctx) => ctx.db.patch(inst, { disabledAt: Date.now() }));
+
+    const second = await registerDevice(t, { deviceId: "ipad-admin-disabled" });
+    const platformAdmin = await seedUser(t, "platform_admin");
+    const found = await (await withUser(t, platformAdmin)).query(
+      api.devicePairing.lookupPairingRequestByCode,
+      { code: second.code },
+    );
+    // The pending request itself still resolves — it is the scholar BEHIND the
+    // suspended school that must not be named.
+    expect(found).not.toBeNull();
+    expect(found?.existingBinding).toBeNull();
+  });
+
+  test("an ORPHANED binding is still warned about, but does not name the scholar", async () => {
+    // A DELETED institution is not a suspended one. Institution deletion does
+    // not cascade the device tables (TRA-360), so the binding survives with a
+    // dangling institutionId. Hiding it would be actively harmful: the upsert
+    // key is (institutionId, deviceId), so re-pairing inserts a SECOND row for
+    // this deviceId and stateForDevice — which returns null unless exactly one
+    // binding matches — silently stops driving the iPad's lock.
+    const t = convexTest(schema, modules);
+    const gone = await seedInstitution(t, "school-gone");
+    const registrar = await seedUser(t, "staff");
+    await grantMembership(t, registrar, "staff", gone);
+    await grantSchoolOperations(t, registrar, gone);
+    const scholar = await seedUser(t, "scholar", {
+      name: "Scholar Gone",
+      username: "scholar-gone",
+      institutionId: gone,
+    });
+
+    const first = await registerDevice(t, { deviceId: "ipad-orphaned" });
+    await (await withUser(t, registrar)).mutation(
+      api.devicePairing.approvePairingRequest,
+      { requestId: first.requestId, scholarId: scholar },
+    );
+    await exchange(t, first.requestId, first.verifier);
+
+    // The school is deleted outright — the row is gone, the binding is not.
+    await t.run((ctx) => ctx.db.delete(gone));
+
+    const second = await registerDevice(t, { deviceId: "ipad-orphaned" });
+    const platformAdmin = await seedUser(t, "platform_admin");
+    const found = await (await withUser(t, platformAdmin)).query(
+      api.devicePairing.lookupPairingRequestByCode,
+      { code: second.code },
+    );
+
+    // Warned about…
+    expect(found?.existingBinding).not.toBeNull();
+    expect(found?.existingBinding?.pairedAt).toEqual(expect.any(Number));
+    // …without naming someone whose school this caller has no standing at.
+    expect(found?.existingBinding?.scholarName).toBeNull();
+    expect(found?.existingBinding?.scholarUsername).toBeNull();
+  });
+
+  test("an in-scope binding still names the scholar, and wins over an orphan", async () => {
+    const t = convexTest(schema, modules);
+    const gone = await seedInstitution(t, "school-gone-2");
+    const live = await seedInstitution(t, "school-live");
+    const registrarGone = await seedUser(t, "staff");
+    await grantMembership(t, registrarGone, "staff", gone);
+    await grantSchoolOperations(t, registrarGone, gone);
+    const registrarLive = await seedUser(t, "staff");
+    await grantMembership(t, registrarLive, "staff", live);
+    await grantSchoolOperations(t, registrarLive, live);
+    const scholarGone = await seedUser(t, "scholar", {
+      name: "Scholar Gone",
+      username: "scholar-gone-2",
+      institutionId: gone,
+    });
+    const scholarLive = await seedUser(t, "scholar", {
+      name: "Scholar Live",
+      username: "scholar-live",
+      institutionId: live,
+    });
+
+    // Two bindings for ONE physical device, in two different schools.
+    const a = await registerDevice(t, { deviceId: "ipad-both" });
+    await (await withUser(t, registrarGone)).mutation(
+      api.devicePairing.approvePairingRequest,
+      { requestId: a.requestId, scholarId: scholarGone },
+    );
+    await exchange(t, a.requestId, a.verifier);
+    const b = await registerDevice(t, { deviceId: "ipad-both" });
+    await (await withUser(t, registrarLive)).mutation(
+      api.devicePairing.approvePairingRequest,
+      { requestId: b.requestId, scholarId: scholarLive },
+    );
+    await exchange(t, b.requestId, b.verifier);
+
+    await t.run((ctx) => ctx.db.delete(gone));
+
+    const third = await registerDevice(t, { deviceId: "ipad-both" });
+    const found = await (await withUser(t, registrarLive)).query(
+      api.devicePairing.lookupPairingRequestByCode,
+      { code: third.code },
+    );
+    // The informative one wins, rather than whichever happened to be indexed
+    // first — an orphan is only ever the bare warning.
+    expect(found?.existingBinding).toMatchObject({
+      scholarName: "Scholar Live",
+      scholarUsername: "scholar-live",
+    });
+  });
 });
 
 describe("device pairing — reassignment + revocation", () => {
@@ -725,6 +856,58 @@ describe("device pairing — reassignment + revocation", () => {
     expect(await t.run(async (ctx) => ctx.db.get(pairedDeviceId))).not.toBeNull();
   });
 
+  // TRA-441, the manual-pairing twin of TRA-434. Deleting a scholar leaves the
+  // iPad's binding behind; the roster used to hide it, so staff could never
+  // unpair it, and re-pairing the iPad made a second row for the same device.
+  test("a deleted scholar's paired iPad stays on the roster, unassigned and flagged, in its own school only", async () => {
+    const t = convexTest(schema, modules);
+    const inst = await seedInstitution(t, "moli");
+    const registrar = await seedUser(t, "staff");
+    await grantMembership(t, registrar, "staff", inst);
+    await grantSchoolOperations(t, registrar, inst);
+    const kai = await seedUser(t, "scholar", { name: "Kai", institutionId: inst });
+    const lani = await seedUser(t, "scholar", { name: "Lani", institutionId: inst });
+    const { pairedDeviceId } = await pairDevice(t, registrar, kai, "ipad-kai");
+    await pairDevice(t, registrar, lani, "ipad-lani");
+
+    const admin = await seedUser(t, "platform_admin");
+    await (await withUser(t, admin)).mutation(api.users.deleteUser, { userId: kai });
+
+    const asRegistrar = await withUser(t, registrar);
+    const rows = await asRegistrar.query(api.devicePairing.listPairedDevices, {});
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => row._id === pairedDeviceId)).toMatchObject({
+      deviceId: "ipad-kai",
+      scholarId: null,
+      scholarDeleted: true,
+      scholarName: null,
+      scholarUsername: null,
+    });
+    // Control: a live scholar's binding is unchanged.
+    expect(rows.find((row) => row.deviceId === "ipad-lani")).toMatchObject({
+      scholarId: lani,
+      scholarName: "Lani",
+      scholarDeleted: false,
+    });
+
+    // Scoping comes from the binding's own school, not the deleted scholar.
+    const other = await seedInstitution(t, "albatross-society");
+    const outsider = await seedUser(t, "staff");
+    await grantMembership(t, outsider, "staff", other);
+    await grantSchoolOperations(t, outsider, other);
+    const asOutsider = await withUser(t, outsider);
+    expect(await asOutsider.query(api.devicePairing.listPairedDevices, {})).toEqual([]);
+    expect(
+      await asOutsider.query(api.devicePairing.listPairedDevices, { institutionScope: "moli" }),
+    ).toEqual([]);
+
+    // And staff can now act on it: Unpair clears the orphan.
+    await asRegistrar.mutation(api.devicePairing.unpairDevice, { pairedDeviceId });
+    expect(
+      (await asRegistrar.query(api.devicePairing.listPairedDevices, {})).map((row) => row.deviceId),
+    ).toEqual(["ipad-lani"]);
+  });
+
   const SERIAL = "F9FZX2ABCDEF";
 
   /** Provision + exchange a managed-device claim, binding `deviceId` to
@@ -830,41 +1013,21 @@ describe("device pairing — reassignment + revocation", () => {
     expect(unlockState?.nextRecheckAt).toBe(0);
   });
 
-  test("(Finding 1) managed remote sign-out (revokeDeviceSession) is a real decommission — session dies, token re-exchange fails, generation bumps, relock is scheduled", async () => {
+  test("revokeDeviceSession refuses a managed binding without changing its claim, pairing, or auth session", async () => {
     const t = convexTest(schema, modules);
     const inst = await seedInstitution(t, "moli");
     const registrar = await seedUser(t, "staff");
     await grantMembership(t, registrar, "staff", inst);
     await grantSchoolOperations(t, registrar, inst);
     const scholar = await seedUser(t, "scholar", { institutionId: inst });
-
-    const { claimId, sessionId: managedSessionId, claimToken } = await provisionManagedClaim(
+    const { claimId, sessionId } = await provisionManagedClaim(
       t,
       inst,
       registrar,
       scholar,
       "ipad-managed-signout",
     );
-    const claimBefore = await t.run((ctx) => ctx.db.get(claimId));
-    const claimTokenHashBefore = claimBefore!.claimTokenHash;
-    const generationBefore = claimBefore!.claimGeneration ?? 0;
-
-    // Simulate an active/warm unlock, exactly like the Finding 4 test, so we
-    // can prove the relock got scheduled (not merely that the session died).
-    const unlockStateId = await t.run(async (ctx) =>
-      ctx.db.insert("deviceAppUnlockStates", {
-        institutionId: inst,
-        managedDeviceClaimId: claimId,
-        desiredState: "unlocked",
-        appKey: "google-sheets",
-        updatedAt: Date.now(),
-        requestedAt: Date.now(),
-        requestedBy: registrar,
-        nextRecheckAt: Date.now() + 60 * 60 * 1000,
-      }),
-    );
-
-    const pairedDeviceId = (await t.run(async (ctx) =>
+    const pairedDeviceId = (await t.run((ctx) =>
       ctx.db
         .query("pairedDevices")
         .withIndex("by_device", (q) =>
@@ -872,48 +1035,26 @@ describe("device pairing — reassignment + revocation", () => {
         )
         .unique(),
     ))!._id;
+    const asRegistrar = await withUser(t, registrar);
+    const claimBefore = await t.run((ctx) => ctx.db.get(claimId));
+    const pairingBefore = await t.run((ctx) => ctx.db.get(pairedDeviceId));
+    const authSessionBefore = await t.run((ctx) => ctx.db.get(sessionId));
 
-    // The actual UI mutation path — not unpairDevice.
-    const res = await (await withUser(t, registrar)).mutation(
-      api.devicePairing.revokeDeviceSession,
-      { pairedDeviceId },
-    );
-    expect(res.sessionRevoked).toBe(true);
-
-    // The managed-claim session is gone.
-    expect(await t.run((ctx) => ctx.db.get(managedSessionId))).toBeNull();
-
-    // The durable claim credential itself is dead: state is "revoked", the
-    // token hash changed (no longer the original — an unmatchable
-    // placeholder), and the generation bumped (any in-flight reconciler task
-    // stamped with the old generation must go stale).
-    const claimAfter = await t.run((ctx) => ctx.db.get(claimId));
-    expect(claimAfter?.claimState).toBe("revoked");
-    expect(claimAfter?.claimTokenHash).not.toBe(claimTokenHashBefore);
-    expect(claimAfter?.claimGeneration).toBe(generationBefore + 1);
-
-    // The physical binding's session pointer is cleared too (the existing
-    // remote sign-out contract).
-    const binding = await t.run((ctx) => ctx.db.get(pairedDeviceId));
-    expect(binding?.authSessionId).toBeUndefined();
-
-    // A relock was scheduled: the warm unlock's nextRecheckAt was nudged
-    // due-now, so the reconciler re-derives (and closes) it on its very next
-    // tick instead of waiting out the stale hour-long window.
-    const unlockState = await t.run((ctx) => ctx.db.get(unlockStateId));
-    expect(unlockState?.nextRecheckAt).toBe(0);
-
-    // Re-exchanging the ORIGINAL plaintext claim token — exactly what the
-    // native app's durable-token auto-re-exchange would attempt on its next
-    // foreground — must now fail — the durable credential is dead, so remote
-    // sign-out cannot be silently undone by the device itself.
-    const reExchange = await t.run(async (ctx) =>
-      ctx.runMutation(internal.managedDeviceClaims.consumeManagedClaim, {
-        claimToken,
-        deviceId: "ipad-managed-signout",
+    await expect(
+      asRegistrar.mutation(api.devicePairing.revokeDeviceSession, {
+        pairedDeviceId,
       }),
+    ).rejects.toThrow(
+      "This iPad is managed and signs itself back in. Use Unassign, Reassign, or Disable device instead.",
     );
-    expect(reExchange).toBeNull();
+
+    expect(await t.run((ctx) => ctx.db.get(claimId))).toEqual(claimBefore);
+    expect(await t.run((ctx) => ctx.db.get(pairedDeviceId))).toEqual(
+      pairingBefore,
+    );
+    expect(await t.run((ctx) => ctx.db.get(sessionId))).toEqual(
+      authSessionBefore,
+    );
   });
 
   test("(round 5, Finding 3) attachDeviceSession replaces the prior live row instead of accumulating a second one", async () => {

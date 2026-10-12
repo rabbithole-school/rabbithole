@@ -4,17 +4,19 @@ import { v } from "convex/values";
 
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { geminiGenerateImage } from "./lib/gemini";
+import { openaiGenerateImage } from "./lib/openaiImage";
+import { openaiImageUsageKey } from "./lib/models";
 import {
-  GEMINI_IMAGE_MODEL,
-  GEMINI_IMAGE_QUOTA_FALLBACK_MODEL,
-} from "./lib/models";
-import { removeChromaScreen } from "./lib/chromaImage";
+  assertTransparentBackdrop,
+  downscaleTransparentPng,
+} from "./lib/spriteImage";
 import { toStorageBlob } from "./lib/imageBytes";
 import { buildFlairArtPrompt } from "./lib/themeIconArt";
 import { recordImageUsage } from "./usage";
 
 const FLAIR_ART_MAX_DIM = 256;
+/** Flair renders in a 36px chip. "low" is the honest tier at that size. */
+const FLAIR_ART_QUALITY = "low" as const;
 const FLAIR_ART_DRAIN_BATCH_SIZE = 4;
 const FLAIR_ART_DRAIN_DELAY_MS = 5_000;
 const FLAIR_ART_RECOVERY_BATCH_MAX = 8;
@@ -22,14 +24,8 @@ const FLAIR_ART_RECOVERY_BATCH_MAX = 8;
 export const generateFlairArt = internalAction({
   args: {
     id: v.id("flairArt"),
-    modelOverride: v.optional(
-      v.union(
-        v.literal(GEMINI_IMAGE_MODEL),
-        v.literal(GEMINI_IMAGE_QUOTA_FALLBACK_MODEL),
-      ),
-    ),
   },
-  handler: async (ctx, { id, modelOverride }) => {
+  handler: async (ctx, { id }) => {
     const row = await ctx.runQuery(internal.flairArtInternal.getById, { id });
     if (!row || row.status !== "pending") return { status: "skipped" as const };
 
@@ -39,11 +35,8 @@ export const generateFlairArt = internalAction({
     );
     let imageStorageId: Awaited<ReturnType<typeof ctx.storage.store>> | undefined;
     try {
-      const image = await geminiGenerateImage([{ text: prompt }], {
-        aspectRatio: "1:1",
-        ...(modelOverride
-          ? { model: modelOverride }
-          : { quotaFallbackModel: GEMINI_IMAGE_QUOTA_FALLBACK_MODEL }),
+      const image = await openaiGenerateImage(prompt, {
+        quality: FLAIR_ART_QUALITY,
       });
       if (!image) {
         await ctx.runMutation(internal.flairArtInternal.markFailed, { id });
@@ -53,14 +46,15 @@ export const generateFlairArt = internalAction({
       void recordImageUsage(ctx, {
         source: "flair-art",
         institutionId: row.institutionId,
-        model: image.model,
+        model: openaiImageUsageKey(image.model, image.quality),
       });
-      const bytes = removeChromaScreen(image.bytes, {
-        screen: "magenta",
-        maxDim: FLAIR_ART_MAX_DIM,
-        minAlphaComponentFraction: 0.0008,
-        requireTransparentBackdrop: true,
-      });
+      // The model returns real alpha, so the magenta screen and its keying
+      // heuristics are gone. One guard survives the move, because alpha does
+      // not make it unnecessary: the model can still PAINT an opaque tile into
+      // the canvas, and publishing that would put a solid rectangle in the chip
+      // row. Throwing here marks the row failed, same as before.
+      assertTransparentBackdrop(image.bytes);
+      const bytes = downscaleTransparentPng(image.bytes, FLAIR_ART_MAX_DIM);
       imageStorageId = await ctx.storage.store(
         toStorageBlob(bytes, "image/png"),
       );
@@ -143,19 +137,15 @@ export const drainPending = internalAction({
 });
 
 /**
- * Model-pinned recovery for a precise failed-row list. Keep batches small: each
- * image call is awaited before the next begins so recovery cannot recreate the
- * backfill's original quota spike.
+ * Recovery for a precise failed-row list. Keep batches small: each image call is
+ * awaited before the next begins so recovery cannot recreate the backfill's
+ * original rate spike.
  */
-export const generateIdsWithModel = internalAction({
+export const regenerateIds = internalAction({
   args: {
     ids: v.array(v.id("flairArt")),
-    model: v.union(
-      v.literal(GEMINI_IMAGE_MODEL),
-      v.literal(GEMINI_IMAGE_QUOTA_FALLBACK_MODEL),
-    ),
   },
-  handler: async (ctx, { ids, model }) => {
+  handler: async (ctx, { ids }) => {
     const uniqueIds = [...new Set(ids)];
     if (uniqueIds.length > FLAIR_ART_RECOVERY_BATCH_MAX) {
       throw new Error(
@@ -179,15 +169,15 @@ export const generateIdsWithModel = internalAction({
       try {
         const result = await ctx.runAction(
           internal.flairArtActions.generateFlairArt,
-          { id, modelOverride: model },
+          { id },
         );
         results.push({ id, ...result });
       } catch (error) {
-        console.error(`[flairArt] model-pinned generation failed for ${id}`, error);
+        console.error(`[flairArt] re-mint failed for ${id}`, error);
         await ctx.runMutation(internal.flairArtInternal.markFailed, { id }).catch(
           (statusError) => {
             console.error(
-              `[flairArt] failed to record model-pinned failure for ${id}`,
+              `[flairArt] failed to record re-mint failure for ${id}`,
               statusError,
             );
           },

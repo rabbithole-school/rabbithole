@@ -6,8 +6,8 @@
  * math is unit-tested separately in convex/lib/practice/calibration.test.ts — this
  * file asserts cardinality + auth, not arithmetic.
  */
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
@@ -20,8 +20,25 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
+
 async function seedUser(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   role: "scholar" | "teacher" = "scholar",
   username = `test${role}`,
 ) {
@@ -30,7 +47,7 @@ async function seedUser(
   );
 }
 
-async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function withUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) =>
     ctx.db.insert("authSessions", {
       userId,
@@ -45,7 +62,7 @@ async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 
 /** Insert a stored generated item on a real seeded skill (answer "1"). */
 async function seedItem(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   skillKey = "count_to_10",
 ) {
   const id = await t.run(async (ctx) =>
@@ -62,15 +79,14 @@ async function seedItem(
   return `gen#${id}` as const;
 }
 
-async function allPredictions(t: ReturnType<typeof convexTest>) {
+async function allPredictions(t: TestConvex<typeof schema>) {
   return await t.run(async (ctx) => ctx.db.query("practicePredictions").collect());
 }
 
 describe("practicePredictions — write cardinality on the grade path", () => {
   test("a predicted attempt writes exactly ONE row with the mapped confidence + outcome", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedUser(t);
+    const t = await freshSeeded();
+    const scholar = await seedUser(t, "scholar", "pcalib_write1");
     const asScholar = await withUser(t, scholar);
     const itemId = await seedItem(t);
 
@@ -95,9 +111,8 @@ describe("practicePredictions — write cardinality on the grade path", () => {
   });
 
   test("a wrong predicted attempt records the miss (confidence unchanged)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedUser(t);
+    const t = await freshSeeded();
+    const scholar = await seedUser(t, "scholar", "pcalib_write2");
     const asScholar = await withUser(t, scholar);
     const itemId = await seedItem(t);
 
@@ -116,9 +131,8 @@ describe("practicePredictions — write cardinality on the grade path", () => {
   });
 
   test("NO prediction arg → NO row (the chip is optional, skipping changes nothing)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedUser(t);
+    const t = await freshSeeded();
+    const scholar = await seedUser(t, "scholar", "pcalib_write3");
     const asScholar = await withUser(t, scholar);
     const itemId = await seedItem(t);
 
@@ -132,9 +146,8 @@ describe("practicePredictions — write cardinality on the grade path", () => {
   });
 
   test("a record:false retry never logs a prediction (first-look affordance only)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedUser(t);
+    const t = await freshSeeded();
+    const scholar = await seedUser(t, "scholar", "pcalib_write4");
     const asScholar = await withUser(t, scholar);
     const itemId = await seedItem(t);
 
@@ -152,9 +165,8 @@ describe("practicePredictions — write cardinality on the grade path", () => {
 
 describe("myCalibrationSummary — scholar self-only, redacted shape", () => {
   test("returns only { n, band }, never raw bias/gap numbers", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedUser(t);
+    const t = await freshSeeded();
+    const scholar = await seedUser(t, "scholar", "pcalib_summary1");
     const asScholar = await withUser(t, scholar);
     const itemId = await seedItem(t);
 
@@ -175,8 +187,7 @@ describe("myCalibrationSummary — scholar self-only, redacted shape", () => {
   });
 
   test("a scholar's summary reflects only their OWN predictions, never a peer's", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarA = await seedUser(t, "scholar", "scholarA");
     const scholarB = await seedUser(t, "scholar", "scholarB");
     const asA = await withUser(t, scholarA);
@@ -209,9 +220,8 @@ describe("myCalibrationSummary — scholar self-only, redacted shape", () => {
 
 describe("calibrationForScholar — teacher-gated", () => {
   test("a scholar cannot read the full (teacher) calibration", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedUser(t);
+    const t = sharedSeeded();
+    const scholar = await seedUser(t, "scholar", "pcalib_gate1");
     const asScholar = await withUser(t, scholar);
 
     await expect(
@@ -222,8 +232,7 @@ describe("calibrationForScholar — teacher-gated", () => {
   });
 
   test("a teacher gets the overall summary + per-domain breakdown", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedUser(t, "scholar", "cscholar");
     const teacher = await seedUser(t, "teacher", "cteacher");
     await grantStaffAccessToScholars(t, {
@@ -260,14 +269,14 @@ describe("calibrationForScholar — teacher-gated", () => {
 // institution scoping (requireActiveScholarAccess): a teacher can read a scholar
 // in THEIR institution but not one in another.
 
-async function seedInstitution(t: ReturnType<typeof convexTest>, slug: string) {
+async function seedInstitution(t: TestConvex<typeof schema>, slug: string) {
   return await t.run(async (ctx) =>
     ctx.db.insert("institutions", { name: `Inst ${slug}`, slug, kind: "school" }),
   );
 }
 
 async function seedScholarIn(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   username: string,
   institutionId: Id<"institutions">,
 ) {
@@ -282,7 +291,7 @@ async function seedScholarIn(
 }
 
 async function seedTeacherWithMembership(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   username: string,
   institutionId: Id<"institutions">,
 ) {

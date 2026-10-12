@@ -7,9 +7,11 @@
  * Both engines force the SAME structured shape (the tool's input_schema), so
  * scores stay comparable regardless of which engine produced them:
  *
- *   - anthropic (default, the fallback): the Anthropic SDK with a forced
- *     tool_choice — pinned to JUDGE_MODEL. This is the existing behaviour.
- *   - copilot: Opus via the GitHub Copilot CLI in headless mode. Routes
+ *   - anthropic (default, the fallback): the Anthropic SDK, pinned to
+ *     TUTOR_JUDGE_MODEL (Fable 5.1). Fable rejects a forced tool_choice, so
+ *     the call uses tool_choice auto plus an instruction to call the tool,
+ *     and a reply without the tool call is re-asked like a malformed one.
+ *   - copilot: Claude Fable 5.1 via the GitHub Copilot CLI in headless mode. Routes
  *     judging through a Copilot seat rather than the Anthropic API. Auth
  *     is COPILOT_GITHUB_TOKEN (a fine-grained PAT with the "Copilot Requests"
  *     permission — see `copilot login --help`). The CLI has no tool-forcing API,
@@ -19,24 +21,95 @@
  *
  * Pick the engine with JUDGE_ENGINE=anthropic|copilot (default anthropic).
  * Provenance is stamped on every eval output via `judgeProvenance()`:
- *   anthropic  → the JUDGE_MODEL id            (e.g. "claude-opus-4-8")
- *   copilot    → "copilot-cli:<normalised model>" (e.g. "copilot-cli:claude-opus-4-8")
+ *   anthropic  → the judge model id            (e.g. "claude-fable-5-1")
+ *   copilot    → "copilot-cli:<normalised model>" (e.g. "copilot-cli:claude-fable-5-1")
  * so a report never silently conflates a Copilot-engine run with an API run.
  */
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import type Anthropic from "@anthropic-ai/sdk";
-import { JUDGE_MODEL } from "../../../convex/lib/models";
+import { MODELS, TUTOR_JUDGE_MODEL } from "../../../convex/lib/models";
 
 export type JudgeEngineName = "anthropic" | "copilot";
 
 /**
  * The Copilot CLI model slug for the judge. The CLI takes dotted slugs
- * (`--model claude-opus-4.8`, mirroring its `gpt-5.4` examples); override with
- * COPILOT_MODEL. Kept in lock-step with JUDGE_MODEL's Opus id — a deliberate
- * judge bump should move both together and note the drift (see models.ts).
+ * (`--model claude-fable-5.1`); override with JUDGE_MODEL so workflow dispatches
+ * can back-test an earlier Copilot judge.
  */
-export const COPILOT_JUDGE_CLI_MODEL = process.env.COPILOT_MODEL ?? "claude-opus-4.8";
+export const COPILOT_JUDGE_CLI_MODEL = process.env.JUDGE_MODEL ?? "claude-fable-5.1";
+
+/**
+ * The Anthropic-engine judge. JUDGE_MODEL overrides it too (dotted or dashed —
+ * `claude-opus-4.8` and `claude-opus-4-8` both work), e.g. to re-score a
+ * reference set with the old judge. assertJudgeNotWeaker still applies.
+ */
+export function anthropicJudgeModel(): string {
+  const raw = process.env.JUDGE_MODEL?.trim();
+  return raw ? raw.replace(/\./g, "-") : TUTOR_JUDGE_MODEL;
+}
+
+/** Effort for an always-thinking judge (Fable 5.1, Opus 5.5). JUDGE_EFFORT overrides. */
+export function judgeEffort(model: string): string | undefined {
+  if (process.env.JUDGE_EFFORT) return process.env.JUDGE_EFFORT;
+  return ALWAYS_THINKING.has(model) ? "medium" : undefined;
+}
+
+const ALWAYS_THINKING = new Set<string>([MODELS.FABLE, MODELS.OPUS_5_5]);
+
+/**
+ * Capability order for the "never judge with a weaker model" rule. Higher =
+ * stronger. A model missing from this table can't be ranked, so the guard
+ * refuses it rather than guessing — add it here when it first shows up.
+ */
+const MODEL_RANK: Record<string, number> = {
+  [MODELS.HAIKU]: 1,
+  "claude-haiku-4-5": 1,
+  [MODELS.SONNET]: 2,
+  [MODELS.OPUS]: 3,
+  "claude-opus-5": 4,
+  [MODELS.OPUS_5_5]: 5,
+  "claude-fable-5": 6,
+  [MODELS.FABLE]: 7,
+};
+
+/** The judge model id, engine prefix and dotted slugs normalised away. */
+export function judgeModelId(engine: JudgeEngineName = judgeEngineName()): string {
+  return engine === "copilot"
+    ? COPILOT_JUDGE_CLI_MODEL.replace(/\./g, "-")
+    : anthropicJudgeModel();
+}
+
+/**
+ * Throw unless the judge is at least as strong as every model it is grading.
+ * A weaker judge can't see what the stronger tutor is doing — and it scored an
+ * Opus 5.5 vs Sonnet 5 bake-off as a wash that a blind read called 10-0
+ * (TRA-408). Call it wherever the tutor model is known (regenerate mode,
+ * pairwise). `asis` mode scores whatever shipped, so it has nothing to check.
+ */
+export function assertJudgeNotWeaker(
+  tutorModels: readonly string[],
+  judgeModel: string = judgeModelId(),
+): void {
+  const canonical = (id: string) => id.trim().replace(/\./g, "-");
+  const judge = canonical(judgeModel);
+  const judgeRank = MODEL_RANK[judge];
+  if (judgeRank === undefined) {
+    throw new Error(`judge model "${judge}" has no capability rank — add it to MODEL_RANK in judgeEngine.ts`);
+  }
+  for (const m of new Set(tutorModels.map(canonical))) {
+    const rank = MODEL_RANK[m];
+    if (rank === undefined) {
+      throw new Error(`tutor model "${m}" has no capability rank — add it to MODEL_RANK in judgeEngine.ts`);
+    }
+    if (rank > judgeRank) {
+      throw new Error(
+        `judge "${judge}" is weaker than tutor model "${m}". Never judge with a model weaker ` +
+          `than either model being compared — set JUDGE_MODEL to one at least as strong.`,
+      );
+    }
+  }
+}
 
 /** Read + validate the selected engine from the environment. */
 export function judgeEngineName(): JudgeEngineName {
@@ -49,15 +122,13 @@ export function judgeEngineName(): JudgeEngineName {
 
 /**
  * Provenance string stamped on eval outputs. For the Copilot engine the model
- * is normalised to the dashed id form (`claude-opus-4.8` → `claude-opus-4-8`)
+ * is normalised to the dashed id form (`claude-fable-5.1` → `claude-fable-5-1`)
  * so it reads like the Anthropic model ids and matches stored promptVersion/pulse
  * conventions.
  */
 export function judgeProvenance(engine: JudgeEngineName = judgeEngineName()): string {
-  if (engine === "copilot") {
-    return `copilot-cli:${COPILOT_JUDGE_CLI_MODEL.replace(/\./g, "-")}`;
-  }
-  return JUDGE_MODEL;
+  if (engine === "copilot") return `copilot-cli:${judgeModelId(engine)}`;
+  return judgeModelId(engine);
 }
 
 // ── The structured-tool contract shared by both engines ──────────────────────
@@ -94,11 +165,22 @@ export async function runStructuredJudge(
   opts: RunJudgeOptions,
 ): Promise<Record<string, unknown>> {
   const engine = judgeEngineName();
-  const raw =
-    engine === "copilot"
-      ? runCopilotJudge(opts)
-      : await runAnthropicJudge(opts);
-  return validateToolInput(raw, opts.tool);
+  // A judge call is not deterministic: on welfare turns it sometimes writes
+  // "null" into an integer-only dimension. Re-ask before failing, so one
+  // malformed call no longer aborts the whole run (and every unwritten case).
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const raw =
+        engine === "copilot"
+          ? runCopilotJudge(opts)
+          : await runAnthropicJudge(opts);
+      return validateToolInput(raw, opts.tool);
+    } catch (err) {
+      if (attempt >= MAX_ATTEMPTS) throw err;
+      console.error(`judge: ${(err as Error).message} — retrying (${attempt}/${MAX_ATTEMPTS - 1})`);
+    }
+  }
 }
 
 // ── Anthropic engine (default / fallback) ────────────────────────────────────
@@ -115,17 +197,34 @@ async function runAnthropicJudge(
   opts: RunJudgeOptions,
 ): Promise<Record<string, unknown>> {
   const anthropic = await anthropicClient();
+  const model = anthropicJudgeModel();
+  // Fable 5.1 and Opus 5.5 always think: forced tool_choice is a 400, and
+  // thinking bills against max_tokens, so the cap needs headroom above the
+  // verdict's own size. No refusal fallback on purpose — a verdict from a
+  // different model than the one stamped in provenance would be a silent swap.
+  const thinks = ALWAYS_THINKING.has(model);
+  const effort = judgeEffort(model);
+  const system = thinks
+    ? `${opts.system}\n\nRecord your judgment by calling the ${opts.tool.name} tool exactly once.`
+    : opts.system;
   const response = await anthropic.messages.create({
-    model: JUDGE_MODEL,
-    max_tokens: opts.maxTokens,
-    system: opts.system,
+    model,
+    max_tokens: thinks ? Math.max(opts.maxTokens, 16000) : opts.maxTokens,
+    // The rubric + tool schema is the same on every call of a run (~6k tokens
+    // for the per-turn judge), so cache it: tools render before system, and a
+    // breakpoint on the system block covers both. Only the case text is new
+    // per call. A prefix under the model's cache minimum simply isn't cached.
+    system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
     tools: [opts.tool as unknown as Anthropic.Tool],
-    tool_choice: { type: "tool", name: opts.tool.name },
+    tool_choice: thinks ? { type: "auto" } : { type: "tool", name: opts.tool.name },
+    ...(effort ? { output_config: { effort: effort as "low" | "medium" | "high" | "xhigh" | "max" } } : {}),
     messages: [{ role: "user", content: opts.userText }],
   });
   const block = response.content.find((b) => b.type === "tool_use");
   if (!block || block.type !== "tool_use") {
-    throw new Error(`judge(anthropic): no tool_use in response for ${opts.tool.name}`);
+    throw new Error(
+      `judge(anthropic): no ${opts.tool.name} call in the response (stop_reason ${response.stop_reason})`,
+    );
   }
   return block.input as Record<string, unknown>;
 }

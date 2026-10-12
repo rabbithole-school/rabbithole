@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useAuthToken } from "@convex-dev/auth/react";
 import { toaster } from "@/lib/toaster";
+import { LLM_BUSY_MESSAGE } from "@/shared/llmLimiter";
 import type { ToolActivity, ThinkingActivity } from "@/lib/toolActivityGroups";
 import { reduceThinkingStreamState } from "@/lib/thinkingStreamState";
 
@@ -23,6 +24,10 @@ export interface SessionStreamState {
   /** The model is in a pre-text extended-thinking pause (Fable's always-on
    * thinking, ~10-30s) — lets UIs label the silence "Thinking deeply…". */
   isThinking: boolean;
+  /** The user stopped this turn: the stream is no longer live but the partial
+   * streamingContent is kept on screen until the persisted (finalized) row
+   * takes over. Never true while isStreaming. */
+  stopped: boolean;
 }
 
 const IDLE_STATE: SessionStreamState = {
@@ -32,6 +37,7 @@ const IDLE_STATE: SessionStreamState = {
   toolActivity: [],
   thinkingActivity: [],
   isThinking: false,
+  stopped: false,
 };
 
 interface StreamRegistryContextValue {
@@ -42,6 +48,12 @@ interface StreamRegistryContextValue {
     initialMsgId: string
   ) => Promise<void>;
   stopStream: (sessionId: string) => void;
+  /**
+   * Drop the lingering "stopped" shell for a session once its finalized
+   * (server-persisted) row has landed, so the transcript renders that row
+   * alone. No-op unless the session is currently in the stopped state.
+   */
+  releaseStopped: (sessionId: string) => void;
   getStreamState: (sessionId: string) => SessionStreamState;
   streamingSessionIds: string[];
 }
@@ -49,6 +61,7 @@ interface StreamRegistryContextValue {
 const StreamRegistryContext = createContext<StreamRegistryContextValue>({
   startStream: async () => {},
   stopStream: () => {},
+  releaseStopped: () => {},
   getStreamState: () => IDLE_STATE,
   streamingSessionIds: [],
 });
@@ -56,6 +69,19 @@ const StreamRegistryContext = createContext<StreamRegistryContextValue>({
 export function StreamRegistryProvider({ children }: { children: React.ReactNode }) {
   const [streams, setStreams] = useState<Record<string, SessionStreamState>>({});
   const abortRefs = useRef<Record<string, AbortController>>({});
+  // The in-flight run promise per session, so a new startStream (steering) can
+  // preempt the current one and await its settle before starting — the two
+  // runs never interleave their state.
+  const runPromiseRefs = useRef<Record<string, Promise<void>>>({});
+  // Set true by stopStream so the aborted run's finally KEEPS the partial on
+  // screen (a user stop) instead of deleting the session (a hard error).
+  const userStoppedRefs = useRef<Record<string, boolean>>({});
+  // Monotonic per-session token: each startStream bumps it and captures its
+  // value, so a third rapid send can pre-empt a second still queued behind the
+  // first run's settle (the superseded run bails instead of streaming).
+  const sendGenerationRefs = useRef<Record<string, number>>({});
+  // Flipped false on provider unmount so queued runs don't start after teardown.
+  const mountedRef = useRef(true);
   // Convex Auth JWT — attached to every stream POST so the Convex HTTP
   // actions can authenticate the caller (getAuthUserId) instead of
   // trusting an id from the request body.
@@ -64,6 +90,26 @@ export function StreamRegistryProvider({ children }: { children: React.ReactNode
   useEffect(() => {
     authTokenRef.current = authToken;
   }, [authToken]);
+
+  // Provider unmount: abort every in-flight fetch and invalidate any queued
+  // runs (bump each session's generation so a run awaiting a settle bails
+  // instead of firing a stream into a torn-down tree).
+  useEffect(() => {
+    // Re-arm on every mount: React StrictMode (dev) runs mount → cleanup →
+    // mount, so a cleanup-only flag would stay false and refuse every stream.
+    mountedRef.current = true;
+    const abortControllers = abortRefs.current;
+    const generations = sendGenerationRefs.current;
+    return () => {
+      mountedRef.current = false;
+      for (const sessionId of Object.keys(abortControllers)) {
+        abortControllers[sessionId]?.abort();
+      }
+      for (const sessionId of Object.keys(generations)) {
+        generations[sessionId] += 1;
+      }
+    };
+  }, []);
 
   const patchSession = useCallback(
     (sessionId: string, update: Partial<SessionStreamState> | null) => {
@@ -131,15 +177,16 @@ export function StreamRegistryProvider({ children }: { children: React.ReactNode
     []
   );
 
-  const startStream = useCallback(
+  const runStream = useCallback(
     async (
       sessionId: string,
       url: string,
       body: Record<string, unknown>,
       initialMsgId: string
     ) => {
-      // Abort any existing stream for this session before starting a new one
-      abortRefs.current[sessionId]?.abort();
+      // A fresh run for this session: clear any stale user-stop marker so this
+      // run's own finally cleans up normally.
+      userStoppedRefs.current[sessionId] = false;
 
       const controller = new AbortController();
       abortRefs.current[sessionId] = controller;
@@ -151,6 +198,7 @@ export function StreamRegistryProvider({ children }: { children: React.ReactNode
         toolActivity: [],
         thinkingActivity: [],
         isThinking: false,
+        stopped: false,
       });
 
       let fullContent = "";
@@ -231,9 +279,14 @@ export function StreamRegistryProvider({ children }: { children: React.ReactNode
               }
 
               if (data.error) {
+                const isBusy =
+                  typeof data.error === "string" &&
+                  data.error === LLM_BUSY_MESSAGE;
                 toaster.error({
-                  title: "AI error",
-                  description: "Something went wrong. Please try again.",
+                  title: isBusy ? "Just a moment" : "AI error",
+                  description: isBusy
+                    ? data.error
+                    : "Something went wrong. Please try again.",
                 });
               }
 
@@ -254,9 +307,27 @@ export function StreamRegistryProvider({ children }: { children: React.ReactNode
         }
       } finally {
         delete abortRefs.current[sessionId];
-        // Only clear if the session is still registered as streaming (data.done may have already removed it)
+        const wasUserStopped = userStoppedRefs.current[sessionId];
+        // The marker has been captured for this run; clear it so a later run
+        // for the same session doesn't inherit a stale user-stop flag.
+        delete userStoppedRefs.current[sessionId];
+        // A user-initiated stop keeps the partial on screen: drop the live
+        // stream id (so the message list stops skipping the persisted row and
+        // the finalized row takes over) but do NOT wipe the entry. Any other
+        // exit (natural `done`, error) removes the session as before.
         setStreams((prev) => {
           if (!prev[sessionId]) return prev;
+          if (wasUserStopped) {
+            return {
+              ...prev,
+              [sessionId]: {
+                ...prev[sessionId],
+                isStreaming: false,
+                stopped: true,
+                streamingMsgId: null,
+              },
+            };
+          }
           const next = { ...prev };
           delete next[sessionId];
           return next;
@@ -266,11 +337,59 @@ export function StreamRegistryProvider({ children }: { children: React.ReactNode
     [applyThinkingEvent, patchSession, updateToolActivity]
   );
 
+  // Public entry point. Preempts any in-flight run for this session (steering):
+  // abort its fetch, then wait for that run to settle before starting the new
+  // one, so their states never interleave. A first send starts immediately.
+  const startStream = useCallback(
+    async (
+      sessionId: string,
+      url: string,
+      body: Record<string, unknown>,
+      initialMsgId: string
+    ) => {
+      const previous = runPromiseRefs.current[sessionId];
+      const myGeneration = (sendGenerationRefs.current[sessionId] ?? 0) + 1;
+      sendGenerationRefs.current[sessionId] = myGeneration;
+      abortRefs.current[sessionId]?.abort();
+      const p = (async () => {
+        if (previous) {
+          try {
+            await previous;
+          } catch {
+            /* the previous run owns its own error handling */
+          }
+        }
+        // A newer startStream for this session arrived while we waited for
+        // `previous` to settle (or the provider unmounted) — don't start a
+        // superseded stream.
+        if (!mountedRef.current) return;
+        if (sendGenerationRefs.current[sessionId] !== myGeneration) return;
+        await runStream(sessionId, url, body, initialMsgId);
+      })();
+      runPromiseRefs.current[sessionId] = p;
+      void p.finally(() => {
+        if (runPromiseRefs.current[sessionId] === p) {
+          delete runPromiseRefs.current[sessionId];
+        }
+      });
+      await p;
+    },
+    [runStream]
+  );
+
   const stopStream = useCallback(
     (sessionId: string) => {
+      // A user-initiated stop: mark it so the aborted run's finally keeps the
+      // partial content on screen (the persisted, server-finalized row takes
+      // over within ≤1.5 s), abort the fetch, and flip this session out of the
+      // live-streaming state without dropping its text.
+      userStoppedRefs.current[sessionId] = true;
       abortRefs.current[sessionId]?.abort();
-      delete abortRefs.current[sessionId];
-      patchSession(sessionId, null);
+      patchSession(sessionId, {
+        isStreaming: false,
+        stopped: true,
+        streamingMsgId: null,
+      });
     },
     [patchSession]
   );
@@ -282,13 +401,29 @@ export function StreamRegistryProvider({ children }: { children: React.ReactNode
     [streams]
   );
 
+  const releaseStopped = useCallback((sessionId: string) => {
+    // The finalized (server-persisted) row has landed for a session the user
+    // stopped: drop the lingering stopped shell so the message list renders the
+    // persisted row alone. No-op if the session isn't in the stopped state.
+    setStreams((prev) => {
+      const cur = prev[sessionId];
+      if (!cur || !cur.stopped) return prev;
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+  }, []);
+
   return (
     <StreamRegistryContext.Provider
       value={{
         startStream,
         stopStream,
+        releaseStopped,
         getStreamState,
-        streamingSessionIds: Object.keys(streams),
+        streamingSessionIds: Object.keys(streams).filter(
+          (id) => streams[id]?.isStreaming
+        ),
       }}
     >
       {children}

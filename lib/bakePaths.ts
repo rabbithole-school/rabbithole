@@ -13,10 +13,19 @@ export interface SuggestedPath {
 
 /**
  * Sentinel for the "Endless chat" option — the old ad-lib free exploration with
- * no curated path. Picking it launches a plain (un-shaped) bake, just like
- * before the "choose your path" menu existed.
+ * no curated path. The chat stays open: it is never held behind "building your
+ * quest" nor upgraded in place into a baked activity (a topic star skips the
+ * bake entirely via `createFromSeed({ endlessChat })`).
  */
 export const ENDLESS_CHAT = "endless-chat" as const;
+
+/**
+ * The Convex client queues a call while its socket is down and never gives up
+ * on it; past this deadline the picker shows FALLBACK_PATHS instead of
+ * placeholders (and, on web, a Start button disabled) forever. Mirrored in
+ * native/src/components/BakePathPicker.tsx.
+ */
+export const PATH_SUGGEST_TIMEOUT_MS = 15_000;
 
 /** What the scholar picked in the path menu: a curated path or endless chat. */
 export type PathChoice = SuggestedPath | typeof ENDLESS_CHAT;

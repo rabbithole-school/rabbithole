@@ -10,13 +10,15 @@
  *   2. FRONTIER (new) work is round-robined across domains for balance.
  *   3. A "never 100% review" mix floor reserves ~a quarter of the session for
  *      frontier work whenever any exists (mirrors nextPractice's own mix floor).
+ *   4. Placement-confirmation reviews are capped across the combined run, not
+ *      once per domain.
  *
  * Kept free of Convex/ctx so it unit-tests standalone (mixedQueue.test.ts). The
  * submit path needs nothing special — submitAnswer resolves each item's domain
  * from its own skill (by_nodeKey), so a blended session records correctly.
  */
 
-import { HINT_STRAND_WEIGHT } from "./scheduler";
+import { CONFIRMATION_LANE_CAP, HINT_STRAND_WEIGHT } from "./scheduler";
 
 /** One queued skill, tagged with the domain it belongs to. */
 export type DomainQueueEntry = { domain: string; key: string };
@@ -26,7 +28,12 @@ export type DomainQueueEntry = { domain: string; key: string };
  *  merge ignores those — structural typing lets the richer type flow in). */
 export type MergeableDomainQueue = {
   domain: string;
-  entries: { key: string; reason: "review" | "new"; retention: number }[];
+  entries: {
+    key: string;
+    reason: "review" | "new";
+    isConfirmation: boolean;
+    retention: number;
+  }[];
 };
 
 /** Round-robin interleave a set of per-domain lists into one, preserving each
@@ -58,7 +65,12 @@ export function mergeDomainQueues(
     .flatMap((pd) =>
       pd.entries
         .filter((e) => e.reason === "review")
-        .map((e) => ({ domain: pd.domain, key: e.key, retention: e.retention })),
+        .map((e) => ({
+          domain: pd.domain,
+          key: e.key,
+          isConfirmation: e.isConfirmation,
+          retention: e.retention,
+        })),
     )
     .sort((a, b) => a.retention - b.retention);
   const frontierByDomain = perDomain.map((pd) => ({
@@ -91,10 +103,13 @@ export function mergeDomainQueues(
 
   const out: DomainQueueEntry[] = [];
   const seen = new Set<string>();
-  const push = (e: { domain: string; key: string }) => {
+  let confirmationCount = 0;
+  const push = (e: { domain: string; key: string; isConfirmation?: boolean }) => {
     const id = `${e.domain}\u0000${e.key}`;
     if (seen.has(id)) return;
+    if (e.isConfirmation && confirmationCount >= CONFIRMATION_LANE_CAP) return;
     seen.add(id);
+    if (e.isConfirmation) confirmationCount += 1;
     out.push({ domain: e.domain, key: e.key });
   };
   for (const r of reviews) {

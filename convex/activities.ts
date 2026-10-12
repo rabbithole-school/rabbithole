@@ -7,10 +7,11 @@
 // Scholars hit the 403 wall twice during PR #10 development — when adding a
 // new scholar surface, double-check which variant you're calling.
 
-import { v } from "convex/values";
+import { v, type ObjectType } from "convex/values";
 import {
   authedMutation,
   authedQuery,
+  curriculumMutation,
   staffQuery,
   teacherQuery,
 } from "./lib/customFunctions";
@@ -19,8 +20,12 @@ import {
   requireUnitEditAccessForUser,
 } from "./lib/auth";
 import { validateDeck, validateDeckLenient } from "../shared/slidesScene";
-import { requireUnitAccess } from "./lib/unitAccess";
-import { internalMutation, internalQuery, type MutationCtx } from "./_generated/server";
+import { requireUnitAccess, requireUnitAccessForUser } from "./lib/unitAccess";
+import {
+  internalMutation,
+  internalQuery,
+  type MutationCtx,
+} from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   deliverableValidator,
@@ -28,11 +33,15 @@ import {
   normalizeDeliverable,
   normalizeAdvanceRubric,
   requireDeliverableForOnline,
+  type AdvanceRubricSpec,
   type DeliverableSpec,
 } from "./lib/deliverable";
 import { ensureFlairArtForActivity } from "./flairArt";
 import { resolveActivityWebTarget } from "./lib/webActivityTarget";
-import { duplicateActivityDesign } from "./lib/curriculumDuplication";
+import {
+  duplicateActivityDesign,
+  forkActivityIntoOwnedUnit,
+} from "./lib/curriculumDuplication";
 import { activityResourceDisplayRows } from "./lib/activityResourceDisplay";
 import {
   presentationState,
@@ -46,7 +55,18 @@ import {
 } from "./lib/activityCascade";
 import { GAME_CATALOG, getGame } from "../lib/games/catalog";
 import { isTextArtifact } from "../shared/textArtifacts";
+import { looksLikeHtml } from "../lib/vibecode/helpers";
 import { portfolioFamilySharingEligibility } from "./lib/schoolMediaConsent";
+import { normalizeStoredTutorModel } from "./lib/tutorModel";
+import {
+  buildContractPatch,
+  buildContractValidator,
+} from "./lib/buildContract";
+import { markUnitBuiltInSession } from "./lib/independentStudy";
+import { generateAppToken } from "./customApps";
+import { isUsableVibecodeStarterApp } from "./lib/vibecodeStarter";
+import { assertInstitutionActive } from "./lib/access";
+import { isCurriculumRole, isTeacherRole } from "./lib/roles";
 
 const kindLiteral = v.union(
   v.literal("online"),
@@ -65,6 +85,35 @@ const kindLiteral = v.union(
   // the full-screen VibecodeScreen (see convex/sessions.ts create).
   v.literal("vibecode"),
 );
+
+const tutorModelLiteral = v.union(
+  v.literal("sonnet"),
+  v.literal("fable"),
+);
+
+const scholarsStartFromLiteral = v.union(
+  v.literal("blank"),
+  v.literal("starter"),
+);
+// App designer scholar edit policy (TRA-301); see schema.ts activities.editAccess.
+const editAccessLiteral = v.union(
+  v.literal("always"),
+  v.literal("never"),
+  v.literal("afterCompletion"),
+);
+
+/**
+ * The scholar edit policy steers the App designer only, so the internal
+ * writers (aide + unit tools, TRA-477) refuse it on any other kind rather than
+ * strand a setting nothing reads.
+ */
+function assertEditAccessKind(kind: string | undefined) {
+  if (kind !== "vibecode") {
+    throw new Error(
+      "editAccess (scholarEdit) applies to vibecode activities only.",
+    );
+  }
+}
 
 /**
  * kind="game" fields, shared by create + update. `gameId` must be a game that
@@ -224,13 +273,23 @@ export const listByLesson = authedQuery({
       .query("activities")
       .withIndex("by_lesson", (q) => q.eq("lessonId", args.lessonId))
       .collect();
+    // The activity's app brief (`appRequest`) is a teacher-facing pedagogical
+    // target that must NEVER reach a scholar — but this full query's gate
+    // (`requireUnitEditAccess`) also admits the scholar author of an
+    // Independent Study unit. Strip it for any non-curriculum caller and
+    // expose the boolean `hasAppRequest` instead (matching
+    // `sessions.getWithMessages`).
+    const canReadAppRequest = isCurriculumRole(ctx.user.role);
     return Promise.all(
       acts
         .sort((a, b) => a.order - b.order)
         .map(async (a) => {
           const process = a.processId ? await ctx.db.get(a.processId) : null;
+          const { appRequest, ...rest } = a;
           return {
-            ...a,
+            ...rest,
+            ...(canReadAppRequest ? { appRequest } : {}),
+            hasAppRequest: appRequest != null,
             processTitle: process?.title ?? null,
             processEmoji: process?.emoji ?? null,
           };
@@ -255,7 +314,26 @@ export const get = authedQuery({
     // never plain unit READ access, which includes enrolled scholars. Scholars
     // read activities through the scrubbed `*Public` projections only.
     await requireUnitEditAccess(ctx, { unitId: lesson.unitId });
-    return activity;
+    const starterApp = activity.starterAppId
+      ? await ctx.db.get(activity.starterAppId)
+      : null;
+    // Strip the teacher-facing app brief (`appRequest`) for any non-curriculum
+    // caller — this full query's gate also admits the scholar author of an
+    // Independent Study unit, and the brief must never reach a scholar. Expose
+    // the boolean `hasAppRequest` instead (matching `sessions.getWithMessages`).
+    const { appRequest, ...rest } = activity;
+    return {
+      ...rest,
+      ...(isCurriculumRole(ctx.user.role) ? { appRequest } : {}),
+      hasAppRequest: appRequest != null,
+      starterApp: isUsableVibecodeStarterApp(starterApp)
+        ? {
+            id: starterApp._id,
+            name: starterApp.name,
+            updatedAt: starterApp.updatedAt,
+          }
+        : null,
+    };
   },
 });
 
@@ -347,6 +425,7 @@ export const create = authedMutation({
     scholarDescription: v.optional(v.string()),
     kind: kindLiteral,
     systemPrompt: v.optional(v.string()),
+    tutorModel: v.optional(tutorModelLiteral),
     processId: v.optional(v.id("processes")),
     durationMinutes: v.optional(v.number()),
     defaultMode: v.optional(
@@ -360,9 +439,18 @@ export const create = authedMutation({
     webAllowedHosts: v.optional(v.array(v.string())),
     externalAppId: v.optional(v.id("externalApps")),
     game: v.optional(gameFieldsValidator),
+    // kind="vibecode" only: the model contract + allowSilence (schema.ts).
+    buildContract: v.optional(buildContractValidator),
+    allowSilence: v.optional(v.boolean()),
+    // Explicitly about spelling/typing (schema.ts).
+    assessesWritingMechanics: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     await requireUnitEditAccess(ctx, { lessonId: args.lessonId });
+    const contract = buildContractPatch(args.kind, {
+      buildContract: args.buildContract,
+      allowSilence: args.allowSilence,
+    });
     const existing = await ctx.db
       .query("activities")
       .withIndex("by_lesson", (q) => q.eq("lessonId", args.lessonId))
@@ -375,6 +463,10 @@ export const create = authedMutation({
       scholarDescription: args.scholarDescription?.trim() || undefined,
       kind: args.kind,
       systemPrompt: args.systemPrompt?.trim() || undefined,
+      tutorModel:
+        args.kind === "vibecode"
+          ? normalizeStoredTutorModel(args.tutorModel)
+          : undefined,
       processId: args.processId,
       durationMinutes: args.durationMinutes,
       defaultMode: args.defaultMode,
@@ -388,6 +480,8 @@ export const create = authedMutation({
         args.kind === "game" && args.game
           ? validateGameFields(args.game)
           : undefined,
+      ...contract,
+      assessesWritingMechanics: args.assessesWritingMechanics ? true : undefined,
       order: maxOrder + 1,
       // Seed Share Back defaults at create time so 80% of the time the
       // teacher doesn't have to touch anything before generating the
@@ -563,6 +657,373 @@ export const duplicate = authedMutation({
   },
 });
 
+async function activityWithUnitId(
+  ctx: MutationCtx,
+  activityId: Id<"activities">,
+) {
+  const activity = await ctx.db.get(activityId);
+  if (!activity) throw new Error("Activity not found");
+  if (!activity.lessonId) {
+    throw new Error("Activity is not attached to a lesson");
+  }
+  const lesson = await ctx.db.get(activity.lessonId);
+  if (!lesson) throw new Error("Lesson not found");
+  return { activity, unitId: lesson.unitId };
+}
+
+export const forkToMyUnit = curriculumMutation({
+  args: {
+    activityId: v.id("activities"),
+    targetUnitId: v.optional(v.id("units")),
+  },
+  handler: async (ctx, args) => {
+    await assertInstitutionActive(ctx, ctx.user);
+    const { activity, unitId } = await activityWithUnitId(
+      ctx,
+      args.activityId,
+    );
+    await requireUnitAccess(ctx, unitId);
+    return await forkActivityIntoOwnedUnit(
+      ctx,
+      activity,
+      ctx.user._id,
+      args.targetUnitId,
+    );
+  },
+});
+
+export const forkToMyUnitForAide = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    activityId: v.id("activities"),
+    targetUnitId: v.optional(v.id("units")),
+  },
+  handler: async (ctx, args) => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller || !isTeacherRole(caller.role)) {
+      throw new Error("Forbidden: teacher or admin role required");
+    }
+    await assertInstitutionActive(ctx, caller);
+    const { activity, unitId } = await activityWithUnitId(
+      ctx,
+      args.activityId,
+    );
+    await requireUnitAccessForUser(ctx, caller, unitId);
+    return await forkActivityIntoOwnedUnit(
+      ctx,
+      activity,
+      caller._id,
+      args.targetUnitId,
+    );
+  },
+});
+
+export const prepareVibecodeStarterFromArtifact = internalQuery({
+  args: {
+    activityId: v.id("activities"),
+    artifactId: v.id("artifacts"),
+    callerUserId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller) throw new Error("Caller not found");
+    const { user } = await requireUnitEditAccessForUser(ctx, caller, {
+      activityId: args.activityId,
+    });
+    const activity = await ctx.db.get(args.activityId);
+    if (!activity) throw new Error("Activity not found");
+    if (activity.kind !== "vibecode") {
+      throw new Error("Activity must be vibecode");
+    }
+
+    const artifact = await ctx.db.get(args.artifactId);
+    if (
+      !artifact ||
+      artifact.type !== "code" ||
+      artifact.content.trim().length === 0 ||
+      !looksLikeHtml(artifact.content)
+    ) {
+      throw new Error("Starter artifact must be a non-empty HTML app");
+    }
+
+    const session = await ctx.db.get(artifact.sessionId);
+    if (
+      !session?.isTestDrive ||
+      session.userId !== user._id ||
+      session.activityId !== args.activityId
+    ) {
+      throw new Error(
+        "Starter artifact must come from your rehearsal of this activity",
+      );
+    }
+    return {
+      title: artifact.title,
+      html: artifact.content,
+      revision: artifact.revision ?? 0,
+    };
+  },
+});
+
+// Cheap idempotency probe the promotion ACTION runs BEFORE copying any asset
+// blobs: if this activity's starter was already promoted from this exact
+// (artifact, revision), copying would leak orphaned storage objects on the
+// no-op short-circuit (F6). Returns the existing promotion result, or null.
+export const vibecodeStarterAlreadyPromoted = internalQuery({
+  args: {
+    activityId: v.id("activities"),
+    artifactId: v.id("artifacts"),
+    sourceRevision: v.number(),
+    callerUserId: v.id("users"),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    id: Id<"customApps">;
+    name: string;
+    updatedAt: number;
+  } | null> => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller) throw new Error("Caller not found");
+    await requireUnitEditAccessForUser(ctx, caller, {
+      activityId: args.activityId,
+    });
+    const activity = await ctx.db.get(args.activityId);
+    if (!activity?.starterAppId) return null;
+    const starterApp = await ctx.db.get(activity.starterAppId);
+    if (
+      starterApp &&
+      starterApp.kind === "static" &&
+      starterApp.origin === "starter" &&
+      starterApp.sourceArtifactId === args.artifactId &&
+      starterApp.sourceRevision === args.sourceRevision
+    ) {
+      return {
+        id: activity.starterAppId,
+        name: starterApp.name,
+        updatedAt: starterApp.updatedAt ?? Date.now(),
+      };
+    }
+    return null;
+  },
+});
+
+/**
+ * Write an activity's vibecode starter app — the ONE writer behind rehearsal
+ * promotion (`commitVibecodeStarterFromArtifact`) and the file installer
+ * (`appInstall.installAppAsActivity`). Patches the activity's own starter in
+ * place (deleting the storage it no longer references), forks a fresh row when
+ * another activity still shares the starter, or inserts the first one. The
+ * caller owns access checks, idempotency, and the activity patch.
+ */
+export async function writeVibecodeStarterApp(
+  ctx: MutationCtx,
+  args: {
+    activity: Doc<"activities">;
+    createdBy: Id<"users">;
+    name: string;
+    html: string;
+    appAssetIds: Id<"_storage">[];
+    thumbnailStorageId?: Id<"_storage">;
+    // Rehearsal provenance; absent for an installed app (clears it on patch).
+    sourceArtifactId?: Id<"artifacts">;
+    sourceRevision?: number;
+    appAi?: Doc<"customApps">["appAi"];
+    updatedAt: number;
+  },
+): Promise<Id<"customApps">> {
+  const fields = {
+    name: args.name,
+    html: args.html,
+    appAssetIds: args.appAssetIds.length > 0 ? args.appAssetIds : undefined,
+    thumbnailStorageId: args.thumbnailStorageId,
+    updatedAt: args.updatedAt,
+    sourceArtifactId: args.sourceArtifactId,
+    sourceRevision: args.sourceRevision,
+    appAi: args.appAi,
+  };
+  const insertStarter = () =>
+    ctx.db.insert("customApps", {
+      token: generateAppToken(),
+      kind: "static",
+      status: "live",
+      origin: "starter",
+      createdBy: args.createdBy,
+      ...fields,
+    });
+  const starterAppId = args.activity.starterAppId;
+  if (!starterAppId) return await insertStarter();
+  const starterApp = await ctx.db.get(starterAppId);
+  if (!starterApp) {
+    throw new Error("Referenced activity starter app was not found");
+  }
+  if (starterApp.kind !== "static") {
+    throw new Error("Referenced activity starter app must be static");
+  }
+  // Promotion forks a shared starter rather than editing it in place; never
+  // rewrite a row another activity still points at.
+  const references = await ctx.db
+    .query("activities")
+    .withIndex("by_starterAppId", (q) => q.eq("starterAppId", starterAppId))
+    .take(2);
+  if (references.length > 1) return await insertStarter();
+  const retainedStorageIds = new Set<Id<"_storage">>(args.appAssetIds);
+  if (args.thumbnailStorageId) retainedStorageIds.add(args.thumbnailStorageId);
+  const supersededStorageIds = new Set(
+    (starterApp.appAssetIds ?? []).filter((id) => !retainedStorageIds.has(id)),
+  );
+  if (
+    starterApp.thumbnailStorageId &&
+    !retainedStorageIds.has(starterApp.thumbnailStorageId)
+  ) {
+    supersededStorageIds.add(starterApp.thumbnailStorageId);
+  }
+  await ctx.db.patch(starterAppId, fields);
+  for (const storageId of supersededStorageIds) {
+    await ctx.storage.delete(storageId);
+  }
+  return starterAppId;
+}
+
+export const commitVibecodeStarterFromArtifact = internalMutation({
+  args: {
+    activityId: v.id("activities"),
+    artifactId: v.id("artifacts"),
+    callerUserId: v.id("users"),
+    sourceRevision: v.number(),
+    html: v.string(),
+    appAssetIds: v.array(v.id("_storage")),
+  },
+  handler: async (ctx, args) => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller) throw new Error("Caller not found");
+    const { user } = await requireUnitEditAccessForUser(ctx, caller, {
+      activityId: args.activityId,
+    });
+    const activity = await ctx.db.get(args.activityId);
+    if (!activity) throw new Error("Activity not found");
+    if (activity.kind !== "vibecode") {
+      throw new Error("Activity must be vibecode");
+    }
+    const artifact = await ctx.db.get(args.artifactId);
+    if (
+      !artifact ||
+      artifact.type !== "code" ||
+      (artifact.revision ?? 0) !== args.sourceRevision
+    ) {
+      throw new Error("The rehearsal app changed while it was being saved.");
+    }
+    const session = await ctx.db.get(artifact.sessionId);
+    if (
+      !session?.isTestDrive ||
+      session.userId !== user._id ||
+      session.activityId !== args.activityId
+    ) {
+      throw new Error(
+        "Starter artifact must come from your rehearsal of this activity",
+      );
+    }
+
+    const latestSnapshotMessage = await ctx.db
+      .query("messages")
+      .withIndex("by_session", (q) => q.eq("sessionId", session._id))
+      .filter((q) => q.neq(q.field("appSnapshotStorageId"), undefined))
+      .order("desc")
+      .first();
+    const thumbnailStorageId = latestSnapshotMessage?.appSnapshotStorageId;
+    const updatedAt = Date.now();
+    // Every branch below snapshots the rehearsal app's server-only AI spec
+    // (character persona, judge rubrics) with its HTML, so scholars clone the
+    // character the teacher rehearsed. An absent spec clears the starter's.
+    // FIRST promotion: no starter existed yet. On first save the build-session
+    // autosave also switches scholars onto the saved app (F8) — matching the
+    // aide's existing-app hand-off, which sets `scholarsStartFrom: "starter"`
+    // at convex/lib/customAppTools.ts. Without this, an autosaved starter would
+    // never reach scholars (they'd open a blank slate).
+    const firstPromotion = !activity.starterAppId;
+    if (activity.starterAppId) {
+      const starterApp = await ctx.db.get(activity.starterAppId);
+      // Autosave idempotency: if this starter was already promoted from this
+      // exact (artifact, revision), a re-run is a no-op. Keeps the App
+      // designer's per-turn autosave from re-copying assets or churning rows.
+      if (
+        starterApp?.kind === "static" &&
+        starterApp.origin === "starter" &&
+        starterApp.sourceArtifactId === args.artifactId &&
+        starterApp.sourceRevision === args.sourceRevision
+      ) {
+        return {
+          id: activity.starterAppId,
+          name: starterApp.name,
+          updatedAt: starterApp.updatedAt ?? updatedAt,
+        };
+      }
+    }
+    const starterAppId = await writeVibecodeStarterApp(ctx, {
+      activity,
+      createdBy: user._id,
+      name: artifact.title,
+      html: args.html,
+      appAssetIds: args.appAssetIds,
+      thumbnailStorageId,
+      sourceArtifactId: args.artifactId,
+      sourceRevision: args.sourceRevision,
+      appAi: artifact.appAi,
+      updatedAt,
+    });
+    await ctx.db.patch(args.activityId, {
+      starterAppId,
+      ...(firstPromotion && activity.scholarsStartFrom === undefined
+        ? { scholarsStartFrom: "starter" as const }
+        : {}),
+    });
+    return { id: starterAppId, name: artifact.title, updatedAt };
+  },
+});
+
+export const clearVibecodeStarter = authedMutation({
+  args: { activityId: v.id("activities") },
+  handler: async (ctx, args) => {
+    await requireUnitEditAccess(ctx, { activityId: args.activityId });
+    await ctx.db.patch(args.activityId, {
+      starterAppId: undefined,
+      scholarsStartFrom: undefined,
+    });
+    return null;
+  },
+});
+
+export const setScholarsStartFrom = authedMutation({
+  args: {
+    activityId: v.id("activities"),
+    value: scholarsStartFromLiteral,
+  },
+  handler: async (ctx, args) => {
+    await requireUnitEditAccess(ctx, { activityId: args.activityId });
+    const activity = await ctx.db.get(args.activityId);
+    if (!activity) throw new Error("Activity not found");
+    if (activity.kind !== "vibecode") {
+      throw new Error("Activity must be vibecode");
+    }
+    if (args.value === "starter") {
+      const hasUsableStarter = activity.starterAppId
+        ? isUsableVibecodeStarterApp(
+            await ctx.db.get(activity.starterAppId),
+          )
+        : false;
+      if (!hasUsableStarter) {
+        throw new Error(
+          "Save an activity starter before choosing Saved app",
+        );
+      }
+    }
+    await ctx.db.patch(args.activityId, {
+      scholarsStartFrom: args.value,
+    });
+    return null;
+  },
+});
+
 export const update = authedMutation({
   args: {
     id: v.id("activities"),
@@ -571,11 +1032,21 @@ export const update = authedMutation({
     scholarDescription: v.optional(v.union(v.string(), v.null())),
     kind: v.optional(kindLiteral),
     systemPrompt: v.optional(v.union(v.string(), v.null())),
+    tutorModel: v.optional(v.union(tutorModelLiteral, v.null())),
+    scholarsStartFrom: v.optional(scholarsStartFromLiteral),
+    // kind="vibecode" only: the App designer scholar edit policy (TRA-301).
+    editAccess: v.optional(editAccessLiteral),
+    // kind="vibecode" only: the model contract (null clears) + allowSilence.
+    buildContract: v.optional(v.union(buildContractValidator, v.null())),
+    allowSilence: v.optional(v.boolean()),
     processId: v.optional(v.union(v.id("processes"), v.null())),
     durationMinutes: v.optional(v.union(v.number(), v.null())),
     // Pass the full spec to set / replace, or null to clear it.
     deliverable: v.optional(v.union(deliverableValidator, v.null())),
     hasScholarAngles: v.optional(v.boolean()),
+    // This activity is explicitly about spelling/typing (schema.ts). false
+    // clears it back to the default (unset).
+    assessesWritingMechanics: v.optional(v.boolean()),
     // Design-time intent for how this activity is meant to be done.
     defaultMode: v.optional(
       v.union(
@@ -616,6 +1087,13 @@ export const update = authedMutation({
     await requireUnitEditAccess(ctx, { activityId: args.id });
     const { id, ...fields } = args;
     const updates: Record<string, unknown> = {};
+    const currentActivity =
+      (fields.tutorModel !== undefined ||
+        fields.buildContract !== undefined ||
+        fields.allowSilence !== undefined) &&
+      fields.kind === undefined
+        ? await ctx.db.get(id)
+        : null;
     let flairCriteria:
       | Array<{ id: string; label: string; description?: string }>
       | undefined;
@@ -628,6 +1106,16 @@ export const update = authedMutation({
     if (fields.kind !== undefined) updates.kind = fields.kind;
     if (fields.systemPrompt !== undefined)
       updates.systemPrompt = fields.systemPrompt?.trim() || undefined;
+    if (fields.tutorModel !== undefined) {
+      const targetKind = fields.kind ?? currentActivity?.kind;
+      updates.tutorModel =
+        targetKind === "vibecode"
+          ? normalizeStoredTutorModel(fields.tutorModel)
+          : undefined;
+    }
+    if (fields.scholarsStartFrom !== undefined)
+      updates.scholarsStartFrom = fields.scholarsStartFrom;
+    if (fields.editAccess !== undefined) updates.editAccess = fields.editAccess;
     if (fields.processId !== undefined)
       updates.processId = fields.processId ?? undefined;
     if (fields.durationMinutes !== undefined)
@@ -636,11 +1124,21 @@ export const update = authedMutation({
       const normalized = fields.deliverable
         ? normalizeDeliverable(fields.deliverable)
         : undefined;
+      if (normalized) {
+        const existing = await ctx.db.get(id);
+        if (existing) {
+          assertOneEvaluationBar(existing, { deliverable: normalized });
+        }
+      }
       updates.deliverable = normalized;
       flairCriteria = normalized?.criteria;
     }
     if (fields.hasScholarAngles !== undefined)
       updates.hasScholarAngles = fields.hasScholarAngles;
+    if (fields.assessesWritingMechanics !== undefined)
+      updates.assessesWritingMechanics = fields.assessesWritingMechanics
+        ? true
+        : undefined;
     if (fields.defaultMode !== undefined)
       updates.defaultMode = fields.defaultMode;
     if (fields.shareBackRecipe !== undefined) {
@@ -685,6 +1183,23 @@ export const update = authedMutation({
     // Angles only apply to online activities — clear when flipping away.
     if (fields.kind !== undefined && fields.kind !== "online") {
       updates.hasScholarAngles = undefined;
+    }
+    Object.assign(
+      updates,
+      buildContractPatch(
+        fields.kind ?? currentActivity?.kind,
+        {
+          buildContract: fields.buildContract,
+          allowSilence: fields.allowSilence,
+        },
+        currentActivity?.buildContract,
+      ),
+    );
+    if (fields.kind !== undefined && fields.kind !== "vibecode") {
+      updates.tutorModel = undefined;
+      // The contract steers the App designer only — drop it on a kind flip.
+      updates.buildContract = undefined;
+      updates.allowSilence = undefined;
     }
     // Conversation recipes (baseline/exitTicket) apply to online activities
     // (tutor-run) AND offline activities (the uploaded artifact is assessed
@@ -871,13 +1386,6 @@ export const collateDeliverablesForActivity = staffQuery({
         const videoThumbUrl = capture?.videoThumbStorageId
           ? await ctx.storage.getUrl(capture.videoThumbStorageId)
           : null;
-        // Magic Annotations: the "magic version" of the scan (Magic Corners
-        // redrawn), same file kind as the original. Exposed ALONGSIDE fileUrl
-        // (which stays the original) — the data layer carries both and the UI
-        // chooses which to show. null when the scan had no marker.
-        const magicUrl = portfolioItem?.magicStorageId
-          ? await ctx.storage.getUrl(portfolioItem.magicStorageId)
-          : null;
         const contentKind:
           | "text"
           | "map"
@@ -923,7 +1431,6 @@ export const collateDeliverablesForActivity = staffQuery({
             : textContent,
           mapContent,
           fileUrl,
-          magicUrl,
           thumbUrl,
           videoThumbUrl,
           videoDurationMs: capture?.videoDurationMs ?? null,
@@ -1192,6 +1699,37 @@ const parentValidator = v.object({
   lessonId: v.id("lessons"),
 });
 
+/**
+ * An activity carries EITHER a deliverable OR an advanceRubric, never both.
+ * Beyond the schema's intent this keeps two writers apart: a photo/text
+ * submission and the conversation-rubric upsert both key their `deliverables`
+ * row on `(sessionId, activityId, artifactId === undefined)`, so an activity
+ * holding both would have them overwrite each other's verdicts (TRA-340).
+ * Checks what is being ADDED against what the row already carries.
+ */
+function assertOneEvaluationBar(
+  existing: Pick<Doc<"activities">, "deliverable" | "advanceRubric">,
+  adding: {
+    deliverable?: DeliverableSpec;
+    advanceRubric?: AdvanceRubricSpec;
+  },
+) {
+  if (adding.advanceRubric && existing.deliverable) {
+    throw new Error(
+      "This activity already has a document quality map; it can't also " +
+        "take an advanceRubric (an activity has EITHER, not both). " +
+        "Clear the deliverable first if you meant to switch bars.",
+    );
+  }
+  if (adding.deliverable && existing.advanceRubric) {
+    throw new Error(
+      "This activity already has a conversation advance gate; it can't also " +
+        "take a deliverable (an activity has EITHER, not both). " +
+        "Clear the advanceRubric first if you meant to switch bars.",
+    );
+  }
+}
+
 export const upsertInternal = internalMutation({
   args: {
     parent: parentValidator,
@@ -1209,6 +1747,21 @@ export const upsertInternal = internalMutation({
     scholarDescription: v.optional(v.string()),
     kind: v.optional(kindLiteral),
     systemPrompt: v.optional(v.string()),
+    tutorModel: v.optional(tutorModelLiteral),
+    // Starter validation lives in resolveStaticAppForCoachedActivity; create_scholar_activity must never expose these args.
+    starterAppId: v.optional(v.id("customApps")),
+    scholarsStartFrom: v.optional(scholarsStartFromLiteral),
+    // Teacher build request carried in by make_app_a_coached_activity's
+    // hand-off path; never scholar-facing. create_scholar_activity must never
+    // expose this arg.
+    appRequest: v.optional(v.string()),
+    // kind="vibecode" only: the model contract + allowSilence (schema.ts).
+    // Supplied = replace; omitted = keep.
+    buildContract: v.optional(buildContractValidator),
+    allowSilence: v.optional(v.boolean()),
+    // kind="vibecode" only: the scholar edit policy (TRA-301). Supplied =
+    // replace; omitted = keep (absent on the row reads as "always").
+    editAccess: v.optional(editAccessLiteral),
     processId: v.optional(v.id("processes")),
     durationMinutes: v.optional(v.number()),
     /** Optional zero-based insertion slot. Collisions shift an occupied run. */
@@ -1218,10 +1771,14 @@ export const upsertInternal = internalMutation({
     recipe: v.optional(
       v.union(v.literal("baseline"), v.literal("exitTicket")),
     ),
+    // Explicitly about spelling/typing (schema.ts). Supplied = set/clear
+    // (false clears); omitted = keep.
+    assessesWritingMechanics: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const parent = args.parent;
     const kind = args.kind ?? "online";
+    const tutorModel = normalizeStoredTutorModel(args.tutorModel);
     const deliverable = normalizeDeliverable(args.deliverable);
     const advanceRubric = normalizeAdvanceRubric(args.advanceRubric);
     if (deliverable && advanceRubric) {
@@ -1266,20 +1823,7 @@ export const upsertInternal = internalMutation({
       // row that already carries one evaluation shape must be stopped from gaining
       // the other here (e.g. create-with-deliverable, then a retry that
       // supplies only an advanceRubric).
-      if (advanceRubric && existing.deliverable) {
-        throw new Error(
-          "This activity already has a document quality map; it can't also " +
-            "take an advanceRubric (an activity has EITHER, not both). " +
-            "Clear the deliverable first if you meant to switch bars.",
-        );
-      }
-      if (deliverable && existing.advanceRubric) {
-        throw new Error(
-          "This activity already has a conversation advance gate; it can't also " +
-            "take a deliverable (an activity has EITHER, not both). " +
-            "Clear the advanceRubric first if you meant to switch bars.",
-        );
-      }
+      assertOneEvaluationBar(existing, { deliverable, advanceRubric });
       const patch: Record<string, unknown> = {};
       // Patch deliverable if the caller supplied one AND it differs
       // (or the existing row had none). This is the path that fixes
@@ -1299,6 +1843,62 @@ export const upsertInternal = internalMutation({
           (existing.systemPrompt ?? "")
       ) {
         patch.systemPrompt = args.systemPrompt.trim() || undefined;
+      }
+      if (
+        existing.kind !== "vibecode" ||
+        (args.kind !== undefined && args.kind !== "vibecode")
+      ) {
+        if (existing.tutorModel !== undefined) {
+          patch.tutorModel = undefined;
+        }
+      } else if (
+        args.tutorModel !== undefined &&
+        tutorModel !== existing.tutorModel
+      ) {
+        patch.tutorModel = tutorModel;
+      }
+      if (
+        args.starterAppId !== undefined &&
+        args.starterAppId !== existing.starterAppId
+      ) {
+        patch.starterAppId = args.starterAppId;
+      }
+      if (
+        args.scholarsStartFrom !== undefined &&
+        args.scholarsStartFrom !== existing.scholarsStartFrom
+      ) {
+        patch.scholarsStartFrom = args.scholarsStartFrom;
+      }
+      // The patch branch never changes an existing row's kind, so the
+      // contract is judged against the kind the row keeps (existing.kind).
+      // A retry naming a DIFFERENT kind (e.g. vibecode + contract against a
+      // row that is online) gets the row as it is: its contract fields are
+      // dropped rather than thrown, so a retry stays a no-throw recovery and
+      // a contract is never stranded on a kind the designer never runs.
+      if (args.kind === undefined || args.kind === existing.kind) {
+        Object.assign(
+          patch,
+          buildContractPatch(
+            existing.kind,
+            {
+              buildContract: args.buildContract,
+              allowSilence: args.allowSilence,
+            },
+            existing.buildContract,
+          ),
+        );
+        if (args.editAccess !== undefined) {
+          assertEditAccessKind(existing.kind);
+          if (args.editAccess !== existing.editAccess) {
+            patch.editAccess = args.editAccess;
+          }
+        }
+      }
+      if (
+        args.appRequest !== undefined &&
+        (args.appRequest.trim() || "") !== (existing.appRequest ?? "")
+      ) {
+        patch.appRequest = args.appRequest.trim() || undefined;
       }
       if (
         args.description !== undefined &&
@@ -1323,6 +1923,14 @@ export const upsertInternal = internalMutation({
       }
       if (recipe !== undefined && recipe !== existing.recipe) {
         patch.recipe = recipe;
+      }
+      if (
+        args.assessesWritingMechanics !== undefined &&
+        args.assessesWritingMechanics !== (existing.assessesWritingMechanics === true)
+      ) {
+        patch.assessesWritingMechanics = args.assessesWritingMechanics
+          ? true
+          : undefined;
       }
       if (Object.keys(patch).length > 0) {
         await ctx.db.patch(existing._id, patch);
@@ -1350,6 +1958,11 @@ export const upsertInternal = internalMutation({
     }
 
     // ── Insert branch ──────────────────────────────────────────────
+    if (args.editAccess !== undefined) assertEditAccessKind(kind);
+    const contract = buildContractPatch(kind, {
+      buildContract: args.buildContract,
+      allowSilence: args.allowSilence,
+    });
     const lessonId = parent.lessonId;
     const peers = await ctx.db
       .query("activities")
@@ -1376,12 +1989,19 @@ export const upsertInternal = internalMutation({
       scholarDescription: args.scholarDescription?.trim() || undefined,
       kind,
       systemPrompt: args.systemPrompt?.trim() || undefined,
+      tutorModel: kind === "vibecode" ? tutorModel : undefined,
+      starterAppId: args.starterAppId,
+      scholarsStartFrom: args.scholarsStartFrom,
+      appRequest: args.appRequest?.trim() || undefined,
+      editAccess: args.editAccess,
+      ...contract,
       processId: args.processId,
       durationMinutes: args.durationMinutes,
       order,
       deliverable,
       advanceRubric,
       recipe,
+      assessesWritingMechanics: args.assessesWritingMechanics ? true : undefined,
     });
     if (deliverable?.criteria.length) {
       await ensureFlairArtForActivity(ctx, insertedId, deliverable.criteria);
@@ -1400,41 +2020,64 @@ export const upsertInternal = internalMutation({
 // Legacy wrapper — kept while call sites migrate. New code should
 // call upsertInternal directly. Returns just the id to match the
 // old signature.
+const createInternalArgs = {
+  lessonId: v.id("lessons"),
+  title: v.string(),
+  description: v.optional(v.string()),
+  kind: kindLiteral,
+  systemPrompt: v.optional(v.string()),
+  tutorModel: v.optional(tutorModelLiteral),
+  processId: v.optional(v.id("processes")),
+  durationMinutes: v.optional(v.number()),
+  deliverable: v.optional(deliverableValidator),
+  buildContract: v.optional(buildContractValidator),
+  allowSilence: v.optional(v.boolean()),
+  assessesWritingMechanics: v.optional(v.boolean()),
+};
+
+/** The body of `createInternal`, shared with the app installer
+ *  (`appInstall.installAppAsActivity`) so there is one activity-insert path. */
+export async function createActivityCore(
+  ctx: MutationCtx,
+  args: ObjectType<typeof createInternalArgs>,
+): Promise<Id<"activities">> {
+  const deliverable = normalizeDeliverable(args.deliverable);
+  requireDeliverableForOnline(args.kind, deliverable);
+  const contract = buildContractPatch(args.kind, {
+    buildContract: args.buildContract,
+    allowSilence: args.allowSilence,
+  });
+  const peers = await ctx.db
+    .query("activities")
+    .withIndex("by_lesson", (q) => q.eq("lessonId", args.lessonId))
+    .collect();
+  const maxOrder = peers.reduce((max, a) => Math.max(max, a.order), -1);
+  const activityId = await ctx.db.insert("activities", {
+    lessonId: args.lessonId,
+    title: args.title.trim() || "New activity",
+    description: args.description?.trim() || undefined,
+    kind: args.kind,
+    systemPrompt: args.systemPrompt?.trim() || undefined,
+    tutorModel:
+      args.kind === "vibecode"
+        ? normalizeStoredTutorModel(args.tutorModel)
+        : undefined,
+    processId: args.processId,
+    durationMinutes: args.durationMinutes,
+    order: maxOrder + 1,
+    deliverable,
+    ...contract,
+    assessesWritingMechanics: args.assessesWritingMechanics ? true : undefined,
+  });
+  if (deliverable?.criteria.length) {
+    await ensureFlairArtForActivity(ctx, activityId, deliverable.criteria);
+  }
+  return activityId;
+}
+
 export const createInternal = internalMutation({
-  args: {
-    lessonId: v.id("lessons"),
-    title: v.string(),
-    description: v.optional(v.string()),
-    kind: kindLiteral,
-    systemPrompt: v.optional(v.string()),
-    processId: v.optional(v.id("processes")),
-    durationMinutes: v.optional(v.number()),
-    deliverable: v.optional(deliverableValidator),
-  },
-  handler: async (ctx, args) => {
-    const deliverable = normalizeDeliverable(args.deliverable);
-    requireDeliverableForOnline(args.kind, deliverable);
-    const peers = await ctx.db
-      .query("activities")
-      .withIndex("by_lesson", (q) => q.eq("lessonId", args.lessonId))
-      .collect();
-    const maxOrder = peers.reduce((max, a) => Math.max(max, a.order), -1);
-    const activityId = await ctx.db.insert("activities", {
-      lessonId: args.lessonId,
-      title: args.title.trim() || "New activity",
-      description: args.description?.trim() || undefined,
-      kind: args.kind,
-      systemPrompt: args.systemPrompt?.trim() || undefined,
-      processId: args.processId,
-      durationMinutes: args.durationMinutes,
-      order: maxOrder + 1,
-      deliverable,
-    });
-    if (deliverable?.criteria.length) {
-      await ensureFlairArtForActivity(ctx, activityId, deliverable.criteria);
-    }
-    return activityId;
-  },
+  args: createInternalArgs,
+  handler: createActivityCore,
 });
 
 export const updateInternal = internalMutation({
@@ -1445,10 +2088,19 @@ export const updateInternal = internalMutation({
     scholarDescription: v.optional(v.union(v.string(), v.null())),
     kind: v.optional(kindLiteral),
     systemPrompt: v.optional(v.union(v.string(), v.null())),
+    tutorModel: v.optional(v.union(tutorModelLiteral, v.null())),
+    scholarsStartFrom: v.optional(scholarsStartFromLiteral),
+    // kind="vibecode" only: the App designer scholar edit policy (TRA-301).
+    editAccess: v.optional(editAccessLiteral),
+    // kind="vibecode" only: the model contract (null clears) + allowSilence.
+    buildContract: v.optional(v.union(buildContractValidator, v.null())),
+    allowSilence: v.optional(v.boolean()),
     processId: v.optional(v.union(v.id("processes"), v.null())),
     durationMinutes: v.optional(v.union(v.number(), v.null())),
     deliverable: v.optional(v.union(deliverableValidator, v.null())),
     hasScholarAngles: v.optional(v.boolean()),
+    // Explicitly about spelling/typing (schema.ts); false clears.
+    assessesWritingMechanics: v.optional(v.boolean()),
     defaultMode: v.optional(
       v.union(
         v.literal("classFocus"),
@@ -1463,6 +2115,14 @@ export const updateInternal = internalMutation({
   handler: async (ctx, args) => {
     const { id, ...fields } = args;
     const updates: Record<string, unknown> = {};
+    const currentActivity =
+      (fields.tutorModel !== undefined ||
+        fields.buildContract !== undefined ||
+        fields.allowSilence !== undefined ||
+        fields.editAccess !== undefined) &&
+      fields.kind === undefined
+        ? await ctx.db.get(id)
+        : null;
     let flairCriteria:
       | Array<{ id: string; label: string; description?: string }>
       | undefined;
@@ -1475,6 +2135,19 @@ export const updateInternal = internalMutation({
     if (fields.kind !== undefined) updates.kind = fields.kind;
     if (fields.systemPrompt !== undefined)
       updates.systemPrompt = fields.systemPrompt?.trim() || undefined;
+    if (fields.tutorModel !== undefined) {
+      const targetKind = fields.kind ?? currentActivity?.kind;
+      updates.tutorModel =
+        targetKind === "vibecode"
+          ? normalizeStoredTutorModel(fields.tutorModel)
+          : undefined;
+    }
+    if (fields.scholarsStartFrom !== undefined)
+      updates.scholarsStartFrom = fields.scholarsStartFrom;
+    if (fields.editAccess !== undefined) {
+      assertEditAccessKind(fields.kind ?? currentActivity?.kind);
+      updates.editAccess = fields.editAccess;
+    }
     if (fields.processId !== undefined)
       updates.processId = fields.processId ?? undefined;
     if (fields.durationMinutes !== undefined)
@@ -1483,11 +2156,21 @@ export const updateInternal = internalMutation({
       const normalized = fields.deliverable
         ? normalizeDeliverable(fields.deliverable)
         : undefined;
+      if (normalized) {
+        const existing = await ctx.db.get(id);
+        if (existing) {
+          assertOneEvaluationBar(existing, { deliverable: normalized });
+        }
+      }
       updates.deliverable = normalized;
       flairCriteria = normalized?.criteria;
     }
     if (fields.hasScholarAngles !== undefined)
       updates.hasScholarAngles = fields.hasScholarAngles;
+    if (fields.assessesWritingMechanics !== undefined)
+      updates.assessesWritingMechanics = fields.assessesWritingMechanics
+        ? true
+        : undefined;
     if (fields.defaultMode !== undefined)
       updates.defaultMode = fields.defaultMode;
     if (fields.recipe !== undefined)
@@ -1501,6 +2184,24 @@ export const updateInternal = internalMutation({
     ) {
       updates.recipe = undefined;
     }
+    Object.assign(
+      updates,
+      buildContractPatch(
+        fields.kind ?? currentActivity?.kind,
+        {
+          buildContract: fields.buildContract,
+          allowSilence: fields.allowSilence,
+        },
+        currentActivity?.buildContract,
+      ),
+    );
+    if (fields.kind !== undefined && fields.kind !== "vibecode") {
+      updates.tutorModel = undefined;
+      // The contract steers the App designer only — drop it on a kind flip.
+      updates.buildContract = undefined;
+      updates.allowSilence = undefined;
+      updates.editAccess = undefined;
+    }
     await ctx.db.patch(id, updates);
     if (flairCriteria?.length) {
       await ensureFlairArtForActivity(ctx, id, flairCriteria);
@@ -1510,7 +2211,7 @@ export const updateInternal = internalMutation({
 
 /**
  * Internal: activity-create variant invoked by the scholar IS
- * planning tutor (convex/http.ts /project-stream). Verifies the
+ * planning tutor (convex/http.ts /session-stream). Verifies the
  * scholar owns the IS unit before writing — same gate as
  * `lessons.aiCreateForIsUnit`.
  *
@@ -1536,6 +2237,7 @@ export const aiCreateForIsUnit = internalMutation({
     title: v.string(),
     kind: kindLiteral,
     systemPrompt: v.string(),
+    tutorModel: v.optional(tutorModelLiteral),
     // Optional tutor-supplied deliverable for online activities. When
     // omitted, an auto-mode text deliverable is synthesized from the
     // title/systemPrompt so the default is always scorable.
@@ -1545,6 +2247,8 @@ export const aiCreateForIsUnit = internalMutation({
         notes: v.optional(v.string()),
       }),
     ),
+    // The planning session whose tutor is building the unit (TRA-464).
+    sessionId: v.optional(v.id("sessions")),
   },
   handler: async (ctx, args) => {
     const unit = await ctx.db.get(args.unitId);
@@ -1583,14 +2287,24 @@ export const aiCreateForIsUnit = internalMutation({
       .withIndex("by_lesson", (q) => q.eq("lessonId", args.lessonId))
       .collect();
     const maxOrder = peers.reduce((m, a) => Math.max(m, a.order), -1);
-    return await ctx.db.insert("activities", {
+    const activityId = await ctx.db.insert("activities", {
       lessonId: args.lessonId,
       title: args.title.trim() || "New activity",
       kind: args.kind,
       systemPrompt: args.systemPrompt.trim() || undefined,
+      tutorModel:
+        args.kind === "vibecode"
+          ? normalizeStoredTutorModel(args.tutorModel)
+          : undefined,
       order: maxOrder + 1,
       deliverable,
     });
+    await markUnitBuiltInSession(ctx, {
+      sessionId: args.sessionId,
+      scholarId: args.scholarId,
+      unitId: args.unitId,
+    });
+    return activityId;
   },
 });
 

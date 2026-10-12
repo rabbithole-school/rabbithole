@@ -1,65 +1,31 @@
 import { describe, expect, test } from "vitest";
 import { linkTopicFor } from "../slackTools";
 
-// The topic-string selection is a pure function so we can pin the exact stamp
-// per link type without standing up the tool loop. These strings are what the
-// bot writes to a channel's topic on the explicit LINK action.
+// Behavior of the topic selector, not its copy: which inputs surface in the
+// stamp, which roles must NOT claim safety alerts, and Slack's hard cap.
 
-describe("linkTopicFor — the self-documenting channel topic per link type", () => {
-  test("group link uses the canonical group name", () => {
-    expect(linkTopicFor("group", { groupName: "Geckos" })).toBe(
-      "📚 Geckos · Rabbithole activity updates",
-    );
+describe("linkTopicFor — channel topic per link type", () => {
+  test("group topics carry the trimmed group name, with a fallback when blank", () => {
+    expect(linkTopicFor("group", { groupName: "  Sea Turtles  " })).toContain("Sea Turtles");
+    expect(linkTopicFor("group", { groupName: "  Sea Turtles  " })).not.toContain("  ");
+    expect(linkTopicFor("group", { groupName: "" })).toBe(linkTopicFor("group"));
+    expect(linkTopicFor("group")).not.toBe("");
   });
 
-  test("group name is trimmed, with a sensible fallback when blank", () => {
-    expect(linkTopicFor("group", { groupName: "  Sea Turtles  " })).toBe(
-      "📚 Sea Turtles · Rabbithole activity updates",
-    );
-    expect(linkTopicFor("group", { groupName: "" })).toBe(
-      "📚 Scholar group · Rabbithole activity updates",
-    );
-    expect(linkTopicFor("group")).toBe(
-      "📚 Scholar group · Rabbithole activity updates",
-    );
+  test("scoped alerts name the institution; catchall and unknown role share one stamp", () => {
+    const scoped = linkTopicFor("alerts", { alertsRole: "scoped", institutionName: "Moli School" });
+    expect(scoped).toContain("Moli School");
+    expect(linkTopicFor("alerts", { alertsRole: "catchall" })).toBe(linkTopicFor("alerts"));
+    expect(scoped).not.toBe(linkTopicFor("alerts"));
   });
 
-  test("catchall alerts link (or role unknown) is the generic alerts stamp", () => {
-    expect(linkTopicFor("alerts", { alertsRole: "catchall" })).toBe(
-      "🚨 Rabbithole alerts · safety alerts & weekly reports",
-    );
-    expect(linkTopicFor("alerts")).toBe(
-      "🚨 Rabbithole alerts · safety alerts & weekly reports",
-    );
-  });
-
-  test("scoped alerts link names the institution", () => {
-    expect(
-      linkTopicFor("alerts", { alertsRole: "scoped", institutionName: "Moli School" }),
-    ).toBe("🚨 Moli School · Rabbithole safety alerts & weekly reports");
-  });
-
-  test("platform-ops link never claims safety alerts (and drops the siren)", () => {
-    const topic = linkTopicFor("alerts", { alertsRole: "platform-ops" });
-    expect(topic).toBe(
-      "📊 Rabbithole platform ops · cost/usage reports & system alerts",
-    );
-    expect(topic).not.toContain("safety");
-    expect(topic).not.toContain("🚨");
-  });
-
-  test("improvement-loop link names only the generic policies", () => {
-    const topic = linkTopicFor("alerts", { alertsRole: "improvement-loops" });
-    expect(topic).toBe(
-      "🔄 Rabbithole improvement loops · Rounds, Coherence & proposals",
-    );
-    expect(topic).not.toContain("scholar");
-  });
-
-  test("parent-message link flags PRIVATE / staff-only", () => {
-    expect(linkTopicFor("parent")).toBe(
-      "✉️ Rabbithole parent messages · PRIVATE — staff only",
-    );
+  test("platform-ops and improvement-loop channels never claim safety alerts", () => {
+    for (const alertsRole of ["platform-ops", "improvement-loops"] as const) {
+      const topic = linkTopicFor("alerts", { alertsRole });
+      expect(topic).not.toContain("safety");
+      expect(topic).not.toContain("🚨");
+      expect(topic).not.toBe(linkTopicFor("alerts"));
+    }
   });
 
   test("every stamp is within Slack's 250-char topic cap", () => {

@@ -18,7 +18,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useAction, useConvex, useMutation, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import { Center, Dialog, Portal, Text } from "@chakra-ui/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -60,7 +60,7 @@ export function SlidesArtifactView({
   const generateSlideImage = useAction(api.artifacts.scholarGenerateSlideImage);
   const searchWebImages = useAction(api.slidesImageSearch.searchWebImages);
   const pickWebImage = useAction(api.slidesImageSearch.pickWebImage);
-  const exportDeck = useAction(api.slidesExport.exportDeck);
+  const exportDeck = useAction(api.slidesExport.exportDeckFile);
   const [exportError, setExportError] = useState<string | null>(null);
   // The slide the editor opens on. `null` = the editor is closed; keeping the
   // index here (rather than a bare `open` flag) is what makes clicking slide 4
@@ -74,7 +74,6 @@ export function SlidesArtifactView({
   const [imageSearchSnapshot, setImageSearchSnapshot] = useState<ImageSearchSnapshot>(
     EMPTY_IMAGE_SEARCH_SNAPSHOT,
   );
-  const getFileUrl = useConvex();
   const deck = parseDeck(content);
 
   // Derived, never stored: a viewer who loses edit rights mid-view (the teacher
@@ -102,8 +101,8 @@ export function SlidesArtifactView({
   }, [deck]);
 
   const assetUrls = useQuery(
-    api.files.getUrls,
-    assetIds.length > 0 ? { storageIds: assetIds } : "skip",
+    api.artifacts.slideAssetUrls,
+    assetIds.length > 0 ? { artifactId, storageIds: assetIds } : "skip",
   );
 
   // Deleting (or adding) an image changes `assetIds`, changing this query's
@@ -165,23 +164,21 @@ export function SlidesArtifactView({
   /**
    * Export the deck and hand the file to the browser.
    *
-   * The action renders bytes SERVER-side and returns a storage id, so a .pptx is
-   * identical whichever client asked for it. We then resolve that id to a URL and
-   * open it — rather than streaming bytes through the action's return value,
-   * which would put a whole deck in a function response.
+   * The action renders bytes SERVER-side and returns the stored file's URL, so a
+   * .pptx is identical whichever client asked for it — rather than streaming
+   * bytes through the action's return value, which would put a whole deck in a
+   * function response.
    */
   const onExport = useCallback(
     async (format: "pptx" | "pdf") => {
       try {
-        const storageId = await exportDeck({ artifactId, format });
-        const url = await getFileUrl.query(api.files.getUrl, { storageId });
-        if (!url) throw new Error("The exported file could not be opened.");
+        const { url } = await exportDeck({ artifactId, format });
         window.open(url, "_blank", "noopener");
       } catch (e) {
         setExportError(e instanceof Error ? e.message : String(e));
       }
     },
-    [exportDeck, getFileUrl, artifactId],
+    [exportDeck, artifactId],
   );
 
   const onOps = useCallback(

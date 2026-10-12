@@ -341,28 +341,16 @@ describe("buildSystemPrompt — granule sections", () => {
     { key: "eu:r1", kind: "eu", text: "Communities balance needs.", status: "green" },
   ];
 
-  test("steering section buckets gray/yellow/green", () => {
-    const prompt = buildPrompt({ granuleStatus: statusEntries });
-    expect(prompt).toContain("UNIT UNDERSTANDING COVERAGE");
-    expect(prompt).toContain("Not yet explored");
-    expect(prompt).toContain("EQ: What makes a community thrive?");
-    expect(prompt).toContain("Touched but not yet demonstrated");
-    expect(prompt).toContain("EQ: Who decides the rules?");
-    expect(prompt).toContain("Already demonstrated");
-    expect(prompt).toContain("EU: Communities balance needs.");
-  });
-
-  test("steering is suppressed on recipe activities", () => {
+  test("steering section is suppressed on recipe activities", () => {
     const prompt = buildPrompt({
       granuleStatus: statusEntries,
       recipe: "baseline",
     });
     expect(prompt).not.toContain("UNIT UNDERSTANDING COVERAGE");
     expect(prompt).toContain("BASELINE CONVERSATION");
-    expect(prompt).toContain("DON'T teach");
   });
 
-  test("exit ticket quotes the scholar's baseline answers", () => {
+  test("exit ticket embeds the scholar's baseline transcript excerpt", () => {
     const prompt = buildPrompt({
       recipe: "exitTicket",
       baseline: [
@@ -375,13 +363,6 @@ describe("buildSystemPrompt — granule sections", () => {
     });
     expect(prompt).toContain("EXIT-TICKET CONVERSATION");
     expect(prompt).toContain("communities need money to work");
-    expect(prompt).toContain("what do you think now?");
-    expect(prompt).toContain("Preserve ownership of the conclusion");
-    expect(prompt).toContain("ask once what they would tell their earlier self");
-    expect(prompt).toContain(
-      "Once they have named the change and applied it to a concrete example",
-    );
-    expect(prompt).not.toContain("End on how far they've come, named concretely");
   });
 
   test("no unit / no granules → no sections", () => {

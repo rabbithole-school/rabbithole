@@ -45,14 +45,23 @@ import {
 } from "./answers";
 import type { WorkedStep } from "./fadedSteps";
 import {
+  addWithin20MakeTenSteps,
+  clockRemainderSteps,
   columnAddSteps,
   columnSubtractSteps,
+  commonFactorsSteps,
+  compareGreaterSteps,
   complementProbabilitySteps,
+  countListOutcomesSteps,
+  cycleBipartiteSteps,
   decimalAddSubtractSteps,
   decimalDivideSteps,
   decimalMultiplySteps,
   decimalNotationSteps,
+  degreeSequenceSteps,
+  divisibilityRuleSteps,
   expectedFrequencySteps,
+  exponentRepeatedMultSteps,
   fractionAddSubtractLikeSteps,
   fractionAddSubtractUnlikeSteps,
   fractionDivideSteps,
@@ -61,12 +70,22 @@ import {
   longDivisionSteps,
   meanSteps,
   medianSteps,
+  negationSteps,
   orderOfOperationsSteps,
+  parityProofSteps,
   partialProductsSteps,
+  permutationsSteps,
+  pigeonholeSteps,
+  primeCompositeSteps,
+  primeFactorizationExponentSteps,
+  primeGapSteps,
   probabilityFractionSteps,
   rangeSteps,
   sampleSpaceSteps,
+  twinPrimesSteps,
+  twoStepExpressionSteps,
   unitFractionDividedByWholeSteps,
+  weekdayRemainderSteps,
   wholeDividedByUnitFractionSteps,
 } from "./workedStepGen";
 import {
@@ -482,7 +501,6 @@ const NEW_COVERAGE_SKILL_KEYS = new Set([
   "long_division_1digit_divisor",
   "long_division_2digit_divisor",
   "factors_and_multiples",
-  "prime_composite",
   "add_subtract_properties",
   "mult_commutative_associative",
   "mult_distributive",
@@ -551,6 +569,12 @@ const NEW_COVERAGE_SKILL_KEYS = new Set([
   "compare_same_center_different_spread",
   "typical_distance_from_fair_share",
   "outlier_effect_on_mean_median",
+  "population_vs_sample",
+  "representative_random_sample",
+  "estimate_population_from_sample",
+  "sampling_variability",
+  "compare_populations_from_samples",
+  "margin_of_error_range",
   // PR4 — 4th-grade-edge densification (dedicated coverage in placementV2Templates.test.ts)
   "place_value_relationships",
   "compare_multidigit",
@@ -881,12 +905,13 @@ function decomposeTensOnes(n: number): number[] {
   return ones === 0 ? [tens] : [tens, ones];
 }
 
-function choiceItem(
+export function choiceItem(
   rng: Rng,
   stem: string,
   correct: string,
   distractors: string[],
   promptVisual?: PracticePromptVisual,
+  workedSteps?: WorkedStep[],
 ) {
   const options = [...new Set([correct, ...distractors])].slice(0, 4);
   if (options.length < 3) throw new Error(`Multiple-choice template needs at least 3 options: ${stem}`);
@@ -897,6 +922,7 @@ function choiceItem(
     answer: choiceAns(choices.indexOf(correct)),
     choices,
     promptVisual,
+    ...(workedSteps ? withWorkedSteps(workedSteps) : {}),
   };
 }
 
@@ -1660,15 +1686,17 @@ const TEMPLATES: Template[] = [
     };
   }),
   T("area_model_multiplication", "integer", (r) => {
-    const a = r.int(2, 9) * 10 + r.int(1, 9);
-    const b = r.int(1, 6) * 10 + r.int(1, 9);
+    const a = r.int(2, 9);
+    const b = r.int(1, 4) * 10 + r.int(1, 9);
+    const answer = intAns(a * b);
     return {
-      stem: `What is ${a} × ${b}? Use the area model.`,
-      answer: intAns(a * b),
+      stem: `What is ${a} × ${b}? (Try splitting ${b} into ${Math.floor(b / 10) * 10} + ${b % 10}.)`,
+      answer,
       promptVisual: makeAreaModelPromptVisual({
-        widthParts: decomposeTensOnes(a),
+        widthParts: [a],
         heightParts: decomposeTensOnes(b),
       }),
+      ...withWorkedSteps(partialProductsSteps(b, a, answer)),
     };
   }),
   T("compare_within_10", "integer", (r) => {
@@ -1706,7 +1734,12 @@ const TEMPLATES: Template[] = [
     const a = r.int(100, 999);
     let b = r.int(100, 999);
     if (a === b) b = b === 999 ? 998 : b + 1;
-    return { stem: `Which is greater, ${a} or ${b}? (type the larger number)`, answer: intAns(Math.max(a, b)) };
+    const answer = intAns(Math.max(a, b));
+    return {
+      stem: `Which is greater, ${a} or ${b}? (type the larger number)`,
+      answer,
+      ...withWorkedSteps(compareGreaterSteps(answer)),
+    };
   }),
   T("place_value_to_1000", "integer", (r) => {
     const digits = [r.int(1, 9), r.int(1, 9), r.int(1, 9)];
@@ -1822,7 +1855,13 @@ const TEMPLATES: Template[] = [
   T("add_within_20_regroup", "integer", (r) => {
     const a = r.int(5, 9);
     const b = r.int(11 - a > 2 ? 11 - a : 2, 9); // force ones carry past 10
-    return { stem: `${a} + ${b} = ?`, answer: intAns(a + b), variant: { a, op: "+", b } };
+    const answer = intAns(a + b);
+    return {
+      stem: `${a} + ${b} = ?`,
+      answer,
+      variant: { a, op: "+", b },
+      ...withWorkedSteps(addWithin20MakeTenSteps(a, b, answer)),
+    };
   }),
   T("subtract_within_20", "integer", (r) => {
     const a = r.int(10, 20);
@@ -1880,7 +1919,8 @@ const TEMPLATES: Template[] = [
   }),
   T("subtract_3digit_regroup", "integer", (r) => {
     const { a, b } = subtract(r, 3, true);
-    return { stem: `${a} − ${b} = ?`, answer: intAns(a - b) };
+    const answer = intAns(a - b);
+    return { stem: `${a} − ${b} = ?`, answer, ...withWorkedSteps(columnSubtractSteps(a, b, answer)) };
   }),
   T("add_multidigit_algorithm", "integer", (r) => {
     const a = r.int(1000, 9999);
@@ -2023,14 +2063,15 @@ const TEMPLATES: Template[] = [
     const k = r.int(2, 10);
     return { stem: `What is the ${formatOrdinal(k)} positive multiple of ${base}?`, answer: intAns(base * k) };
   }),
-  T("prime_composite", "integer", (r) => {
-    const n = r.pick([2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 4, 6, 8, 9, 12, 15, 21, 25, 27, 33, 35, 49]);
-    return { stem: `How many positive factors does ${n} have? (A prime has exactly 2.)`, answer: intAns(factorCount(n)) };
-  }),
   T("divisibility_rules_2_5_10", "integer", (r) => {
     const divisor = r.pick([2, 5, 10]);
     const n = r.int(20, 999);
-    return { stem: `What is the remainder when ${n} is divided by ${divisor}? (0 means divisible.)`, answer: intAns(n % divisor) };
+    const answer = intAns(n % divisor);
+    return {
+      stem: `What is the remainder when ${n} is divided by ${divisor}? (0 means divisible.)`,
+      answer,
+      ...withWorkedSteps(divisibilityRuleSteps(n, divisor, answer)),
+    };
   }),
   T("divisibility_rules_3_9", "integer", (r) => {
     const divisor = r.pick([3, 9]);
@@ -2054,9 +2095,11 @@ const TEMPLATES: Template[] = [
     ];
     const item = r.pick(cases);
     const ask = r.pick(item.asks);
+    const answer = intAns(ask.exponent);
     return {
       stem: `The prime factorization of ${item.n} is ${item.text}. What is the exponent of ${ask.prime}?`,
-      answer: intAns(ask.exponent),
+      answer,
+      ...withWorkedSteps(primeFactorizationExponentSteps(ask.prime, item.text, answer)),
     };
   }),
   T("gcf", "integer", (r) => {
@@ -2086,7 +2129,12 @@ const TEMPLATES: Template[] = [
     // identical, so every seed outside the three capped cells re-derives the
     // same stem/answer as before.
     while (Math.pow(base, exponent) > 256) exponent -= 1;
-    return { stem: `${base}^${exponent} = ?`, answer: intAns(Math.pow(base, exponent)) };
+    const answer = intAns(Math.pow(base, exponent));
+    return {
+      stem: `${base}^${exponent} = ?`,
+      answer,
+      ...withWorkedSteps(exponentRepeatedMultSteps(base, exponent, answer)),
+    };
   }),
   T("square_cube_numbers", "integer", (r) => {
     if (r.int(0, 1) === 0) {
@@ -2107,17 +2155,21 @@ const TEMPLATES: Template[] = [
       const start = r.int(1, 12);
       const hours = r.int(5, 100);
       const answer = ((start + hours - 1) % 12) + 1;
+      const typed = intAns(answer);
       return {
         stem: `On a 12-hour clock, ${start} o'clock + ${hours} hours = ? o'clock`,
-        answer: intAns(answer),
+        answer: typed,
         promptVisual: makeClockfacePromptVisual({ highlightHour: start }),
+        ...withWorkedSteps(clockRemainderSteps(start, hours, typed)),
       };
     }
     const day = r.int(0, 6);
     const daysLater = r.int(20, 200);
+    const answer = intAns((day + daysLater) % 7);
     return {
       stem: `Today is day ${day} (0=Sun…6=Sat). What day number is it ${daysLater} days later?`,
-      answer: intAns((day + daysLater) % 7),
+      answer,
+      ...withWorkedSteps(weekdayRemainderSteps(day, daysLater, answer)),
     };
   }),
 
@@ -3151,6 +3203,190 @@ const TEMPLATES: Template[] = [
       answer: intAns(askMean ? center + 2 : center),
       promptVisual: integerLinePlot(values),
     };
+  }),
+
+  // Sampling and inference.
+  T("population_vs_sample", "multipleChoice", (r) => {
+    const cases = [
+      {
+        question: "which lunch option all 620 students at a school prefer",
+        observation: "The researcher surveys 80 students selected from the school roster.",
+        population: "all 620 students at the school",
+        sample: "the 80 students surveyed",
+        responseSubset: "the surveyed students who prefer pizza",
+        samplingFrame: "the school roster used to select names",
+      },
+      {
+        question: "how satisfied all 2,400 library cardholders are with weekend hours",
+        observation: "The library asks 120 cardholders selected from its full member list.",
+        population: "all 2,400 library cardholders",
+        sample: "the 120 cardholders asked",
+        responseSubset: "the cardholders who say they are satisfied",
+        samplingFrame: "the membership list used to select cardholders",
+      },
+      {
+        question: "which park feature all 900 neighborhood households want most",
+        observation: "The city contacts 75 households selected from the neighborhood address list.",
+        population: "all 900 neighborhood households",
+        sample: "the 75 households contacted",
+        responseSubset: "the contacted households that prefer a playground",
+        samplingFrame: "the address list used to select households",
+      },
+    ];
+    const item = r.pick(cases);
+    return choiceItem(
+      r,
+      `A researcher wants to learn ${item.question}. ${item.observation} Which choice correctly names the population and sample?`,
+      `Population: ${item.population}; sample: ${item.sample}.`,
+      [
+        `Population: ${item.sample}; sample: ${item.population}.`,
+        `Population: ${item.sample}; sample: ${item.responseSubset}.`,
+        `Population: ${item.samplingFrame}; sample: ${item.population}.`,
+      ],
+    );
+  }),
+  T("representative_random_sample", "multipleChoice", (r) => {
+    const cases = [
+      {
+        stem: "A school wants to estimate which lunch option all students prefer. Which sampling plan is most likely to represent the whole school?",
+        correct: "Use a random number generator to select students from the full school roster.",
+        distractors: [
+          "Ask only students already waiting in the pizza line.",
+          "Post a voluntary poll in the cooking club.",
+          "Survey the first class that finishes lunch.",
+        ],
+      },
+      {
+        stem: "A town wants to estimate support for a new park among all households. Which sampling plan is most likely to represent the town?",
+        correct: "Randomly select addresses from the complete town address list.",
+        distractors: [
+          "Ask only households next to the proposed park.",
+          "Invite responses on the parks department's social-media page.",
+          "Survey people attending one weekend sports event.",
+        ],
+      },
+      {
+        stem: "A library wants to estimate satisfaction with weekend hours among all cardholders. Which sampling plan is most likely to represent its cardholders?",
+        correct: "Randomly select cardholders from the complete membership list.",
+        distractors: [
+          "Ask only people visiting on Saturday morning.",
+          "Survey volunteers in the library's book club.",
+          "Use the first 50 complaint emails received.",
+        ],
+      },
+    ];
+    const item = r.pick(cases);
+    return choiceItem(r, item.stem, item.correct, item.distractors);
+  }),
+  T("estimate_population_from_sample", "integer", (r) => {
+    const sampleSize = r.pick([20, 25, 40, 50]);
+    const successes = r.int(Math.ceil(sampleSize * 0.2), Math.floor(sampleSize * 0.8));
+    const scale = r.pick([10, 12, 20, 25]);
+    const populationSize = sampleSize * scale;
+    return {
+      stem: `In a random sample of ${sampleSize} households, ${successes} support a proposal. The population has ${populationSize} households. Based on the sample proportion, estimate how many households in the population support it.`,
+      answer: intAns(successes * scale),
+    };
+  }),
+  T("sampling_variability", "multipleChoice", (r) => {
+    const center = r.int(35, 65);
+    const offsets = r.pick([
+      [-4, 1, -2, 3],
+      [-3, 2, 4, -1],
+      [-5, -1, 2, 4],
+    ]);
+    const estimates = offsets.map((offset) => center + offset);
+    const justified = [
+      "Different random samples can produce different estimates for the same population.",
+      "Some sample-to-sample variation is expected even when the population stays the same.",
+      "Random samples of equal size need not give identical estimates of one population.",
+    ];
+    const unjustified = [
+      [
+        "The population must have changed between samples.",
+        "Different estimates prove the population changed before each sample.",
+        "The population could not have stayed the same while these samples were taken.",
+      ],
+      [
+        "Only the largest sample estimate can be valid.",
+        "The greatest percentage must be the one true population value.",
+        "All estimates except the largest should be discarded as invalid.",
+      ],
+      [
+        "Random sampling failed because the estimates are not identical.",
+        "A proper random sample would give exactly the same percentage every time.",
+        "The differing estimates show that none of the samples was random.",
+      ],
+    ];
+    const askForUnjustified = r.int(0, 3) === 0;
+    if (askForUnjustified) {
+      const misconception = r.pick(unjustified);
+      return choiceItem(
+        r,
+        `Four random samples of the same size from one population estimate support at ${estimates.map((value) => `${value}%`).join(", ")}. Which conclusion is NOT justified?`,
+        r.pick(misconception),
+        justified,
+      );
+    }
+    return choiceItem(
+      r,
+      `Four random samples of the same size from one population estimate support at ${estimates.map((value) => `${value}%`).join(", ")}. What does this variation show?`,
+      r.pick(justified),
+      unjustified.map((phrases) => r.pick(phrases)),
+    );
+  }),
+  T("compare_populations_from_samples", "multipleChoice", (r) => {
+    const lowCenter = r.int(52, 62);
+    const distanceA = r.pick([2, 4]);
+    const distanceB = distanceA === 2 ? 4 : 2;
+    const largerRange = 2 * Math.max(distanceA, distanceB);
+    // Keep the center difference at least twice the larger sample range, so
+    // the informal population comparison is clearly stronger than the spread.
+    const highCenter = lowCenter + r.int(2 * largerRange, 2 * largerRange + 6);
+    const aIsHigher = r.int(0, 1) === 0;
+    const centerA = aIsHigher ? highCenter : lowCenter;
+    const centerB = aIsHigher ? lowCenter : highCenter;
+    const sampleA = shuffledNumbers(
+      [centerA - distanceA, centerA - 1, centerA, centerA + 1, centerA + distanceA],
+      r,
+    );
+    const sampleB = shuffledNumbers(
+      [centerB - distanceB, centerB - 1, centerB, centerB + 1, centerB + distanceB],
+      r,
+    );
+    const higherLabel = aIsHigher ? "A" : "B";
+    const lowerLabel = aIsHigher ? "B" : "A";
+    const higherDistance = aIsHigher ? distanceA : distanceB;
+    const lowerDistance = aIsHigher ? distanceB : distanceA;
+    const higherSpread = higherDistance > lowerDistance ? "more" : "less";
+    return choiceItem(
+      r,
+      `Random samples from two populations give these values. Sample A: ${sampleA.join(", ")}. Sample B: ${sampleB.join(", ")}. Which inference is best supported by the sample means and ranges?`,
+      `Population ${higherLabel} likely has a higher typical value and ${higherSpread} variability.`,
+      [
+        `Population ${higherLabel} likely has a higher typical value and ${higherSpread === "more" ? "less" : "more"} variability.`,
+        `Population ${lowerLabel} likely has a higher typical value and ${higherSpread} variability.`,
+        "The populations must have exactly the same center and spread.",
+      ],
+    );
+  }),
+  T("margin_of_error_range", "multipleChoice", (r) => {
+    const estimate = r.int(30, 70);
+    const margin = r.int(2, 6);
+    const plausible = estimate + r.int(1, margin) * (r.int(0, 1) === 0 ? -1 : 1);
+    const thirdIsBelow = r.int(0, 1) === 0;
+    return choiceItem(
+      r,
+      `A poll estimates ${estimate}% support with a margin of error of ${margin} percentage points. Which population percentage is inside the plausible range?`,
+      `${plausible}%`,
+      [
+        `${estimate - margin - r.int(1, 4)}%`,
+        `${estimate + margin + r.int(1, 4)}%`,
+        thirdIsBelow
+          ? `${estimate - margin - r.int(5, 8)}%`
+          : `${estimate + margin + r.int(5, 8)}%`,
+      ],
+    );
   }),
 
   // Geometry & measurement (grades 1–6)
@@ -6775,13 +7011,26 @@ const TEMPLATES: Template[] = [
   T("prime_or_composite", "multipleChoice", (r) => {
     const n = r.pick([2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 4, 6, 8, 9, 10, 12, 14, 15, 16, 18, 20, 21, 25, 27, 33, 35, 49]);
     // A prime has exactly two factors (1 and itself).
-    return { stem: `Is ${n} prime or composite?`, answer: choiceAns(factorCount(n) === 2 ? 0 : 1), choices: PRIME_COMPOSITE_CHOICES };
+    const choiceIndex = factorCount(n) === 2 ? 0 : 1;
+    const answer = choiceAns(choiceIndex);
+    const answerLabel = choiceIndex === 0 ? "Prime" : "Composite";
+    return {
+      stem: `Is ${n} prime or composite?`,
+      answer,
+      choices: PRIME_COMPOSITE_CHOICES,
+      ...withWorkedSteps(primeCompositeSteps(n, answerLabel)),
+    };
   }),
   T("common_factors", "integer", (r) => {
     const g = r.int(2, 12);
     const a = g * r.int(1, 6);
     const b = g * r.int(1, 6);
-    return { stem: `How many common factors do ${a} and ${b} have?`, answer: intAns(commonFactorCount(a, b)) };
+    const answer = intAns(commonFactorCount(a, b));
+    return {
+      stem: `How many common factors do ${a} and ${b} have?`,
+      answer,
+      ...withWorkedSteps(commonFactorsSteps(a, b, answer)),
+    };
   }),
   T("common_multiples", "multipleChoice", (r) => {
     const a = r.int(2, 9);
@@ -6813,18 +7062,42 @@ const TEMPLATES: Template[] = [
     const product = d * q;
     const shape = r.int(0, 3);
     // shape 0: X + b × c  (× second — L→R would add first)
-    if (shape === 0) return { stem: `${a} + ${b} × ${c} = ?`, answer: intAns(a + b * c) };
+    if (shape === 0) {
+      const answer = intAns(a + b * c);
+      return {
+        stem: `${a} + ${b} × ${c} = ?`,
+        answer,
+        ...withWorkedSteps(twoStepExpressionSteps(`${b} × ${c}`, b * c, a, "+", answer)),
+      };
+    }
     // shape 1: X − a × b  (× on the right — L→R would subtract first). X ≥ a×b.
     if (shape === 1) {
       const prod = a * b;
       const x = prod + r.int(0, 20);
-      return { stem: `${x} − ${a} × ${b} = ?`, answer: intAns(x - prod) };
+      const answer = intAns(x - prod);
+      return {
+        stem: `${x} − ${a} × ${b} = ?`,
+        answer,
+        ...withWorkedSteps(twoStepExpressionSteps(`${a} × ${b}`, prod, x, "−", answer)),
+      };
     }
     // shape 2: X + product ÷ d  (÷ second — L→R would add first). product/d = q.
-    if (shape === 2) return { stem: `${a} + ${product} ÷ ${d} = ?`, answer: intAns(a + q) };
+    if (shape === 2) {
+      const answer = intAns(a + q);
+      return {
+        stem: `${a} + ${product} ÷ ${d} = ?`,
+        answer,
+        ...withWorkedSteps(twoStepExpressionSteps(`${product} ÷ ${d}`, q, a, "+", answer)),
+      };
+    }
     // shape 3: X − product ÷ d  (÷ on the right — L→R would subtract first). X ≥ q.
     const x = q + r.int(0, 20);
-    return { stem: `${x} − ${product} ÷ ${d} = ?`, answer: intAns(x - q) };
+    const answer = intAns(x - q);
+    return {
+      stem: `${x} − ${product} ÷ ${d} = ?`,
+      answer,
+      ...withWorkedSteps(twoStepExpressionSteps(`${product} ÷ ${d}`, q, x, "−", answer)),
+    };
   }),
 
   // ── discrete-math: counting / graph-theory / number-theory / logic ────────
@@ -6843,7 +7116,8 @@ const TEMPLATES: Template[] = [
           // reads as the SAME card/outcome, which would make the answer 1.
           `${capitalize(first.verb)} ${first.label}, then ${first.verb} again. How many different outcomes are possible?`
         : `${capitalize(first.verb)} ${first.label}. Then ${second.verb} ${second.label}. How many different outcomes are possible in total?`;
-    return { stem, answer: intAns(first.n * second.n) };
+    const answer = intAns(first.n * second.n);
+    return { stem, answer, ...withWorkedSteps(countListOutcomesSteps(first.n, second.n, answer)) };
   }),
   T("count_organized_count", "integer", (r) => {
     const scenario = r.pick(ATTRIBUTE_SCENARIOS);
@@ -6896,9 +7170,11 @@ const TEMPLATES: Template[] = [
     const n = r.int(4, 8);
     const rCount = r.int(2, Math.min(4, n));
     const noun = r.pick(PERM_NOUN_POOL);
+    const answer = intAns(permCount(n, rCount));
     return {
       stem: `From ${n} ${noun}, how many ways can you place ${rCount} in order on a shelf?`,
-      answer: intAns(permCount(n, rCount)),
+      answer,
+      ...withWorkedSteps(permutationsSteps(n, rCount, answer)),
     };
   }),
   T("combinations_r_from_n", "integer", (r) => {
@@ -6958,9 +7234,11 @@ const TEMPLATES: Template[] = [
     const m = r.int(2, 7);
     const remainder = r.int(0, k - 1);
     const n = k * (m - 1) + remainder + 1;
+    const answer = intAns(m);
     return {
       stem: `${n} books go on ${k} shelves. Some shelf must hold at least how many books?`,
-      answer: intAns(m),
+      answer,
+      ...withWorkedSteps(pigeonholeSteps(n, k, answer)),
     };
   }),
 
@@ -7002,12 +7280,16 @@ const TEMPLATES: Template[] = [
       .map(seqStr)
       .filter((s) => s !== correct);
     const distractors = [...new Set(variantCandidates)].slice(0, 3);
-    return choiceItem(
-      r,
-      `For the graph with edges ${edgeListString(edges)}, which is the degree sequence?`,
-      correct,
-      distractors,
-    );
+    return {
+      ...choiceItem(
+        r,
+        `For the graph with edges ${edgeListString(edges)}, which is the degree sequence?`,
+        correct,
+        distractors,
+        undefined,
+        degreeSequenceSteps(correct),
+      ),
+    };
   }),
   T("gt_handshake_sum", "integer", (r) => {
     if (r.int(0, 1) === 0) {
@@ -7093,10 +7375,16 @@ const TEMPLATES: Template[] = [
     const n = r.int(3, 8);
     const bipartite = n % 2 === 0;
     const correct = bipartite ? "bipartite" : "not bipartite";
-    return choiceItem(r, `A cycle graph has ${n} vertices in a ring. Is it bipartite?`, correct, [
-      bipartite ? "not bipartite" : "bipartite",
-      "cannot be determined",
-    ]);
+    return {
+      ...choiceItem(
+        r,
+        `A cycle graph has ${n} vertices in a ring. Is it bipartite?`,
+        correct,
+        [bipartite ? "not bipartite" : "bipartite", "cannot be determined"],
+        undefined,
+        cycleBipartiteSteps(n, correct),
+      ),
+    };
   }),
   T("gt_coloring", "integer", (r) => {
     const kind = r.pick(["complete", "cycle", "tree"] as const);
@@ -7170,10 +7458,16 @@ const TEMPLATES: Template[] = [
       r,
     ).map((i) => parts[i]);
     const correct = shouldMatch ? "possible" : "impossible";
-    return choiceItem(r, `Can ${shuffledParts.join(" + ")} equal ${target}?`, correct, [
-      shouldMatch ? "impossible" : "possible",
-      "cannot be determined",
-    ]);
+    return {
+      ...choiceItem(
+        r,
+        `Can ${shuffledParts.join(" + ")} equal ${target}?`,
+        correct,
+        [shouldMatch ? "impossible" : "possible", "cannot be determined"],
+        undefined,
+        parityProofSteps(target, correct),
+      ),
+    };
   }),
   T("nt_modular_clock", "integer", (r) => {
     const m = r.int(3, 12);
@@ -7255,16 +7549,23 @@ const TEMPLATES: Template[] = [
   }),
   T("nt_twin_primes", "integer", (r) => {
     const u = r.pick([20, 30, 40, 50, 60, 70, 80, 90, 100]);
+    const answer = intAns(countTwinPrimesBelow(u));
     return {
       stem: `How many twin-prime pairs (p, p+2) are there with both primes below ${u}?`,
-      answer: intAns(countTwinPrimesBelow(u)),
+      answer,
+      ...withWorkedSteps(twinPrimesSteps(u, answer)),
     };
   }),
   T("nt_prime_gaps", "integer", (r) => {
     const i = r.int(0, PRIMES_TO_97.length - 2);
     const p1 = PRIMES_TO_97[i];
     const p2 = PRIMES_TO_97[i + 1];
-    return { stem: `What is the gap between the consecutive primes ${p1} and ${p2}?`, answer: intAns(p2 - p1) };
+    const answer = intAns(p2 - p1);
+    return {
+      stem: `What is the gap between the consecutive primes ${p1} and ${p2}?`,
+      answer,
+      ...withWorkedSteps(primeGapSteps(p1, p2, answer)),
+    };
   }),
   T("nt_gcd_euclid", "integer", (r) => {
     const a = r.int(12, 96);
@@ -7349,7 +7650,16 @@ const TEMPLATES: Template[] = [
   }),
   T("lg_negate", "multipleChoice", (r) => {
     const item = r.pick(NEGATION_ITEMS);
-    return choiceItem(r, `What is the negation of '${item.statement}'?`, item.correct, item.distractors);
+    return {
+      ...choiceItem(
+        r,
+        `What is the negation of '${item.statement}'?`,
+        item.correct,
+        item.distractors,
+        undefined,
+        negationSteps(item.statement, item.correct),
+      ),
+    };
   }),
   T("lg_if_then", "multipleChoice", (r) => {
     const hyp = randomFact(r);

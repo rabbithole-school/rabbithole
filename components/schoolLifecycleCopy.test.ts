@@ -30,20 +30,6 @@ describe("deleteSchoolCopy", () => {
     });
   });
 
-  test('the /admin/institutions caller (noun="institution") renders institution copy', () => {
-    expect(deleteSchoolCopy("institution")).toEqual({
-      confirmButton: "Delete this institution",
-      errorTitle: "Couldn't delete institution",
-      inProgressDescription:
-        "The institution and all of its data are being deleted in the background.",
-      cannotDelete: "This institution cannot be deleted.",
-      confirmInputAriaLabel: "Type the institution name to confirm deletion",
-      deletingSelf:
-        "This is your own institution — deleting it will delete your account and sign you out.",
-      survivingAccountsClause: "belong to another institution",
-    });
-  });
-
   test("neither noun leaks the other noun's vocabulary", () => {
     for (const value of Object.values(deleteSchoolCopy("school"))) {
       expect(value).not.toMatch(/institution/i);
@@ -66,20 +52,6 @@ describe("disableSchoolCopy", () => {
         "Members who can only use Rabbithole through this school are blocked from the app and see an “access is paused” message. Nothing was deleted — resume any time.",
       otherActiveSentence:
         "Anyone who also belongs to another active school keeps working there.",
-    });
-  });
-
-  test('the /admin/institutions caller (noun="institution") renders institution copy', () => {
-    expect(disableSchoolCopy("institution")).toEqual({
-      confirmButton: "Pause this institution",
-      errorTitle: "Couldn't pause institution",
-      reasonAriaLabel: "Optional reason for pausing this institution",
-      accessPausedDescription:
-        "Members who can only use Rabbithole through this institution are blocked from the app and see an “access is paused” message.",
-      successDescription:
-        "Members who can only use Rabbithole through this institution are blocked from the app and see an “access is paused” message. Nothing was deleted — resume any time.",
-      otherActiveSentence:
-        "Anyone who also belongs to another active institution keeps working there.",
     });
   });
 

@@ -27,14 +27,12 @@ import { WHOLE_NUMBER_ARITHMETIC_DOMAIN } from "../seed/wholeNumberArithmeticGra
 import { fastMathFactKeys } from "../lib/practice/fastMath";
 import { FACT_FAMILY_SKILLS } from "../../shared/factKey";
 
-// Every grant schedules badgeArtActions:generateBadgeArt, which calls the real
-// Gemini endpoint via geminiGenerateImage (convex/lib/gemini.ts) — under
-// finishAllScheduledFunctions that's an unmocked network call, and under
-// full-suite load it can outlive the fixed 10k-pump budget. Mock the module
-// (the tutorSessionTools.test.ts pattern) with the real failure sentinel the
-// contract returns — `null`, not vi.fn()'s bare `undefined` — so the action
-// records a failed art render through the branch production would take. It is
-// a branch nothing here asserts on; the point is that it stays the real one.
+// A grant no longer schedules AI badge art (the license badge's image is the
+// card itself), but nothing scheduled from here may ever reach a real image
+// endpoint if a path regressed — so the image modules stay mocked with their
+// real failure sentinel (`null`), and the print test asserts they are never
+// called.
+vi.mock("../lib/openaiImage", () => ({ openaiGenerateImage: vi.fn(async () => null) }));
 vi.mock("../lib/gemini", () => ({ geminiGenerateImage: vi.fn(async () => null) }));
 
 // Pre-load the "use node" modules the scheduled chain reaches, so the pump
@@ -315,8 +313,6 @@ describe("calculatorLicenses.grantCalculatorLicense", () => {
     expect(badgeRow).toMatchObject({
       scholarId,
       kind: "calculator_license",
-      style: "medallion",
-      colorway: "gold",
       artStatus: "generating",
       badgeSnapshot: {
         title: "Calculator license",
@@ -497,6 +493,154 @@ describe("calculatorLicenses.revokeCalculatorLicense", () => {
         scholarId: otherScholar,
       }),
     ).rejects.toThrow();
+  });
+});
+
+/**
+ * The bot path (Slack, in-app assistant, MCP): the same shared grant/revoke
+ * helpers as the UI, behind an internal mutation that takes an explicit
+ * callerUserId. Pins the role gate, the institution boundary, and the
+ * already-licensed guard that keeps a bot from silently reprinting a card.
+ */
+describe("calculatorLicenses bot path (grantForCaller / revokeForCaller)", () => {
+  async function licenseRows(t: TC, scholarId: Id<"users">) {
+    return await t.run((ctx) =>
+      ctx.db
+        .query("calculatorLicenses")
+        .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
+        .collect(),
+    );
+  }
+
+  test("grants, refuses a silent re-grant, re-records only on rerecord, then revokes", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedTestInstitution(t, { slug: "school-a" });
+    const teacher = await seedTeacher(t, institutionId, "teacher-a");
+    const scholarId = await seedScholarInInstitution(t, {
+      institutionId,
+      name: "Kai Nakamura",
+      username: "kai",
+    });
+
+    const granted = await t.mutation(internal.calculatorLicenses.grantForCaller, {
+      callerUserId: teacher,
+      scholarId,
+    });
+    expect(granted).toMatchObject({
+      status: "granted",
+      scholarName: "Kai Nakamura",
+      issuedByName: "Teacher teacher-a",
+      printsCard: false, // non-primary institution: no card
+    });
+    const [first] = await licenseRows(t, scholarId);
+    expect(first.issuedBy).toBe(teacher);
+    expect(first.badgeId).toBeDefined();
+    const scheduledAfterGrant = await t.run(
+      async (ctx) =>
+        (await ctx.db.system.query("_scheduled_functions").collect()).length,
+    );
+
+    // A second ask without rerecord changes nothing and schedules nothing.
+    const again = await t.mutation(internal.calculatorLicenses.grantForCaller, {
+      callerUserId: teacher,
+      scholarId,
+    });
+    expect(again).toMatchObject({
+      status: "already_licensed",
+      scholarName: "Kai Nakamura",
+      issuedByName: "Teacher teacher-a",
+    });
+    const [unchanged] = await licenseRows(t, scholarId);
+    expect(unchanged.issuedAt).toBe(first.issuedAt);
+    expect(
+      await t.run(
+        async (ctx) =>
+          (await ctx.db.system.query("_scheduled_functions").collect()).length,
+      ),
+    ).toBe(scheduledAfterGrant);
+
+    // The teacher confirmed: rerecord goes through the shared correction path.
+    const rerecorded = await t.mutation(
+      internal.calculatorLicenses.grantForCaller,
+      { callerUserId: teacher, scholarId, rerecord: true },
+    );
+    expect(rerecorded.status).toBe("rerecorded");
+    expect(await licenseRows(t, scholarId)).toHaveLength(1);
+
+    expect(
+      await t.mutation(internal.calculatorLicenses.revokeForCaller, {
+        callerUserId: teacher,
+        scholarId,
+      }),
+    ).toEqual({ removed: true });
+    expect(await licenseRows(t, scholarId)).toHaveLength(0);
+    expect(
+      await t.mutation(internal.calculatorLicenses.revokeForCaller, {
+        callerUserId: teacher,
+        scholarId,
+      }),
+    ).toEqual({ removed: false });
+  });
+
+  test("refuses a non-teacher caller on both grant and revoke", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedTestInstitution(t, { slug: "school-a" });
+    const scholarId = await seedScholarInInstitution(t, {
+      institutionId,
+      username: "kai",
+    });
+    const otherScholar = await seedScholarInInstitution(t, {
+      institutionId,
+      username: "peer",
+    });
+    const designer = await t.run((ctx) =>
+      ctx.db.insert("users", {
+        name: "Designer",
+        username: "designer",
+        role: "curriculum_designer",
+      }),
+    );
+    await grantInstitutionMembership(t, designer, institutionId);
+
+    for (const callerUserId of [otherScholar, designer]) {
+      await expect(
+        t.mutation(internal.calculatorLicenses.grantForCaller, {
+          callerUserId,
+          scholarId,
+        }),
+      ).rejects.toThrow(/teacher or admin/);
+      await expect(
+        t.mutation(internal.calculatorLicenses.revokeForCaller, {
+          callerUserId,
+          scholarId,
+        }),
+      ).rejects.toThrow(/teacher or admin/);
+    }
+    expect(await licenseRows(t, scholarId)).toHaveLength(0);
+  });
+
+  test("refuses a scholar in another institution", async () => {
+    const t = convexTest(schema, modules);
+    const mine = await seedTestInstitution(t, { slug: "school-a" });
+    const theirs = await seedTestInstitution(t, { slug: "school-b" });
+    const teacher = await seedTeacher(t, mine, "teacher-a");
+    const otherScholar = await seedScholarInInstitution(t, {
+      institutionId: theirs,
+      username: "other-scholar",
+    });
+    await expect(
+      t.mutation(internal.calculatorLicenses.grantForCaller, {
+        callerUserId: teacher,
+        scholarId: otherScholar,
+      }),
+    ).rejects.toThrow(/Forbidden/);
+    await expect(
+      t.mutation(internal.calculatorLicenses.revokeForCaller, {
+        callerUserId: teacher,
+        scholarId: otherScholar,
+      }),
+    ).rejects.toThrow(/Forbidden/);
+    expect(await licenseRows(t, otherScholar)).toHaveLength(0);
   });
 });
 

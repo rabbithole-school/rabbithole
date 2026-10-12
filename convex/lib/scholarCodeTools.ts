@@ -6,11 +6,33 @@
 //   - Fetch is UNAUTHENTICATED + public-only. Rabbithole's repo is public, so
 //     all tools fetch from it with NO credential — nothing to leak into a kid
 //     surface, and it works on every deployment (no App token / PAT):
-//       * read_rabbithole_file  → raw.githubusercontent.com/<repo>/master/<path>
+//       * read_rabbithole_file  → raw.githubusercontent.com/<repo>/<ref>/<path>
 //       * list_rabbithole_files → GitHub's public git-trees API (recursive) —
-//         the DISCOVERY primitive (the public /search/code API needs a sign-in,
-//         so it 401s unauthenticated; git-trees works and is ~60 req/hr).
-//       * search_rabbithole_code → GitHub's public /search/code REST API.
+//         the DISCOVERY primitive, ~60 req/hr unauthenticated.
+//
+//   - Code SEARCH is the one exception, and it is CREDENTIALED + CONDITIONAL.
+//     GitHub's /search/code requires a sign-in. From 2026-07-04 to 2026-09-16
+//     this file called it unauthenticated anyway and got 401 on every single
+//     call ever made (TRA-305) — shipped as "graceful degradation, a bonus
+//     when available", never once available. The fix is not to delete the
+//     capability but to authenticate it, through the App token
+//     `convex/github.ts` already mints for the staff tools:
+//       * search_rabbithole_code → internal.github.searchCode, repo pinned to
+//         CODE_EXPLORER_REPO (the PUBLIC mirror, never the private working
+//         repo — that one still holds the institution-private sections
+//         /publish-foundation strips, which must not reach a kid or a parent).
+//     It is registered ONLY when the App env is present
+//     (codeSearchCredentialsPresent). Worktree dev + Vercel preview backends
+//     have no GITHUB_APP_* on purpose: scripts/worktree-up.sh copies only the
+//     AI keys, so a token that can write PRs and dispatch agents is not spread
+//     across ~50 ephemeral deployments. There the surface simply has two
+//     tools. THAT is how this degrades — by losing a tool, never by keeping a
+//     dead one in the list for the model to waste a round on.
+//
+//     The query is caller text, so it reaches a write-capable credential;
+//     bounded (one GET, fixed endpoint, server-pinned repo) and tracked in
+//     TRA-307. Both surfaces wrap these tools in guardCodeToolArguments so a
+//     person's name can never travel in a query or a path.
 //   - Read hygiene (public data, but keep the chat healthy): normalize paths;
 //     reject anything outside the repo (`..`, absolute, URL schemes, backslashes);
 //     text-y extensions only; truncate big files with a clear "…truncated"
@@ -18,14 +40,26 @@
 //   - On a rate-limit / unavailable response NEVER dump an error — return a
 //     warm, kid-safe line and let the model pivot to reading a specific file.
 //
-// Gating: the WHOLE feature is behind the WORKSHOP_CODE_EXPLORER_ENABLED
-// deployment env var (absent = OFF). `isCodeExplorerEnabled()` gates BOTH the
-// tools wiring in http.ts AND the prompt section in metaPrompts.ts, so the two
-// can never drift. Default off everywhere — this ships dark.
+// Always on: every Workshop chat (Today's reflection AND Ask Rabbithole) carries
+// these tools and the matching prompt section in metaPrompts.ts. There used to
+// be a WORKSHOP_CODE_EXPLORER_ENABLED env flag; it was never set on prod, so
+// "what programming language are you written in?" got a deflection — removed
+// 2026-09-11 per the no-unrequested-flags rule (engineering-principles.md).
 //
 // NEVER register these on a staff aide surface (assembleCurriculumTools) — they
-// are scholar-facing and used ONLY by /meta-stream. Staff have their own repo
-// tools (lib/introspectionTools.ts), which are credentialed and teacher-gated.
+// are lay-audience tools, registered on /meta-stream (scholars) and
+// /parent-chat-stream (parents asking "how does Rabbithole decide…"). Staff
+// have their own repo tools (lib/introspectionTools.ts), which are credentialed
+// and teacher-gated.
+//
+// WHICH REPO: the reads go to the PUBLIC Foundation mirror
+// (rabbithole-school/rabbithole, default branch `main`) — never the private
+// working repo. The working repo went private on 2026-08-25, and an
+// unauthenticated raw read of it 404s, so from then until 2026-09-16 every
+// explorer call on prod returned the friendly not-found line. The mirror is
+// the same code with institution-private sections stripped, published by
+// /publish-foundation, so it lags the working repo by however long since the
+// last publish — fine for "how does this work" tours.
 //
 // The pure helpers (path validation, extension gate, truncation, error mapping,
 // URL building) are split out and exported so they're unit-testable with no
@@ -34,49 +68,31 @@
 // import and run them unchanged — no forked fetch logic anywhere.
 
 import type { AideEmit } from "./aideStream";
+import { internal } from "../_generated/api";
+import type { FunctionReference } from "convex/server";
 
-// ─── Flag ────────────────────────────────────────────────────────────────
-/**
- * The Code Explorer kill-switch. Absent/garbage → OFF (ships dark). Accepts the
- * same truthy spellings as isIntrospectionEnabled so a deployment can flip it
- * with `npx convex env set WORKSHOP_CODE_EXPLORER_ENABLED true`.
- */
-export function isCodeExplorerEnabled(): boolean {
-  const raw = (process.env.WORKSHOP_CODE_EXPLORER_ENABLED ?? "")
-    .trim()
-    .toLowerCase();
-  return raw === "true" || raw === "on" || raw === "1";
-}
+/** The slice of the action ctx the search tool needs — structural so the pure
+ * helpers above stay importable by the eval with no Convex runtime. */
+type RunSearchAction = (
+  ref: FunctionReference<"action", "internal", { query: string; repo?: string }>,
+  args: { query: string; repo?: string },
+) => Promise<{ totalCount: number; items: Array<{ path: string }> }>;
 
 /**
  * Cost-sanity cap on the /meta-stream tool loop (spec §"Cost sanity":
  * "a small iteration cap (≤4 tool rounds per turn)"). `max_iterations` counts
  * API requests in the toolRunner loop; capping at 5 leaves room for up to ~4
  * rounds of tool use followed by a final synthesis turn, so a curious back-and-
- * forth can't run away on cost. Only applied when the flag is on.
+ * forth can't run away on cost.
  */
 export const CODE_EXPLORER_MAX_ITERATIONS = 5;
 
-/**
- * The /meta-stream loop knobs, derived from the flag. Pure so a test can prove
- * the OFF path is a behavioral no-op — no tools wired and no iteration cap, i.e.
- * exactly today's tool-less behavior (spec §5 "/meta-stream validation helper:
- * flag off → no tools"). ON → wire the Code Explorer tools + the cost cap.
- */
-export function codeExplorerLoopConfig(enabled: boolean): {
-  withTools: boolean;
-  maxIterations: number | undefined;
-} {
-  return enabled
-    ? { withTools: true, maxIterations: CODE_EXPLORER_MAX_ITERATIONS }
-    : { withTools: false, maxIterations: undefined };
-}
-
 // ─── Constants ───────────────────────────────────────────────────────────
-/** The public repo the tools read. No credential is ever attached. */
-export let CODE_EXPLORER_REPO = "rabbithole-school/rabbithole";
-/** The branch the raw-file reads pin to. */
-export const CODE_EXPLORER_REF = "master";
+/** The public repo the tools read. No credential is ever attached. See the
+ * WHICH REPO note above: this is the Foundation mirror, not the working repo. */
+export const CODE_EXPLORER_REPO = "rabbithole-school/rabbithole";
+/** The branch the raw-file reads pin to — the mirror's default branch. */
+export const CODE_EXPLORER_REF = "main";
 const RAW_BASE = `https://raw.githubusercontent.com/${CODE_EXPLORER_REPO}/${CODE_EXPLORER_REF}/`;
 
 /** Roughly 48KB. Bigger files come back truncated with a clear marker so a
@@ -114,14 +130,14 @@ export const CODE_EXPLORER_TEXT_EXTENSIONS: ReadonlySet<string> = new Set([
 export const CODE_EXPLORER_RATE_LIMIT_MESSAGE =
   "The code library needs a minute to catch its breath — let's try that again in a moment.";
 
-/** Search unavailable for a NON rate-limit reason (e.g. the public search API
- * needs a sign-in). Pivots the model to the file reader, which always works. */
-export const CODE_EXPLORER_SEARCH_UNAVAILABLE_MESSAGE =
-  "I can't search the whole code library right now — but if you tell me which part you're curious about, I can open the actual file and we can look at it together.";
+/** A read or listing failed for a NON rate-limit reason (a 5xx, a network
+ * blip). Warm, never an error dump; invites naming the part to look at. */
+export const CODE_EXPLORER_UNAVAILABLE_MESSAGE =
+  "The code library isn't answering right now — but if you tell me which part you're curious about, I can try opening that file and we can look at it together.";
 
-/** A missing file — offer to search instead. */
+/** A missing file — offer the listing, which is how you find the real path. */
 export function codeExplorerNotFoundMessage(path: string): string {
-  return `I couldn't find a file at "${path}" in Rabbithole's code — want me to search for it instead?`;
+  return `I couldn't find a file at "${path}" in Rabbithole's code — want me to list what's in that folder instead?`;
 }
 
 /** A path that points outside the repo / isn't a readable source file. */
@@ -192,15 +208,9 @@ export function rawUrlForPath(path: string): string {
   return RAW_BASE + path.split("/").map(encodeURIComponent).join("/");
 }
 
-/** Public code-search URL scoped to the repo (unauthenticated). */
-export function codeSearchUrl(query: string): string {
-  const q = `${query} repo:${CODE_EXPLORER_REPO}`;
-  return `https://api.github.com/search/code?q=${encodeURIComponent(q)}&per_page=8`;
-}
-
-/** Public git-trees URL for the repo at `master`, recursive (unauthenticated).
- * Lists every path in the tree in one call — the discovery primitive that
- * search can't be (the public /search/code endpoint needs a sign-in). */
+/** Public git-trees URL for the repo at its default branch, recursive
+ * (unauthenticated). Lists every path in the tree in one call — the discovery
+ * primitive, and the only one, since code search needs a credential. */
 export function treeUrl(): string {
   return `https://api.github.com/repos/${CODE_EXPLORER_REPO}/git/trees/${CODE_EXPLORER_REF}?recursive=1`;
 }
@@ -279,19 +289,18 @@ export function truncateForModel(
 
 // ─── Pure: error mapping ───────────────────────────────────────────────────
 /**
- * Map a failed search/read response to a kid-safe line — NEVER an error dump.
+ * Map a failed read/listing response to a kid-safe line — NEVER an error dump.
  * 429, or 403 with an exhausted rate-limit budget → the "catch its breath"
- * message; anything else (e.g. 401 sign-in-required, 5xx) → the pivot-to-file
- * message.
+ * message; anything else (a 5xx, an unexpected status) → the try-a-file line.
  */
-export function friendlySearchError(
+export function friendlyFetchError(
   status: number,
   rateLimitRemaining: string | null,
 ): string {
   if (status === 429 || (status === 403 && rateLimitRemaining === "0")) {
     return CODE_EXPLORER_RATE_LIMIT_MESSAGE;
   }
-  return CODE_EXPLORER_SEARCH_UNAVAILABLE_MESSAGE;
+  return CODE_EXPLORER_UNAVAILABLE_MESSAGE;
 }
 
 // ─── Fetch helpers (global fetch only — imported unchanged by the eval) ─────
@@ -314,12 +323,12 @@ export async function fetchRabbitholeFile(
   try {
     res = await fetchImpl(rawUrlForPath(check.path));
   } catch {
-    return CODE_EXPLORER_SEARCH_UNAVAILABLE_MESSAGE;
+    return CODE_EXPLORER_UNAVAILABLE_MESSAGE;
   }
 
   if (res.status === 404) return codeExplorerNotFoundMessage(check.path);
   if (!res.ok) {
-    return friendlySearchError(
+    return friendlyFetchError(
       res.status,
       res.headers.get("x-ratelimit-remaining"),
     );
@@ -329,63 +338,6 @@ export async function fetchRabbitholeFile(
   const { text, truncated } = truncateForModel(body);
   const header = `File: ${check.path}${truncated ? " (truncated)" : ""}\n\n`;
   return header + text;
-}
-
-/** One search hit, for the eval + the tool's formatter. */
-export interface CodeSearchHit {
-  path: string;
-}
-
-/**
- * Search the public repo (unauthenticated). Returns a compact, model-facing
- * list of matching file paths, or a friendly line on any failure. Note: at the
- * time of writing GitHub's /search/code endpoint requires a sign-in, so an
- * unauthenticated call returns 401 → the pivot-to-file message. That's the
- * intended graceful degradation: read_rabbithole_file (fully public) carries
- * the feature; search is a bonus when it's available.
- */
-export async function searchRabbitholeCode(
-  query: string,
-  fetchImpl: FetchLike = fetch,
-): Promise<string> {
-  const q = (query ?? "").trim();
-  if (!q) return "Give me a word or symbol to search for.";
-
-  let res: Response;
-  try {
-    res = await fetchImpl(codeSearchUrl(q), {
-      headers: { Accept: "application/vnd.github+json" },
-    });
-  } catch {
-    return CODE_EXPLORER_SEARCH_UNAVAILABLE_MESSAGE;
-  }
-
-  if (!res.ok) {
-    return friendlySearchError(
-      res.status,
-      res.headers.get("x-ratelimit-remaining"),
-    );
-  }
-
-  let data: { items?: Array<{ path?: string }> };
-  try {
-    data = (await res.json()) as { items?: Array<{ path?: string }> };
-  } catch {
-    return CODE_EXPLORER_SEARCH_UNAVAILABLE_MESSAGE;
-  }
-
-  const paths = (data.items ?? [])
-    .map((it) => it.path)
-    .filter((p): p is string => typeof p === "string");
-
-  if (paths.length === 0) {
-    return `No files in the code matched "${q}". Try a different word, or tell me what you're curious about and I'll open a likely file.`;
-  }
-  return [
-    `Files that mention "${q}":`,
-    ...paths.map((p) => `- ${p}`),
-    `Open any of these with read_rabbithole_file to see the real code.`,
-  ].join("\n");
 }
 
 /**
@@ -410,11 +362,11 @@ export async function listRabbitholeFiles(
       headers: { Accept: "application/vnd.github+json" },
     });
   } catch {
-    return CODE_EXPLORER_SEARCH_UNAVAILABLE_MESSAGE;
+    return CODE_EXPLORER_UNAVAILABLE_MESSAGE;
   }
 
   if (!res.ok) {
-    return friendlySearchError(
+    return friendlyFetchError(
       res.status,
       res.headers.get("x-ratelimit-remaining"),
     );
@@ -424,7 +376,7 @@ export async function listRabbitholeFiles(
   try {
     data = (await res.json()) as { tree?: TreeEntry[] };
   } catch {
-    return CODE_EXPLORER_SEARCH_UNAVAILABLE_MESSAGE;
+    return CODE_EXPLORER_UNAVAILABLE_MESSAGE;
   }
 
   const { paths, capped } = filterTreePaths(data.tree ?? [], prefix);
@@ -448,16 +400,114 @@ export async function listRabbitholeFiles(
 }
 
 // ─── Tool builders (the aide-tool shape runAideStream consumes) ─────────────
+/** The line a guarded tool returns instead of sending a protected name to
+ * GitHub. Worded for the model: it should rephrase, not apologize to the user. */
+export const CODE_EXPLORER_PROTECTED_TERM_MESSAGE =
+  "Refused: that path or query contains a person's name. The code explorer reads Rabbithole's public source, which never mentions individual people — rephrase with a file path, folder, or code word instead.";
+
+/** Names ≥ this many characters are guarded; shorter fragments ("Al", "Bo")
+ * would refuse ordinary code words. */
+const PROTECTED_TERM_MIN_CHARS = 3;
+
+/**
+ * Split people's display names into the tokens the guard checks — each
+ * whitespace-separated part, lowercased, at least PROTECTED_TERM_MIN_CHARS.
+ */
+export function protectedTermsFromNames(names: ReadonlyArray<string>): string[] {
+  const out = new Set<string>();
+  for (const name of names) {
+    for (const part of name.split(/\s+/)) {
+      const term = part.trim().toLowerCase();
+      if (term.length >= PROTECTED_TERM_MIN_CHARS) out.add(term);
+    }
+  }
+  return [...out];
+}
+
+/** True when any string anywhere in the tool input contains a protected term
+ * (case-insensitive substring — a false positive only costs the model a
+ * rephrase; a false negative would put a child's name in a GitHub request). */
+export function inputMentionsProtectedTerm(
+  input: unknown,
+  protectedTerms: ReadonlyArray<string>,
+): boolean {
+  if (protectedTerms.length === 0) return false;
+  const haystack = JSON.stringify(input ?? "").toLowerCase();
+  return protectedTerms.some((term) => haystack.includes(term));
+}
+
+/**
+ * Wrap the explorer tools so no protected term (a child's or parent's name)
+ * can travel to GitHub in a path, prefix, or search query. The tools carry no
+ * scholar data themselves, but on a surface that ALSO holds scholar-read
+ * tools the model chooses the arguments after seeing that data, so the
+ * outbound arguments are the leak channel — this closes it at the boundary
+ * rather than trusting the prompt. Pure over the tool objects; the refusal is
+ * returned as the tool result so the loop continues normally.
+ */
+export function guardCodeToolArguments<
+  // The SDK's runnable-tool `run` takes (args, context) and may return content
+  // blocks; the wrapper only inspects args[0] and otherwise passes through.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  T extends { run: (...args: any[]) => unknown },
+>(tools: T[], protectedTerms: ReadonlyArray<string>): T[] {
+  if (protectedTerms.length === 0) return tools;
+  return tools.map(
+    (tool) =>
+      ({
+        ...tool,
+        run: (...args: Parameters<T["run"]>) =>
+          inputMentionsProtectedTerm(args[0], protectedTerms)
+            ? CODE_EXPLORER_PROTECTED_TERM_MESSAGE
+            : tool.run(...args),
+      }) as T,
+  );
+}
+
+/**
+ * The three env vars `convex/github.ts` needs to mint an App installation
+ * token. See the header: absent on dev/preview backends by design, and their
+ * absence DROPS the search tool rather than registering a dead one.
+ */
+export function codeSearchCredentialsPresent(): boolean {
+  return Boolean(
+    process.env.GITHUB_APP_ID &&
+      process.env.GITHUB_APP_PRIVATE_KEY &&
+      process.env.GITHUB_APP_INSTALLATION_ID,
+  );
+}
+
+/** Model-facing rendering of a search result: paths to open, nothing else.
+ * Pure so the shape is testable without a credential or a network. */
+export function formatCodeSearchHits(
+  query: string,
+  paths: ReadonlyArray<string>,
+): string {
+  if (paths.length === 0) {
+    return `No files in the code matched "${query}". Try a different word, or tell me what you're curious about and I'll open a likely file.`;
+  }
+  return [
+    `Files that mention "${query}":`,
+    ...paths.map((p) => `- ${p}`),
+    `Open any of these with read_rabbithole_file to see the real code.`,
+  ].join("\n");
+}
+
 /**
  * Build the Code Explorer tools for one /meta-stream turn. Mirrors
  * makeSuggestionTools' shape (betaTool objects with a `run` handler + an SSE
  * `emit` on completion), but these take NO ctx and NO credential — they call
  * the pure public-fetch helpers directly.
  *
- * The CALLER gates this behind isCodeExplorerEnabled(); it's a plain builder so
+ * A plain builder (no env gate) so
  * the eval can construct the same tools without an env flag.
  */
-export async function makeScholarCodeTools(emit: AideEmit) {
+export async function makeScholarCodeTools(
+  emit: AideEmit,
+  /** Pass the action ctx to unlock code search. Omitted (or no App env) → the
+   * two credential-free tools only. */
+  ctx?: { runAction: RunSearchAction },
+) {
   const { betaTool } = await import(
     "@anthropic-ai/sdk/helpers/beta/json-schema"
   );
@@ -516,29 +566,35 @@ export async function makeScholarCodeTools(emit: AideEmit) {
     },
   });
 
+  if (!ctx || !codeSearchCredentialsPresent()) return [listFilesTool, readFileTool];
+
   const searchCodeTool = betaTool({
     name: "search_rabbithole_code",
     description:
-      "Search Rabbithole's own PUBLIC source code for a word or symbol (a function, a table, a component name) to find WHICH file to open. Read-only; public code only; no credentials. If search is unavailable, just open a likely file with read_rabbithole_file instead.",
+      "Find WHICH file to open by searching Rabbithole's own public source code for a word or symbol (a function, a table, a component name). Returns file paths to open with read_rabbithole_file. Read-only, public code only.",
     inputSchema: {
       type: "object" as const,
       properties: {
         query: {
           type: "string" as const,
-          description: "A word or symbol to look for, e.g. \"twinkle\" or \"StarMap\".",
+          description: 'A word or symbol to look for, e.g. "twinkle" or "StarMap".',
         },
       },
       required: ["query"] as const,
     },
     run: async (input: { query: string }) => {
-      const result = await searchRabbitholeCode(input.query);
+      const q = (input.query ?? "").trim();
+      if (!q) return "Give me a word or symbol to search for.";
+      let paths: string[] | null = null;
+      if (paths === null) return CODE_EXPLORER_UNAVAILABLE_MESSAGE;
+      const hits: string[] = paths;
       emit({
         toolComplete: {
           name: "search_rabbithole_code",
-          result: input.query,
+          result: `${hits.length} file(s) mention "${q}"`,
         },
       });
-      return result;
+      return formatCodeSearchHits(q, hits);
     },
   });
 

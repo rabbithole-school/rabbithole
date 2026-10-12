@@ -9,11 +9,16 @@
  * tutor should point a scholar at the "How it works" page when (and ONLY when)
  * they ask about the tool itself — never on ordinary subject questions.
  *
- * The tutor runs on MODELS.SONNET (the live tutor model). The judge runs on Opus.
+ * The tutor uses the live tutor model and runtime. The judge runs on Opus.
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { buildSystemPrompt } from "../../../convex/sessionHelpers";
-import { MODELS } from "../../../convex/lib/models";
+import type { AideEffort } from "../../../convex/lib/aideModel";
+import type { ModelId } from "../../../convex/lib/models";
+import {
+  TUTOR_DEFAULT_MODEL,
+  tutorRuntime,
+} from "../../../convex/lib/tutorModel";
 
 /** What the scholar's message is probing — used only for reporting buckets. */
 export type CaseKind = "introspection" | "subject" | "pedagogical-meta" | "task";
@@ -45,6 +50,10 @@ export interface TutorRun {
 }
 
 const anthropic = new Anthropic();
+export const tutorModel = process.env.TUTOR_MODEL || TUTOR_DEFAULT_MODEL;
+const runtime = tutorRuntime(tutorModel as ModelId);
+export const tutorEffort: AideEffort | undefined =
+  (process.env.TUTOR_EFFORT as AideEffort | undefined) || runtime.effort;
 
 /**
  * Assemble the real system prompt with only the params this eval varies.
@@ -73,10 +82,11 @@ export async function runTutor(c: TutorCase, sample: number): Promise<TutorRun> 
   ];
   try {
     const response = await anthropic.messages.create({
-      model: MODELS.SONNET,
-      max_tokens: 1024,
+      model: tutorModel,
+      max_tokens: runtime.maxTokens,
       system,
       messages,
+      ...(tutorEffort ? { output_config: { effort: tutorEffort } } : {}),
     });
     const text = response.content
       .filter((b) => b.type === "text")

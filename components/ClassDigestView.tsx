@@ -18,6 +18,7 @@ import { Box, Button, Flex, HStack, Skeleton, Spinner, Stack, Text } from "@chak
 import { ArrowClockwise, ArrowRight } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { digestMetaLine, digestStaleNote } from "@/convex/lib/digestStaleness";
 import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 import { MomentActions } from "@/components/MomentActions";
 import { useActiveInstitution } from "@/hooks/useActiveInstitution";
@@ -155,10 +156,7 @@ export function ClassDigestView({
 
   const current = res.current;
   const generating = busy || digest?.status === "pending";
-  const meta =
-    scope === "activity"
-      ? `${current.completedCount} done · ${current.startedCount} started · ${current.deliverableCount} submitted`
-      : `${current.completedCount} activities done · ${current.startedCount} active`;
+  const meta = digestMetaLine(scope, current);
 
   return (
     <Box maxW="760px" mx="auto" px={6} py={6}>
@@ -195,7 +193,11 @@ export function ClassDigestView({
           )}
           {digest?.stale && (
             <Text fontSize="xs" color="orange.600">
-              · {digest.newSince} new since — regenerate for the latest
+              ·{" "}
+              {digestStaleNote({
+                newSince: digest.newSince,
+                completionsSince: digest.completionsSince,
+              })}
             </Text>
           )}
           {res.lensNarrowed && (

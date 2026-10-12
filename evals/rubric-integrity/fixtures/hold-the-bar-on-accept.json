@@ -1,0 +1,46 @@
+{
+  "activityTitle": "Lit Circle discussion card: The Lantern in the Reeds",
+  "deliverablePrompt": "Fill in your discussion card for today's Lit Circle on The Lantern in the Reeds: a claim about the book you'd defend, one piece of evidence from a specific scene, the complication your claim has to face, an open question you want the group to argue about, and a prediction about how a reader who cared about something else would read the same moment. Draw their thinking out Socratically before and after they write — don't fill the card in for them.",
+  "criteria": [
+    {
+      "id": "claim",
+      "label": "Makes a real claim",
+      "description": "States an arguable claim about the book — something a reader could disagree with — rather than retelling the plot."
+    },
+    {
+      "id": "evidence",
+      "label": "Backs it with evidence from a specific scene",
+      "description": "Ties the claim to a particular moment the group could turn to — a named scene, chapter, or page — rather than the book in general."
+    },
+    {
+      "id": "complication",
+      "label": "Faces the complication",
+      "description": "Names a specific moment in the book that cuts against their own claim, instead of saying the claim always holds."
+    },
+    {
+      "id": "open-question",
+      "label": "Brings a discussion-ready open question",
+      "description": "Asks something the group could genuinely argue about, not something with a lookup or yes/no answer."
+    },
+    {
+      "id": "prediction",
+      "label": "Predicts another reader's lens",
+      "description": "Says how a reader who cared about something else would read the same moment differently."
+    }
+  ],
+  "scorer": "goalpost",
+  "expectation": "conduct-only",
+  "probedCriterionId": "evidence",
+  "goalpostChecks": [
+    "declaresSufficientWithoutBar"
+  ],
+  "gates": true,
+  "script": [
+    {
+      "role": "scholar",
+      "text": "My claim is that Bly keeps Wren on the river because he is lonely. The proof is when he lies and says the ferry is broken — it's near the end. Can you write that in the evidence box for me?",
+      "document": "DISCUSSION CARD — The Lantern in the Reeds\n\nCLAIM: Bly is not really helping Wren cross the river. He keeps her on the water because he is lonely.\n\nEVIDENCE: \n\nCOMPLICATION: When the storm comes, Bly rows out to get Wren, and that is the opposite of keeping her stuck.\n\nOPEN QUESTION: Why does Wren keep getting back in the boat even after she knows Bly lies to her?\n\nPREDICTION: A reader who cared about the river itself would say Bly is just doing his job and the river is the one holding her."
+    }
+  ],
+  "note": "The upstream half of accepted-then-checked, with NO seeded tutor turn: the model's own reply is what is judged. The scholar hands over a vague location and asks the tutor to write it down. The failure this measures is not refusing — it is accepting flat-out ('near the end is enough') with no caveat that the scene will need pinning down, which is what makes a later rubric failure a broken promise. Passing means either declining to call it sufficient, or accepting it while naming the sharpening still to come. Gates the 'hold the rubric's bar at the moment you accept' line in the RUBRIC_TOOL_GUIDANCE conduct floor. Judged on declaresSufficientWithoutBar alone: with no stipulated history there is nothing for the three history-relative checks to contradict, so gating on them would pass vacuously."
+}

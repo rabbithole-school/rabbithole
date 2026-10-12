@@ -214,6 +214,36 @@ describe("curriculumExperiments.start — gate + kickoff", () => {
     ).rejects.toThrow(/don't build apps yet.*manually/i);
   });
 
+  test("talks about playing, not building, for an app scholars only play", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher");
+    const { activityId } = await seedUnitWithActivity(t, teacher, "vibecode");
+    await t.run(async (ctx) => {
+      const starterAppId = await ctx.db.insert("customApps", {
+        token: "play-only-starter-token",
+        name: "Teach the robot",
+        kind: "static",
+        status: "live",
+        html: "<!doctype html><p>robot</p>",
+        origin: "starter",
+        createdBy: teacher,
+        updatedAt: 1_725_000_000_000,
+      });
+      await ctx.db.patch(activityId, {
+        starterAppId,
+        scholarsStartFrom: "starter",
+        editAccess: "never",
+      });
+    });
+    const asTeacher = await withUser(t, teacher);
+
+    const rejection = asTeacher.mutation(api.curriculumExperiments.start, {
+      activityId,
+    });
+    await expect(rejection).rejects.toThrow(/as a scholar would/);
+    await expect(rejection).rejects.not.toThrow(/build/);
+  });
+
   test("rejects a supplied profile the caller doesn't own", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");

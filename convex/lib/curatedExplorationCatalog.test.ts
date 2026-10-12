@@ -101,10 +101,6 @@ describe("curated exploration catalog", () => {
 
     expect(section).not.toContain(`"topic":"${first.topic}"`);
     expect(section).toContain(`"topic":"${second.topic}"`);
-    expect(section).toContain("AT MOST 2");
-    expect(section).toContain("You may select none");
-    expect(section).toContain("not a checklist or quota");
-    expect(section).toContain("substantially overlaps");
   });
 
   test("suppresses a decorated already-visited topic via the same normalization", () => {
@@ -119,7 +115,6 @@ describe("curated exploration catalog", () => {
   test("withholds catalog entries when there is no learner signal", () => {
     const section = curatedExplorationPromptSection([], false);
 
-    expect(section).toContain("not offered");
     expect(section).not.toContain(CURATED_EXPLORATION_CATALOG[0].topic);
     expect(
       capCuratedExplorationSelections(

@@ -124,6 +124,7 @@ describe("claimInstructionShown", () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedScholar(t);
     const s = await asScholar(t, scholarId);
+    await seedPassedContent(t, keyA, STRAND_A);
 
     const first = await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: keyA });
     expect(first).toEqual({ claimed: true });
@@ -140,6 +141,8 @@ describe("claimInstructionShown", () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedScholar(t);
     const s = await asScholar(t, scholarId);
+    await seedPassedContent(t, keyA, STRAND_A);
+    await seedPassedContent(t, keyB, STRAND_B);
 
     expect(await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: keyA })).toEqual({ claimed: true });
     const second = await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: keyB });
@@ -147,6 +150,26 @@ describe("claimInstructionShown", () => {
 
     // The held key was never burned — no row was written for it.
     expect(await eventFor(t, scholarId, keyB)).toBeNull();
+  });
+
+  test("the standalone card's claim is refused for a key with nothing to show; the question frame's is not", async () => {
+    // A frame whose move is the item's own teaching step has no content row.
+    // An older iPad build still mounts the standalone card (no `framing`),
+    // which would render an empty card — so its claim is refused and it
+    // proceeds straight to the item.
+    const t = convexTest(schema, modules);
+    const scholarId = await seedScholar(t);
+    const s = await asScholar(t, scholarId);
+    const stepsOnly = "node:add_within_20_regroup";
+
+    expect(await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: stepsOnly })).toEqual({
+      claimed: false,
+      reason: "suppressed",
+    });
+    expect(await eventFor(t, scholarId, stepsOnly)).toBeNull();
+    expect(
+      await s.mutation(api.instruction.claimInstructionShown, { scholarId, key: stepsOnly, framing: "question" }),
+    ).toEqual({ claimed: true });
   });
 
   test("a viewed Launchpad is permanently suppressed", async () => {

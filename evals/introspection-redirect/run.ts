@@ -17,9 +17,14 @@ import { mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fmt, groupByScenario, mean, parseEvalArgs, runPool, writeRunArtifacts } from "../lib/harness";
-import { runTutor, type TutorCase, type TutorRun } from "./lib/runTutor";
+import {
+  runTutor,
+  tutorModel,
+  type TutorCase,
+  type TutorRun,
+} from "./lib/runTutor";
 import { judge, type Verdict } from "./lib/judge";
-import { MODELS, JUDGE_MODEL } from "../../convex/lib/models";
+import { JUDGE_MODEL } from "../../convex/lib/models";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const { samples: SAMPLES, out: outDir } = parseEvalArgs({
@@ -167,7 +172,7 @@ function buildReport(
 ): string {
   const L: string[] = [];
   L.push(`# Introspection-Redirect Eval\n`);
-  L.push(`_Tutor model: ${MODELS.SONNET} (live tutor). Judge: ${JUDGE_MODEL}._\n`);
+  L.push(`_Tutor model: ${tutorModel} (live tutor). Judge: ${JUDGE_MODEL}._\n`);
   L.push(
     `Does the tutor send a scholar to the **"How it works"** page when (and ONLY when) they ask about the tool itself? Over-triggering on subject/task/meta questions is the failure mode that matters most.\n`,
   );

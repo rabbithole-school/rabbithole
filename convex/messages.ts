@@ -7,6 +7,7 @@ import {
   canReadScholarAsTeacher,
   requireActiveScholarAccess,
 } from "./lib/access";
+import { isTypedScholarText } from "./lib/inputModality";
 import { isTeacherRole, ROLES } from "./lib/roles";
 import { readabilityStats } from "../lib/readability";
 import { buildScholarReadingTrend, isSyntheticStartMessage } from "../lib/readingTrend";
@@ -267,8 +268,10 @@ export const getRecentByScholar = authedQuery({
 });
 
 /**
- * All user-role message texts for a scholar from the last 30 days.
- * Used by the AI reading-level analysis action.
+ * TYPED user-role message texts for a scholar from the last 30 days — spoken
+ * (speech-to-text) and app-button turns are excluded (`isTypedScholarText`).
+ * Used by the AI reading-level analysis action, which estimates from the
+ * scholar's own writing (TRA-495).
  */
 export const getScholarUserMessages30d = teacherQuery({
   args: { scholarId: v.id("users") },
@@ -295,7 +298,9 @@ export const getScholarUserMessages30d = teacherQuery({
         )
         .collect();
       for (const m of msgs) {
-        if (typeof m.content === "string") texts.push(m.content);
+        if (typeof m.content === "string" && isTypedScholarText(m)) {
+          texts.push(m.content);
+        }
       }
     }
     return texts;
@@ -487,10 +492,14 @@ export const getScholarReadingTrend = teacherQuery({
       .order("desc")
       .take(MAX_SCHOLAR_READING_TREND_SESSIONS);
 
+    // Vocabulary wins read every scholar turn (a word a scholar SAID is still
+    // their word); the Flesch–Kincaid trend reads only typed turns, because
+    // speech-to-text punctuation would grade the transcription engine (TRA-495).
     const scholarMessages: {
       content: string;
       createdAt: number;
     }[] = [];
+    const typedScholarMessages: typeof scholarMessages = [];
 
     for (const session of sessions) {
       const messages = await ctx.db
@@ -502,14 +511,16 @@ export const getScholarReadingTrend = teacherQuery({
       for (const message of messages) {
         if (message.role !== "user" || message._creationTime < since) continue;
         if (!message.content.trim() || isSyntheticStartMessage(message.content)) continue;
-        scholarMessages.push({
+        const entry = {
           content: message.content,
           createdAt: message._creationTime,
-        });
+        };
+        scholarMessages.push(entry);
+        if (isTypedScholarText(message)) typedScholarMessages.push(entry);
       }
     }
 
-    const trend = buildScholarReadingTrend(scholarMessages, {
+    const trend = buildScholarReadingTrend(typedScholarMessages, {
       now,
       windowDays: SCHOLAR_READING_TREND_WINDOW_DAYS,
       bucketDays: SCHOLAR_READING_TREND_BUCKET_DAYS,

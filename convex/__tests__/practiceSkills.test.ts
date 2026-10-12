@@ -1,13 +1,18 @@
-import { convexTest } from "convex-test";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import { gradeTemplateItem, makeItemId } from "../lib/practice/session";
-import { FLUENT_REPS, STRUGGLING_MISS_THRESHOLD } from "../lib/practice/scheduler";
+import {
+  CHALLENGE_OVERFLOW_CAP,
+  FLUENT_REPS,
+  STRUGGLING_MISS_THRESHOLD,
+} from "../lib/practice/scheduler";
 import { domainClimb } from "../lib/practice/summits";
 import { masteryOf } from "../../shared/treeMapLayout";
 import {
+  breakerMissStreakAttempts,
   SPIRAL_GAP_MS,
   SPIRAL_MISS_THRESHOLD,
   SPIRAL_SCAN_LIMIT,
@@ -28,12 +33,31 @@ const NOW = Date.UTC(2026, 6, 27, 20, 0, 0);
 
 const modules = (import.meta as ImportMeta & { glob: (p: string) => Record<string, () => Promise<unknown>> }).glob("../**/*.ts");
 
+let sharedT: TestConvex<typeof schema>;
+let sharedSeedResult: { skills: number; edges: number };
+let scholarCounter = 0;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  sharedSeedResult = await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
 });
 
-async function seedScholar(t: ReturnType<typeof convexTest>, username = "wnascholar") {
+async function seedScholar(t: TestConvex<typeof schema>, username = `wnascholar_${++scholarCounter}`) {
   return seedScholarInInstitution(t, {
     institutionId: await seedTestInstitution(t),
     name: "WNA Scholar",
@@ -41,7 +65,7 @@ async function seedScholar(t: ReturnType<typeof convexTest>, username = "wnascho
   });
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -54,10 +78,10 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 
 describe("practiceSkills — graph seed", () => {
   test("seeds the whole-number-arithmetic graph as a valid DAG", async () => {
-    const t = convexTest(schema, modules);
-    const res = await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
+    const res = sharedSeedResult;
     // seedGraph now loads ALL practice graphs: whole-number-arithmetic (87/149)
-    // + fraction-arithmetic (31/47) + probability (26/33) + geometry-measurement
+    // + fraction-arithmetic (31/47) + probability (32/41) + geometry-measurement
     // (60/76) + ratio-proportion-percent (39/68) + integers-coordinates
     // (31/58) + early-algebra (45/78) + algebra-1 (55/79), including their
     // live cross-domain bridges. geometry-measurement went 46/66 → 60/77 when
@@ -66,17 +90,21 @@ describe("practiceSkills — graph seed", () => {
     // ruler→jar edge was DECLINED on review: the two are analogous, and
     // analogy is not prerequisite.)
     // getDomain (below) is scoped per-domain.
-    // 374 → 422 when the elective discrete-math domain landed (48 nodes).
-    expect(res.skills).toBe(422);
-    // 583 buildsOn edges + 10 INFERENCE-ONLY `implies` edges (probability 3 +
+    // 380 → 428 when the elective discrete-math domain landed (48 nodes).
+    // 428 → 427 when the duplicate `prime_composite` node was folded into
+    // `prime_or_composite` (2026-09-07).
+    expect(res.skills).toBe(427);
+    // 592 buildsOn edges + 10 INFERENCE-ONLY `implies` edges (probability 3 +
     // geometry 1 + early-algebra 2 + algebra-1 4) — the rebuild absorbs both kinds.
-    // 593 → 649 with discrete-math: 56 buildsOn edges (48 in-domain + 8
+    // 601 → 657 with discrete-math: 56 buildsOn edges (48 in-domain + 8
     // cross-domain from the WNA number-theory strand), 0 implies.
-    expect(res.edges).toBe(649);
+    // 657 → 655 with the prime fold: its three edges left, one
+    // (`prime_or_composite → prime_factorization`) arrived.
+    expect(res.edges).toBe(655);
 
     const { skills, edges } = await t.query(api.practiceSkills.getDomain, {});
-    expect(skills).toHaveLength(87);
-    expect(edges).toHaveLength(149);
+    expect(skills).toHaveLength(86);
+    expect(edges).toHaveLength(147);
 
     // every edge endpoint is a real node…
     const keys = new Set(skills.map((s) => s.skillKey));
@@ -105,8 +133,7 @@ describe("practiceSkills — graph seed", () => {
   });
 
   test("seeds the fraction-arithmetic graph as a valid DAG (Wave D)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
 
     const { skills, edges } = await t.query(api.practiceSkills.getDomain, {
       domain: "fraction-arithmetic",
@@ -181,16 +208,15 @@ describe("practiceSkills — graph seed", () => {
   });
 
   test("seeds the probability + statistics graph as a valid DAG", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
 
     const { skills, edges } = await t.query(api.practiceSkills.getDomain, {
       domain: "probability",
     });
-    expect(skills).toHaveLength(26);
-    // 30 in-domain edges + 3 live cross-domain bridges, all stamped to this
+    expect(skills).toHaveLength(32);
+    // 38 in-domain edges + 3 live cross-domain bridges, all stamped to this
     // (to-side) domain.
-    expect(edges).toHaveLength(33);
+    expect(edges).toHaveLength(41);
 
     const STRANDS = new Set([
       "chance",
@@ -199,6 +225,7 @@ describe("practiceSkills — graph seed", () => {
       "compound",
       "data-displays",
       "center-spread",
+      "sampling-inference",
     ]);
     for (const s of skills) expect(STRANDS.has(s.strand ?? "")).toBe(true);
 
@@ -252,14 +279,14 @@ describe("practiceSkills — graph seed", () => {
     await t.mutation(internal.practiceSkills.seedGraph, {});
     await t.mutation(internal.practiceSkills.seedGraph, {});
     const { skills, edges } = await t.query(api.practiceSkills.getDomain, {});
-    expect(skills).toHaveLength(87);
-    expect(edges).toHaveLength(149);
+    expect(skills).toHaveLength(86);
+    expect(edges).toHaveLength(147);
   });
 });
 
 describe("practiceSkills — probability root serveability (cross-domain ladder)", () => {
   async function insertProbItem(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     skillKey: string,
     stem: string,
     answer: string,
@@ -278,8 +305,7 @@ describe("practiceSkills — probability root serveability (cross-domain ladder)
   }
 
   test("the chance root is served from its deterministic template", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "probscholar_a");
     const asScholar = await asUser(t, scholar);
 
@@ -295,8 +321,7 @@ describe("practiceSkills — probability root serveability (cross-domain ladder)
   });
 
   test("a stored root item keeps the chance strand climbable", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "probscholar_b");
     const asScholar = await asUser(t, scholar);
 
@@ -314,6 +339,209 @@ describe("practiceSkills — probability root serveability (cross-domain ladder)
   });
 });
 
+describe("practiceSkills — served-lane echo records the opt-in challenge tail (TRA-250)", () => {
+  // Answer-time inference labels an attempt "challenge" only when every prereq
+  // is fluent, so a take from the #735 one-hop tail (prereq still ON the
+  // frontier) records "frontier" — and counts toward the spiral breaker. The
+  // client now echoes `servedLane: "challenge"` for items it took from
+  // `practiceSession.challenge`; the server honors it only above the band.
+  // Fixture: count_to_10 demonstrated-fluent (ceiling = grade 1), count_to_20
+  // (grade K) open on the frontier but NOT fluent, and its sole dependent
+  // count_to_100_ones pushed to grade 8 — above band, one hop past the frontier.
+  const ONE_HOP = "count_to_100_ones";
+  const ON_BAND_FRONTIER = "count_to_20";
+
+  async function seedOneHopFixture(username: string) {
+    const t = await freshSeeded();
+    const scholar = await seedScholar(t, username);
+    await t.run(async (ctx) => {
+      const node = await ctx.db
+        .query("knowledgeNodes")
+        .withIndex("by_nodeKey", (q) => q.eq("nodeKey", ONE_HOP))
+        .first();
+      if (node) await ctx.db.patch(node._id, { grade: "8" });
+    });
+    for (let i = 0; i < 3; i++) {
+      await t.mutation(internal.practiceSkills.recordAttemptInternal, {
+        scholarId: scholar,
+        skillKey: "count_to_10",
+        correct: true,
+      });
+    }
+    return { t, scholar, asScholar: await asUser(t, scholar) };
+  }
+
+  async function attemptsNewestFirst(t: TestConvex<typeof schema>, scholar: Id<"users">) {
+    return await t.run(async (ctx) =>
+      (await ctx.db.query("practiceAttempts").collect())
+        .filter((row) => row.scholarId === scholar)
+        .sort((a, b) => (b.createdAt ?? b._creationTime) - (a.createdAt ?? a._creationTime)),
+    );
+  }
+
+  /** Answer a template item for `skillKey` (seeded ids), right or wrong. */
+  async function answer(
+    asScholar: Awaited<ReturnType<typeof asUser>>,
+    scholar: Id<"users">,
+    skillKey: string,
+    seed: number,
+    correct: boolean,
+    servedLane?: "challenge" | "required",
+  ) {
+    const itemId = makeItemId(skillKey, seed);
+    const truth = gradeTemplateItem(itemId, "0");
+    expect(truth).toBeDefined();
+    await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId: scholar,
+      itemId,
+      answer: correct ? truth!.correctAnswer : `${truth!.correctAnswer}999`,
+      ...(servedLane ? { servedLane } : {}),
+    });
+    return itemId;
+  }
+
+  test("(b) a take from the one-hop challenge tail, echoed servedLane 'challenge', records 'challenge'", async () => {
+    const { t, scholar, asScholar } = await seedOneHopFixture("servedlane_b");
+    // Precondition: this really is the one-hop tail — offered as a challenge
+    // while its prereq is still un-fluent required work.
+    const session = await asScholar.query(api.practiceSkills.practiceSession, {
+      scholarId: scholar,
+      size: 8,
+      seed: 77,
+    });
+    const item = session.challenge.find((it) => it.skillKey === ONE_HOP);
+    expect(item).toBeDefined();
+    expect(session.items.some((it) => it.skillKey === ON_BAND_FRONTIER)).toBe(true);
+
+    const truth = gradeTemplateItem(item!.itemId, "0");
+    await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId: scholar,
+      itemId: item!.itemId,
+      answer: truth!.correctAnswer,
+      servedLane: "challenge",
+    });
+    const rows = (await attemptsNewestFirst(t, scholar)).filter((r) => r.itemId === item!.itemId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].lane).toBe("challenge");
+  });
+
+  test("(c) an on-band frontier attempt stays 'frontier' even when servedLane 'challenge' is sent", async () => {
+    const { t, scholar, asScholar } = await seedOneHopFixture("servedlane_c");
+    const itemId = await answer(asScholar, scholar, ON_BAND_FRONTIER, 4101, true, "challenge");
+    const rows = (await attemptsNewestFirst(t, scholar)).filter((r) => r.itemId === itemId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].lane).toBe("frontier");
+  });
+
+  test("(e) flagged misses on the one-hop item leave the breaker at 0; on-band frontier misses reach 3", async () => {
+    const oneHop = await seedOneHopFixture("servedlane_e1");
+    for (let i = 0; i < SPIRAL_MISS_THRESHOLD; i++) {
+      await answer(oneHop.asScholar, oneHop.scholar, ONE_HOP, 5100 + i, false, "challenge");
+    }
+    const oneHopRows = await attemptsNewestFirst(oneHop.t, oneHop.scholar);
+    expect(oneHopRows.filter((r) => r.nodeKey === ONE_HOP).map((r) => r.lane)).toEqual(
+      Array(SPIRAL_MISS_THRESHOLD).fill("challenge"),
+    );
+    expect(breakerMissStreakAttempts(oneHopRows)).toHaveLength(0);
+
+    const onBand = await seedOneHopFixture("servedlane_e2");
+    for (let i = 0; i < SPIRAL_MISS_THRESHOLD; i++) {
+      await answer(onBand.asScholar, onBand.scholar, ON_BAND_FRONTIER, 5200 + i, false);
+    }
+    const onBandRows = await attemptsNewestFirst(onBand.t, onBand.scholar);
+    expect(breakerMissStreakAttempts(onBandRows)).toHaveLength(SPIRAL_MISS_THRESHOLD);
+  });
+
+  test("(f) a scoped session on the one-hop node, answered WITHOUT the flag, records 'frontier' and reaches the breaker", async () => {
+    // The review's case: a teacher-scoped problem set serves the SAME above-band
+    // key as REQUIRED work. The client sends no echo, so struggling on assigned
+    // work must still count toward the spiral breaker.
+    const { t, scholar, asScholar } = await seedOneHopFixture("servedlane_f");
+    const scoped = await asScholar.query(api.practiceSkills.practiceSession, {
+      scholarId: scholar,
+      size: SPIRAL_MISS_THRESHOLD,
+      seed: 91,
+      skillKeys: [ONE_HOP],
+    });
+    expect(scoped.challenge).toHaveLength(0);
+    const items = scoped.items.filter((it) => it.skillKey === ONE_HOP);
+    expect(items.length).toBeGreaterThanOrEqual(SPIRAL_MISS_THRESHOLD);
+    for (const item of items.slice(0, SPIRAL_MISS_THRESHOLD)) {
+      expect(item.lane).not.toBe("challenge");
+      const truth = gradeTemplateItem(item.itemId, "0");
+      await asScholar.mutation(api.practiceSkills.submitAnswer, {
+        scholarId: scholar,
+        itemId: item.itemId,
+        answer: `${truth!.correctAnswer}999`,
+      });
+    }
+    const rows = await attemptsNewestFirst(t, scholar);
+    expect(rows.filter((r) => r.nodeKey === ONE_HOP).map((r) => r.lane)).toEqual(
+      Array(SPIRAL_MISS_THRESHOLD).fill("frontier"),
+    );
+    expect(breakerMissStreakAttempts(rows)).toHaveLength(SPIRAL_MISS_THRESHOLD);
+  });
+
+  test("(h) a scoped set on an above-band skill with fluent prereqs: 'required' records 'frontier' and reaches the breaker; no flag stays 'challenge' (master)", async () => {
+    // count_to_20's only prereq (count_to_10) is fluent, so it sits on the
+    // fully-fluent frontier; pushed to grade 8 it is above the band. Master's
+    // inference labels ANY take of it "challenge" — including a teacher-scoped
+    // problem set serving it as REQUIRED work, whose misses then skip the
+    // breaker. An updated client says "required", and required work counts.
+    async function scopedMisses(username: string, servedLane?: "required") {
+      const fx = await seedOneHopFixture(username);
+      await fx.t.run(async (ctx) => {
+        const node = await ctx.db
+          .query("knowledgeNodes")
+          .withIndex("by_nodeKey", (q) => q.eq("nodeKey", ON_BAND_FRONTIER))
+          .first();
+        if (node) await ctx.db.patch(node._id, { grade: "8" });
+      });
+      const scoped = await fx.asScholar.query(api.practiceSkills.practiceSession, {
+        scholarId: fx.scholar,
+        size: SPIRAL_MISS_THRESHOLD,
+        seed: 93,
+        skillKeys: [ON_BAND_FRONTIER],
+      });
+      const items = scoped.items.filter((it) => it.skillKey === ON_BAND_FRONTIER);
+      expect(items.length).toBeGreaterThanOrEqual(SPIRAL_MISS_THRESHOLD);
+      for (const item of items.slice(0, SPIRAL_MISS_THRESHOLD)) {
+        expect(item.lane).not.toBe("challenge");
+        const truth = gradeTemplateItem(item.itemId, "0");
+        await fx.asScholar.mutation(api.practiceSkills.submitAnswer, {
+          scholarId: fx.scholar,
+          itemId: item.itemId,
+          answer: `${truth!.correctAnswer}999`,
+          ...(servedLane ? { servedLane } : {}),
+        });
+      }
+      const rows = await attemptsNewestFirst(fx.t, fx.scholar);
+      return {
+        lanes: rows.filter((r) => r.nodeKey === ON_BAND_FRONTIER).map((r) => r.lane),
+        streak: breakerMissStreakAttempts(rows).length,
+      };
+    }
+
+    const required = await scopedMisses("servedlane_h_required", "required");
+    expect(required.lanes).toEqual(Array(SPIRAL_MISS_THRESHOLD).fill("frontier"));
+    expect(required.streak).toBe(SPIRAL_MISS_THRESHOLD);
+
+    const legacy = await scopedMisses("servedlane_h_legacy");
+    expect(legacy.lanes).toEqual(Array(SPIRAL_MISS_THRESHOLD).fill("challenge"));
+    expect(legacy.streak).toBe(0);
+  });
+
+  test("(g) no flag at all is master behavior, including the one-hop take recorded as 'frontier'", async () => {
+    const { t, scholar, asScholar } = await seedOneHopFixture("servedlane_g");
+    const oneHopId = await answer(asScholar, scholar, ONE_HOP, 6101, true);
+    const onBandId = await answer(asScholar, scholar, ON_BAND_FRONTIER, 6102, true);
+    const rows = await attemptsNewestFirst(t, scholar);
+    // The old mislabel an un-updated iPad keeps producing (no echo) — unchanged.
+    expect(rows.find((r) => r.itemId === oneHopId)?.lane).toBe("frontier");
+    expect(rows.find((r) => r.itemId === onBandId)?.lane).toBe("frontier");
+  });
+});
+
 describe("practiceSkills — mixed-domain playlists (interleaved cross-domain session)", () => {
   // A standing playlist can blend several practice domains into ONE interleaved
   // session. These pin the engine-level contract of the mixed branch (the pure
@@ -323,7 +551,7 @@ describe("practiceSkills — mixed-domain playlists (interleaved cross-domain se
   // yields an empty session (which the UI turns into the summit / caught-up
   // handoff, whose selection logic is unit-tested in shared/practiceSummit).
   async function insertItem(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     skillKey: string,
     domain: string,
     stem: string,
@@ -343,8 +571,7 @@ describe("practiceSkills — mixed-domain playlists (interleaved cross-domain se
   }
 
   test("a mixed session interleaves items from EVERY blended domain, each tagged with its domain", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "mixedscholar_a");
     const asScholar = await asUser(t, scholar);
 
@@ -376,8 +603,7 @@ describe("practiceSkills — mixed-domain playlists (interleaved cross-domain se
   });
 
   test("a length-1 `domains` array serves THAT domain, never the whole-number default", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "mixedscholar_b");
     const asScholar = await asUser(t, scholar);
 
@@ -400,8 +626,7 @@ describe("practiceSkills — mixed-domain playlists (interleaved cross-domain se
   });
 
   test("deterministic statistics roots make a fresh probability blend serveable", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "mixedscholar_c");
     const asScholar = await asUser(t, scholar);
 
@@ -419,9 +644,108 @@ describe("practiceSkills — mixed-domain playlists (interleaved cross-domain se
     expect(session.domains).toEqual(["probability", "fraction-arithmetic"]);
   });
 
+  // TRA-250: a blend used to return `challenge: []` unconditionally, while each
+  // of its domains still ran the banded scheduler — so the band WITHHELD a
+  // blend's above-band frontier from the required set and never offered it back.
+  async function seedAboveBandWholeNumber(t: TestConvex<typeof schema>, scholar: Id<"users">) {
+    // Same fixture as the single-domain test below: push two of count_to_10's
+    // dependents to grade 8, then make count_to_10 demonstrated-fluent so they
+    // open on the frontier above the (grade-1) ceiling.
+    await t.run(async (ctx) => {
+      for (const key of ["count_to_100_tens", "count_to_20"]) {
+        const node = await ctx.db
+          .query("knowledgeNodes")
+          .withIndex("by_nodeKey", (q) => q.eq("nodeKey", key))
+          .first();
+        if (node) await ctx.db.patch(node._id, { grade: "8" });
+      }
+    });
+    for (let i = 0; i < 3; i++) {
+      await t.mutation(internal.practiceSkills.recordAttemptInternal, {
+        scholarId: scholar,
+        skillKey: "count_to_10",
+        correct: true,
+      });
+    }
+  }
+
+  test("a blended session offers the above-band challenge tail (labeled, domain-stamped, capped)", async () => {
+    const t = await freshSeeded();
+    const scholar = await seedScholar(t, "mixedscholar_challenge");
+    const asScholar = await asUser(t, scholar);
+    await seedAboveBandWholeNumber(t, scholar);
+    const ABOVE_BAND = new Set(["count_to_100_tens", "count_to_20"]);
+
+    const session = await asScholar.query(api.practiceSkills.practiceSession, {
+      scholarId: scholar,
+      size: 8,
+      seed: 77,
+      domains: ["whole-number-arithmetic", "probability"],
+    });
+
+    expect(session.domains).toEqual(["whole-number-arithmetic", "probability"]);
+    // The required set still never contains an above-band skill.
+    for (const it of session.items) expect(ABOVE_BAND.has(it.skillKey)).toBe(false);
+    // ...and the band's withheld work now comes back as the opt-in tail.
+    expect(session.challenge.length).toBeGreaterThan(0);
+    expect(session.challenge.length).toBeLessThanOrEqual(CHALLENGE_OVERFLOW_CAP);
+    for (const it of session.challenge) {
+      expect(it.lane).toBe("challenge");
+      expect(it.domain).toBe("whole-number-arithmetic");
+      expect(ABOVE_BAND.has(it.skillKey)).toBe(true);
+      expect(hasTemplate(it.skillKey)).toBe(true);
+    }
+
+    // Taking it records the attempt in the challenge lane, same as single-domain.
+    const challengeItem = session.challenge[0];
+    const truth = gradeTemplateItem(challengeItem.itemId, "0");
+    expect(truth).toBeDefined();
+    await asScholar.mutation(api.practiceSkills.submitAnswer, {
+      scholarId: scholar,
+      itemId: challengeItem.itemId,
+      answer: truth!.correctAnswer,
+    });
+    const attempts = await t.run(async (ctx) =>
+      (await ctx.db.query("practiceAttempts").collect()).filter(
+        (row) => row.scholarId === scholar && row.itemId === challengeItem.itemId,
+      ),
+    );
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0].lane).toBe("challenge");
+  });
+
+  test("a blended session's challenge tail still excludes a cold-failed above-band key", async () => {
+    const t = await freshSeeded();
+    const scholar = await seedScholar(t, "mixedscholar_challenge_cold");
+    const asScholar = await asUser(t, scholar);
+    await seedAboveBandWholeNumber(t, scholar);
+    const ABOVE_BAND_COLD = "count_to_100_tens";
+    const ABOVE_BAND_HOT = "count_to_20";
+    // A just-failed above-band skill is not a "challenge" — it re-enters
+    // through teach-first below the band.
+    await t.run(async (ctx) =>
+      ctx.db.insert("practiceAttempts", {
+        scholarId: scholar,
+        nodeKey: ABOVE_BAND_COLD,
+        correct: false,
+        createdAt: Date.now(),
+      }),
+    );
+
+    const session = await asScholar.query(api.practiceSkills.practiceSession, {
+      scholarId: scholar,
+      size: 8,
+      seed: 77,
+      domains: ["whole-number-arithmetic", "probability"],
+    });
+
+    for (const it of session.challenge) expect(it.skillKey).not.toBe(ABOVE_BAND_COLD);
+    // Targeted exclusion, not an accidentally empty tail.
+    expect(session.challenge.some((it) => it.skillKey === ABOVE_BAND_HOT)).toBe(true);
+  });
+
   test("the single-domain path is unchanged by the mixed branch (no domains arg)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "mixedscholar_d");
     const asScholar = await asUser(t, scholar);
 
@@ -441,8 +765,7 @@ describe("practiceSkills — mixed-domain playlists (interleaved cross-domain se
 
 describe("practiceSkills — attempts update mastery", () => {
   test("correct attempts advance reps and proficiency band", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
 
     let res = await t.mutation(internal.practiceSkills.recordAttemptInternal, {
@@ -465,8 +788,7 @@ describe("practiceSkills — attempts update mastery", () => {
   });
 
   test("a miss does not advance the rep count", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     await t.mutation(internal.practiceSkills.recordAttemptInternal, { scholarId: scholar, skillKey: "count_to_10", correct: true });
     const res = await t.mutation(internal.practiceSkills.recordAttemptInternal, { scholarId: scholar, skillKey: "count_to_10", correct: false });
@@ -478,8 +800,7 @@ describe("practiceSkills — attempts update mastery", () => {
   // `source` to "practice" on a correct attempt. Without this the entire placed
   // population is stuck provisional forever.
   test("a provisional (placement) credit flips to green on a correct practice attempt", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
 
     // Seed an INFERRED credit: placement gave access at FLUENT_REPS, but it's
@@ -512,8 +833,7 @@ describe("practiceSkills — attempts update mastery", () => {
   });
 
   test("a miss on a provisional credit does NOT claim demonstration (source unchanged)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const rowId = await t.run(async (ctx) =>
       ctx.db.insert("practiceMastery", {
@@ -541,8 +861,7 @@ describe("practiceSkills — attempts update mastery", () => {
   // consecutive recent misses and resets to 0 on the next correct answer (the
   // "determination of fluency" that supersedes the streak).
   test("missStreak increments on consecutive misses and resets on a correct answer", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const readMiss = () =>
       t.run(async (ctx) =>
@@ -583,8 +902,7 @@ describe("practiceSkills — attempts update mastery", () => {
   // missStreak (so masteryOf → "struggling") for a teacher read, but REDACTS it
   // from the scholar's own map (honors "a portrait, not a report card").
   test("treeForScholar surfaces struggling to a teacher but redacts it from the scholar", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
 
     // Two recent misses → missStreak at the struggling bar.
@@ -625,8 +943,7 @@ describe("practiceSkills — attempts update mastery", () => {
   // rollup report a TRUE "turned fluent / frontier moved this week" instead of a
   // decaying read-time proxy. They must fire exactly on the crossing edge.
   test("practicing a new skill to fluent stamps becameFluentAt + frontierAdvancedAt, once", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const readSkill = () =>
       t.run(async (ctx) =>
@@ -769,8 +1086,7 @@ describe("practiceSkills — attempts update mastery", () => {
   });
 
   test("a placement credit practiced green stamps becameFluentAt but NOT frontierAdvancedAt (access was inferred, not practice-earned)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const readSkill = () =>
       t.run(async (ctx) =>
@@ -806,8 +1122,7 @@ describe("practiceSkills — attempts update mastery", () => {
   });
 
   test("a miss before the crossing stamps nothing", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     await t.mutation(internal.practiceSkills.recordAttemptInternal, { scholarId: scholar, skillKey: "count_to_10", correct: true });
     await t.mutation(internal.practiceSkills.recordAttemptInternal, { scholarId: scholar, skillKey: "count_to_10", correct: false });
@@ -828,8 +1143,7 @@ describe("practiceSkills — attempts update mastery", () => {
   // (correct OR wrong) and NEVER by placement/reprobe trust-upward, or a
   // just-placed-but-never-drilled scholar would falsely read as "practiced".
   test("a recorded attempt stamps lastAttemptAt (correct and wrong); placement does not", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const readSkill = (skillKey: string) =>
       t.run(async (ctx) =>
@@ -874,8 +1188,7 @@ describe("practiceSkills — attempts update mastery", () => {
   });
 
   test("recordAttempt writes exactly one practiceAttempts row with lane and predicted retention", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const before = Date.now();
 
@@ -905,8 +1218,7 @@ describe("practiceSkills — attempts update mastery", () => {
 
 describe("practiceSkills — frontier gating end to end", () => {
   test("a downstream skill stays locked until its prerequisites are fluent", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -987,8 +1299,7 @@ describe("practiceSkills — frontier gating end to end", () => {
   });
 
   test("the next-practice queue surfaces frontier work, labeled", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const queue = await asScholar.query(api.practiceSkills.nextForScholar, { scholarId: scholar, limit: 3 });
@@ -1000,8 +1311,7 @@ describe("practiceSkills — frontier gating end to end", () => {
 
 describe("practiceSkills — playlistForScholar (scholar-home Playlist card §3)", () => {
   test("a fresh scholar gets a next-up + a queued set, not started", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -1019,8 +1329,7 @@ describe("practiceSkills — playlistForScholar (scholar-home Playlist card §3)
   });
 
   test("practicing a frontier skill today marks its set row done", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -1046,8 +1355,7 @@ describe("practiceSkills — playlistForScholar (scholar-home Playlist card §3)
     const now = new Date("2026-07-03T20:00:00Z").getTime();
     vi.setSystemTime(now);
 
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const institutionId = await t.run((ctx) =>
       ctx.db.insert("institutions", {
         name: "Moli School",
@@ -1105,8 +1413,7 @@ describe("practiceSkills — playlistForScholar (scholar-home Playlist card §3)
   });
 
   test("becoming fluent unlocks the next skill → next-up moves off the practiced root", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -1128,8 +1435,7 @@ describe("practiceSkills — playlistForScholar (scholar-home Playlist card §3)
   });
 
   test("a scholar cannot read another scholar's playlist", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const a = await seedScholar(t, "playlist_a");
     const b = await seedScholar(t, "playlist_b");
     const asA = await asUser(t, a);
@@ -1151,8 +1457,7 @@ describe("practiceSkills — practice set + auth", () => {
   });
 
   test("a scholar cannot read another scholar's tree", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const a = await seedScholar(t, "scholar_a");
     const b = await seedScholar(t, "scholar_b");
     const asA = await asUser(t, a);
@@ -1162,8 +1467,7 @@ describe("practiceSkills — practice set + auth", () => {
 
 describe("practiceSkills — practice session loop", () => {
   test("serves items without answers, and submitAnswer grades + records", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -1189,8 +1493,7 @@ describe("practiceSkills — practice session loop", () => {
   });
 
   test("a correct answer (the revealed truth) advances proficiency", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const session = await asScholar.query(api.practiceSkills.practiceSession, { scholarId: scholar, size: 1, seed: 7 });
@@ -1205,8 +1508,7 @@ describe("practiceSkills — practice session loop", () => {
   });
 
   test("record:false grades without moving mastery (handoff retry)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const session = await asScholar.query(api.practiceSkills.practiceSession, { scholarId: scholar, size: 1, seed: 11 });
@@ -1259,12 +1561,192 @@ describe("practiceSkills — practice session loop", () => {
   });
 });
 
+describe("practiceStuckAlert — outcome skill snapshot", () => {
+  const NOW = Date.UTC(2026, 6, 27, 20, 0, 0);
+  const domain = "whole-number-arithmetic";
+  const skillKey = "count_to_10";
+
+  async function seedOutcome(repetitionBefore = 0, missingMastery = false) {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+    const scholarId = await seedScholar(t, "outcome_snapshot");
+    const ids = await t.run(async (ctx) => {
+      const nodeId = await ctx.db.insert("knowledgeNodes", {
+        nodeKey: skillKey,
+        label: "Count to 10",
+        domain,
+      });
+      const triggerAttemptId = await ctx.db.insert("practiceAttempts", {
+        scholarId,
+        nodeKey: skillKey,
+        correct: false,
+        domain,
+        lane: "frontier",
+        repetitionBefore,
+        halfLifeBefore: 0,
+        halfLifeAfter: 1,
+        createdAt: NOW,
+        breaker: { streak: 3, offer: "declined", recovery: "won" },
+        breakerLifecycle: {
+          version: 2,
+          triggerNodeKey: skillKey,
+          triggeredAt: NOW,
+          easyExitedAt: NOW,
+        },
+      });
+      const masteryId = missingMastery ? undefined : await ctx.db.insert("practiceMastery", {
+        scholarId,
+        skillKey,
+        domain,
+        repetition: repetitionBefore,
+        halfLifeDays: 1,
+        missStreak: 3,
+        frontier: true,
+        source: "practice",
+        updatedAt: NOW,
+      });
+      const alertId = await ctx.db.insert("alerts", {
+        kind: "practice_stuck",
+        severity: "warning",
+        title: "Practice paused",
+        body: "Missed three items.",
+        source: "practice",
+        scholarId,
+        practiceTriggerAttemptId: triggerAttemptId,
+        slackChannelId: "C_ALERTS",
+        slackMessageTs: "1234.5678",
+        status: "open",
+        createdAt: NOW,
+      });
+      return { triggerAttemptId, masteryId, nodeId, alertId };
+    });
+    return { t, ...ids };
+  }
+
+  test.each([
+    { name: "first correct answer", before: 0, after: 1, halfLife: 1, line: "first correct answer on this skill in this episode." },
+    { name: "another correct answer", before: 1, after: 2, halfLife: 1, line: "now practicing." },
+    { name: "retention growth only", before: 1, after: 1, halfLife: 2, line: "now practicing." },
+  ])("reads $name from the trigger skill mastery", async ({ before, after, halfLife, line }) => {
+    const { t, triggerAttemptId, masteryId } = await seedOutcome(before);
+    await t.run(async (ctx) => {
+      await ctx.db.patch(masteryId!, {
+        repetition: after,
+        halfLifeDays: halfLife,
+        missStreak: 0,
+        updatedAt: NOW + 1,
+      });
+      const attemptId = await ctx.db.insert("practiceAttempts", {
+        scholarId: (await ctx.db.get(masteryId!))!.scholarId,
+        nodeKey: skillKey,
+        itemId: "fresh-item",
+        correct: true,
+        createdAt: NOW + 1,
+      });
+      await ctx.db.patch(triggerAttemptId, {
+        breakerLifecycle: {
+          version: 2,
+          triggeredAt: NOW,
+          triggerNodeKey: skillKey,
+          repairCompletedAt: NOW,
+          freshResult: {
+            attemptId,
+            itemId: "fresh-item",
+            correct: true,
+            completedAt: NOW + 1,
+          },
+        },
+      });
+    });
+    const claim = await t.mutation(internal.practiceStuckAlert.claimOutcome, { triggerAttemptId });
+    expect(claim?.text).toContain(`Count to 10: ${line}`);
+    expect(claim?.text).not.toContain("the skill itself did not move");
+  });
+
+  test("omits an unknown miss count when the mastery row is missing", async () => {
+    const { t, triggerAttemptId } = await seedOutcome(0, true);
+    const claim = await t.mutation(internal.practiceStuckAlert.claimOutcome, { triggerAttemptId });
+    expect(claim?.text).toContain("Count to 10: currently not started — progress during this episode is unknown.");
+    expect(claim?.text).not.toContain("0 misses");
+  });
+
+  test("does not infer a lifetime first success from a zero repetition baseline", async () => {
+    const { t, triggerAttemptId, masteryId } = await seedOutcome();
+    await t.run((ctx) => ctx.db.patch(masteryId!, { repetition: 1 }));
+    const claim = await t.mutation(internal.practiceStuckAlert.claimOutcome, { triggerAttemptId });
+    expect(claim?.text).toContain("Count to 10: now practicing.");
+    expect(claim?.text).not.toContain("first correct answer");
+  });
+
+  test("does not count later unrelated practice as episode progress on a delayed first claim", async () => {
+    const { t, triggerAttemptId, masteryId } = await seedOutcome();
+    vi.setSystemTime(NOW + 60 * 60_000);
+    await t.run((ctx) => ctx.db.patch(masteryId!, {
+      repetition: 2,
+      halfLifeDays: 4,
+      missStreak: 0,
+      updatedAt: Date.now(),
+    }));
+    const claim = await t.mutation(internal.practiceStuckAlert.claimOutcome, { triggerAttemptId });
+    expect(claim?.text).toContain("Count to 10: currently practicing — progress during this episode is unknown.");
+    expect(claim?.text).not.toContain("first correct answer");
+    expect(claim?.text).not.toContain("the skill itself did not move");
+  });
+
+  test("duplicate mastery and node rows do not prevent an outcome claim", async () => {
+    const { t, triggerAttemptId, masteryId, nodeId } = await seedOutcome();
+    await t.run(async (ctx) => {
+      const mastery = await ctx.db.get(masteryId!);
+      const node = await ctx.db.get(nodeId);
+      expect(mastery).not.toBeNull();
+      expect(node).not.toBeNull();
+      await ctx.db.insert("practiceMastery", {
+        scholarId: mastery!.scholarId,
+        skillKey,
+        domain,
+        repetition: 5,
+        halfLifeDays: 10,
+        frontier: false,
+        source: "practice",
+        updatedAt: NOW + 1,
+      });
+      await ctx.db.insert("knowledgeNodes", { nodeKey: skillKey, domain, label: "Duplicate label" });
+    });
+    const claim = await t.mutation(internal.practiceStuckAlert.claimOutcome, { triggerAttemptId });
+    expect(claim?.text).toContain("Count to 10: still not started — 3 misses in a row");
+  });
+
+  test.each(["release", "lease expiry"])("preserves the first skill reading after claim %s", async (retryMode) => {
+    const { t, triggerAttemptId, masteryId, nodeId, alertId } = await seedOutcome();
+    const first = await t.mutation(internal.practiceStuckAlert.claimOutcome, { triggerAttemptId });
+    expect(first).not.toBeNull();
+    const snapshot = (await t.run((ctx) => ctx.db.get(alertId)))?.practiceOutcomeSkillState;
+    expect(snapshot).toMatchObject({ progressed: false, missStreak: 3 });
+    if (retryMode === "release") {
+      expect(await t.mutation(internal.practiceStuckAlert.releaseOutcomeClaim, {
+        alertId,
+        claimId: first!.claimId,
+      })).toBe(true);
+    }
+    await t.run(async (ctx) => {
+      await ctx.db.patch(masteryId!, { repetition: 2, halfLifeDays: 4, missStreak: 0 });
+      await ctx.db.patch(nodeId, { label: "Renamed skill" });
+    });
+    vi.setSystemTime(NOW + 16 * 60_000);
+    const retry = await t.mutation(internal.practiceStuckAlert.claimOutcome, { triggerAttemptId });
+    expect(retry?.claimId).not.toBe(first?.claimId);
+    expect(retry?.text).toBe(first?.text);
+    expect((await t.run((ctx) => ctx.db.get(alertId)))?.practiceOutcomeSkillState).toEqual(snapshot);
+  });
+});
+
 describe("practiceSkills — spiral circuit breaker", () => {
   const NOW = Date.UTC(2026, 6, 27, 20, 0, 0);
   const ITEM_ID = makeItemId("count_to_10", 8675309);
 
   async function requireBreakerRecovery(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     result: unknown,
   ) {
     if (
@@ -1303,7 +1785,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   }
 
   async function seedPriorMisses(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholarId: Id<"users">,
     lane: "review" | "frontier" | "confirmation" | "challenge" = "review",
     count = 2,
@@ -1327,7 +1809,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   }
 
   async function submitMiss(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholarId: Id<"users">,
     args: {
       answer?: string;
@@ -1349,7 +1831,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   }
 
   async function practiceAlerts(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholarId: Id<"users">,
   ) {
     return await t.run(async (ctx) =>
@@ -1360,7 +1842,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   }
 
   async function practiceStuckAlerts(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholarId: Id<"users">,
   ) {
     return (await practiceAlerts(t, scholarId)).filter(
@@ -1371,8 +1853,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("legacy rows without breaker eligibility retain their counted behavior", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_three");
     await seedPriorMisses(t, scholar);
     const legacyAttempts = await t.run(async (ctx) =>
@@ -1416,8 +1897,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("suppresses the breaker lifecycle and alert for a contained practice mode", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_contained_mode");
     await seedPriorMisses(t, scholar);
 
@@ -1433,8 +1913,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("returns repair-unavailable with the threshold-crossing submission when no rung exists", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_prepared_repair");
     await seedPriorMisses(t, scholar);
 
@@ -1454,8 +1933,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("returns an actionable first repair rung with the triggering submission", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_prepared_step");
     await seedPriorMisses(t, scholar);
     const itemId = await t.run((ctx) =>
@@ -1503,8 +1981,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("replay submissions preserve the answer record without opening a breaker or alert", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_replayed_step");
     await seedPriorMisses(t, scholar);
     const itemId = await t.run((ctx) =>
@@ -1582,8 +2059,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     test(`three ${mode.label} misses followed by one live miss stay below the breaker threshold`, async () => {
       vi.useFakeTimers();
       vi.setSystemTime(NOW);
-      const t = convexTest(schema, modules);
-      await t.mutation(internal.practiceSkills.seedGraph, {});
+      const t = await freshSeeded();
       const scholar = await seedScholar(t, mode.username);
 
       const excludedIds: Id<"practiceAttempts">[] = [];
@@ -1632,8 +2108,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_mixed_eligibility");
 
     const first = await submitMiss(t, scholar);
@@ -1708,8 +2183,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("a correct suppressed answer resets prior live misses", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_suppressed_correct_reset");
 
     await submitMiss(t, scholar);
@@ -1757,8 +2231,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_ordinary_eligibility");
 
     const first = await submitMiss(t, scholar);
@@ -1800,8 +2273,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("serves an explicitly requested cross-domain practice item", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_cross_domain");
     await seedPriorMisses(t, scholar);
     await t.run(async (ctx) => {
@@ -1859,8 +2331,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     // a non-stretch stored item) keeps the stored-only skill in the pool.
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_stored_only");
     await seedPriorMisses(t, scholar);
     await t.run(async (ctx) => {
@@ -1910,8 +2381,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("grade-only retries never return backOff", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_grade_only");
     await seedPriorMisses(t, scholar, "review", 3);
 
@@ -1923,8 +2393,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("teacher rehearsal never returns backOff", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_rehearsal");
     const teacher = await seedStaffWithMembership(t, {
       institutionId: await seedTestInstitution(t),
@@ -1946,8 +2415,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("excluded-lane attempts do not return backOff", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_stretch");
     await seedPriorMisses(t, scholar);
     const stretchId = await t.run(async (ctx) =>
@@ -1976,8 +2444,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("recovery selection requires context-aware fluency and is deterministic", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_recovery");
     await seedPriorMisses(t, scholar);
     await t.run(async (ctx) => {
@@ -2033,8 +2500,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("recordBreakerOutcome records choice immediately and fills recovery monotonically", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_outcome");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -2100,8 +2566,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("records the versioned repair lifecycle monotonically and links one fresh same-node result", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_repair");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -2266,8 +2731,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("breakerRecoverySession is idempotent across a retry with a different client seed", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_recovery_retry");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -2358,8 +2822,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("breakerRecoverySession reconstructs a pre-existing freshItemId with no other lifecycle metadata (pre-fix compatibility)", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_recovery_legacy_row");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -2413,8 +2876,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("allows easy exit after coach and rejects terminal recovery serving", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_coach_exit");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -2443,8 +2905,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("atomically records an easy exit after a missed fresh attempt", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_fresh_miss_exit");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -2516,8 +2977,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("records an explicit stop before a fresh attempt", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_stop_before_fresh");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -2543,8 +3003,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("rejects a fresh result when that fresh item used the hint ladder", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_hinted_fresh");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -2607,8 +3066,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_alert");
     await seedPriorMisses(t, scholar);
     await t.run(async (ctx) => {
@@ -2705,8 +3163,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("replays a lost threshold-miss response without a second breaker lifecycle", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_idempotent_trip");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -2738,8 +3195,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_legacy_reattach");
     await seedPriorMisses(t, scholar, "review", 3);
 
@@ -2760,8 +3216,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_legacy_compose");
     await seedPriorMisses(t, scholar, "review", SPIRAL_MISS_THRESHOLD);
     const attemptIds = await t.run(async (ctx) =>
@@ -2792,8 +3247,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_excluded_compose");
     const attemptIds = await t.run(async (ctx) => {
       const ids: Id<"practiceAttempts">[] = [];
@@ -2831,8 +3285,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
     vi.stubEnv("SLACK_BOT_TOKEN", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_threaded_outcome");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -2882,6 +3335,9 @@ describe("practiceSkills — spiral circuit breaker", () => {
     expect(firstClaim?.text).toContain(
       "They chose the easier finish and got that item right.",
     );
+    expect(firstClaim?.text).toContain(
+      "Count to 10 by ones: still not started — 1 miss in a row, no progress this episode. Recovered on an easier item; the skill itself did not move.",
+    );
     expect(
       await t.mutation(internal.practiceStuckAlert.claimOutcome, {
         triggerAttemptId: result.breakerRecovery!.triggerAttemptId,
@@ -2928,8 +3384,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
     vi.stubEnv("SLACK_BOT_TOKEN", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_thread_delivery");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -2996,6 +3451,9 @@ describe("practiceSkills — spiral circuit breaker", () => {
           expect(body.markdown_text).toContain(
             "They chose the easier finish and got that item right.",
           );
+          expect(body.markdown_text).toContain(
+            "Count to 10 by ones: still not started — 1 miss in a row, no progress this episode.",
+          );
           return new Response(
             JSON.stringify({ ok: true, ts: "1234.9999" }),
             { status: 200 },
@@ -3030,8 +3488,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
     vi.stubEnv("SLACK_BOT_TOKEN", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_fresh_miss_stop");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -3087,8 +3544,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
     vi.stubEnv("SLACK_BOT_TOKEN", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_activity_timeout");
     await seedPriorMisses(t, scholar);
     const asScholar = await asUser(t, scholar);
@@ -3124,11 +3580,57 @@ describe("practiceSkills — spiral circuit breaker", () => {
     ).toMatchObject({ alertId: alert._id });
   });
 
+  test("activeBreakerEpisode closes an idle episode on the caller's clock alone", async () => {
+    // Convex re-runs a subscribed query on writes, never on elapsed time, so
+    // the hosts pass a minute-rounded `now` (T11). With the server clock held
+    // at the trigger and nothing written, that argument must be what closes
+    // the episode once its window has passed.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const t = await freshSeeded();
+    const scholar = await seedScholar(t, "spiral_caller_clock");
+    await seedPriorMisses(t, scholar);
+    const asScholar = await asUser(t, scholar);
+    const { triggerAttemptId } = await requireBreakerRecovery(
+      t,
+      await submitMiss(t, scholar),
+    );
+
+    await expect(
+      asScholar.query(api.practiceSkills.activeBreakerEpisode, {
+        scholarId: scholar,
+        now: NOW,
+      }),
+    ).resolves.toMatchObject({
+      triggerAttemptId,
+      lastActivityAt: NOW,
+      expiresAt: NOW + SPIRAL_GAP_MS,
+    });
+    await expect(
+      asScholar.query(api.practiceSkills.activeBreakerEpisode, {
+        scholarId: scholar,
+        now: NOW + SPIRAL_GAP_MS + 60_000,
+      }),
+    ).resolves.toBeNull();
+    // A build that predates the argument still gets the server's clock, both
+    // inside the window and after it.
+    await expect(
+      asScholar.query(api.practiceSkills.activeBreakerEpisode, {
+        scholarId: scholar,
+      }),
+    ).resolves.toMatchObject({ triggerAttemptId });
+    vi.setSystemTime(NOW + SPIRAL_GAP_MS + 60_000);
+    await expect(
+      asScholar.query(api.practiceSkills.activeBreakerEpisode, {
+        scholarId: scholar,
+      }),
+    ).resolves.toBeNull();
+  });
+
   test("an all-dont-know streak keeps back-off and raises only a calm not-yet-taught alert", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_all_dont_know");
     await t.run(async (ctx) => {
       await ctx.db.insert("practiceAttempts", {
@@ -3191,8 +3693,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("an all-manipulative streak keeps the scholar back-off but raises no alert", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_all_manipulative");
     const itemId = await t.run(async (ctx) => {
       for (const offset of [2, 1]) {
@@ -3266,8 +3767,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_mixed_diagnosable");
     await t.run(async (ctx) => {
       for (const offset of [2, 1]) {
@@ -3304,8 +3804,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("not-yet-taught alerts deduplicate within the same sitting", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_not_yet_dedup");
 
     const seedDontKnows = async (base: number) => {
@@ -3366,8 +3865,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_pinned_before_recovery");
     await seedPriorMisses(t, scholar);
     await t.run(async (ctx) => {
@@ -3418,13 +3916,13 @@ describe("practiceSkills — spiral circuit breaker", () => {
     expect(stuck[0].body).toContain("This sitting: 1 of 4 correct");
     expect(stuck[0].body.match(/^• /gm)).toHaveLength(3);
     expect(stuck[0].body).toContain(
-      "• *prior\\_2* (7s on this one)\n",
+      "• **prior\\_2** (7s on this one)\n",
     );
     expect(stuck[0].body).toContain(
-      "• *prior\\_1* (8s on this one)\n",
+      "• **prior\\_1** (8s on this one)\n",
     );
     expect(stuck[0].body).toContain(
-      "• *Count to 10 by ones* (17s on this one)\n",
+      "• **Count to 10 by ones** (17s on this one)\n",
     );
     expect(stuck[0].body).toContain("answered `999999`");
     expect(stuck[0].body).not.toContain("Recovery question");
@@ -3434,8 +3932,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     vi.stubEnv("ANTHROPIC_API_KEY", "");
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_evidence_fallback");
     await seedPriorMisses(t, scholar);
 
@@ -3466,7 +3963,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
     expect(stuck[0].body).toBe(
       [
         "Missed 3 practice items in a row. Rabbithole paused the run and offered to talk one through with the tutor, or to finish on an easier one.",
-        "Most recently on *Count to 10 by ones*.",
+        "Most recently on **Count to 10 by ones**.",
         "Might be a good moment to check in.",
       ].join("\n"),
     );
@@ -3475,8 +3972,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("deduplicates diagnosable episodes inside 30 minutes and re-alerts after the sitting window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_new_episode");
     await seedPriorMisses(t, scholar);
 
@@ -3561,8 +4057,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("no backOff (below threshold) raises no practice_stuck alert", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_below");
     // Only one prior miss → this submit is the 2nd, under SPIRAL_MISS_THRESHOLD.
     await seedPriorMisses(t, scholar, "review", 1);
@@ -3586,8 +4081,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("replay submissions never open a breaker or raise a practice_stuck alert", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_replay");
     await seedPriorMisses(t, scholar);
 
@@ -3636,8 +4130,7 @@ describe("practiceSkills — spiral circuit breaker", () => {
   test("a flood of newer retry rows does not dilute the miss-streak scan window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "spiral_retry_flood");
 
     // Two genuine counted misses, comfortably older than the retry flood below.
@@ -3686,8 +4179,7 @@ describe("practiceSkills — review visibility + challenge items (P1e)", () => {
   const DAY = 86_400_000;
 
   test("a due, already-learned skill is served with the 'review' lane; session carries a challenge array", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -3719,8 +4211,7 @@ describe("practiceSkills — review visibility + challenge items (P1e)", () => {
   });
 
   test("above-band frontier is offered ONLY as a labeled, opt-in challenge tail — never in the required set", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -3881,8 +4372,7 @@ describe("practiceSkills — review visibility + challenge items (P1e)", () => {
   });
 
   test("submitAnswer reports the consolidation moment + when the skill comes back", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -3918,8 +4408,7 @@ describe("practiceSkills — review visibility + challenge items (P1e)", () => {
   });
 
   test("a non-consolidating attempt carries no comesBackAt", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -3942,8 +4431,7 @@ describe("practiceSkills — review visibility + challenge items (P1e)", () => {
   });
 
   test("treeForScholar exposes dueAt and becameFluentAt for practiced skills, null for untouched", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -3967,7 +4455,7 @@ describe("practiceSkills — review visibility + challenge items (P1e)", () => {
 });
 
 describe("practiceSkills — generated (LLM) items grade + mix in", () => {
-  async function insertGenItem(t: ReturnType<typeof convexTest>, skillKey: string, stem: string, answer: string) {
+  async function insertGenItem(t: TestConvex<typeof schema>, skillKey: string, stem: string, answer: string) {
     return await t.run(async (ctx) =>
       ctx.db.insert("practiceItems", {
         skillKey,
@@ -3982,8 +4470,7 @@ describe("practiceSkills — generated (LLM) items grade + mix in", () => {
   }
 
   test("submitAnswer grades a stored generated item by id lookup", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const id = await insertGenItem(t, "mult_2digit_by_1digit", "16 pages × 5 weeks?", "80");
@@ -3999,8 +4486,7 @@ describe("practiceSkills — generated (LLM) items grade + mix in", () => {
   });
 
   test("practiceSession mixes a generated item in for a frontier skill", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     // count_to_10 is the root → on the frontier for a fresh scholar.
@@ -4011,7 +4497,7 @@ describe("practiceSkills — generated (LLM) items grade + mix in", () => {
 });
 
 describe("practiceSkills — mastery-gated cross-domain seeds", () => {
-  async function seedCount(t: ReturnType<typeof convexTest>, scholarId: Id<"users">) {
+  async function seedCount(t: TestConvex<typeof schema>, scholarId: Id<"users">) {
     return await t.run(async (ctx) => {
       const rows = await ctx.db.query("seeds").collect();
       return rows.filter(
@@ -4021,8 +4507,7 @@ describe("practiceSkills — mastery-gated cross-domain seeds", () => {
   }
 
   test("a cross-domain seed fires only once its gate skill is fluent", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
 
     // 2 correct on the gate skill → still practicing, no seed yet.
@@ -4030,13 +4515,13 @@ describe("practiceSkills — mastery-gated cross-domain seeds", () => {
       await t.mutation(internal.practiceSkills.recordAttemptInternal, { scholarId: scholar, skillKey: "skip_count_2s_5s_10s", correct: true });
     expect(await seedCount(t, scholar)).toBe(0);
 
-    // 3rd correct → fluent → the gated seed fires.
+    // 3rd correct → fluent → both seeds gated on this high-traffic node fire.
     await t.mutation(internal.practiceSkills.recordAttemptInternal, { scholarId: scholar, skillKey: "skip_count_2s_5s_10s", correct: true });
-    expect(await seedCount(t, scholar)).toBe(1);
+    expect(await seedCount(t, scholar)).toBe(2);
 
-    // Further practice does not duplicate it (idempotent).
+    // Further practice does not duplicate them (idempotent).
     await t.mutation(internal.practiceSkills.recordAttemptInternal, { scholarId: scholar, skillKey: "skip_count_2s_5s_10s", correct: true });
-    expect(await seedCount(t, scholar)).toBe(1);
+    expect(await seedCount(t, scholar)).toBe(2);
 
     // The seed is scholar-facing and curiosity-framed (no "gap" language).
     const seed = await t.run(async (ctx) => {
@@ -4049,8 +4534,7 @@ describe("practiceSkills — mastery-gated cross-domain seeds", () => {
   });
 
   test("the fractions on-ramp seed stamps its practice-drill target; a plain seed does not", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
 
     // Make the on-ramp's gate skill (equal-sharing division) fluent.
@@ -4088,12 +4572,34 @@ describe("practiceSkills — mastery-gated cross-domain seeds", () => {
     expect(binary).not.toBeNull();
     expect(binary?.practiceDomain).toBeUndefined();
   });
+
+  test("math previews pass private tutor steering and an optional drill target", async () => {
+    const t = sharedSeeded();
+    const scholar = await seedScholar(t);
+
+    for (let i = 0; i < FLUENT_REPS_VALUE; i++)
+      await t.mutation(internal.practiceSkills.recordAttemptInternal, {
+        scholarId: scholar,
+        skillKey: "subtract_within_20",
+        correct: true,
+      });
+
+    const preview = await t.run(async (ctx) => {
+      const rows = await ctx.db.query("seeds").collect();
+      return rows.find(
+        (s) =>
+          s.scholarId === scholar &&
+          s.topic === "Subtracting past zero: is there a number to the left of 0?",
+      ) ?? null;
+    });
+    expect(preview?.approachHint).toContain("Put your finger on 5");
+    expect(preview?.practiceDomain).toBe("integers-coordinates");
+  });
 });
 
 describe("practiceSkills — problem_set activity (scoped practice)", () => {
   test("creating a problem set schedules one idempotent durable-item job", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const teacher = await seedScholar(t, "problemset-teacher");
     const { lessonId } = await t.run(async (ctx) => {
       const unitId = await ctx.db.insert("units", {
@@ -4128,8 +4634,7 @@ describe("practiceSkills — problem_set activity (scoped practice)", () => {
   });
 
   test("filters stale or cross-domain generation targets without scheduling paid work for them", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const activityId = await t.run((ctx) =>
       ctx.db.insert("activities", {
         title: "Invalid targets",
@@ -4147,8 +4652,7 @@ describe("practiceSkills — problem_set activity (scoped practice)", () => {
   });
 
   test("problemSetSkills resolves a problem_set activity, and practice scopes to its skills", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -4178,8 +4682,7 @@ describe("practiceSkills — problem_set activity (scoped practice)", () => {
   });
 
   test("only a live assigned problem set can bypass a limited Math-plan scope", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "problemset-scope-scholar");
     const asScholar = await asUser(t, scholar);
     const targetSkillKeys = ["mult_facts_7_8_9"];
@@ -4292,7 +4795,7 @@ const MULT_STRAND = [
   "mult_2digit_by_1digit",
 ];
 
-async function seedTwoStrandDomain(t: ReturnType<typeof convexTest>) {
+async function seedTwoStrandDomain(t: TestConvex<typeof schema>) {
   await t.run(async (ctx) => {
     const strands: [string, string[]][] = [
       ["add", ADD_STRAND],
@@ -4323,7 +4826,7 @@ async function seedTwoStrandDomain(t: ReturnType<typeof convexTest>) {
 
 describe("practiceSkills — hard Math-plan serving scope", () => {
   async function limitToMultiplication(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholarId: Id<"users">,
   ) {
     await t.run((ctx) =>
@@ -4635,7 +5138,7 @@ async function runV2Placement(
   return { cur, served };
 }
 
-async function masteryByKey(t: ReturnType<typeof convexTest>, scholarId: Id<"users">, domain: string) {
+async function masteryByKey(t: TestConvex<typeof schema>, scholarId: Id<"users">, domain: string) {
   const rows = await t.run(async (ctx) => {
     const all = await ctx.db.query("practiceMastery").collect();
     return all.filter((r) => r.scholarId === scholarId && r.domain === domain);
@@ -4647,7 +5150,7 @@ describe("practiceSkills — Phase 2 scheduler evidence", () => {
   const oldPracticeAt = () => Date.now() - 20 * 86_400_000;
 
   async function insertMastery(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholar: Id<"users">,
     skillKey: string,
     overrides: Partial<Doc<"practiceMastery">> = {},
@@ -4674,7 +5177,7 @@ describe("practiceSkills — Phase 2 scheduler evidence", () => {
   }
 
   async function readMastery(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholar: Id<"users">,
     skillKey: string,
   ) {
@@ -4836,8 +5339,7 @@ describe("practiceSkills — Phase 2 scheduler evidence", () => {
 
 describe("practiceSkills — placement flow", () => {
   test("needsPlacement remains true for shadow mastery and flips only after a converged run", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     expect(await asScholar.query(api.practiceSkills.needsPlacement, { scholarId: scholar })).toBe(true);
@@ -4869,7 +5371,8 @@ describe("practiceSkills — placement flow", () => {
     // credit the whole strand (no frontier node left).
     const { cur, served } = await runV2Placement(asScholar, scholar, PLACEMENT_TEST_DOMAIN, () => "correct");
     expect(cur.done).toBe(true);
-    // 2 strands, ≤5 probes each (MAX_PROBES_PER_STRAND) → generously bounded.
+    // 2 strands, ≤6 probes each (MAX_PROBES_PER_STRAND); this domain has only
+    // 5+4 probeable nodes, so the per-strand cap never binds → generously bounded.
     expect(served.length).toBeLessThanOrEqual(10);
     // A fully-fluent 5-node + 4-node domain: whole thing credited, no frontier rows.
     const mastery = await masteryByKey(t, scholar, PLACEMENT_TEST_DOMAIN);
@@ -4935,8 +5438,7 @@ describe("practiceSkills — placement flow", () => {
   });
 
   test("real multi-strand domain: all-correct converges and credits with short half-life", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -4953,8 +5455,7 @@ describe("practiceSkills — placement flow", () => {
   });
 
   test("submitPlacementAnswer is guarded by a CONVERGED run, not by mastery existence", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -5236,8 +5737,7 @@ describe("practiceSkills — placement v2 (server-authoritative loop)", () => {
   });
 
   test("global cap: never exceeds PLACEMENT_GLOBAL_CAP probes", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const { served, cur } = await runV2Placement(asScholar, scholar, undefined, () => "correct");
@@ -5327,8 +5827,7 @@ describe("practiceSkills — placement v2 (server-authoritative loop)", () => {
 
 describe("practiceSkills — don't-know in drills", () => {
   test("records a miss, flagged distinctly, no answer reveal, no error classification", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -5473,7 +5972,7 @@ describe("acceleration valve (B1) — end-to-end streak-jump", () => {
   // no-prereq frontier node) to reps 1 / streak 1 so the NEXT clean fast correct
   // is the 2nd of the streak.
   async function primeValve(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholar: Id<"users">,
     opts: { withBaseline: boolean },
   ) {
@@ -5497,14 +5996,14 @@ describe("acceleration valve (B1) — end-to-end streak-jump", () => {
     });
   }
 
-  async function submitCount10(t: ReturnType<typeof convexTest>, scholar: Id<"users">, firstKeyMs: number) {
+  async function submitCount10(t: TestConvex<typeof schema>, scholar: Id<"users">, firstKeyMs: number) {
     const asScholar = await asUser(t, scholar);
     const itemId = makeItemId("count_to_10", 12345);
     const answer = gradeTemplateItem(itemId, "0")!.correctAnswer;
     return asScholar.mutation(api.practiceSkills.submitAnswer, { scholarId: scholar, itemId, answer, firstKeyMs });
   }
 
-  async function count10Row(t: ReturnType<typeof convexTest>, scholar: Id<"users">) {
+  async function count10Row(t: TestConvex<typeof schema>, scholar: Id<"users">) {
     return t.run(async (ctx) => {
       const rows = await ctx.db.query("practiceMastery").collect();
       return rows.find((r) => r.scholarId === scholar && r.skillKey === "count_to_10") ?? null;
@@ -5512,8 +6011,7 @@ describe("acceleration valve (B1) — end-to-end streak-jump", () => {
   }
 
   test("a fast 2nd clean correct at a frontier node jumps to fluent (source accelerated)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     await primeValve(t, scholar, { withBaseline: true });
 
@@ -5526,8 +6024,7 @@ describe("acceleration valve (B1) — end-to-end streak-jump", () => {
   });
 
   test("does NOT jump without a personal baseline (a fresh kid keeps the full rep count)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     await primeValve(t, scholar, { withBaseline: false });
 
@@ -5540,8 +6037,7 @@ describe("acceleration valve (B1) — end-to-end streak-jump", () => {
   });
 
   test("does NOT jump on a SLOW correct even with a baseline (speed gate)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     await primeValve(t, scholar, { withBaseline: true });
 
@@ -5558,7 +6054,7 @@ describe("acceleration valve (B1) — end-to-end streak-jump", () => {
 describe("practiceSkills — error-pattern flags (C3)", () => {
   const SUB_SKILL = "subtract_2digit_regroup";
 
-  async function seedTeacher(t: ReturnType<typeof convexTest>) {
+  async function seedTeacher(t: TestConvex<typeof schema>) {
     return seedStaffWithMembership(t, {
       institutionId: await seedTestInstitution(t),
       name: "Teach",
@@ -5568,7 +6064,7 @@ describe("practiceSkills — error-pattern flags (C3)", () => {
 
   // A stored gen# item whose stem the classifier can read: "52 − 38 = ?" (14).
   // The SMALLER_FROM_LARGER buggy answer is 26 (|5-3||2-8| = 2,6).
-  async function insertBorrowItem(t: ReturnType<typeof convexTest>) {
+  async function insertBorrowItem(t: TestConvex<typeof schema>) {
     return t.run(async (ctx) =>
       ctx.db.insert("practiceItems", {
         skillKey: SUB_SKILL,
@@ -5582,7 +6078,7 @@ describe("practiceSkills — error-pattern flags (C3)", () => {
     );
   }
 
-  async function events(t: ReturnType<typeof convexTest>, scholar: Id<"users">) {
+  async function events(t: TestConvex<typeof schema>, scholar: Id<"users">) {
     return t.run(async (ctx) =>
       (await ctx.db.query("practiceErrorEvents").collect()).filter(
         (e) => e.scholarId === scholar,
@@ -5591,8 +6087,7 @@ describe("practiceSkills — error-pattern flags (C3)", () => {
   }
 
   test("a recorded, classifiable miss logs one practiceErrorEvents row", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const id = await insertBorrowItem(t);
@@ -5612,8 +6107,7 @@ describe("practiceSkills — error-pattern flags (C3)", () => {
   });
 
   test("an unclassifiable miss logs nothing", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const id = await insertBorrowItem(t);
@@ -5627,8 +6121,7 @@ describe("practiceSkills — error-pattern flags (C3)", () => {
   });
 
   test("a correct answer logs nothing", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const id = await insertBorrowItem(t);
@@ -5642,8 +6135,7 @@ describe("practiceSkills — error-pattern flags (C3)", () => {
   });
 
   test("a record:false handoff retry logs nothing (no double-count)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const id = await insertBorrowItem(t);
@@ -5657,7 +6149,7 @@ describe("practiceSkills — error-pattern flags (C3)", () => {
     expect(await events(t, scholar)).toHaveLength(0);
   });
 
-  async function missThrice(t: ReturnType<typeof convexTest>, scholar: Id<"users">) {
+  async function missThrice(t: TestConvex<typeof schema>, scholar: Id<"users">) {
     const asScholar = await asUser(t, scholar);
     const id = await insertBorrowItem(t);
     for (let i = 0; i < 3; i++) {
@@ -5670,8 +6162,7 @@ describe("practiceSkills — error-pattern flags (C3)", () => {
   }
 
   test("≥3 same-pattern misses open a teacher-visible flag on the node", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const teacher = await seedTeacher(t);
     await missThrice(t, scholar);
@@ -5688,8 +6179,7 @@ describe("practiceSkills — error-pattern flags (C3)", () => {
   });
 
   test("2 misses do not open the flag (below threshold)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const teacher = await seedTeacher(t);
     const asScholar = await asUser(t, scholar);
@@ -5711,8 +6201,7 @@ describe("practiceSkills — error-pattern flags (C3)", () => {
   });
 
   test("REDACTION: a scholar viewing their own node gets no pattern detail", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     await missThrice(t, scholar);
 
@@ -5725,8 +6214,7 @@ describe("practiceSkills — error-pattern flags (C3)", () => {
   });
 
   test("the flag lights nodeReadingsForScholar for a teacher, redacted for the scholar", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const teacher = await seedTeacher(t);
     await missThrice(t, scholar);
@@ -5761,7 +6249,7 @@ describe("practiceSkills — strand re-probe (B1-M2)", () => {
 
   // Resolve a strand's topological order from the seeded graph (the same order
   // the re-probe searches over).
-  async function countingOrder(t: ReturnType<typeof convexTest>): Promise<string[]> {
+  async function countingOrder(t: TestConvex<typeof schema>): Promise<string[]> {
     const { skills, edges } = await t.query(api.practiceSkills.getDomain, {});
     const orders = strandOrders(
       skills.map((s) => ({ nodeKey: s.skillKey, strand: s.strand, order: s.order })),
@@ -5773,7 +6261,7 @@ describe("practiceSkills — strand re-probe (B1-M2)", () => {
   // Credit the first `n` counting nodes as accelerated (valve) credits — the
   // under-placed signal that makes the strand a re-probe candidate.
   async function seedAcceleratedFloor(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholar: Id<"users">,
     order: string[],
     n: number,
@@ -5798,8 +6286,7 @@ describe("practiceSkills — strand re-probe (B1-M2)", () => {
   }
 
   test("reprobeCandidates flags a strand with ≥2 accelerated credits + headroom", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const order = await countingOrder(t);
@@ -5816,8 +6303,7 @@ describe("practiceSkills — strand re-probe (B1-M2)", () => {
   });
 
   test("only 1 accelerated credit → NOT a candidate", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const order = await countingOrder(t);
@@ -5830,8 +6316,7 @@ describe("practiceSkills — strand re-probe (B1-M2)", () => {
   });
 
   test("reprobeProbes serves a probe ABOVE the current floor", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const order = await countingOrder(t);
@@ -5852,8 +6337,7 @@ describe("practiceSkills — strand re-probe (B1-M2)", () => {
   });
 
   test("reprobeProbes preserves the 2-D editor signal for a fraction probe", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "fraction_reprobe");
     const asScholar = await asUser(t, scholar);
     const domain = "fraction-arithmetic";
@@ -5903,8 +6387,7 @@ describe("practiceSkills — strand re-probe (B1-M2)", () => {
   });
 
   test("submitReprobe moves the frontier up + credits new nodes PROVISIONALLY (source reprobe)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const order = await countingOrder(t);
@@ -5961,8 +6444,7 @@ describe("practiceSkills — strand re-probe (B1-M2)", () => {
   // otherwise `masteryOf` keeps returning "struggling" (TOP priority) and paints
   // a just-credited node red on the teacher's map.
   test("submitReprobe clears a stale missStreak on the rows it credits", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const order = await countingOrder(t);
@@ -6029,8 +6511,7 @@ describe("practiceSkills — strand re-probe (B1-M2)", () => {
   // answer → reprobeProbes([a1]) → … until { done }. Prove that loop terminates
   // and every served probe stays above the floor (never re-probes known nodes).
   test("the adaptive reprobe loop converges to done, always above the floor", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     const order = await countingOrder(t);
@@ -6072,7 +6553,7 @@ describe("practiceSkills — FIRe implicit repetition (§4A)", () => {
   const DAY = 86_400_000;
 
   async function seedAncestor(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholarId: Id<"users">,
     skillKey: string,
     opts: { repetition?: number; halfLifeDays?: number; agoDays?: number } = {},
@@ -6094,7 +6575,7 @@ describe("practiceSkills — FIRe implicit repetition (§4A)", () => {
     );
   }
 
-  async function recordCorrectTip(t: ReturnType<typeof convexTest>, scholar: Id<"users">) {
+  async function recordCorrectTip(t: TestConvex<typeof schema>, scholar: Id<"users">) {
     return t.mutation(internal.practiceSkills.recordAttemptInternal, {
       scholarId: scholar,
       skillKey: "add_2digit_regroup",
@@ -6243,7 +6724,7 @@ describe("practiceSkills — auto-remediation on plateau (§5, C)", () => {
 
   /** Seed one mastery row at a chosen retention (fluent reps by default). */
   async function seedMastery(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholarId: Id<"users">,
     skillKey: string,
     opts: { repetition?: number; halfLifeDays?: number; agoDays?: number } = {},
@@ -6266,7 +6747,7 @@ describe("practiceSkills — auto-remediation on plateau (§5, C)", () => {
 
   /** Insert `count` same-pattern misses on `nodeKey`, all inside the 14-day window. */
   async function seedOpenFlag(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholarId: Id<"users">,
     nodeKey: string,
     pattern = "DROPPED_CARRY",
@@ -6398,8 +6879,7 @@ describe("practiceSkills — auto-remediation on plateau (§5, C)", () => {
 // per-domain scoping so a future caller can't silently regress to the default.
 describe("practiceSkills — summaryForScholar domain scoping", () => {
   test("total reflects the requested domain (defaults to whole-number)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -6436,8 +6916,7 @@ describe("practiceSkills — summaryForScholar domain scoping", () => {
   });
 
   test("fluent mastery is counted only within its own domain", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -6477,7 +6956,7 @@ describe("practiceSkills — summaryForScholar domain scoping", () => {
 describe("practiceSkills — Stage 2 summit / exhaustion", () => {
   // Make a scholar fluent in EVERY skill of a domain — a true summit.
   async function makeExhausted(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholar: Id<"users">,
     domain: string,
   ) {
@@ -6543,8 +7022,7 @@ describe("practiceSkills — Stage 2 summit / exhaustion", () => {
   });
 
   test("query counts keep provisional access separate from a summit", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "synthetic-placement");
     const domain = "probability";
     const { skills } = await t.query(api.practiceSkills.getDomain, { domain });
@@ -6587,8 +7065,7 @@ describe("practiceSkills — Stage 2 summit / exhaustion", () => {
   });
 
   test("summaryForScholar.exhausted flips only when EVERY skill is demonstrated", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -6633,8 +7110,7 @@ describe("practiceSkills — Stage 2 summit / exhaustion", () => {
   });
 
   test("an empty/unseeded domain is never a summit", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
     // A domain slug with no seeded nodes: total 0 → exhausted must be false
@@ -6648,8 +7124,7 @@ describe("practiceSkills — Stage 2 summit / exhaustion", () => {
   });
 
   test("domainsForScholar tags started + exhausted per seeded domain", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -6706,8 +7181,7 @@ describe("practiceSkills — Stage 2 summit / exhaustion", () => {
   });
 
   test("an exhausted domain automatically serves Go Deeper problems", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "summit_go_deeper");
     const skills = (
       await t.query(api.practiceSkills.getDomain, { domain: "probability" })
@@ -6753,8 +7227,7 @@ describe("practiceSkills — Stage 2 summit / exhaustion", () => {
   });
 
   test("access-complete placement still serves eligible demonstrated Go Deeper work", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "placed_go_deeper");
     const skills = (
       await t.query(api.practiceSkills.getDomain, { domain: "probability" })
@@ -6824,8 +7297,7 @@ describe("practiceSkills — Stage 2 summit / exhaustion", () => {
   });
 
   test("Go Deeper only considers the bounded per-skill stretch window before eligibility", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "summit_stretch_scan_cap");
     const skills = (
       await t.query(api.practiceSkills.getDomain, { domain: "probability" })
@@ -6870,8 +7342,7 @@ describe("practiceSkills — Stage 2 summit / exhaustion", () => {
   });
 
   test("a story-linked Go Deeper item selects a story-bearing exact edge pair", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "summit_story_exact_pair");
     const skills = (
       await t.query(api.practiceSkills.getDomain, { domain: "probability" })
@@ -6977,7 +7448,7 @@ describe("practiceSkills — Stage 2 summit / exhaustion", () => {
 // is proven as a pure test in remediation.test.ts.)
 describe("practiceSkills — D4 cross-domain frontier", () => {
   async function makeFluent(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholar: Id<"users">,
     skillKey: string,
     domain: string,
@@ -7004,8 +7475,7 @@ describe("practiceSkills — D4 cross-domain frontier", () => {
   ) => tree.nodes.find((n) => n.skillKey === key)?.frontier ?? false;
 
   test("child skill stays LOCKED while its foreign prereq is unpracticed, UNLOCKS when it turns fluent", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -7055,8 +7525,7 @@ describe("practiceSkills — D4 cross-domain frontier", () => {
   });
 
   test("with the foreign prereq fluent but the OWN prereq unmet, the child is still locked (both prereqs required)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -7071,8 +7540,7 @@ describe("practiceSkills — D4 cross-domain frontier", () => {
   });
 
   test("the inert domains (whole-number, fractions) have NO foreign gates — frontier roots unchanged", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -7096,8 +7564,7 @@ describe("practiceSkills — D4 cross-domain frontier", () => {
   });
 
   test("FIRe implicit credit does NOT flow across the cross-domain edge", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
 
     // Both prereqs fluent so the child is serveable; the foreign fraction prereq
@@ -7146,7 +7613,7 @@ describe("practiceSkills — confirmation lane wiring", () => {
   const DAY = 86_400_000;
 
   async function insertNode(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     node: { nodeKey: string; domain: string; strand?: string },
   ) {
     return await t.run(async (ctx) =>
@@ -7160,7 +7627,7 @@ describe("practiceSkills — confirmation lane wiring", () => {
     );
   }
 
-  async function masteryRow(t: ReturnType<typeof convexTest>, scholarId: Id<"users">, skillKey: string) {
+  async function masteryRow(t: TestConvex<typeof schema>, scholarId: Id<"users">, skillKey: string) {
     return await t.run(async (ctx) => {
       const rows = await ctx.db.query("practiceMastery").collect();
       return rows.find((r) => r.scholarId === scholarId && r.skillKey === skillKey) ?? null;
@@ -7170,7 +7637,7 @@ describe("practiceSkills — confirmation lane wiring", () => {
   /** Insert an inferred placement-credit row: source "placement", NO lastAttemptAt
    *  (placement never stamps it), due (old lastPracticedAt on the 4-day leash). */
   async function insertPlacementRow(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholarId: Id<"users">,
     skillKey: string,
     domain: string,
@@ -7294,8 +7761,7 @@ describe("practiceSkills — confirmation lane wiring", () => {
   //    this pins the real `practiceSession` surface (not just `nextForScholar`)
   //    at the new default size. ──
   test("a freshly-placed scholar's 6-item whole-graph session keeps >= 2 frontier items (week-one mix floor)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const domain = "whole-number-arithmetic";
     const scholar = await seedScholar(t, "freshplaced6");
     const asScholar = await asUser(t, scholar);
@@ -7424,8 +7890,7 @@ describe("practiceSkills — unified all-domains tree", () => {
   });
 
   test("allDomains merges every seeded domain, tagging each node with its domain", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const admin = await t.run(async (ctx) =>
       ctx.db.insert("users", {
         name: "Map Admin",
@@ -7457,9 +7922,10 @@ describe("practiceSkills — unified all-domains tree", () => {
         "discrete-math",
       ]),
     );
-    // geometry-measurement is 60 since the measurement-data strand landed
-    // (46 + 14 new length/time/money/capacity nodes).
-    expect(unified.nodes).toHaveLength(87 + 31 + 26 + 60 + 39 + 31 + 45 + 55 + 48);
+    // Probability is 32 after the six-node sampling-inference strand; geometry-
+    // measurement is 60 since the 14-node measurement-data strand landed.
+    // Whole-number is 86 since the duplicate prime node was folded (2026-09-07).
+    expect(unified.nodes).toHaveLength(86 + 31 + 32 + 60 + 39 + 31 + 45 + 55 + 48);
 
     // Every node carries its domain, and a known key from each domain is present.
     for (const n of unified.nodes) expect(typeof n.domain).toBe("string");
@@ -7496,8 +7962,7 @@ describe("practiceSkills — unified all-domains tree", () => {
   });
 
   test("the unified frontier matches the per-domain roots (nothing leaks across domains)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const asScholar = await asUser(t, scholar);
 
@@ -7516,8 +7981,7 @@ describe("practiceSkills — unified all-domains tree", () => {
   });
 
   test("an explicit domain still pins a single domain (back-compat)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const admin = await t.run(async (ctx) =>
       ctx.db.insert("users", {
         name: "Domain Admin",
@@ -7570,7 +8034,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
    *  which is what these composition/ordering tests are about; the K-ring
    *  restriction has its own test in checkInSittingBudget.test.ts. */
   async function seedGradedScholar(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     username: string,
     gradeLevel = "9",
   ) {
@@ -7613,7 +8077,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
     return { cur, served };
   }
 
-  async function completedPlacementDomains(t: ReturnType<typeof convexTest>, scholarId: Id<"users">) {
+  async function completedPlacementDomains(t: TestConvex<typeof schema>, scholarId: Id<"users">) {
     return await t.run(async (ctx) => {
       const rows = (await ctx.db.query("practicePlacements").collect()).filter(
         (r) => r.scholarId === scholarId,
@@ -7622,15 +8086,14 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
     });
   }
 
-  async function allMastery(t: ReturnType<typeof convexTest>, scholarId: Id<"users">) {
+  async function allMastery(t: TestConvex<typeof schema>, scholarId: Id<"users">) {
     return await t.run(async (ctx) =>
       (await ctx.db.query("practiceMastery").collect()).filter((r) => r.scholarId === scholarId),
     );
   }
 
   test("a fresh scholar needs a check-in; it interleaves probes from EVERY seeded domain, each tagged, and completes when all are placed", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedGradedScholar(t, "mixed_place_a");
     const asScholar = await asUser(t, scholar);
 
@@ -7708,8 +8171,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
       username: string,
       opts: { isolated?: string; contiguousThrough?: string },
     ) {
-      const t = convexTest(schema, modules);
-      await t.mutation(internal.practiceSkills.seedGraph, {});
+      const t = await freshSeeded();
       const scholar = await seedScholar(t, username);
       const asScholar = await asUser(t, scholar);
       const creditKeys = await t.run(async (ctx) => {
@@ -7779,8 +8241,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
   });
 
   test("partial-placement folding: a scholar already placed in one domain gets ONLY the missing domains probed; the completed domain never restarts", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedGradedScholar(t, "mixed_fold");
     const asScholar = await asUser(t, scholar);
 
@@ -7850,8 +8311,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
   });
 
   test("a completed check-in never restarts: re-submitting is an idempotent no-op", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedGradedScholar(t, "mixed_done");
     const asScholar = await asUser(t, scholar);
 
@@ -7880,8 +8340,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
   });
 
   test("mixedPlacementCurrent reports the served probe mid-flow and a per-domain summary when done", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedGradedScholar(t, "mixed_current");
     const asScholar = await asUser(t, scholar);
 
@@ -7897,12 +8356,11 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
     // Back-compat ALL-seeded count (includes the elective); the honest
     // header numbers are mapped/eligible.
     expect(current.totalDomains).toBe(ALL_SEEDED.length);
-    // 161 → 166 when the `measurement-data` strand landed (2026-08-06). The cap
-    // is a per-strand sum of min(PLACEMENT_MAX_PROBES_PER_STRAND=5, probeable
-    // nodes), so ONE new strand adds exactly 5 questions to a full Math
-    // Check-In. That is the intended, and the only, placement-length cost of
-    // the new strand — worth re-reading this number if it ever moves further.
-    expect(current.maxQuestions).toBe(166);
+    // The cap is a per-strand sum of min(PLACEMENT_MAX_PROBES_PER_STRAND=6,
+    // probeable nodes). 171 → 184 when the per-strand cap rose 5 → 6 (TRA-92):
+    // exactly the 13 seeded strands with ≥6 probeable nodes each gain one probe
+    // of headroom. Worth re-reading this number if it ever moves further.
+    expect(current.maxQuestions).toBe(184);
 
     // Finish; the current read now reports done + a per-domain summary row each.
     await runMixedPlacement(asScholar, scholar, () => "correct");
@@ -7917,8 +8375,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
   });
 
   test("a folded (done) domain carrying a STALE served probe is never re-served", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "mixed_stale");
     const asScholar = await asUser(t, scholar);
 
@@ -7960,8 +8417,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
   });
 
   test("mixed check-in ignores a stale served probe from a still-gated domain", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const staleSeed = 123;
     const staleItemId = makeItemId("unit_fraction", staleSeed);
     const insertStaleFractionProbe = async (scholarId: Id<"users">) =>
@@ -8021,8 +8477,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
   });
 
   test("mixed check-in re-serves an unanswered held probe even when its domain is gated", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "mixed_held_gated");
     const asScholar = await asUser(t, scholar);
     const heldSeed = 123;
@@ -8092,8 +8547,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
   });
 
   test("cross-domain prereq gating: dependent domains wait for their arithmetic prerequisites", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedGradedScholar(t, "mixed_gate");
     const asScholar = await asUser(t, scholar);
 
@@ -8169,8 +8623,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
   });
 
   test("gated-domain self-select is ALLOWED-with-note: domainsForScholar flags a still-gated domain as prereqGated (never a hard lock)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "mixed_gateflag");
     const asScholar = await asUser(t, scholar);
 
@@ -8226,8 +8679,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
   });
 
   test("post-check-in HANDOFF lands in a REAL first block, not an empty screen (calibrated first block)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     // A GRADED scholar who answers correctly at/below grade 3 and "I haven't
     // learned this yet" above — the realistic mid-placement whose discovered
     // frontier is a just-flagged don't-know. Pre-fix, the blended hand-off was
@@ -8284,8 +8736,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
   });
 
   test("an all-not-yet mixed placement hands each automatically entered domain to an aligned runnable foundation without credit", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     // Production pre-warms these conceptual roots with verified items. Seed the
     // same serving contract here; geometry and ratios are fully templated.
     await t.run(async (ctx) => {
@@ -8436,7 +8887,7 @@ describe("practiceSkills — mixed multi-domain placement (Math Check-In)", () =
 
 describe("practiceSkills — first post-placement manipulative", () => {
   async function seedCompletedPlacement(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholarId: Id<"users">,
     withManipulative: boolean,
   ) {
@@ -8487,8 +8938,7 @@ describe("practiceSkills — first post-placement manipulative", () => {
   }
 
   test("starts single- and mixed-domain first blocks with a credited-skill manipulative", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "postplacement_manipulative");
     await seedCompletedPlacement(t, scholar, true);
     const asScholar = await asUser(t, scholar);
@@ -8515,8 +8965,7 @@ describe("practiceSkills — first post-placement manipulative", () => {
   });
 
   test("keeps the existing first-block order when no manipulative rows exist", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "postplacement_no_manipulative");
     await seedCompletedPlacement(t, scholar, false);
     const asScholar = await asUser(t, scholar);
@@ -8538,8 +8987,7 @@ describe("practiceSkills — first post-placement manipulative", () => {
 
 describe("practiceSkills — fact sprint serve coverage", () => {
   test("unscoped single and mixed runs activate from weak facts while scoped runs stay exact", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "fact_sprint_unscoped");
     const asScholar = await asUser(t, scholar);
     const now = Date.now();
@@ -8753,8 +9201,7 @@ describe("practiceSkills — fact sprint serve coverage", () => {
 
 describe("practiceSkills — implicit and standing serving", () => {
   test("with no checkpoint, playlist and session resolve via autoBlend", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "implicit_auto_blend");
     const asScholar = await asUser(t, scholar);
 
@@ -8785,8 +9232,7 @@ describe("practiceSkills — implicit and standing serving", () => {
   });
 
   test("a standing assignment supersedes automatic blend selection", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "standing_assignment_wins");
     await t.run((ctx) =>
       ctx.db.insert("assignments", {
@@ -8819,7 +9265,7 @@ describe("practiceSkills — checkpoint soft preference (mathGroupCheckpoint / s
   const DAY_MS = 86_400_000;
 
   async function insertMastery(
-    t: ReturnType<typeof convexTest>,
+    t: TestConvex<typeof schema>,
     scholarId: Id<"users">,
     args: {
       skillKey: string;
@@ -8848,8 +9294,7 @@ describe("practiceSkills — checkpoint soft preference (mathGroupCheckpoint / s
   }
 
   test("a soft checkpoint retains cross-domain review", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "checkpoint_soft_runtime");
     await insertMastery(t, scholar, {
       skillKey: "unit_fraction",
@@ -8950,8 +9395,7 @@ describe("practiceSkills — checkpoint soft preference (mathGroupCheckpoint / s
   });
 
   test("an exhausted checkpoint band still falls back to ordinary runnable work in the same domain", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "checkpoint_exhausted_fallback");
     const groupId = await t.run((ctx) =>
       ctx.db.insert("scholarGroups", {
@@ -9068,5 +9512,112 @@ describe("practiceSkills — gradeBandsForKeys (kinder read-aloud gate)", () => 
       skillKeys: [],
     });
     expect(map).toEqual({});
+  });
+});
+
+describe("practiceStuckAlert.gatherEvidence — same-node breaker re-trip", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  async function insertBreakerMiss(
+    t: TestConvex<typeof schema>,
+    scholarId: Id<"users">,
+    nodeKey: string,
+    at: number,
+    episode: boolean,
+  ) {
+    return t.run((ctx) =>
+      ctx.db.insert("practiceAttempts", {
+        scholarId,
+        nodeKey,
+        itemId: `item_${nodeKey}_${at}`,
+        correct: false,
+        lane: "review",
+        domain: "whole-number-arithmetic",
+        createdAt: at,
+        ...(episode
+          ? {
+              breakerLifecycle: {
+                version: 2 as const,
+                triggerNodeKey: nodeKey,
+                triggeredAt: at,
+              },
+            }
+          : {}),
+      }),
+    );
+  }
+
+  // A three-miss streak on `nodeKey` ending at `anchor`; the crossing (last)
+  // attempt carries the breakerLifecycle, mirroring practiceSkills.ts.
+  async function insertStreak(
+    t: TestConvex<typeof schema>,
+    scholarId: Id<"users">,
+    nodeKey: string,
+    anchor: number,
+  ): Promise<Id<"practiceAttempts">[]> {
+    const first = await insertBreakerMiss(t, scholarId, nodeKey, anchor - 2_000, false);
+    const second = await insertBreakerMiss(t, scholarId, nodeKey, anchor - 1_000, false);
+    const crossing = await insertBreakerMiss(t, scholarId, nodeKey, anchor, true);
+    return [first, second, crossing];
+  }
+
+  async function gather(
+    t: TestConvex<typeof schema>,
+    scholarId: Id<"users">,
+    attemptIds: Id<"practiceAttempts">[],
+  ) {
+    return t.query(internal.practiceStuckAlert.gatherEvidence, {
+      scholarId,
+      attemptIds,
+    });
+  }
+
+  test("reports prior same-node episodes inside the 7-day window", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedScholar(t, "retrip_window");
+    const node = "permutations_r_from_n";
+    await insertBreakerMiss(t, scholar, node, NOW - 2 * DAY, true);
+    await insertBreakerMiss(t, scholar, node, NOW - 1 * DAY, true);
+    const streak = await insertStreak(t, scholar, node, NOW);
+
+    const evidence = await gather(t, scholar, streak);
+    expect(evidence).not.toBeNull();
+    expect(evidence!.repeatBreaker).toBeDefined();
+    expect([...evidence!.repeatBreaker!.priorEpisodeAts].sort((a, b) => a - b)).toEqual([
+      NOW - 2 * DAY,
+      NOW - 1 * DAY,
+    ]);
+    expect(evidence!.repeatBreaker!.timeZone).toBeTruthy();
+  });
+
+  test("omits the repeat evidence on a first episode", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedScholar(t, "retrip_first");
+    const streak = await insertStreak(t, scholar, "permutations_r_from_n", NOW);
+
+    const evidence = await gather(t, scholar, streak);
+    expect(evidence).not.toBeNull();
+    expect(evidence!.repeatBreaker).toBeUndefined();
+  });
+
+  test("ignores a prior episode older than the window (8 days)", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedScholar(t, "retrip_stale");
+    const node = "permutations_r_from_n";
+    await insertBreakerMiss(t, scholar, node, NOW - 8 * DAY, true);
+    const streak = await insertStreak(t, scholar, node, NOW);
+
+    const evidence = await gather(t, scholar, streak);
+    expect(evidence!.repeatBreaker).toBeUndefined();
+  });
+
+  test("ignores a recent episode on a different node", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedScholar(t, "retrip_othernode");
+    await insertBreakerMiss(t, scholar, "nt_prime_gaps", NOW - 1 * DAY, true);
+    const streak = await insertStreak(t, scholar, "permutations_r_from_n", NOW);
+
+    const evidence = await gather(t, scholar, streak);
+    expect(evidence!.repeatBreaker).toBeUndefined();
   });
 });

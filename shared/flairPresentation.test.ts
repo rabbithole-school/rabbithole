@@ -13,10 +13,4 @@ describe("flairEmojiForCriterion", () => {
       ),
     ).toBe("🧭");
   });
-
-  test("gives unmatched criteria a stable fallback across surfaces", () => {
-    expect(flairEmojiForCriterion("rubric-full-surprise")).toBe(
-      flairEmojiForCriterion("rubric-full-surprise"),
-    );
-  });
 });

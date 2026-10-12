@@ -1,9 +1,10 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { grantInstitutionMembership, seedTestInstitution } from "./institutionTestHelpers";
 import { api, internal } from "../_generated/api";
 import { liveActivityAt } from "../assignments";
+import { plannedReleaseArgs } from "../../shared/plannedRelease";
 import type { Doc, Id } from "../_generated/dataModel";
 
 const modules = (
@@ -256,6 +257,79 @@ describe("calendar scheduling (planned vs live)", () => {
     expect(focus).toHaveLength(1);
   });
 
+  test("activateScheduledActivity expires a planned focus whose end already passed", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
+    const asTeacher = await withUser(t, teacherId);
+
+    const assignmentId = await asTeacher.mutation(api.assignments.create, {
+      unitId,
+      scholarIds: [scholarId],
+    });
+    await asTeacher.mutation(api.assignments.scheduleActivity, {
+      assignmentId,
+      activityId,
+      mode: "classFocus",
+      startsAt: Date.now() + HOUR,
+      endsAt: Date.now() + 2 * HOUR,
+    });
+    await t.run(async (ctx) => {
+      const a = await ctx.db.get(assignmentId);
+      const schedule = (a!.activitySchedule ?? []).map((entry) => ({
+        ...entry,
+        startsAt: Date.now() - 2_000,
+        endsAt: Date.now() - 1_000,
+      }));
+      await ctx.db.patch(assignmentId, { activitySchedule: schedule });
+    });
+
+    await t.run(async (ctx) =>
+      ctx.runMutation(internal.assignments.activateScheduledActivity, {
+        assignmentId,
+        activityId,
+      }),
+    );
+
+    const assignment = await t.run(async (ctx) => ctx.db.get(assignmentId));
+    expect(assignment?.activitySchedule).toEqual([]);
+    const mirror = await t.run(async (ctx) =>
+      ctx.db
+        .query("pushes")
+        .withIndex("by_assignment", (q) => q.eq("assignmentId", assignmentId))
+        .first(),
+    );
+    expect(mirror?.clearedReason).toBe("expired");
+    expect(mirror?.clearedAt).toBeTypeOf("number");
+  });
+
+  test("pushActivity refuses a class focus whose end time is already past", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
+    const asTeacher = await withUser(t, teacherId);
+
+    const assignmentId = await asTeacher.mutation(api.assignments.create, {
+      unitId,
+      scholarIds: [scholarId],
+    });
+    const pastEnd = Date.now() - HOUR;
+
+    await expect(
+      asTeacher.mutation(api.assignments.pushActivity, {
+        assignmentId,
+        activityId,
+        mode: "classFocus",
+        endsAt: pastEnd,
+      }),
+    ).rejects.toThrow(new Date(pastEnd).toISOString());
+
+    const assignment = await t.run(async (ctx) => ctx.db.get(assignmentId));
+    expect(assignment?.activitySchedule).toEqual([]);
+  });
+
   test("clearActivity removes a planned entry", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
@@ -451,6 +525,40 @@ describe("calendar scheduling (planned vs live)", () => {
 });
 
 describe("re-scheduling an already-live entry (postpone semantics)", () => {
+  test("rescheduling a planned class focus preserves its window duration", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
+    const asTeacher = await withUser(t, teacherId);
+
+    const assignmentId = await asTeacher.mutation(api.assignments.create, {
+      unitId,
+      scholarIds: [scholarId],
+    });
+    const startsAt = Date.now() + 2 * HOUR;
+    const endsAt = startsAt + HOUR;
+    await asTeacher.mutation(api.assignments.scheduleActivity, {
+      assignmentId,
+      activityId,
+      mode: "classFocus",
+      startsAt,
+      endsAt,
+    });
+
+    const movedStart = startsAt + 3 * HOUR;
+    await asTeacher.mutation(api.assignments.rescheduleActivity, {
+      assignmentId,
+      activityId,
+      startsAt: movedStart,
+    });
+
+    const assignment = await t.run(async (ctx) => ctx.db.get(assignmentId));
+    const entry = assignment!.activitySchedule![0];
+    expect(entry.startsAt).toBe(movedStart);
+    expect(entry.endsAt).toBe(movedStart + HOUR);
+  });
+
   test("scheduleActivity on a LIVE entry re-times it but keeps it live, subset intact", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher");
@@ -469,6 +577,7 @@ describe("re-scheduling an already-live entry (postpone semantics)", () => {
       activityId,
       mode: "classFocus",
       scholarIds: [scholarA],
+      endsAt: Date.now() + HOUR,
     });
     const live = await t.run(async (ctx) => {
       const a = await ctx.db.get(assignmentId);
@@ -476,14 +585,14 @@ describe("re-scheduling an already-live entry (postpone semantics)", () => {
     });
     expect(live.setAt).toBeDefined();
     expect(live.scholarIds).toEqual([scholarA]);
+    expect(live.endsAt).toBeDefined();
 
     // "Postpone to tomorrow" — must NOT hide it from scholars (same
     // semantics as applyRescheduleActivity), and must not widen targeting.
     const newStart = Date.now() + 24 * HOUR;
-    await asTeacher.mutation(api.assignments.scheduleActivity, {
+    await asTeacher.mutation(api.assignments.rescheduleActivity, {
       assignmentId,
       activityId,
-      mode: "classFocus",
       startsAt: newStart,
     });
     const after = await t.run(async (ctx) => {
@@ -493,7 +602,393 @@ describe("re-scheduling an already-live entry (postpone semantics)", () => {
     expect(after.setAt).toBe(live.setAt);
     expect(after.startsAt).toBe(newStart);
     expect(after.scholarIds).toEqual([scholarA]);
+    expect(after.endsAt).toBe(live.endsAt);
     // Still live → no activation job was scheduled for it.
     expect(after.scheduledFnId).toBeUndefined();
+  });
+});
+
+test("assigning a unit does not invent a class-focus lifetime", async () => {
+  const t = convexTest(schema, modules);
+  const teacherId = await seedUser(t, "teacher");
+  const scholarId = await seedUser(t, "scholar");
+  const { unitId } = await seedUnitWithActivity(t, teacherId);
+  const asTeacher = await withUser(t, teacherId);
+
+  const assignmentId = await asTeacher.mutation(api.assignments.assignWork, {
+    unitId,
+    scholarIds: [scholarId],
+    startsAt: Date.now() + HOUR,
+    target: { kind: "unit" },
+  });
+
+  const assignment = await t.run(async (ctx) => ctx.db.get(assignmentId));
+  expect(assignment?.activitySchedule?.[0].endsAt).toBeUndefined();
+});
+
+describe("the Run page's planned-vs-sent read", () => {
+  async function seedUnitWithHomeworkActivity(
+    t: ReturnType<typeof convexTest>,
+    teacherId: Id<"users">,
+  ) {
+    return await t.run(async (ctx) => {
+      const unitId = await ctx.db.insert("units", {
+        teacherId,
+        title: "Homework Unit",
+        isActive: true,
+      });
+      const lessonId = await ctx.db.insert("lessons", {
+        unitId,
+        title: "Homework Lesson",
+        order: 0,
+      });
+      const activityId = await ctx.db.insert("activities", {
+        lessonId,
+        title: "Tonight's reading",
+        kind: "online",
+        systemPrompt: "...",
+        order: 0,
+        defaultMode: "homework",
+      });
+      return { unitId, lessonId, activityId };
+    });
+  }
+
+  test("assigning a unit lands homework PLANNED, and the header counts say so", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { unitId, activityId } = await seedUnitWithHomeworkActivity(
+      t,
+      teacherId,
+    );
+    const asTeacher = await withUser(t, teacherId);
+    const asScholar = await withUser(t, scholarId);
+
+    const assignmentId = await asTeacher.mutation(api.assignments.assignWork, {
+      unitId,
+      scholarIds: [scholarId],
+      startsAt: Date.now() + 24 * HOUR,
+      target: { kind: "unit" },
+    });
+
+    // The header eyebrow's inputs: nothing is live, one thing is planned.
+    const run = await asTeacher.query(api.assignments.get, { assignmentId });
+    expect(run!.homeworkCount).toBe(0);
+    expect(run!.classFocusCount).toBe(0);
+    expect(run!.plannedCount).toBe(1);
+    expect(run!.sentCount).toBe(0);
+
+    // The row's badge predicate comes from the same server call.
+    const progress = await asTeacher.query(api.assignments.activityProgress, {
+      assignmentId,
+    });
+    const row = progress!.lessons[0].activities.find(
+      (a) => String(a.activityId) === String(activityId),
+    )!;
+    expect(row.schedule).not.toBeNull();
+    expect(row.schedule!.planned).toBe(true);
+    expect(row.schedule!.dueAt).not.toBeNull();
+
+    // And the scholar genuinely has no homework yet — the state the old Run
+    // page hid behind an identical orange "homework" badge.
+    expect(await asScholar.query(api.assignments.homeworkForMe, {})).toEqual([]);
+  });
+
+  test("Start now on a planned unit homework row sends it, keeping the due date", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { unitId, activityId } = await seedUnitWithHomeworkActivity(
+      t,
+      teacherId,
+    );
+    const asTeacher = await withUser(t, teacherId);
+    const asScholar = await withUser(t, scholarId);
+
+    const assignmentId = await asTeacher.mutation(api.assignments.assignWork, {
+      unitId,
+      scholarIds: [scholarId],
+      startsAt: Date.now() + 24 * HOUR,
+      target: { kind: "unit" },
+    });
+    const progress = await asTeacher.query(api.assignments.activityProgress, {
+      assignmentId,
+    });
+    const planned = progress!.lessons[0].activities[0].schedule!;
+
+    // Exactly what the row's "Start now" sends (see shared/plannedRelease).
+    await asTeacher.mutation(api.assignments.pushActivity, {
+      assignmentId,
+      activityId,
+      ...plannedReleaseArgs(planned, Date.now()),
+    });
+
+    const run = await asTeacher.query(api.assignments.get, { assignmentId });
+    expect(run!.plannedCount).toBe(0);
+    expect(run!.sentCount).toBe(1);
+    expect(run!.homeworkCount).toBe(1);
+
+    const homework = await asScholar.query(api.assignments.homeworkForMe, {});
+    expect(homework).toHaveLength(1);
+    const entry = await t.run(async (ctx) => {
+      const a = await ctx.db.get(assignmentId);
+      return a!.activitySchedule!.find((e) => e.activityId === activityId)!;
+    });
+    expect(entry.setAt).toBeDefined();
+    expect(entry.dueAt).toBe(planned.dueAt);
+  });
+
+  test("releasing a planned entry keeps its targeting instead of widening it", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const targetedScholarId = await seedUser(t, "scholar");
+    const otherScholarId = await seedUser(t, "scholar");
+    const { unitId, activityId } = await seedUnitWithHomeworkActivity(
+      t,
+      teacherId,
+    );
+    const asTeacher = await withUser(t, teacherId);
+    const asOtherScholar = await withUser(t, otherScholarId);
+
+    const assignmentId = await asTeacher.mutation(api.assignments.assignWork, {
+      unitId,
+      scholarIds: [targetedScholarId, otherScholarId],
+      startsAt: Date.now() + 24 * HOUR,
+      target: {
+        kind: "activity",
+        activityId,
+        mode: "homework",
+        scholarIds: [targetedScholarId],
+      },
+    });
+    const progress = await asTeacher.query(api.assignments.activityProgress, {
+      assignmentId,
+    });
+    const planned = progress!.lessons[0].activities[0].schedule!;
+    expect(planned.planned).toBe(true);
+    expect(planned.scholarIds).toEqual([targetedScholarId]);
+
+    await asTeacher.mutation(api.assignments.pushActivity, {
+      assignmentId,
+      activityId,
+      ...plannedReleaseArgs(planned, Date.now()),
+    });
+
+    const entry = await t.run(async (ctx) => {
+      const a = await ctx.db.get(assignmentId);
+      return a!.activitySchedule!.find((e) => e.activityId === activityId)!;
+    });
+    expect(entry.scholarIds).toEqual([targetedScholarId]);
+    expect(
+      await asOtherScholar.query(api.assignments.homeworkForMe, {}),
+    ).toEqual([]);
+  });
+
+  test("Start now drops a stale planned end and releases an unspecified focus", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
+    const asTeacher = await withUser(t, teacherId);
+    const asScholar = await withUser(t, scholarId);
+
+    const assignmentId = await asTeacher.mutation(api.assignments.create, {
+      unitId,
+      scholarIds: [scholarId],
+    });
+    const startsAt = Date.now() - 24 * HOUR;
+    await asTeacher.mutation(api.assignments.scheduleActivity, {
+      assignmentId,
+      activityId,
+      mode: "classFocus",
+      startsAt,
+      endsAt: startsAt + HOUR,
+    });
+    const progress = await asTeacher.query(api.assignments.activityProgress, {
+      assignmentId,
+    });
+    const planned = progress!.lessons[0].activities[0].schedule!;
+    expect(planned.endsAt).toBeLessThan(Date.now());
+
+    await asTeacher.mutation(api.assignments.pushActivity, {
+      assignmentId,
+      activityId,
+      ...plannedReleaseArgs(planned, Date.now()),
+    });
+
+    expect(
+      await asScholar.query(api.assignments.currentClassFocusForMe, {}),
+    ).toHaveLength(1);
+    const released = await t.run(async (ctx) => {
+      const assignment = await ctx.db.get(assignmentId);
+      return assignment!.activitySchedule!.find(
+        (entry) => entry.activityId === activityId,
+      )!;
+    });
+    expect(released.setAt).toBeDefined();
+    expect(released.endsAt).toBeUndefined();
+  });
+
+  test("a same-day overrun focus stays live and reads as sent, not planned", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
+    const asTeacher = await withUser(t, teacherId);
+
+    const assignmentId = await asTeacher.mutation(api.assignments.assignWork, {
+      unitId,
+      scholarIds: [scholarId],
+      startsAt: Date.now(),
+      target: { kind: "unit" },
+    });
+    await asTeacher.mutation(api.assignments.pushActivity, {
+      assignmentId,
+      activityId,
+      mode: "classFocus",
+      endsAt: Date.now() + HOUR,
+    });
+
+    // The class ran over and `autoClearActivity` hasn't fired. The same-day
+    // focus remains visible even though its blocking window closed.
+    await t.run(async (ctx) => {
+      const a = await ctx.db.get(assignmentId);
+      await ctx.db.patch(assignmentId, {
+        activitySchedule: a!.activitySchedule!.map((e) =>
+          e.activityId === activityId ? { ...e, endsAt: Date.now() - 1 } : e,
+        ),
+      });
+    });
+
+    const run = await asTeacher.query(api.assignments.get, { assignmentId });
+    // Teacher and scholar surfaces share the same showing predicate.
+    expect(run!.classFocusCount).toBe(1);
+    expect(run!.sentCount).toBe(1);
+    expect(run!.plannedCount).toBe(0);
+    expect(run!.sentCount + run!.plannedCount).toBe(
+      run!.activitySchedule.length,
+    );
+
+    // And the row agrees: not planned, so it keeps the sent badge and its
+    // Extend / Wrap controls rather than being restyled as never-sent.
+    const progress = await asTeacher.query(api.assignments.activityProgress, {
+      assignmentId,
+    });
+    const row = progress!.lessons[0].activities.find(
+      (a) => String(a.activityId) === String(activityId),
+    )!;
+    expect(row.schedule!.planned).toBe(false);
+    expect(row.schedule!.setAt).not.toBeNull();
+
+    const agenda = await asTeacher.query(
+      api.assignments.scheduleForTeacher,
+      {},
+    );
+    expect(agenda[0].state).toBe("live");
+  });
+});
+
+describe("re-timing a live class focus", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function pushThenRetime(endsAfterRetime: number) {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
+    const asTeacher = await withUser(t, teacherId);
+    const assignmentId = await asTeacher.mutation(api.assignments.create, {
+      unitId,
+      scholarIds: [scholarId],
+    });
+    const start = Date.now();
+    await asTeacher.mutation(api.assignments.pushActivity, {
+      assignmentId,
+      activityId,
+      mode: "classFocus",
+      endsAt: start + HOUR,
+    });
+    await asTeacher.mutation(api.assignments.scheduleActivity, {
+      assignmentId,
+      activityId,
+      mode: "classFocus",
+      startsAt: start,
+      endsAt: start + endsAfterRetime,
+    });
+    const entry = async () =>
+      t.run(async (ctx) =>
+        (await ctx.db.get(assignmentId))!.activitySchedule!.find(
+          (e) => e.activityId === activityId,
+        ) ?? null,
+      );
+    return { t, start, entry };
+  }
+
+  test("moved later: the push's clear job follows the new end instead of dropping it", async () => {
+    vi.useFakeTimers();
+    const { t, start, entry } = await pushThenRetime(2 * HOUR);
+    expect((await entry())!.setAt).toBeDefined();
+
+    // The original job fires at the OLD end. The focus is still inside its
+    // new window, so it must survive…
+    vi.advanceTimersByTime(HOUR + 1);
+    await t.finishInProgressScheduledFunctions();
+    expect(Date.now()).toBeLessThan(start + 2 * HOUR);
+    expect(await entry()).not.toBeNull();
+
+    // …and still be cleared once the new end passes.
+    await t.finishAllScheduledFunctions(() => vi.advanceTimersByTime(HOUR));
+    expect(await entry()).toBeNull();
+  });
+
+  test("re-applying an unchanged live focus schedules no extra clear job", async () => {
+    // The recurring re-materialization re-applies scheduleActivity to live
+    // entries every tick; it must stay idempotent.
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
+    const asTeacher = await withUser(t, teacherId);
+    const assignmentId = await asTeacher.mutation(api.assignments.create, {
+      unitId,
+      scholarIds: [scholarId],
+    });
+    const start = Date.now();
+    await asTeacher.mutation(api.assignments.pushActivity, {
+      assignmentId,
+      activityId,
+      mode: "classFocus",
+      endsAt: start + HOUR,
+    });
+    const pendingJobs = () =>
+      t.run(async (ctx) =>
+        (await ctx.db.system.query("_scheduled_functions").collect()).filter(
+          (job) => job.state.kind === "pending",
+        ).length,
+      );
+    const before = await pendingJobs();
+    for (let i = 0; i < 3; i++) {
+      await asTeacher.mutation(api.assignments.scheduleActivity, {
+        assignmentId,
+        activityId,
+        mode: "classFocus",
+        startsAt: start,
+        endsAt: start + HOUR,
+      });
+    }
+    expect(await pendingJobs()).toBe(before);
+  });
+
+  test("moved earlier: the focus clears at the new end, not the old one", async () => {
+    vi.useFakeTimers();
+    const { t, start, entry } = await pushThenRetime(HOUR / 2);
+
+    vi.advanceTimersByTime(HOUR / 2 + 1);
+    await t.finishInProgressScheduledFunctions();
+    expect(Date.now()).toBeLessThan(start + HOUR);
+    expect(await entry()).toBeNull();
   });
 });

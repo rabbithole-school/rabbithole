@@ -6,6 +6,7 @@ import { useQuery, useMutation, useAction } from "convex/react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
+  Badge,
   Box,
   Button,
   HStack,
@@ -17,11 +18,17 @@ import {
   Dialog,
   Portal,
 } from "@chakra-ui/react";
-import { Trash, UserPlus } from "@phosphor-icons/react";
+import { Plus, Trash, UserPlus, X } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
 import { formatRelative } from "@/lib/relativeTime";
-import { isStaffRole, isPasskeyRole, isPlatformAdminRole, type Role } from "@/convex/lib/roles";
+import {
+  isStaffRole,
+  isPasskeyRole,
+  isPlatformAdminRole,
+  SCHOOL_STANDING_ROLES,
+  type Role,
+} from "@/convex/lib/roles";
 import {
   canonicalInstitutionScope,
   withInstitutionScope,
@@ -31,6 +38,19 @@ import { FieldSelect } from "@/components/ui/FieldSelect";
 import { TableRowsSkeleton } from "@/components/skeletons/PanelSkeletons";
 
 type AssignableRole = Exclude<Role, "lifelong_learner">;
+
+/**
+ * The lean institution shape the pickers on this page consume, straight from
+ * `institutions.listForStaff`. `disabled` is the suspension flag (disabledAt
+ * set): every picker labels a paused school, and only the lens filter makes it
+ * unpickable (matching components/SchoolInstitutionSelect.tsx).
+ */
+type InstitutionOption = {
+  _id: Id<"institutions">;
+  name: string;
+  emoji: string | null;
+  disabled: boolean;
+};
 
 function RoleSelect({
   userId,
@@ -274,34 +294,310 @@ function ScholarSignInCell({ userId }: { userId: Id<"users"> }) {
   );
 }
 
+/** The membership rows `listAllUsers` hands each account (see its handler). */
+type StaffMembership = {
+  _id: Id<"memberships">;
+  role: string;
+  institutionId: Id<"institutions"> | null;
+  institutionName: string | null;
+  institutionEmoji: string | null;
+  institutionDisabled: boolean;
+};
+
+/** Match `RoleSelect`'s wording so one role reads the same down the row. */
+const ROLE_LABELS: Record<string, string> = {
+  teacher: "teacher",
+  staff: "staff",
+  school_admin: "school admin",
+  curriculum_designer: "curriculum designer",
+};
+
 /**
- * Institution assignment for a SCHOLAR row. Moving a scholar between
- * institutions is an access-boundary change (it changes which staff can see
- * them), so the mutation is platform-admin-only — which this whole page already
- * is. Non-scholar rows show "—": staff institution membership lives in the
- * memberships table, managed from the school surfaces, not here.
+ * Institution standing for a NON-SCHOLAR row — the staff memberships that tie
+ * an existing account to a school, which previously had no surface at all
+ * outside the Convex dashboard (TRA-349).
+ *
+ * Two things this has to get right, both of them quiet:
+ *
+ * 1. **The empty state is the feature.** A `platform_admin` short-circuits
+ *    every capability resolver, so an operator can hold full AUTHORITY while
+ *    having STANDING at no school — and nothing surfaced that until a
+ *    directory scoped to the sender's own school silently dropped them. An
+ *    account with a staff role and no rows says so in words.
+ * 2. **`platform_admin` is not offered.** It is global, it is set by the Role
+ *    column, and `users.listInstitutionStaff` deliberately excludes it — so a
+ *    scoped platform_admin row would grant authority while leaving the holder
+ *    out of the school's staff directory. `SCHOOL_STANDING_ROLES` is the set
+ *    that actually confers standing.
+ * 3. **A row that EXISTS is always drawn, whatever the account's role.**
+ *    Standing comes from the membership, never from `users.role` — see
+ *    `hasActiveStaffMembershipAtInstitution`, which reads memberships on
+ *    purpose. So a `parent`- or `scholar`-role account that somehow holds a
+ *    teacher row really does have standing, and a cell that skipped those
+ *    rows would re-create the very invisibility this exists to end. Offering
+ *    to ADD is the separate question (`canAdd`): a parent's reach is
+ *    guardianship-derived and a scholar's school is the picker beside this,
+ *    so neither is offered a grant — but both show, and can revoke, what
+ *    they hold.
+ * 4. **An UNSCOPED row is not school standing.** `curriculum_designer` may be
+ *    held with no institution, which `isGloballyPrivilegedMembership` treats
+ *    as deployment-wide. It is drawn (removing it is a real act with a real
+ *    blast radius, so it must be visible and labelled "all schools"), but it
+ *    does NOT satisfy the has-standing test above — otherwise it would
+ *    silence the warning while conferring nothing at any school.
+ *
+ * Both writes are existing platform-admin mutations. `addMembership` dedupes
+ * on (user, role, institution), so re-adding is a no-op rather than a
+ * duplicate — no client-side guard needed.
+ */
+function StaffMembershipCell({
+  userId,
+  role,
+  memberships,
+  institutions,
+  canAdd,
+}: {
+  userId: Id<"users">;
+  role: string;
+  memberships: StaffMembership[];
+  institutions: InstitutionOption[] | undefined;
+  /** Whether this account is one it makes sense to GRANT standing to. */
+  canAdd: boolean;
+}) {
+  const addMembership = useMutation(api.memberships.addMembership);
+  const removeMembership = useMutation(api.memberships.removeMembership);
+  const [adding, setAdding] = useState(false);
+  const [newRole, setNewRole] = useState<string>("teacher");
+  const [newInstitution, setNewInstitution] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  // Nothing held and nothing to offer — the only case that draws a dash.
+  if (memberships.length === 0 && !canAdd) {
+    return (
+      <Text fontFamily="body" fontSize="xs" color="charcoal.300">
+        —
+      </Text>
+    );
+  }
+
+  // Only a SCOPED row is standing at a school; an unscoped one is
+  // deployment-wide and must not silence the warning below.
+  const hasSchoolStanding = memberships.some((m) => m.institutionId !== null);
+
+  const submit = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      // Every role offered here is institution-scoped, so the server would
+      // reject a blank one anyway — check first to keep the message specific.
+      if (!newInstitution) throw new Error("Pick a school");
+      await addMembership({
+        userId,
+        role: newRole as AssignableRole,
+        institutionId: newInstitution as Id<"institutions">,
+      });
+      setAdding(false);
+      setNewInstitution("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const drop = async (membershipId: Id<"memberships">) => {
+    setError("");
+    try {
+      await removeMembership({ membershipId });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <VStack align="start" gap={1} maxW="230px">
+      {memberships.map((m) => (
+        <HStack key={m._id} gap={1}>
+          <Badge
+            colorPalette={m.role === "school_admin" ? "purple" : "gray"}
+            fontFamily="heading"
+            fontSize="2xs"
+          >
+            {ROLE_LABELS[m.role] ?? m.role}
+            {/* An unscoped row is deployment-wide standing, not standing at
+                a school — spelling out the blast radius is the whole point,
+                because the × beside it revokes authority everywhere. */}
+            {m.institutionId === null ? (
+              " · all schools"
+            ) : (
+              <>
+                {" @ "}
+                {m.institutionEmoji ? `${m.institutionEmoji} ` : ""}
+                {m.institutionName ?? "unknown school"}
+                {m.institutionDisabled ? " (paused)" : ""}
+              </>
+            )}
+          </Badge>
+          <IconButton
+            aria-label={`Remove ${ROLE_LABELS[m.role] ?? m.role} ${m.institutionId === null ? "at all schools" : `at ${m.institutionName ?? "unknown school"}`}`}
+            size="2xs"
+            variant="ghost"
+            color="charcoal.300"
+            _hover={{ color: "red.500", bg: "red.50" }}
+            onClick={() => drop(m._id)}
+          >
+            <X size={10} />
+          </IconButton>
+        </HStack>
+      ))}
+
+      {!hasSchoolStanding && (
+        // The invisible state that caused TRA-349. Keyed on SCOPED rows, so
+        // a deployment-wide curriculum_designer row above does not silence
+        // it — that row is authority everywhere and standing nowhere, which
+        // is exactly the shape that went unnoticed. Called out for a staff
+        // role, stated plainly for anyone else (a lifelong learner has no
+        // school by design, so "none" is correct, not a warning).
+        <Text
+          fontFamily="body"
+          fontSize="2xs"
+          // orange, not amber: `amber` is not a token in this theme
+          // (shared/brand.ts) and resolves to nothing.
+          color={isStaffRole(role as Role) ? "orange.700" : "charcoal.300"}
+        >
+          {isStaffRole(role as Role) ? "No school standing" : "None"}
+        </Text>
+      )}
+
+      {!canAdd ? null : adding ? (
+        <VStack align="start" gap={1} w="100%">
+          <FieldSelect
+            value={newRole}
+            onChange={setNewRole}
+            w="100%"
+            fieldProps={{ "aria-label": "Staff role" }}
+          >
+            {SCHOOL_STANDING_ROLES.map((r) => (
+              <option key={r} value={r}>
+                {ROLE_LABELS[r] ?? r}
+              </option>
+            ))}
+          </FieldSelect>
+          <FieldSelect
+            value={newInstitution}
+            onChange={setNewInstitution}
+            w="100%"
+            fieldProps={{ "aria-label": "Staff school" }}
+          >
+            <option value="">Pick a school</option>
+            {institutions?.map((inst) => (
+              // "(paused)" is informational only — a paused school is a
+              // reversible suspension, so staffing it stays allowed (you may
+              // be fixing a roster before re-enabling).
+              <option key={inst._id} value={inst._id}>
+                {inst.emoji ? `${inst.emoji} ` : ""}
+                {inst.name}
+                {inst.disabled ? " (paused)" : ""}
+              </option>
+            ))}
+          </FieldSelect>
+          <HStack gap={1}>
+            <Button
+              size="2xs"
+              fontFamily="heading"
+              bg="navy.500"
+              color="white"
+              _hover={{ bg: "navy.600" }}
+              onClick={submit}
+              disabled={busy}
+              loading={busy}
+            >
+              Add
+            </Button>
+            <Button
+              size="2xs"
+              variant="ghost"
+              fontFamily="heading"
+              color="charcoal.400"
+              // Disabled while the grant is in flight. Closing the form does
+              // not abort the mutation, so an enabled Cancel would report a
+              // cancellation while the access was granted anyway.
+              disabled={busy}
+              onClick={() => {
+                setAdding(false);
+                setError("");
+              }}
+            >
+              Cancel
+            </Button>
+          </HStack>
+        </VStack>
+      ) : (
+        <Button
+          size="2xs"
+          variant="ghost"
+          fontFamily="heading"
+          color="charcoal.400"
+          _hover={{ color: "navy.500", bg: "gray.50" }}
+          onClick={() => setAdding(true)}
+        >
+          <Plus size={10} /> Add standing
+        </Button>
+      )}
+
+      {error && (
+        <Text fontFamily="body" fontSize="2xs" color="red.500">
+          {error}
+        </Text>
+      )}
+    </VStack>
+  );
+}
+
+/**
+ * The "Institution" column. A SCHOLAR's school is a single denormalized
+ * field, and moving them is an access-boundary change (it changes which staff
+ * can see them), so it stays a one-click picker on its own platform-admin
+ * mutation. Everyone else's institutional tie is a set of membership rows,
+ * handled by `StaffMembershipCell` above — before TRA-349 this half of the
+ * column was a hardcoded "—" and the rows had no UI at all.
+ *
+ * A scholar row gets the picker AND, if the account somehow also holds staff
+ * memberships, those rows underneath it. That combination should not exist,
+ * which is the reason to draw it: standing is the membership, not
+ * `users.role`, so a scholar-role account holding a teacher row has real
+ * access at that school and an admin needs to see and revoke it. Adding is
+ * not offered here — the picker above is a scholar's school.
  */
 function InstitutionCell({
   userId,
   role,
   institutionId,
   institutions,
+  staffMemberships,
 }: {
   userId: Id<"users">;
   role: string;
   institutionId: Id<"institutions"> | null;
-  institutions:
-    | { _id: Id<"institutions">; name: string; emoji: string | null }[]
-    | undefined;
+  institutions: InstitutionOption[] | undefined;
+  staffMemberships: StaffMembership[];
 }) {
   const setInstitution = useMutation(api.institutions.setScholarInstitution);
   const [error, setError] = useState("");
 
   if (role !== "scholar") {
     return (
-      <Text fontFamily="body" fontSize="xs" color="charcoal.300">
-        —
-      </Text>
+      <StaffMembershipCell
+        userId={userId}
+        role={role}
+        memberships={staffMemberships}
+        institutions={institutions}
+        // A parent's reach comes from `guardianships`, so granting one school
+        // standing is never the intent — but anything they already hold is
+        // still drawn above, and still revocable.
+        canAdd={role !== "parent"}
+      />
     );
   }
 
@@ -329,9 +625,14 @@ function InstitutionCell({
     >
       <option value="" disabled>Select institution</option>
       {institutions?.map((inst) => (
+        // "(paused)" is informational only — a paused school is a reversible
+        // billing suspension (convex/institutionLifecycle.ts), so assigning a
+        // scholar into it stays allowed (e.g. to fix a roster before
+        // re-enabling).
         <option key={inst._id} value={inst._id}>
           {inst.emoji ? `${inst.emoji} ` : ""}
           {inst.name}
+          {inst.disabled ? " (paused)" : ""}
         </option>
       ))}
     </FieldSelect>
@@ -339,6 +640,15 @@ function InstitutionCell({
       <Text fontFamily="body" fontSize="2xs" color="red.500" maxW="160px">
         {error}
       </Text>
+    )}
+    {staffMemberships.length > 0 && (
+      <StaffMembershipCell
+        userId={userId}
+        role={role}
+        memberships={staffMemberships}
+        institutions={institutions}
+        canAdd={false}
+      />
     )}
     </VStack>
   );
@@ -355,9 +665,7 @@ function LearnerInstitutionCell({
   role: string;
   membershipId: Id<"memberships"> | null;
   institutionId: Id<"institutions"> | null;
-  institutions:
-    | { _id: Id<"institutions">; name: string; emoji: string | null }[]
-    | undefined;
+  institutions: InstitutionOption[] | undefined;
 }) {
   const addMembership = useMutation(api.memberships.addMembership);
   const removeMembership = useMutation(api.memberships.removeMembership);
@@ -396,9 +704,13 @@ function LearnerInstitutionCell({
       >
         <option value="">Not a learner</option>
         {institutions?.map((inst) => (
+          // "(paused)" is informational only; a paused school is a reversible
+          // suspension (convex/institutionLifecycle.ts), so adding a learner
+          // membership stays allowed.
           <option key={inst._id} value={inst._id}>
             {inst.emoji ? `${inst.emoji} ` : ""}
             {inst.name}
+            {inst.disabled ? " (paused)" : ""}
           </option>
         ))}
       </FieldSelect>
@@ -628,9 +940,7 @@ type StaffRole = "scholar" | "teacher" | "platform_admin" | "school_admin" | "cu
 function AddUserButton({
   institutions,
 }: {
-  institutions:
-    | { _id: Id<"institutions">; name: string; emoji: string | null }[]
-    | undefined;
+  institutions: InstitutionOption[] | undefined;
 }) {
   const createUser = useMutation(api.users.adminCreateUser);
   const issueToken = useMutation(api.enrollment.issueToken);
@@ -829,9 +1139,14 @@ function AddUserButton({
                             Default (primary institution)
                           </option>
                           {institutions?.map((inst) => (
+                            // "(paused)" is informational only; a paused school
+                            // is a reversible suspension
+                            // (convex/institutionLifecycle.ts), so creating a
+                            // scholar into it stays allowed.
                             <option key={inst._id} value={inst._id}>
                               {inst.emoji ? `${inst.emoji} ` : ""}
                               {inst.name}
+                              {inst.disabled ? " (paused)" : ""}
                             </option>
                           ))}
                         </FieldSelect>
@@ -912,11 +1227,16 @@ export default function AccountsPage() {
     requestedScope !== "" && requestedScope !== "all" && activeInstitution?.scope === "institution"
       ? activeInstitution.institutionId
       : null;
+  // Match on any tie to the school, including a STAFF membership row —
+  // without that leg, filtering to a school to give someone standing there
+  // hides every staffer it already has (their `users.institutionId` is a
+  // scholar field), which is the one workflow this column exists for.
   const filteredUsers = filterInstId
     ? users?.filter(
         (u) =>
           u.institutionId === filterInstId ||
-          u.learnerInstitutionId === filterInstId,
+          u.learnerInstitutionId === filterInstId ||
+          u.staffMemberships.some((m) => m.institutionId === filterInstId),
       )
     : users;
   // Show the picker only when the admin can see more than one institution.
@@ -981,7 +1301,15 @@ export default function AccountsPage() {
           >
             <option value="">All institutions</option>
             {institutions?.map((inst) => (
-              <option key={inst._id} value={inst.slug}>
+              <option
+                key={inst._id}
+                value={inst.slug}
+                // A paused school is filtered out of the lens candidates, so
+                // its slug can never resolve — picking it would snap back to
+                // "All". Keep it visible but not pickable, matching
+                // SchoolInstitutionSelect.
+                disabled={inst.disabled}
+              >
                 {inst.emoji ? `${inst.emoji} ` : ""}
                 {inst.name}
                 {inst.disabled ? " (paused)" : ""}
@@ -1030,6 +1358,16 @@ export default function AccountsPage() {
                       <Table.Cell fontFamily="body">{u.name ?? "—"}</Table.Cell>
                       <Table.Cell>
                         <RoleSelect userId={u._id} currentRole={u.role} />
+                        {u.isSystem && (
+                          <Badge
+                            mt={1}
+                            colorPalette="gray"
+                            fontFamily="heading"
+                            fontSize="2xs"
+                          >
+                            Service account
+                          </Badge>
+                        )}
                       </Table.Cell>
                       <Table.Cell>
                         <InstitutionCell
@@ -1037,6 +1375,7 @@ export default function AccountsPage() {
                           role={u.role}
                           institutionId={u.institutionId}
                           institutions={institutions}
+                          staffMemberships={u.staffMemberships}
                         />
                       </Table.Cell>
                       <Table.Cell>

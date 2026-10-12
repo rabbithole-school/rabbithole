@@ -19,7 +19,12 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { buildSystemPrompt } from "../../../convex/sessionHelpers";
-import { MODELS } from "../../../convex/lib/models";
+import type { AideEffort } from "../../../convex/lib/aideModel";
+import type { ModelId } from "../../../convex/lib/models";
+import {
+  TUTOR_DEFAULT_MODEL,
+  tutorRuntime,
+} from "../../../convex/lib/tutorModel";
 import { toMessages } from "../../../convex/lib/curriculumSimShared";
 import {
   MARK_ACTIVITY_COMPLETE_SUCCESS_GUIDANCE,
@@ -36,7 +41,10 @@ import { MIN_REAL_TURNS } from "./completionScore";
 
 const anthropic = new Anthropic();
 
-export const tutorModel = process.env.TUTOR_MODEL || MODELS.SONNET;
+export const tutorModel = process.env.TUTOR_MODEL || TUTOR_DEFAULT_MODEL;
+const runtime = tutorRuntime(tutorModel as ModelId);
+export const tutorEffort: AideEffort | undefined =
+  (process.env.TUTOR_EFFORT as AideEffort | undefined) || runtime.effort;
 export const tutorTokens = { input: 0, output: 0 };
 
 /**
@@ -176,10 +184,11 @@ export async function generateTutorTurn(
 
   const first = await anthropic.messages.create({
     model: tutorModel,
-    max_tokens: 1024,
+    max_tokens: runtime.maxTokens,
     system,
     tools: [MARK_COMPLETE_TOOL],
     messages,
+    ...(tutorEffort ? { output_config: { effort: tutorEffort } } : {}),
   });
   accrue(first);
   const toolUse = first.content.find(
@@ -198,7 +207,7 @@ export async function generateTutorTurn(
     if (!completionToolWasFirst && !preToolClosingIsValid) {
       const second = await anthropic.messages.create({
         model: tutorModel,
-        max_tokens: 1024,
+        max_tokens: runtime.maxTokens,
         system,
         tools: [MARK_COMPLETE_TOOL],
         messages: [
@@ -215,6 +224,7 @@ export async function generateTutorTurn(
             ],
           },
         ],
+        ...(tutorEffort ? { output_config: { effort: tutorEffort } } : {}),
       });
       accrue(second);
       return {
@@ -225,7 +235,7 @@ export async function generateTutorTurn(
     }
     const second = await anthropic.messages.create({
       model: tutorModel,
-      max_tokens: 1024,
+      max_tokens: runtime.maxTokens,
       system,
       tools: [MARK_COMPLETE_TOOL],
       messages: [
@@ -244,6 +254,7 @@ export async function generateTutorTurn(
           ],
         },
       ],
+      ...(tutorEffort ? { output_config: { effort: tutorEffort } } : {}),
     });
     accrue(second);
     const summary =
@@ -272,7 +283,7 @@ export async function generateTutorTurn(
     "Not yet — the scholar hasn't engaged enough for this to count as complete. Keep the conversation going.";
   const second = await anthropic.messages.create({
     model: tutorModel,
-    max_tokens: 1024,
+    max_tokens: runtime.maxTokens,
     system,
     tools: [MARK_COMPLETE_TOOL],
     messages: [
@@ -289,6 +300,7 @@ export async function generateTutorTurn(
         ],
       },
     ],
+    ...(tutorEffort ? { output_config: { effort: tutorEffort } } : {}),
   });
   accrue(second);
   return {

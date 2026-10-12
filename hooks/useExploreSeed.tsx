@@ -14,19 +14,19 @@
  * into the map's `onExploreSeed`.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useConvex, useMutation } from "convex/react";
 import { useRouter } from "next/navigation";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useRemote } from "@/hooks/useRemote";
 import { toaster } from "@/lib/toaster";
+import { serverErrorMessage } from "@/lib/serverErrorMessage";
 import { ChoosePathDialog } from "@/components/ChoosePathDialog";
 import { ENDLESS_CHAT } from "@/lib/bakePaths";
 import type {
   ExploreSeedOptions,
   PathChoice,
-  SuggestedPath,
 } from "@/lib/bakePaths";
 
 export function useExploreSeed() {
@@ -43,16 +43,33 @@ export function useExploreSeed() {
     domain: string | null;
   } | null>(null);
   const [pickingPath, setPickingPath] = useState(false);
+  // Bumped when the path dialog closes (or the host unmounts) so a pick still
+  // in flight is abandoned: its late result must not navigate.
+  const pickAttemptRef = useRef(0);
+  useEffect(
+    () => () => {
+      pickAttemptRef.current += 1;
+    },
+    [],
+  );
 
   const launchSeed = useCallback(
-    async (seedId: Id<"seeds">, bakePath?: SuggestedPath) => {
+    async (
+      seedId: Id<"seeds">,
+      choice?: PathChoice,
+      isCurrent: () => boolean = () => true,
+    ) => {
       const result = await createFromSeed({
         seedId,
-        ...(bakePath
-          ? { bakePath: { title: bakePath.title, blurb: bakePath.blurb } }
-          : {}),
+        // "Endless chat" is sent as its own flag — an absent bakePath alone
+        // still means "bake it", for the entry points that skip the menu.
+        ...(choice === ENDLESS_CHAT
+          ? { endlessChat: true }
+          : choice
+            ? { bakePath: { title: choice.title, blurb: choice.blurb } }
+            : {}),
       });
-      if (result) router.push(stamp(`/scholar/${result.id}`));
+      if (result && isCurrent()) router.push(stamp(`/scholar/${result.id}`));
     },
     [createFromSeed, router, stamp],
   );
@@ -84,8 +101,7 @@ export function useExploreSeed() {
       } catch (error) {
         console.error("Error creating session from seed:", error);
         toaster.error({
-          title: "Failed to start exploration",
-          description: "Please try again.",
+          title: serverErrorMessage(error, "Couldn't start that quest"),
         });
       } finally {
         setExploringSeedId(null);
@@ -97,15 +113,18 @@ export function useExploreSeed() {
   const handlePickPath = useCallback(
     async (choice: PathChoice) => {
       if (!pathDialog) return;
+      const attempt = ++pickAttemptRef.current;
+      const live = () => pickAttemptRef.current === attempt;
       setPickingPath(true);
       try {
-        // Endless chat → a plain ad-lib bake (no curated path).
-        const path = choice === ENDLESS_CHAT ? undefined : choice;
-        await launchSeed(pathDialog.seedId, path);
+        await launchSeed(pathDialog.seedId, choice, live);
         // Navigation happens on success; leave the spinner up until it does.
       } catch (error) {
+        if (!live()) return;
         console.error("Error starting quest:", error);
-        toaster.error({ title: "Failed to start", description: "Please try again." });
+        toaster.error({
+          title: serverErrorMessage(error, "Couldn't start that quest"),
+        });
         setPickingPath(false);
       }
     },
@@ -114,12 +133,14 @@ export function useExploreSeed() {
 
   const exploreSeedDialog = (
     <ChoosePathDialog
+      key={pathDialog?.seedId ?? "closed"}
       open={!!pathDialog}
       seedId={pathDialog?.seedId ?? null}
       topic={pathDialog?.topic ?? null}
       domain={pathDialog?.domain ?? null}
       submitting={pickingPath}
       onClose={() => {
+        pickAttemptRef.current += 1;
         setPathDialog(null);
         setPickingPath(false);
       }}

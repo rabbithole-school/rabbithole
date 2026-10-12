@@ -13,7 +13,7 @@ import {
   requireScholarsAccessible,
 } from "./lib/access";
 import {
-  institutionIdInLens,
+  scholarInstitutionReadableInLens,
   resolveInstitutionLens,
 } from "./lib/institutionLens";
 import { ROLES } from "./lib/roles";
@@ -182,7 +182,7 @@ async function requireCheckpointGroupInstitutionAccess(
   const group = await ctx.db.get(groupId);
   if (!group) throw new Error("Group not found.");
   const lens = await resolveInstitutionLens(ctx, ctx.user, "all");
-  if (!institutionIdInLens(lens, group.institutionId)) {
+  if (!scholarInstitutionReadableInLens(lens, group.institutionId)) {
     throw new Error("Forbidden: group is not in your institution");
   }
   return group;

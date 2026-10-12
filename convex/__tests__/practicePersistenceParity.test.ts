@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -17,17 +17,34 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function seedScholar(t: ReturnType<typeof convexTest>) {
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
+
+async function seedScholar(t: TestConvex<typeof schema>, username = "scopescholar") {
   return seedScholarInInstitution(t, {
     institutionId: await seedTestInstitution(t),
     name: "Scope Scholar",
-    username: "scopescholar",
+    username,
   });
 }
 
 /** Mirrors practiceSkills.test.ts's `asUser` — a real authSessions row so
  *  `requireUser` resolves the scholar rather than throwing "Not authenticated". */
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -46,9 +63,8 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
  */
 describe("practiceSession — scopeKey/dayKey (resume validity)", () => {
   test("an open (unscoped) scholar gets a stable scopeKey across repeated calls", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedScholar(t);
+    const t = sharedSeeded();
+    const scholar = await seedScholar(t, "scopescholar_stable");
     const as = await asUser(t, scholar);
     const first = await as.query(api.practiceSkills.practiceSession, {
       scholarId: scholar,
@@ -66,9 +82,8 @@ describe("practiceSession — scopeKey/dayKey (resume validity)", () => {
   });
 
   test("adding a Math plan (open → limited) changes the scopeKey", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedScholar(t);
+    const t = sharedSeeded();
+    const scholar = await seedScholar(t, "scopescholar_mathplan");
     const as = await asUser(t, scholar);
     const beforePlan = await as.query(api.practiceSkills.practiceSession, {
       scholarId: scholar,
@@ -90,8 +105,7 @@ describe("practiceSession — scopeKey/dayKey (resume validity)", () => {
   });
 
   test("a resolved scope with strands sorted differently still produces the SAME scopeKey", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const institutionId = await seedTestInstitution(t);
     const scholarA = await seedScholarInInstitution(t, {
       institutionId,
@@ -135,8 +149,7 @@ describe("practiceSession — scopeKey/dayKey (resume validity)", () => {
   });
 
   test("dayKey changes across an institution-local midnight rollover (default Pacific/Honolulu)", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t);
     const as = await asUser(t, scholar);
     // 2026-01-05 23:00 HST and 2026-01-06 01:00 HST straddle local midnight —
@@ -158,9 +171,8 @@ describe("practiceSession — scopeKey/dayKey (resume validity)", () => {
   });
 
   test("practiceScopeSnapshotKey matches practiceSession's own scopeKey/dayKey without serving anything", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedScholar(t);
+    const t = sharedSeeded();
+    const scholar = await seedScholar(t, "scopescholar_snapshot");
     await t.run(async (ctx) => {
       await ctx.db.insert("scholarMathPlans", {
         scholarId: scholar,
@@ -182,9 +194,8 @@ describe("practiceSession — scopeKey/dayKey (resume validity)", () => {
   });
 
   test("Quick Facts carries a fixed sentinel scopeKey, distinct from an ordinary-domain scopeKey", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedScholar(t);
+    const t = sharedSeeded();
+    const scholar = await seedScholar(t, "scopescholar_quickfacts");
     const as = await asUser(t, scholar);
     const ordinary = await as.query(api.practiceSkills.practiceSession, {
       scholarId: scholar,
@@ -201,9 +212,8 @@ describe("practiceSession — scopeKey/dayKey (resume validity)", () => {
   });
 
   test("a blocked (fully out-of-scope) result still carries a scopeKey/dayKey", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
-    const scholar = await seedScholar(t);
+    const t = sharedSeeded();
+    const scholar = await seedScholar(t, "scopescholar_blocked");
     await t.run(async (ctx) => {
       await ctx.db.insert("scholarMathPlans", {
         scholarId: scholar,

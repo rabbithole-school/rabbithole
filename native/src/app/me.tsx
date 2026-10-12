@@ -17,9 +17,14 @@ import { resolveUserImageUri } from "@/lib/webEmbedConfig";
 import { colorForDomain, fonts, palette, useColors } from "@/theme";
 import { useMapGates } from "@/hooks/useMapGates";
 import WeeklyGoalsCard from "@/components/WeeklyGoalsCard";
+import { LicenseCardImage } from "@/components/LicenseCardImage";
+import { isLicenseCardBadge } from "../../vendor/shared/calculatorLicense";
 import { strongestSignalHeadline } from "../../vendor/practice/calibration";
 
 const MAXW = 720;
+/** The license card on the shelf: two medallion columns wide, centered in the
+ * 120pt art row so its title lines up with its neighbours'. */
+const LICENSE_SHELF_WIDTH = 190;
 const MAX_LEAPS_SHOWN = 6;
 
 export default function MyLearning() {
@@ -166,8 +171,26 @@ export default function MyLearning() {
         ) : badges.length > 0 ? (
           <View style={styles.badgeGrid}>
             {badges.map((b) => (
-              <View key={b._id} style={styles.badge}>
-                {b.imageUrl ? (
+              <View
+                key={b._id}
+                style={[
+                  styles.badge,
+                  isLicenseCardBadge(b.kind) && styles.licenseBadge,
+                ]}
+              >
+                {isLicenseCardBadge(b.kind) ? (
+                  // The license card at its own aspect — an ID, not a medallion.
+                  <View style={styles.licenseCardSlot}>
+                    <LicenseCardImage
+                      imageUrl={b.imageUrl}
+                      width={LICENSE_SHELF_WIDTH}
+                      generating={b.artStatus === "generating"}
+                      icon={b.badge.icon ?? b.unitEmoji}
+                      showSpinner={false}
+                      alt={`${b.unitTitle} card`}
+                    />
+                  </View>
+                ) : b.imageUrl ? (
                   <Image
                     source={b.imageUrl}
                     style={styles.badgeImg}
@@ -334,6 +357,8 @@ function makeStyles(c: ReturnType<typeof useColors>) {
   // Badges
   badgeGrid: { flexDirection: "row", flexWrap: "wrap", gap: 16, marginTop: 6 },
   badge: { width: 132, alignItems: "center", gap: 8 },
+  licenseBadge: { width: 200 },
+  licenseCardSlot: { height: 120, justifyContent: "center" },
   badgeImg: {
     width: 120,
     height: 120,

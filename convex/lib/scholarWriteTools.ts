@@ -11,6 +11,7 @@
 //
 // Gating (mirrors the in-app mutations these wrap):
 //   learning record  (observation/report/dossier/reading level)  teacher/admin
+//   calculator license grant / revoke                            teacher/admin
 //   profile / password / passkey reset                           scholar-admin
 //   delete_scholar                                               admin
 //   document / portfolio upload                                  teacher/admin
@@ -37,7 +38,7 @@ import {
   isPlatformAdminRole,
   type Role,
 } from "./roles";
-import { resolveScholarByName } from "./scholarReadTools";
+import { matchScholarByName, resolveScholarByName } from "./scholarReadTools";
 import type { AideEmit } from "./aideStream";
 import { withBase, scholarPath } from "./channels";
 
@@ -111,6 +112,34 @@ export async function makeScholarWriteTools(
     resolveScholarByName(ctx, name, allowedScholarIds);
   const scholarLink = (id: string) =>
     withBase(linkBase, scholarPath(id));
+
+  /**
+   * Strict variant for writes with a physical side effect (the calculator
+   * license prints a card): a partial name that fits several scholars is
+   * refused with the candidates instead of first-substring-wins.
+   */
+  const resolveStrict = async (
+    name: string,
+  ): Promise<{ id: string; name: string } | string> => {
+    const { scholars } = await ctx.runQuery(
+      internal.curriculumAssistant.listScholarsInternal,
+      {
+        includeProgramGuests: true,
+        ...(allowedScholarIds
+          ? { allowedScholarIds: [...allowedScholarIds] }
+          : {}),
+      },
+    );
+    const visible = allowedScholarIds
+      ? scholars.filter((s) => allowedScholarIds.has(s.id as Id<"users">))
+      : scholars;
+    const m = matchScholarByName(name, visible);
+    if (m.kind === "match") return m.scholar;
+    if (m.kind === "none") return `No scholar found matching "${name}".`;
+    return `"${name}" matches more than one scholar (${m.candidates
+      .map((c) => c.name)
+      .join(", ")}). Ask the teacher which one they mean; nothing was changed.`;
+  };
 
   /**
    * Resolve which attached file a tool should act on. Prefers an explicit
@@ -210,10 +239,9 @@ export async function makeScholarWriteTools(
           if (!scholar) return `No scholar found matching "${input.scholarName}".`;
           const weight = input.weight === "major" ? "major" : "minor";
           const period = input.category
-            ? await ctx.runQuery(
-                internal.reportingPeriods.currentInternal,
-                {},
-              )
+            ? await ctx.runQuery(internal.reportingPeriods.currentInternal, {
+                scholarId: scholar.id as Id<"users">,
+              })
             : null;
           await ctx.runMutation(internal.teacherAide.addScholarObservation, {
             teacherId: callerUserId,
@@ -353,8 +381,10 @@ export async function makeScholarWriteTools(
       identity: "dim_identity",
       goals: "goals",
     };
-    const currentPeriod = async () =>
-      ctx.runQuery(internal.reportingPeriods.currentInternal, {});
+    const currentPeriod = async (scholarId: string) =>
+      ctx.runQuery(internal.reportingPeriods.currentInternal, {
+        scholarId: scholarId as Id<"users">,
+      });
 
     tools.push(
       betaTool({
@@ -372,7 +402,7 @@ export async function makeScholarWriteTools(
         run: async (input) => {
           const scholar = await resolve(input.scholarName);
           if (!scholar) return `No scholar found matching "${input.scholarName}".`;
-          const period = await currentPeriod();
+          const period = await currentPeriod(scholar.id);
           if (!period) return "There's no open reporting period right now.";
           const reports = await ctx.runQuery(internal.courseNarratives.getForBot, {
             scholarId: scholar.id as Id<"users">,
@@ -417,7 +447,7 @@ export async function makeScholarWriteTools(
         run: async (input) => {
           const scholar = await resolve(input.scholarName);
           if (!scholar) return `No scholar found matching "${input.scholarName}".`;
-          const period = await currentPeriod();
+          const period = await currentPeriod(scholar.id);
           if (!period) return "There's no open reporting period right now.";
           const narrativeId = await ctx.runMutation(internal.courseNarratives.openInternal, {
             scholarId: scholar.id as Id<"users">,
@@ -457,7 +487,7 @@ export async function makeScholarWriteTools(
         run: async (input) => {
           const scholar = await resolve(input.scholarName);
           if (!scholar) return `No scholar found matching "${input.scholarName}".`;
-          const period = await currentPeriod();
+          const period = await currentPeriod(scholar.id);
           if (!period) return "There's no open reporting period right now.";
           const narrativeId = await ctx.runMutation(internal.courseNarratives.openInternal, {
             scholarId: scholar.id as Id<"users">,
@@ -600,6 +630,93 @@ export async function makeScholarWriteTools(
           return level
             ? `Reading level set to ${level} for ${scholar.name}.`
             : `Reading level cleared for ${scholar.name}.`;
+        },
+      }),
+    );
+
+    // ── grant / revoke_calculator_license — teacher/admin, any surface ──
+    // The same shared path as the Grant button on /teacher/math-skills
+    // (calculatorLicenses.ts). Not sensitive, so not surface-gated.
+    tools.push(
+      betaTool({
+        name: "grant_calculator_license",
+        description:
+          "Grant a scholar their Calculator License. Use it when a teacher says a scholar passed the proctored paper Calculator License Test, or asks to give them the license. Granting is the teacher's call: there is no score and no readiness gate, so never ask for one or check Fast Math first. Granting prints a physical license card (at schools with the card printer) and shows the scholar a celebration on their iPad. " +
+          "If the scholar already holds a license, this does NOT re-grant; it returns who granted it and when. Pass rerecord=true only after the teacher confirms they want it re-recorded, because that reprints the card.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            scholarName: scholarNameProp,
+            rerecord: {
+              type: "boolean" as const,
+              description:
+                "Re-record an EXISTING license (new date and issuer, reprints the card). Only after the teacher explicitly confirms.",
+            },
+          },
+          required: ["scholarName"] as const,
+        },
+        run: async (input) => {
+          const scholar = await resolveStrict(input.scholarName);
+          if (typeof scholar === "string") return scholar;
+          let res;
+          try {
+            res = await ctx.runMutation(internal.calculatorLicenses.grantForCaller, {
+              callerUserId,
+              scholarId: scholar.id as Id<"users">,
+              rerecord: input.rerecord === true,
+            });
+          } catch (e) {
+            return e instanceof Error ? e.message : String(e);
+          }
+          const by = res.issuedByName ? ` by ${res.issuedByName}` : "";
+          if (res.status === "already_licensed") {
+            return `${res.scholarName} already has a calculator license (granted ${res.issuedOn}${by}). Nothing changed. Re-recording it would reprint the card; only call again with rerecord=true if the teacher confirms. ${scholarLink(scholar.id)}`;
+          }
+          const verb = res.status === "rerecorded" ? "Re-recorded" : "Granted";
+          emit({
+            toolComplete: {
+              name: "grant_calculator_license",
+              result: `${verb} calculator license for ${res.scholarName}`,
+            },
+          });
+          const card = res.printsCard ? " The license card is printing." : "";
+          return `${verb} ${res.scholarName}'s calculator license on ${res.issuedOn}${by}.${card} They'll see a celebration on their iPad. ${scholarLink(scholar.id)}`;
+        },
+      }),
+    );
+
+    tools.push(
+      betaTool({
+        name: "revoke_calculator_license",
+        description:
+          "Remove a scholar's Calculator License that was granted by mistake (deletes the license and its badge). Confirm the scholar with the teacher and get an explicit yes before calling.",
+        inputSchema: {
+          type: "object" as const,
+          properties: { scholarName: scholarNameProp },
+          required: ["scholarName"] as const,
+        },
+        run: async (input) => {
+          const scholar = await resolveStrict(input.scholarName);
+          if (typeof scholar === "string") return scholar;
+          let res;
+          try {
+            res = await ctx.runMutation(internal.calculatorLicenses.revokeForCaller, {
+              callerUserId,
+              scholarId: scholar.id as Id<"users">,
+            });
+          } catch (e) {
+            return e instanceof Error ? e.message : String(e);
+          }
+          if (!res.removed) {
+            return `${scholar.name} has no calculator license, so there was nothing to remove.`;
+          }
+          emit({
+            toolComplete: {
+              name: "revoke_calculator_license",
+              result: `Removed calculator license for ${scholar.name}`,
+            },
+          });
+          return `Removed ${scholar.name}'s calculator license. ${scholarLink(scholar.id)}`;
         },
       }),
     );
@@ -820,7 +937,7 @@ export async function makeScholarWriteTools(
               result: `Attached "${title}" to ${scholar.name}`,
             },
           });
-          return `Document "${title}" attached to ${scholar.name} (${input.kind}). Processing started — summary + key findings will appear on their Records tab.`;
+          return `Document "${title}" attached to ${scholar.name} (${input.kind}). Processing started — summary + key findings will appear on their Documents tab, where staff can also delete it: ${withBase(linkBase, scholarPath(scholar.id, "documents"))}`;
         },
       }),
     );

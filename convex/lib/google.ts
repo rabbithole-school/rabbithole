@@ -30,6 +30,27 @@ export const GOOGLE_OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/drive.readonly",
 ] as const;
 
+/**
+ * The only scopes a token handed to browser JS (the Drive Picker) may carry.
+ * `getDriveAccessToken` mints such a token by down-scoping a refresh, so the
+ * browser never holds the personal link's Gmail, Calendar, Docs or Slides
+ * access. Matches what the client's GIS fallback asks for.
+ */
+export const PICKER_DRIVE_SCOPES = [
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/drive.file",
+] as const;
+
+/** Whether every scope in `granted` is one of `allowed` (and `granted` is non-empty). */
+export function scopesWithin(
+  granted: readonly string[],
+  allowed: readonly string[],
+): boolean {
+  const normalized = normalizeGoogleScopes(granted);
+  const allow = new Set(normalizeGoogleScopes(allowed));
+  return normalized.length > 0 && normalized.every((s) => allow.has(s));
+}
+
 export const GOOGLE_SLIDES_SCOPES = [
   "https://www.googleapis.com/auth/presentations",
 ] as const;
@@ -72,6 +93,103 @@ export const INSTITUTION_WORKSPACE_BOT_SCOPES = [
   ...INSTITUTION_DOCS_BOT_SCOPES,
   "https://www.googleapis.com/auth/presentations",
 ] as const;
+
+/**
+ * Identity scopes every personal link needs: the OAuth callback calls OpenID
+ * userinfo to bind the token to a stable `sub` and email.
+ */
+export const GOOGLE_IDENTITY_SCOPES = ["openid", "email", "profile"] as const;
+
+export const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+export const GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
+/**
+ * The old admissions Gmail scope. No longer requested, and a grant that still
+ * carries it needs a fresh consent: while a token holds gmail.metadata, Gmail
+ * refuses format=full reads and `q` searches even when gmail.readonly is also
+ * granted. gmail.readonly covers everything it allowed.
+ */
+export const GMAIL_METADATA_SCOPE = "https://www.googleapis.com/auth/gmail.metadata";
+
+/**
+ * Gmail scopes Admissions needs. readonly: the "last emailed" sync (headers
+ * only for now) and, later, reading family mail to suggest status changes.
+ * compose: saving drafts for staff to review and send. Nothing sends mail.
+ */
+export const ADMISSIONS_GMAIL_SCOPES = [GMAIL_READONLY_SCOPE, GMAIL_COMPOSE_SCOPE] as const;
+
+/**
+ * Every scope the Admissions workspace asks for, in one consent, so staff
+ * approve access once: calendar events (tours, interviews) and Gmail.
+ */
+export const ADMISSIONS_GOOGLE_SCOPES = [
+  "https://www.googleapis.com/auth/calendar.readonly",
+  ...ADMISSIONS_GMAIL_SCOPES,
+] as const;
+
+/** Whether a grant still carries gmail.metadata (see GMAIL_METADATA_SCOPE). */
+export function hasGmailMetadataScope(grantedScopes: readonly string[]): boolean {
+  return normalizeGoogleScopes(grantedScopes).includes(GMAIL_METADATA_SCOPE);
+}
+
+/**
+ * The `required` admissions scopes a new consent must grant. A grant still
+ * carrying gmail.metadata reports every required Gmail scope as missing,
+ * since those have to be granted again without it.
+ */
+export function missingAdmissionsScopes(
+  grantedScopes: readonly string[],
+  required: readonly string[] = ADMISSIONS_GOOGLE_SCOPES,
+): string[] {
+  const missing = missingGoogleScopes(grantedScopes, required);
+  if (!hasGmailMetadataScope(grantedScopes)) return missing;
+  const gmail = new Set<string>(ADMISSIONS_GMAIL_SCOPES);
+  return normalizeGoogleScopes([...missing, ...required.filter((s) => gmail.has(s))]);
+}
+
+/** OAuth `purpose` values for the per-user link (`beginOAuth`). */
+export const PERSONAL_GOOGLE_PURPOSES = ["default", "admissions"] as const;
+export type PersonalGooglePurpose = (typeof PERSONAL_GOOGLE_PURPOSES)[number];
+
+/** Union of scope sets, normalized and de-duplicated, order-preserving. */
+export function mergeGoogleScopes(
+  ...scopeSets: ReadonlyArray<readonly string[]>
+): string[] {
+  return normalizeGoogleScopes(scopeSets.flat());
+}
+
+/**
+ * Scopes to request for a personal-link purpose. Admissions asks for identity
+ * + admissions scopes merged with whatever the user already granted, so the
+ * new token keeps Docs/Slides/Drive access for people who had it. The old
+ * gmail.metadata scope is never carried forward.
+ */
+export function scopesForPersonalGooglePurpose(
+  purpose: PersonalGooglePurpose,
+  existingScopes: readonly string[] = [],
+): string[] {
+  if (purpose === "admissions") {
+    return mergeGoogleScopes(
+      GOOGLE_IDENTITY_SCOPES,
+      normalizeGoogleScopes(existingScopes).filter((s) => s !== GMAIL_METADATA_SCOPE),
+      ADMISSIONS_GOOGLE_SCOPES,
+    );
+  }
+  return [...GOOGLE_OAUTH_SCOPES];
+}
+
+/**
+ * Whether the consent URL should set `include_granted_scopes=true`
+ * (incremental auth). It does, except for an admissions consent replacing a
+ * grant that carries gmail.metadata: incremental auth would fold the old
+ * scope back into the new token, so that consent asks for the full set
+ * explicitly instead (scopesForPersonalGooglePurpose keeps the rest).
+ */
+export function includeGrantedScopesFor(
+  purpose: PersonalGooglePurpose,
+  existingScopes: readonly string[] = [],
+): boolean {
+  return !(purpose === "admissions" && hasGmailMetadataScope(existingScopes));
+}
 
 export const WORKSPACE_BOT_PURPOSES = ["workspace_bot", "docs_bot"] as const;
 export type WorkspaceBotPurpose = (typeof WORKSPACE_BOT_PURPOSES)[number];
@@ -193,27 +311,62 @@ export async function exchangeCodeForTokens(args: {
   return (await res.json()) as GoogleTokenResponse;
 }
 
-/** Refresh an expired access token. */
+/**
+ * Refresh an expired access token. With `scopes`, asks Google for a token
+ * limited to that subset of the grant (down-scoping on refresh); the caller
+ * must still check the returned `scope`.
+ */
 export async function refreshAccessToken(args: {
   refreshToken: string;
   clientId: string;
   clientSecret: string;
+  scopes?: readonly string[];
 }): Promise<GoogleTokenResponse> {
+  const body = new URLSearchParams({
+    refresh_token: args.refreshToken,
+    client_id: args.clientId,
+    client_secret: args.clientSecret,
+    grant_type: "refresh_token",
+  });
+  if (args.scopes) body.set("scope", args.scopes.join(" "));
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      refresh_token: args.refreshToken,
-      client_id: args.clientId,
-      client_secret: args.clientSecret,
-      grant_type: "refresh_token",
-    }),
+    body,
   });
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(`Google token refresh failed (${res.status}): ${detail}`);
+    throw new GoogleTokenRefreshError(res.status, detail);
   }
   return (await res.json()) as GoogleTokenResponse;
+}
+
+/**
+ * A failed refresh. `revoked` is true when Google says the grant itself is
+ * dead (`invalid_grant`: revoked by the user, expired, or password reset), so
+ * only a reconnect will help. Transient failures (5xx, rate limits) leave it
+ * false and must not prompt a reconnect.
+ */
+export class GoogleTokenRefreshError extends Error {
+  readonly status: number;
+  readonly oauthError: string | undefined;
+  constructor(status: number, detail: string) {
+    super(`Google token refresh failed (${status}): ${detail}`);
+    this.name = "GoogleTokenRefreshError";
+    this.status = status;
+    let oauthError: string | undefined;
+    try {
+      const parsed = JSON.parse(detail) as { error?: unknown };
+      if (typeof parsed.error === "string") oauthError = parsed.error;
+    } catch {
+      // Non-JSON body; leave undefined.
+    }
+    this.oauthError = oauthError;
+  }
+
+  get revoked(): boolean {
+    return this.oauthError === "invalid_grant";
+  }
 }
 
 /** Fetch profile info (sub, email, name) for a freshly issued access token. */

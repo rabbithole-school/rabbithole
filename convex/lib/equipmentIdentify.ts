@@ -1,8 +1,7 @@
 /**
  * Equipment identify — pure logic for the add-by-photo flow (prompt + parser).
  * The model-calling wrapper lives in convex/equipmentActions.ts; keeping the
- * prompt and parser here makes them unit-testable without a model call
- * (same layering as lib/magicAnnotations.ts).
+ * prompt and parser here makes them unit-testable without a model call.
  */
 
 /** The category vocabulary the curation UI already uses (schema comment). */

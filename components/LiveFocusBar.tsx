@@ -9,7 +9,8 @@
  */
 
 import { useEffect, useState } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { Box, Button, Flex, HStack, Text } from "@chakra-ui/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -25,12 +26,15 @@ export function LiveFocusBar({
 }: {
   institutionScope?: string;
 }) {
-  const pushes = useQuery(
+  const [now, setNow] = useState(() => Date.now());
+  const minuteNow = Math.floor(now / 60_000) * 60_000;
+  const pushes = useSmoothedQuery(
     api.pushes.livePushesForScope,
-    institutionScope === undefined ? {} : { scope: institutionScope },
+    institutionScope === undefined
+      ? { now: minuteNow }
+      : { scope: institutionScope, now: minuteNow },
   );
   const clearPush = useMutation(api.pushes.clearPush);
-  const [now, setNow] = useState(() => Date.now());
   const [clearingId, setClearingId] = useState<Id<"pushes"> | null>(null);
 
   useEffect(() => {

@@ -23,6 +23,9 @@ export type SimActivity = {
   durationMinutes?: number | null;
   /** Full unit/lesson/activity design shown to the diagnosis-only judge. */
   unitDesign?: string;
+  /** The activity's stored tutor preference (activities.tutorModel), so the
+   *  sims rehearse against the same model scholars will get. */
+  tutorModel?: "sonnet" | "fable" | null;
 };
 
 import type { ErrorPattern } from "./practice/errorPatterns";

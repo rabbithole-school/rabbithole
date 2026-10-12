@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   createScholarVisibleTextFilter,
   isMachineFacingTextSegment,
+  matchMachineFacingPattern,
   sanitizeScholarVisibleText,
 } from "../scholarSafeText";
 import { stripMarkdownFormatting } from "../practice/plainText";
@@ -76,11 +77,64 @@ describe("scholarSafeText", () => {
     expect(safe).toBe("Try this step.");
   });
 
+  test("reports the first matching machine-facing pattern by stable name", () => {
+    expect(matchMachineFacingPattern("Internal reasoning: choose the next tool.")).toBe(
+      "internal_marker",
+    );
+    expect(
+      matchMachineFacingPattern(
+        "I'll wait for their answer before addressing the question they asked.",
+      ),
+    ).toBe("learner_turn_planning");
+    expect(matchMachineFacingPattern("Before addressing their answer, pause.")).toBe(
+      "before_addressing_learner_turn",
+    );
+    expect(matchMachineFacingPattern("The answer was choice 0.")).toBe(
+      "raw_choice_index",
+    );
+    expect(matchMachineFacingPattern("TypeError: Cannot read properties.")).toBe(
+      "raw_error",
+    );
+    expect(matchMachineFacingPattern("at runTool (convex/http.ts:100:3)")).toBe(
+      "stack_trace",
+    );
+    expect(matchMachineFacingPattern("content_block_delta: text_delta")).toBe(
+      "protocol_fragment",
+    );
+    expect(matchMachineFacingPattern("What pattern do you notice?")).toBeNull();
+  });
+
+  test("batch sanitizer reports only pattern and dropped segment length", () => {
+    const dropped = "Internal reasoning: hidden plan.\n";
+    const drops: unknown[] = [];
+
+    expect(
+      sanitizeScholarVisibleText(`${dropped}Try this step.`, (drop) => {
+        drops.push(drop);
+      }),
+    ).toBe("Try this step.");
+    expect(drops).toEqual([
+      { pattern: "internal_marker", length: dropped.length },
+    ]);
+    expect(drops[0]).not.toHaveProperty("text");
+    expect(drops[0]).not.toHaveProperty("segment");
+  });
+
   test("streaming filter buffers until a full sentence so scratch text never flashes", () => {
-    const filter = createScholarVisibleTextFilter();
+    const drops: unknown[] = [];
+    const dropped =
+      "I'll wait for their answer before addressing the 'why' question they asked.";
+    const filter = createScholarVisibleTextFilter((drop) => {
+      drops.push(drop);
+    });
     expect(filter.push("I'll wait for their answer")).toBe("");
     expect(filter.push(" before addressing the 'why' question they asked.")).toBe("");
     expect(filter.push(" Good next step.")).toBe(" Good next step.");
     expect(filter.finish()).toBe("");
+    expect(drops).toEqual([
+      { pattern: "learner_turn_planning", length: dropped.length },
+    ]);
+    expect(drops[0]).not.toHaveProperty("text");
+    expect(drops[0]).not.toHaveProperty("segment");
   });
 });

@@ -1,9 +1,22 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
+import {
+  DOMAIN_REACHABILITY_STATIC,
+  ELECTIVE_PRACTICE_DOMAINS,
+  REGISTERED_PRACTICE_DOMAINS,
+} from "../knowledgeNodes";
+import { allEligibleDomainsMapped } from "../lib/practice/mapMarker";
+import {
+  automaticPlacementGrade,
+  domainHasAffectSafeEntry,
+  strandOrders,
+} from "../lib/practice/placement";
+import { practiceScopeAllowsDomain, type PracticeScope } from "../lib/practice/mathPlan";
 import { gradeTemplateItem } from "../lib/practice/session";
+import { anyUnmappedDomain } from "../practiceSkills";
 import { masteryOf } from "../../shared/treeMapLayout";
 
 // ── BREADTH-FIRST placement serving, SERVER SIDE ───────────────────────────
@@ -32,8 +45,25 @@ const FRACTION = "fraction-arithmetic";
 const GEOMETRY = "geometry-measurement";
 const PROBABILITY = "probability";
 
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
+
 async function seedScholar(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   username: string,
   gradeLevel: string | null = "9",
 ) {
@@ -47,7 +77,7 @@ async function seedScholar(
   );
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -58,14 +88,14 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
   return t.withIdentity({ subject: `${userId}|${sessionId}`, issuer: "https://convex.dev" });
 }
 
-async function placementRows(t: ReturnType<typeof convexTest>, scholarId: Id<"users">) {
+async function placementRows(t: TestConvex<typeof schema>, scholarId: Id<"users">) {
   return await t.run(async (ctx) =>
     (await ctx.db.query("practicePlacements").collect()).filter((r) => r.scholarId === scholarId),
   );
 }
 
 async function placementRow(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   scholarId: Id<"users">,
   domain: string,
 ) {
@@ -109,7 +139,7 @@ async function answerBand(
 
 /** Mark `domains` MAPPED — a converged run plus the mastery a finalize writes. */
 async function mapDomains(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   scholarId: Id<"users">,
   domains: string[],
 ) {
@@ -143,10 +173,190 @@ async function mapDomains(
   });
 }
 
+async function expectMapParity(
+  t: TestConvex<typeof schema>,
+  asScholar: Awaited<ReturnType<typeof asUser>>,
+  scholarId: Id<"users">,
+  scope: PracticeScope = { kind: "open" },
+) {
+  const [scholar, placements, full] = await Promise.all([
+    t.run((ctx) => ctx.db.get(scholarId)),
+    placementRows(t, scholarId),
+    asScholar.query(api.practiceSkills.domainMapForScholar, { scholarId }),
+  ]);
+  const eligible = full.filter(
+    (domain) => domain.eligible && practiceScopeAllowsDomain(scope, domain.domain),
+  );
+  expect(
+    allEligibleDomainsMapped(scholar?.gradeLevel, scope, placements),
+  ).toBe(eligible.length > 0 && eligible.every((domain) => domain.mapped));
+}
+
+function countingProxy<T extends object>(value: T, count: { documents: number }): T {
+  return new Proxy(value, {
+    get(target, property, receiver) {
+      const member = Reflect.get(target, property, receiver);
+      if (typeof member !== "function") return member;
+      if (property === "get") {
+        return async (...args: unknown[]) => {
+          const result = await Reflect.apply(member, target, args);
+          if (result !== null) count.documents++;
+          return result;
+        };
+      }
+      if (property === "collect") {
+        return async (...args: unknown[]) => {
+          const result = await Reflect.apply(member, target, args);
+          count.documents += result.length;
+          return result;
+        };
+      }
+      return (...args: unknown[]) => {
+        const result = Reflect.apply(member, target, args);
+        return result !== null && typeof result === "object"
+          ? countingProxy(result, count)
+          : result;
+      };
+    },
+  });
+}
+
+describe("cheap all-mapped pre-check", () => {
+  const gradeOne = [WHOLE, FRACTION, PROBABILITY, GEOMETRY];
+  const discrete = "discrete-math";
+
+  test("fixture transitions match the full derivation", async () => {
+    const t = await freshSeeded();
+    const scholar = await seedScholar(t, "breadth_map_state", "1");
+    const asScholar = await asUser(t, scholar);
+    await expectMapParity(t, asScholar, scholar);
+    for (const domain of gradeOne) {
+      await mapDomains(t, scholar, [domain]);
+      await expectMapParity(t, asScholar, scholar);
+    }
+
+    await mapDomains(t, scholar, [discrete]);
+    const elective = await placementRow(t, scholar, discrete);
+    await t.run((ctx) => ctx.db.patch(elective!._id, { status: "in_progress" }));
+    await expectMapParity(t, asScholar, scholar);
+    await expectMapParity(t, asScholar, scholar, {
+      kind: "limited",
+      domains: gradeOne.map((domain) => ({ domain })),
+    });
+
+    await t.run(async (ctx) => {
+      await ctx.db.patch(elective!._id, { status: "complete" });
+      await ctx.db.patch(scholar, { gradeLevel: "4" });
+    });
+    await expectMapParity(t, asScholar, scholar);
+    const mapped = new Set((await placementRows(t, scholar)).map((row) => row.domain));
+    const grade = automaticPlacementGrade("4");
+    await mapDomains(
+      t,
+      scholar,
+      DOMAIN_REACHABILITY_STATIC.filter(
+        (domain) =>
+          !domain.elective &&
+          !mapped.has(domain.domain) &&
+          domainHasAffectSafeEntry(domain.nodeGrades, grade),
+      ).map((domain) => domain.domain),
+    );
+    await expectMapParity(t, asScholar, scholar);
+
+    await t.run(async (ctx) => {
+      const nodes = await ctx.db
+        .query("knowledgeNodes")
+        .withIndex("by_domain", (q) => q.eq("domain", WHOLE))
+        .collect();
+      const order = strandOrders(
+        nodes,
+        await ctx.db.query("knowledgeNodeEdges").collect(),
+      ).find((candidate) => candidate.orderedKeys.length >= 3);
+      const row = await ctx.db
+        .query("practicePlacements")
+        .withIndex("by_scholar_domain", (q) =>
+          q.eq("scholarId", scholar).eq("domain", WHOLE),
+        )
+        .unique();
+      if (!order || !row) throw new Error("Missing repair fixture");
+      const nodeKey = order.orderedKeys[1];
+      await ctx.db.patch(row._id, {
+        probesAnswered: 1,
+        probeLog: [{
+          nodeKey,
+          strand: order.strand,
+          outcome: "incorrect",
+          at: Date.now(),
+        }],
+      });
+    });
+    const repair = await t.mutation(
+      internal.practiceSkills.reopenSlipCappedPlacement,
+      { scholarId: scholar, apply: true },
+    );
+    expect(repair.domains.map((domain) => domain.domain)).toContain(WHOLE);
+    await expectMapParity(t, asScholar, scholar);
+  });
+
+  test("reduces the fully mapped pre-check to a small document set", async () => {
+    const t = await freshSeeded();
+    const scholar = await seedScholar(t, "breadth_map_cost", "2");
+    await mapDomains(t, scholar, [...gradeOne, "early-algebra"]);
+    const measured = await t.run(async (ctx) => {
+      let before = 0;
+      for (const domain of REGISTERED_PRACTICE_DOMAINS) {
+        const placement = await ctx.db
+          .query("practicePlacements")
+          .withIndex("by_scholar_domain", (q) =>
+            q.eq("scholarId", scholar).eq("domain", domain),
+          )
+          .first();
+        if (placement) before++;
+        if (placement?.status === "complete") continue;
+        if (ELECTIVE_PRACTICE_DOMAINS.has(domain) && !placement) continue;
+        if (await ctx.db
+          .query("knowledgeNodes")
+          .withIndex("by_domain", (q) => q.eq("domain", domain))
+          .first()) {
+          before++;
+          break;
+        }
+      }
+      for (const domain of REGISTERED_PRACTICE_DOMAINS) {
+        before += (await ctx.db.query("knowledgeNodes")
+          .withIndex("by_domain", (q) => q.eq("domain", domain)).collect()).length;
+        before += (await ctx.db.query("knowledgeNodeEdges")
+          .withIndex("by_domain", (q) => q.eq("domain", domain)).collect()).length;
+      }
+      const [placements, mastery] = await Promise.all([
+        ctx.db
+          .query("practicePlacements")
+          .withIndex("by_scholar_domain", (q) => q.eq("scholarId", scholar))
+          .collect(),
+        ctx.db
+          .query("practiceMastery")
+          .withIndex("by_scholar", (q) => q.eq("scholarId", scholar))
+          .collect(),
+      ]);
+      before += 1 + placements.length + mastery.length;
+      const count = { documents: 0 };
+      const unmapped = await anyUnmappedDomain(
+        { ...ctx, db: countingProxy(ctx.db, count) },
+        scholar,
+      );
+      return { before, after: count.documents, unmapped };
+    });
+    // The old true branch loaded each graph, scholar, placement, and mastery
+    // document exactly once; the proxy counts the real replacement branch.
+    expect(measured.after).toBe(6);
+    expect(measured.before).toBeGreaterThan(measured.after * 100);
+    expect(measured.unmapped).toBe(false);
+  });
+});
+
 describe("breadth-first serving — the band spans every servable domain", () => {
   test("FIRST COVERAGE everywhere before any domain converges — and no strand is deepened twice in pass 1", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "breadth_band", null);
     const asScholar = await asUser(t, scholar);
     // Whole-number and fractions mapped → geometry, probability and ratio all
@@ -186,8 +396,7 @@ describe("breadth-first serving — the band spans every servable domain", () =>
   });
 
   test("a scholar may hold SEVERAL in-progress runs, and each converges on its own", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "breadth_multi_run");
     const asScholar = await asUser(t, scholar);
     await mapDomains(t, scholar, [WHOLE, FRACTION]);
@@ -214,8 +423,7 @@ describe("breadth-first serving — the band spans every servable domain", () =>
 
 describe("breadth-first serving — no probe is ever lost", () => {
   test("PARKED RUN: a row with answered probes and no served probe resumes mid-search on BOTH surfaces", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "breadth_parked", null);
     const asScholar = await asUser(t, scholar);
 
@@ -259,8 +467,7 @@ describe("breadth-first serving — no probe is ever lost", () => {
   });
 
   test("a deliberate single-domain entry is never refused, even with other runs open", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "breadth_single_entry");
     const asScholar = await asUser(t, scholar);
 
@@ -292,8 +499,7 @@ describe("breadth-first serving — no probe is ever lost", () => {
   });
 
   test("ANTI-STRANDING: a domain with nothing probeable finalizes instead of parking forever", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholar = await seedScholar(t, "breadth_no_strand");
     const asScholar = await asUser(t, scholar);
 
@@ -338,8 +544,7 @@ describe("breadth-first serving — no probe is ever lost", () => {
 
 describe("shadow placement — mastery is not a map", () => {
   test("a domain with DEMONSTRATED mastery and no converged run is searched to convergence, and its earned rows survive intact", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "breadth_shadow");
     const asScholar = await asUser(t, scholar);
 
@@ -448,8 +653,7 @@ describe("shadow placement — mastery is not a map", () => {
     // lifting reps to the fluent floor would turn a once-practised node GREEN out
     // of inference — demonstrated fluency manufactured by a placement search,
     // which rule 4 forbids. The lift must instead read PROVISIONAL ("placed").
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "breadth_shadow_subfluent");
     const asScholar = await asUser(t, scholar);
 
@@ -539,8 +743,7 @@ describe("shadow placement — mastery is not a map", () => {
   });
 
   test("a shadow-placed domain does NOT lose its ordinary practice work to the mapping band", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "breadth_shadow_drill");
     const asScholar = await asUser(t, scholar);
 
@@ -582,8 +785,7 @@ describe("shadow placement — mastery is not a map", () => {
 
 describe("the affect-safe ring gates AUTOMATIC opening only", () => {
   test("no grade on file → the K ring; a deliberate pick still opens a high-floor domain", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "breadth_no_grade", null);
     const asScholar = await asUser(t, scholar);
     // Everything the K ring reaches is already mapped, so only the high-floor
@@ -648,8 +850,7 @@ describe("the affect-safe ring gates AUTOMATIC opening only", () => {
       "integers-coordinates",
       "early-algebra",
     ];
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "breadth_reachable_ceiling", "4");
     const asScholar = await asUser(t, scholar);
     await mapDomains(t, scholar, A1_PREREQS);

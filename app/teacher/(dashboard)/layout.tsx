@@ -70,11 +70,24 @@ function TeacherDashboardLayoutInner({
   // property; these are harmless authedQuery metadata, but intent matters).
   const isStaff = isClientStaffRole(user?.role);
   const { hasSchoolOperationsAccess } = useSchoolOperationsAccess(user, !!user);
+  // Only a base `staff` user's tabs depend on scholar messaging (a mentor
+  // grant opens Messages; mentor-only means Messages alone) — every other
+  // staff role's strip is fixed, so they skip the query.
+  const needsScholarMessaging = user?.role === ROLES.STAFF;
+  const scholarMessaging = useQuery(
+    api.scholarMessages.staffAccess,
+    needsScholarMessaging ? {} : "skip",
+  );
+  const scholarMessagingNav = {
+    mentor: scholarMessaging?.mentor === true,
+    mentorOnly: scholarMessaging?.mentorOnly === true,
+  };
   const validTabs: TeacherNavKey[] = teacherNavKeysForRole(
     user?.role,
     user?.hasCurriculumAccess,
     user?.hasProgramPublishingAccess,
     hasSchoolOperationsAccess === true,
+    scholarMessagingNav,
   );
   // Where the logo goes, and where a role-forbidden tab bounces to. `/teacher`
   // for an ordinary teacher (their Today inbox) — there is no Today tab, so
@@ -83,6 +96,8 @@ function TeacherDashboardLayoutInner({
     user?.role,
     inst,
     hasSchoolOperationsAccess === true,
+    user?.hasCurriculumAccess === true,
+    scholarMessagingNav.mentorOnly,
   );
 
   const passkeyStatus = useQuery(api.passkeys.myStatus, isStaff ? {} : "skip");
@@ -107,15 +122,19 @@ function TeacherDashboardLayoutInner({
 
   // Role-route guard: a tab the role can't see → bounce to its default.
   const activeKey = activeTeacherNavKeyFromPathname(pathname);
+  // (While a staffer's mentor grant is still loading, Messages isn't in
+  // `validTabs` yet, so a mentor sees the spinner — never a bounce, see below.)
   const onForbiddenTab = !!activeKey && !validTabs.includes(activeKey);
   useEffect(() => {
     if (isLoading || !user || !isClientStaffRole(user.role)) return;
     if (hasSchoolOperationsAccess === undefined) return;
+    // Don't bounce a mentor off Messages before their grant has loaded.
+    if (needsScholarMessaging && scholarMessaging === undefined) return;
     if (activeKey && !validTabs.includes(activeKey)) {
       router.replace(homeHref);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- validTabs/homeHref derive from user.role
-  }, [activeKey, isLoading, user, router, inst, hasSchoolOperationsAccess]);
+  }, [activeKey, isLoading, user, router, inst, hasSchoolOperationsAccess, scholarMessaging]);
 
   if (isLoading || !user || !isClientStaffRole(user.role)) {
     return <TeacherDashboardLoading />;

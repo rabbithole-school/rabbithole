@@ -17,8 +17,12 @@ import { isoBase64URL } from "@simplewebauthn/server/helpers";
 import { createAccount, modifyAccountCredentials } from "@convex-dev/auth/server";
 import { ENROLLMENT_TOKEN_TTL_MS } from "./lib/passkeyConfig";
 import { isPasskeyRole, ROLES, type Role } from "./lib/roles";
-import { resolveInstitutionLens } from "./lib/institutionLens";
-import { requireScholarsAccessible } from "./lib/access";
+import { parentInLens, resolveInstitutionLens } from "./lib/institutionLens";
+import {
+  evaluateInstitutionSuspension,
+  INSTITUTION_SUSPENDED_MESSAGE,
+  requireScholarsAccessible,
+} from "./lib/access";
 import { scholarHasPasswordCredential } from "./lib/scholarCredential";
 import {
   MIN_PASSWORD_LENGTH,
@@ -29,7 +33,10 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 
-async function sha256Hex(input: string): Promise<string> {
+/** Exported for `passkeys.insertCredential`, which needs to hash a raw
+ * enrollment token to atomically consume it in the same transaction as the
+ * credential insert — see the comment on `insertCredential`. */
+export async function sha256Hex(input: string): Promise<string> {
   const data = new TextEncoder().encode(input);
   const digest = await crypto.subtle.digest("SHA-256", data);
   return Array.from(new Uint8Array(digest))
@@ -131,6 +138,75 @@ export const tokenInfo = query({
       name: info.name,
       ceremony: isPasskeyRole(info.role as Role | null) ? "passkey" : "pin",
     };
+  },
+});
+
+/**
+ * Internal: atomically validate a scholar enrollment token AND claim it
+ * (mark `usedAt`) in the SAME transaction, returning the target scholar's
+ * `userId` + `username`.
+ *
+ * Why this exists rather than "validate, then write the PIN, then consume":
+ * `redeemScholarEnrollToken` writes the PIN through @convex-dev/auth's
+ * `createAccount`/`modifyAccountCredentials`, which run in an ACTION, not a
+ * mutation — so the PIN write itself can't share a transaction with the
+ * token-row patch. The three-step version (validate query → PIN write →
+ * consumeToken) let two concurrent redemptions of the SAME token both pass
+ * validation, both write a PIN (last write wins, silently), and only then
+ * race on consumeToken — by which point the damage (an attacker-chosen PIN
+ * landing after the legitimate one, or vice versa) was already done. A
+ * reissued/deleted token likewise didn't stop an in-flight PIN write that
+ * started before the reissue.
+ *
+ * Folding the validity checks and the `usedAt` patch into one mutation moves
+ * the race to BEFORE any PIN write: Convex's OCC serializes concurrent
+ * writers to the same `enrollmentTokens` row, so only the first caller's
+ * patch commits — every other concurrent attempt re-reads a row that is
+ * already `usedAt` (or gone) and throws here, never reaching
+ * `createAccount`/`modifyAccountCredentials`. A link REISSUED after this claim
+ * can't delete the claimed row (only unused rows are invalidated), so
+ * `prepareScholarForEnroll` fences that case: it refuses when a newer link
+ * exists for the scholar, leaving only the gap between that mutation and the
+ * auth write. Mirrors
+ * `passkeys.insertCredential`'s validate+claim fold (see its header comment)
+ * for the same reason.
+ *
+ * Validity checks that do NOT depend on the race (role, username) run
+ * before the token is marked used, so an invalid target's token is not
+ * needlessly burned.
+ */
+export const claimScholarEnrollToken = internalMutation({
+  args: { token: v.string() },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    userId: Id<"users">;
+    username: string;
+    tokenId: Id<"enrollmentTokens">;
+  }> => {
+    const tokenHash = await sha256Hex(args.token);
+    const row = await ctx.db
+      .query("enrollmentTokens")
+      .withIndex("by_tokenHash", (q) => q.eq("tokenHash", tokenHash))
+      .unique();
+    if (!row || row.usedAt !== undefined || row.expiresAt < Date.now()) {
+      throw new Error("This enrollment link is invalid or expired.");
+    }
+    const user = await ctx.db.get(row.userId);
+    if (!user) throw new Error("This enrollment link is invalid or expired.");
+    if (user.role !== ROLES.SCHOLAR) {
+      throw new Error("This link isn't for a scholar account.");
+    }
+    if (!user.username) throw new Error("This scholar has no username.");
+    // A paused school's scholars can't use the app, so don't let a link set
+    // their PIN either. Checked before the claim so the link still works once
+    // the school is re-enabled (TRA-385).
+    const { blocked } = await evaluateInstitutionSuspension(ctx, user);
+    if (blocked) throw new Error(INSTITUTION_SUSPENDED_MESSAGE);
+    // Claim it NOW, in this same transaction — see the header comment above.
+    await ctx.db.patch(row._id, { usedAt: Date.now() });
+    return { userId: row.userId, username: user.username, tokenId: row._id };
   },
 });
 
@@ -254,10 +330,30 @@ export async function mintScholarPinToken(
  * scans — this runs behind the public, unauthenticated redeem action.
  */
 export const prepareScholarForEnroll = internalMutation({
-  args: { userId: v.id("users") },
+  args: {
+    userId: v.id("users"),
+    /** The row `claimScholarEnrollToken` just claimed for this redemption. */
+    claimedTokenId: v.id("enrollmentTokens"),
+  },
   handler: async (ctx, args): Promise<{ hasPasswordAccount: boolean }> => {
     const user = await ctx.db.get(args.userId);
     if (!user || user.role !== ROLES.SCHOLAR) throw new Error("Scholar not found");
+
+    // A link reissued since this redemption claimed its token supersedes it:
+    // without this, a slow redemption of the old link could overwrite the
+    // PIN the new link set (claim old → reissue → redeem new → old write).
+    const claimed = await ctx.db.get(args.claimedTokenId);
+    if (!claimed || claimed.userId !== args.userId) {
+      throw new Error("This enrollment link is invalid or expired.");
+    }
+    const newer = await ctx.db
+      .query("enrollmentTokens")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .filter((q) => q.gt(q.field("_creationTime"), claimed._creationTime))
+      .first();
+    if (newer) {
+      throw new Error("This enrollment link has been replaced by a newer one.");
+    }
 
     const sessions = await ctx.db
       .query("authSessions")
@@ -289,19 +385,34 @@ export const prepareScholarForEnroll = internalMutation({
 });
 
 /**
- * Redeem a scholar enrollment link: validate the token, set the chosen PIN as
- * the scholar's password (stored hashed via Convex Auth), then burn the token.
- * Returns the username so the client can immediately sign in with
- * `signIn("password", { flow: "signIn" })`.
+ * Redeem a scholar enrollment link: atomically validate + claim the token,
+ * then set the chosen PIN as the scholar's password (stored hashed via
+ * Convex Auth). Returns the username so the client can immediately sign in
+ * with `signIn("password", { flow: "signIn" })`.
  *
- * Called from the public /enroll page, so it's an unauthenticated action gated
- * ENTIRELY by the one-time token (same trust model as the passkey enroll
- * actions). Works for both first-time setup and a forgotten-PIN reset:
- * `createAccount` links to the existing scholar row through our
- * `createOrUpdateUser` callback the first time; `modifyAccountCredentials`
- * swaps the secret in place on a re-issue — no destructive clear, so a failed
- * write never strands the scholar without a credential (and the token isn't
- * consumed until the write succeeds, so the same link can be retried).
+ * Called from the public /enroll page, so it's an unauthenticated action
+ * gated ENTIRELY by the one-time token (same trust model as the passkey
+ * enroll actions). Token consumption happens FIRST, atomically, via
+ * `claimScholarEnrollToken` — see its header comment for why the old
+ * validate-then-write-then-consume ordering let two concurrent redemptions
+ * of the same token each write a PIN. Only the claim's winner reaches the
+ * PIN write below; every other concurrent or stale attempt throws before
+ * touching `createAccount`/`modifyAccountCredentials`.
+ *
+ * Residual risk: the claim and the PIN write are still two separate steps
+ * (an action can't wrap a `@convex-dev/auth` call in the same transaction as
+ * our mutation), so a PIN write that fails AFTER the claim succeeds leaves
+ * the token burned with no new credential set. This is a narrower, less
+ * likely failure than the race it replaces (an infra error on the auth
+ * write, not routine concurrent use), and it fails LOUDLY to the caller
+ * rather than silently — the operator's recovery is to reissue a fresh link
+ * via `issueScholarEnrollLink`, same as any other invalid/expired token.
+ *
+ * Works for both first-time setup and a forgotten-PIN reset: `createAccount`
+ * links to the existing scholar row through our `createOrUpdateUser`
+ * callback the first time; `modifyAccountCredentials` swaps the secret in
+ * place on a re-issue — no destructive clear, so a failed write never
+ * strands an EXISTING credential.
  */
 export const redeemScholarEnrollToken = action({
   args: { token: v.string(), pin: v.string() },
@@ -313,22 +424,21 @@ export const redeemScholarEnrollToken = action({
       );
     }
 
-    const result = await ctx.runQuery(internal.enrollment.validateToken, {
-      token: args.token,
-    });
-    if (!result) throw new Error("This enrollment link is invalid or expired.");
-    if (result.role !== ROLES.SCHOLAR) {
-      throw new Error("This link isn't for a scholar account.");
-    }
-    if (!result.username) throw new Error("This scholar has no username.");
+    // Validates AND claims (marks usedAt) the token in one transaction —
+    // see claimScholarEnrollToken's header comment. This must run BEFORE
+    // any PIN write.
+    const { userId, username, tokenId } = await ctx.runMutation(
+      internal.enrollment.claimScholarEnrollToken,
+      { token: args.token },
+    );
 
     const { hasPasswordAccount } = await ctx.runMutation(
       internal.enrollment.prepareScholarForEnroll,
-      { userId: result.userId },
+      { userId, claimedTokenId: tokenId },
     );
 
     // The synthetic email the Password provider + AuthForm use for scholars.
-    const email = `${result.username}@local`;
+    const email = `${username}@local`;
     if (hasPasswordAccount) {
       // Re-issue: swap the secret in place (no delete → no lockout window).
       await modifyAccountCredentials(ctx, {
@@ -342,7 +452,7 @@ export const redeemScholarEnrollToken = action({
       // `passwordBindAllowedUntil` grant on this row: `createOrUpdateUser`
       // refuses to adopt a scholar row for any password sign-up without one,
       // which is what closes the username-coupon hole. The grant is justified
-      // here by the one-time token this action already validated.
+      // here by the one-time token this action already claimed.
       await createAccount(ctx, {
         provider: "password",
         account: { id: email, secret: pin },
@@ -350,10 +460,7 @@ export const redeemScholarEnrollToken = action({
       });
     }
 
-    await ctx.runMutation(internal.enrollment.consumeToken, {
-      token: args.token,
-    });
-    return { username: result.username };
+    return { username };
   },
 });
 
@@ -370,6 +477,10 @@ export const issueParentEnrollLink = scholarAdminMutation({
   handler: async (ctx, args) => {
     const target = await ctx.db.get(args.parentId);
     if (!target || target.role !== ROLES.PARENT) {
+      throw new Error("Parent not found");
+    }
+    const lens = await resolveInstitutionLens(ctx, ctx.user);
+    if (!(await parentInLens(ctx, lens, args.parentId))) {
       throw new Error("Parent not found");
     }
     const token = await createTokenForUser(ctx, args.parentId, ctx.user._id);

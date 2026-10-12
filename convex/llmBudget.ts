@@ -1,12 +1,10 @@
 /**
  * LLM spend circuit breaker — a backstop for PUBLIC non-prod deployments.
  *
- * The rhtest staging server is public and `/dev-login` lets anyone sign in as a
- * scholar or teacher, so a stranger could sit on the tutor chat and burn real
- * Anthropic tokens. This caps that: when AI spend in the trailing window exceeds
- * a dollar budget, the expensive HTTP entry points refuse further calls with a
- * friendly 429 until the window rolls off (the nightly db:reset also wipes
- * `usageEvents`, so the running total zeroes out every night anyway).
+ * A public non-production deployment may expose `/dev-login`, so a stranger
+ * could sit on the tutor chat and burn real Anthropic tokens. When explicitly
+ * configured, this caps that spend: expensive entry points refuse further calls
+ * with a friendly 429 until the trailing window rolls off.
  *
  * INERT UNLESS `LLM_DAILY_BUDGET_USD` IS SET. Production has
  * no such env var, so this never throttles real students/teachers — the guard
@@ -20,7 +18,7 @@
  * not by thousands of dollars).
  *
  * Enforced at the three logged-in-rando-reachable cost paths in http.ts:
- *   • /project-stream  (the tutor chat — the dominant cost)
+ *   • /session-stream  (the tutor chat — the dominant cost)
  *   • /aide-stream     (the staff aide + Curriculum Bot)
  *   • /analyze         (observer analysis)
  */
@@ -49,8 +47,7 @@ export function llmBudgetUsd(): number | null {
 /**
  * Total AI spend (USD) recorded in the trailing window, priced with the same
  * rate card as the cost report. Only ever called when the budget is enabled, so
- * on prod this query is never invoked; on the test server `usageEvents` is small
- * (wiped nightly), so the scan is cheap.
+ * on prod this query is never invoked.
  */
 export const spendInWindowUsd = internalQuery({
   args: {},
@@ -83,7 +80,7 @@ export async function llmBudgetExceeded(
 /** Friendly message shown when the breaker trips. */
 export function llmBudgetMessage(cap: number): string {
   return (
-    `This test server has hit its AI spending cap (about $${cap} per day) and ` +
+    `This deployment has hit its AI spending cap (about $${cap} per day) and ` +
     `has paused AI replies to keep costs in check. It resets automatically — ` +
     `try again later.`
   );

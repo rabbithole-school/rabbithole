@@ -6,7 +6,7 @@
  *
  * Two entry points:
  *   • `record` (internalMutation) — the raw insert; callers that already
- *     have the four counts (e.g. the streaming loops that accumulate them
+ *     have the token counts (e.g. the streaming loops that accumulate them
  *     turn-by-turn) call this directly via ctx.runMutation.
  *   • `recordAnthropicUsage` (plain async helper) — the one-liner for the
  *     ~non-streaming `anthropic.messages.create` sites: hand it the raw
@@ -105,6 +105,7 @@ export const record = internalMutation({
     model: v.string(),
     inputTokens: v.number(),
     cacheWriteTokens: v.number(),
+    cacheWrite1hTokens: v.optional(v.number()),
     cacheReadTokens: v.number(),
     outputTokens: v.number(),
     audioSeconds: v.optional(v.number()),
@@ -163,6 +164,7 @@ export async function recordUsage(
       model: args.model,
       inputTokens: args.usage.inputTokens,
       cacheWriteTokens: args.usage.cacheWriteTokens,
+      cacheWrite1hTokens: args.usage.cacheWrite1hTokens || undefined,
       cacheReadTokens: args.usage.cacheReadTokens,
       outputTokens: args.usage.outputTokens,
       sessionId: args.sessionId ?? undefined,
@@ -320,6 +322,7 @@ export const byInstitution = platformAdminQuery({
       model: event.model,
       inputTokens: event.inputTokens,
       cacheWriteTokens: event.cacheWriteTokens,
+      cacheWrite1hTokens: event.cacheWrite1hTokens,
       cacheReadTokens: event.cacheReadTokens,
       outputTokens: event.outputTokens,
       images: event.images,

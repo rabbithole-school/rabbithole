@@ -14,7 +14,11 @@ export type ReachableActivityResources = {
   invalidReferencedResourceIds: Id<"activityResources">[];
 };
 
-async function unitIdForActivity(
+/** The unit an activity currently hangs under, via its lesson. Null for a
+ *  lesson-less activity (a program handout). Exported because a surface that
+ *  shows an activity's materials must agree with reachability on WHICH unit
+ *  the activity is in today — a lesson moved to another unit changes it. */
+export async function unitIdForActivity(
   ctx: ResourceReadCtx,
   activity: Doc<"activities">,
 ): Promise<Id<"units"> | null> {

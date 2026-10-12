@@ -21,7 +21,7 @@ import { insertSeed, normalizeSuggestionType } from "./lib/seeds";
 export const gatherInterests = internalQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args) => {
-    const [signals, connections, mastery, existing, scholar] = await Promise.all([
+    const [signals, connections, mastery, existing, scholar, dossier] = await Promise.all([
       ctx.db
         .query("sessionSignals")
         .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
@@ -42,19 +42,33 @@ export const gatherInterests = internalQuery({
         .withIndex("by_scholar_status", (q) => q.eq("scholarId", args.scholarId))
         .collect(),
       ctx.db.get(args.scholarId),
+      ctx.db
+        .query("scholarDossiers")
+        .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
+        .first(),
     ]);
-    // The topics the LEARNER has actually been drawn to — harvested by the live
-    // observer ("ai") or planted by a teacher — are the purest interest signal
-    // (e.g. the getting-to-know-you quest's "what pulls you in"). Surface them as
-    // positive material the generator builds surprising bridges OUT of, distinct
-    // from `existingTopics` (which is only the anti-repeat list). The generator's
-    // OWN prior stars (origin "ai-constellation") and dev fixtures are NOT
-    // interests, so they're excluded here.
-    const statedInterests = existing
-      .filter((s) => s.origin === "ai" || s.origin === "teacher" || s.origin === "badge_follow")
-      .sort((a, b) => b._creationTime - a._creationTime)
+    // Structured dossier interests are the sole source for what the learner is
+    // into. Seeds remain only the anti-repeat list: they are suggestions made TO
+    // the scholar, not evidence of the scholar's interest.
+    const statedInterests = (dossier?.interests ?? [])
+      .filter(
+        (interest) =>
+          interest.state === "active" &&
+          (interest.how === "said" ||
+            interest.how === "picked" ||
+            interest.how === "teacher"),
+      )
+      .sort((a, b) => {
+        const aLast = a.dates.length > 0 ? Math.max(...a.dates) : 0;
+        const bLast = b.dates.length > 0 ? Math.max(...b.dates) : 0;
+        return bLast - aLast;
+      })
       .slice(0, 12)
-      .map((s) => (s.domain ? `${s.topic} [${s.domain}]` : s.topic));
+      .map((interest) =>
+        interest.words
+          ? `${interest.label} (${interest.words})`
+          : interest.label,
+      );
     return {
       scholarName: scholar?.name ?? "this scholar",
       signals: signals.map((s) => ({ type: s.signalType, description: s.description })),
@@ -150,9 +164,9 @@ export const requestMySky = authedMutation({
 });
 
 /**
- * Interest signal a cold-start scholar must accumulate before we auto-chart their
+ * Evidence a cold-start scholar must accumulate before we auto-chart their
  * first sky — so a thin opening beat doesn't burn the one-shot on a generic map.
- * Tuned so a substantive getting-to-know-you turn (≈2 harvested interest-seeds +
+ * Tuned so a substantive getting-to-know-you turn (≈2 structured interests +
  * a signal, or a cross-domain connection) clears it, but a near-empty first
  * exchange does not. Cheap to nudge later; err toward waiting for real signal.
  */
@@ -178,7 +192,7 @@ const FIRST_SKY_SIGNAL_FLOOR = 3;
  *     blocking the first sky if generation errors) is worse than a duplicate.
  *     The curation invariant is unaffected: curation only happens once a sky
  *     exists, by which point the guard reliably sees the star.
- *   • Floor-gated — sums harvested interest signal (observer interest-seeds +
+ *   • Floor-gated — sums structured dossier interests +
  *     session signals + cross-domain connections, capped) and waits until it's
  *     substantive, so the first sky is personal, not generic.
  * A cheap indexed no-op for everyone who already has a sky. Universal by design:
@@ -195,13 +209,11 @@ export const maybeChartFirstSky = internalMutation({
       .first();
     if (existingStar) return { charted: false, reason: "already-charted" as const };
 
-    const [interestSeeds, signals, connections] = await Promise.all([
+    const [dossier, signals, connections] = await Promise.all([
       ctx.db
-        .query("seeds")
-        .withIndex("by_scholar_origin", (q) =>
-          q.eq("scholarId", args.scholarId).eq("origin", "ai"),
-        )
-        .take(6),
+        .query("scholarDossiers")
+        .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
+        .first(),
       ctx.db
         .query("sessionSignals")
         .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
@@ -211,10 +223,17 @@ export const maybeChartFirstSky = internalMutation({
         .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
         .take(3),
     ]);
+    const interestCount = (dossier?.interests ?? []).filter(
+      (interest) =>
+        interest.state === "active" &&
+        (interest.how === "said" ||
+          interest.how === "picked" ||
+          interest.how === "teacher"),
+    ).length;
     // Connections are the strongest interest tell (a leap the kid made themselves),
     // so they count double.
     const score =
-      Math.min(interestSeeds.length, 6) +
+      Math.min(interestCount, 6) +
       Math.min(signals.length, 6) +
       2 * Math.min(connections.length, 3);
     if (score < FIRST_SKY_SIGNAL_FLOOR) {

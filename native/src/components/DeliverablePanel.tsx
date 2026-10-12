@@ -12,8 +12,23 @@
  * "N of M stars" denominator (those are deficit displays).
  *
  * Used only in landscape mode. Portrait continues to use DeliverableCard inline.
+ *
+ * A session WITHOUT a deliverable activity (open exploration, unit-level
+ * planning, a deliverable-less activity) still gets this panel once it holds a
+ * text/code artifact — the tutor can create documents in any session — showing
+ * just the document switcher + editor, with none of the deliverable-only parts
+ * (1–3, 5). See `workSurfaceFor` (TRA-463).
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+  type Ref,
+} from "react";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { Image } from "expo-image";
 import * as Haptics from "expo-haptics";
@@ -31,6 +46,7 @@ import {
 import Animated from "react-native-reanimated";
 
 import { useImageAttachment } from "@/hooks/useImageAttachment";
+import { useStreamingDictation } from "@/hooks/useStreamingDictation";
 import { isTextArtifact } from "../../vendor/shared/textArtifacts";
 import { createDraftSaveDrain } from "../../vendor/shared/draftSaveDrain";
 import {
@@ -41,11 +57,26 @@ import {
 } from "../../vendor/shared/artifactDraftStore";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { api, type Doc, type Id } from "@/lib/convex";
+import { appStatusBus } from "@/lib/appStatusBus";
+import { getNativeTTS } from "@/lib/nativeTTS";
 import { fonts, useColors } from "@/theme";
-import { CodeArtifactWebView } from "@/components/CodeArtifactWebView";
+import {
+  CodeArtifactWebView,
+  type CodeArtifactWebViewHandle,
+} from "@/components/CodeArtifactWebView";
+import type { AppTutorRequest } from "../../vendor/shared/appTutorRequest";
 import { SlidesDeliverable } from "./slides/SlidesDeliverable";
 import { FlairChips } from "./FlairChips";
 import { AppTextInput } from "@/components/AppTextInput";
+import { RecordingBar } from "@/components/RecordingBar";
+import { ArtifactChipStrip } from "./ArtifactChipStrip";
+import {
+  artifactIdForDeliverableLookup,
+  dedicatedDeliverableArtifact,
+  nextAutoSelect,
+  pickDefaultArtifact,
+  workSurfaceFor,
+} from "@/lib/deliverableArtifactSelection";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -61,7 +92,8 @@ type DeliverableMode = "manual" | "auto" | "none";
 
 export type DeliverablePanelProps = {
   sessionId: Id<"sessions">;
-  activityId: Id<"activities">;
+  /** Absent for a session with no activity — the panel then shows documents only. */
+  activityId?: Id<"activities">;
   /** Submits the active artifact, then optionally runs a silent rubric stream. */
   onAskCheck?: (
     artifact: Doc<"artifacts">,
@@ -69,6 +101,19 @@ export type DeliverablePanelProps = {
   ) => void | Promise<void>;
   /** Whether the chat is currently streaming (disables the check button). */
   checkDisabled?: boolean;
+  codeArtifactRef?: Ref<CodeArtifactWebViewHandle>;
+  onAskTutor?: (request: AppTutorRequest) => void | Promise<void>;
+  /** A character exchange or judgment finished in the app (→ tutor queue). */
+  onAppAiTurn?: () => void;
+  /** False for a non-owner viewer: the app's character/judges answer
+   *  `unavailable` without a server call. */
+  appAiEnabled?: boolean;
+  /**
+   * The session's map card, when the tutor has opened one. In the landscape
+   * layout the map lives here, beside the chat, instead of in the chat list,
+   * where it pinned itself above the composer and crowded out the tutor's text.
+   */
+  map?: ReactNode;
 };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -101,6 +146,11 @@ export function DeliverablePanel({
   activityId,
   onAskCheck,
   checkDisabled = false,
+  codeArtifactRef,
+  onAskTutor,
+  onAppAiTurn,
+  appAiEnabled,
+  map,
 }: DeliverablePanelProps) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -196,7 +246,10 @@ export function DeliverablePanel({
     revealEditor(true);
   }, [revealEditor]);
 
-  const activity = useQuery(api.activities.getPublic, { id: activityId });
+  const activity = useQuery(
+    api.activities.getPublic,
+    activityId ? { id: activityId } : "skip",
+  );
   const snapshot = useQuery(api.sessions.getDeliverableSnapshot, { sessionId });
   const artifactsResult = useQuery(api.artifacts.getBySession, { sessionId });
   const createArtifact = useMutation(api.artifacts.scholarCreate);
@@ -226,53 +279,146 @@ export function DeliverablePanel({
         .sort((a, b) => a._creationTime - b._creationTime),
     [artifactsResult],
   );
-  const activeArtifact =
-    artifacts.find((a) => a._id === selectedArtifactId) ??
-    artifacts[artifacts.length - 1] ??
-    null;
-  const textCheckDisabled = checkDisabled || !activeArtifact?.content.trim();
 
+  // Auto-select an artifact that APPEARS after the panel's first loaded render
+  // — a tutor-made code app, a second doc the scholar asked for — so it opens
+  // once, mirroring the web ArtifactPanel's "new artifact ids → select the
+  // last" effect. The transition rule lives in the pure `nextAutoSelect` state
+  // machine; here we just hold its state across renders and reset it when the
+  // session changes (seen ids are monotonic only WITHIN a session).
+  const autoSelectRef = useRef<{
+    seenIds: string[];
+    baselineEstablished: boolean;
+  }>({ seenIds: [], baselineEstablished: false });
+  const autoSelectSessionRef = useRef<Id<"sessions">>(sessionId);
+  useEffect(() => {
+    if (autoSelectSessionRef.current !== sessionId) {
+      autoSelectSessionRef.current = sessionId;
+      autoSelectRef.current = { seenIds: [], baselineEstablished: false };
+    }
+    // A still-loading artifacts query (undefined) must not advance the machine —
+    // only real snapshots establish the baseline or reveal a new id.
+    if (artifactsResult === undefined) return;
+    const result = nextAutoSelect({
+      seenIds: autoSelectRef.current.seenIds,
+      ids: artifacts.map((a) => String(a._id)),
+      baselineEstablished: autoSelectRef.current.baselineEstablished,
+    });
+    autoSelectRef.current = {
+      seenIds: result.seenIds,
+      baselineEstablished: result.baselineEstablished,
+    };
+    if (result.select !== undefined) {
+      setSelectedArtifactId(result.select as Id<"artifacts">);
+    }
+  }, [artifacts, artifactsResult, sessionId]);
+
+  // A slides/map deliverable's work is its deck/map, which `artifacts` (text
+  // documents only) never contains — resolve it from the unfiltered list so the
+  // footer's flair and check scope to the deck, not a side document (TRA-339).
+  const dedicatedArtifact = dedicatedDeliverableArtifact(
+    artifactsResult ?? [],
+    activity?.deliverable?.kind,
+  );
+  const activeArtifact =
+    dedicatedArtifact !== undefined
+      ? dedicatedArtifact
+      : (artifacts.find((a) => a._id === selectedArtifactId) ??
+        pickDefaultArtifact(artifacts, activity?.deliverable?.kind ?? null));
+  const textCheckDisabled = checkDisabled || !activeArtifact?.content.trim();
+  const deliverableArtifactId = artifactIdForDeliverableLookup(
+    activeArtifact?._id,
+    activity?.deliverable?.kind,
+  );
+
+  const surface = workSurfaceFor({
+    hasActivity: !!activityId,
+    activity,
+    textArtifactCount: artifactsResult === undefined ? undefined : artifacts.length,
+  });
   const deliverable = useQuery(
     api.deliverables.getForSessionActivity,
-    activeArtifact
-      ? { sessionId, activityId, artifactId: activeArtifact._id }
-      : { sessionId, activityId },
+    !activityId || surface === "documents" || surface === "none"
+      ? "skip"
+      : deliverableArtifactId
+        ? { sessionId, activityId, artifactId: deliverableArtifactId }
+        : { sessionId, activityId },
   );
-  const fileUrl = useQuery(
-    api.files.getUrl,
-    deliverable?.fileStorageId ? { storageId: deliverable.fileStorageId } : "skip",
-  );
-
-  // Don't render if this session has no deliverable activity.
-  if (activity === null || (activity && !activity.deliverable)) return null;
-
+  // The deliverable query re-subscribes on every chip switch (its args carry the
+  // active artifact id), so it returns undefined again each time. Remember the
+  // session for which it has resolved at least once so the initial mount can
+  // skeleton, but a later switch keeps the strip + editor mounted and only marks
+  // this artifact's deliverable-derived controls (flair) as pending. This is the
+  // sanctioned "adjust state during render" pattern (guarded, so it can't loop);
+  // tracking it per session resets the skeleton on a session change.
+  // Latch only once the ACTIVITY has loaded. Before that the kind is unknown,
+  // so the lookup is provisionally scoped to whatever document is open; on a
+  // photo activity that resolves to null, and latching on it would let the
+  // panel skip the skeleton and paint "No photo yet" over a photo that is
+  // sitting right there — the very thing this panel was reporting as deleted.
+  const [resolvedDeliverableSession, setResolvedDeliverableSession] =
+    useState<Id<"sessions"> | null>(null);
   if (
-    activity === undefined ||
-    snapshot === undefined ||
-    artifactsResult === undefined ||
-    deliverable === undefined
+    activity !== undefined &&
+    deliverable !== undefined &&
+    resolvedDeliverableSession !== sessionId
+  ) {
+    setResolvedDeliverableSession(sessionId);
+  }
+  const deliverableEverResolved = resolvedDeliverableSession === sessionId;
+  // Served beside the row by getForSessionActivity.
+  const fileUrl = deliverable?.fileUrl ?? null;
+
+  // Nothing to show: no deliverable and no documents — never an empty panel.
+  if (surface === "none") {
+    if (!map) return null;
+    return (
+      <View style={styles.panel}>
+        <View style={[styles.scrollContent, styles.mapFill]}>{map}</View>
+      </View>
+    );
+  }
+
+  // Skeleton only until the panel's core (activity, snapshot, artifacts) loads
+  // and the deliverable has resolved at least ONCE. After that a chip switch
+  // never drops back to the skeleton — the strip and the selected artifact's
+  // editor stay mounted while just that artifact's deliverable row reloads.
+  if (
+    surface === "loading" ||
+    (surface === "deliverable" &&
+      (snapshot === undefined ||
+        artifactsResult === undefined ||
+        (deliverable === undefined && !deliverableEverResolved)))
   ) {
     return <PanelSkeleton />;
   }
 
-  const spec = activity.deliverable as {
-    kind: DeliverableKind;
-    prompt: string;
-    mode: DeliverableMode;
-    criteria: Criterion[];
-  };
-  const isMap = spec.kind === "map";
+  // `null` in documents mode: no prompt, rubric, check, or hand-in.
+  const spec =
+    surface === "deliverable"
+      ? (activity?.deliverable as {
+          kind: DeliverableKind;
+          prompt: string;
+          mode: DeliverableMode;
+          criteria: Criterion[];
+        })
+      : null;
+  const isMap = spec?.kind === "map";
+  // The map IS the work: it takes whatever height the prompt leaves, and the
+  // panel doesn't scroll. Beside another kind of work it gets a fixed band so
+  // the photo/editor below stays reachable.
+  const mapFillsPanel = !!map && isMap;
 
-  const criteria = criteriaFor(spec, snapshot);
+  const criteria = spec ? criteriaFor(spec, snapshot ?? null) : [];
   const criteriaPending =
-    spec.mode === "auto" &&
+    spec?.mode === "auto" &&
     snapshot?.status !== "ready" &&
     snapshot?.status !== "error" &&
     !setupRepairFailed;
   const criteriaFailed =
-    spec.mode === "auto" &&
+    spec?.mode === "auto" &&
     (snapshot?.status === "error" || setupRepairFailed);
-  const isPhoto = spec.kind === "photo";
+  const isPhoto = spec?.kind === "photo";
   // The footer button swaps its navy fill for a light gray one whenever it is
   // unavailable — busy included. Derive that state ONCE per footer so the
   // spinner, the symbol, and the label always share a foreground that reads on
@@ -284,8 +430,12 @@ export function DeliverablePanel({
     !criteriaFailed && (textCheckDisabled || busy || criteriaPending);
   // Slides now have a real in-app editor (SlidesDeliverable). Audio still has
   // no capture path, so it keeps the honest empty state.
-  const isSlides = spec.kind === "slides";
-  const isPendingKind = spec.kind === "audio";
+  const isSlides = spec?.kind === "slides";
+  const isPendingKind = spec?.kind === "audio";
+
+  const handleSelectArtifact = (artifactId: Id<"artifacts">) => {
+    setSelectedArtifactId(artifactId);
+  };
 
   const handleCreateArtifact = async () => {
     if (busy) return;
@@ -294,7 +444,7 @@ export function DeliverablePanel({
     try {
       const artifactId = await createArtifact({
         sessionId,
-        title: defaultArtifactTitle(spec.kind),
+        title: defaultArtifactTitle(spec?.kind ?? "text"),
       });
       setSelectedArtifactId(artifactId);
     } finally {
@@ -333,7 +483,7 @@ export function DeliverablePanel({
   // deliverables row with fileStorageId (same backend as web/portrait). No
   // artifact document is involved.
   const handleCapturePhoto = async (source: "camera" | "library") => {
-    if (busy || uploading) return;
+    if (busy || uploading || !activityId) return;
     void Haptics.selectionAsync();
     setBusy(true);
     try {
@@ -371,7 +521,6 @@ export function DeliverablePanel({
       <ScrollView
         ref={scrollRef}
         style={styles.scroll}
-        contentContainerStyle={styles.scrollContent}
         onLayout={(event) => handleScrollLayout(event.nativeEvent.layout.height)}
         onScroll={(event) => {
           scrollOffsetRef.current = event.nativeEvent.contentOffset.y;
@@ -379,17 +528,30 @@ export function DeliverablePanel({
         scrollEventThrottle={16}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
+        scrollEnabled={!mapFillsPanel}
+        contentContainerStyle={[
+          styles.scrollContent,
+          mapFillsPanel && styles.scrollContentFill,
+        ]}
       >
-        {/* ── Deliverable kind ── */}
-        <View style={styles.kindPill}>
-          <SymbolView name={kindIcon(spec.kind)} size={14} tintColor={colors.violetSolid} />
-          <Text style={styles.kindText}>{kindLabel(spec.kind)}</Text>
-        </View>
+        {spec && activity ? (
+          <>
+            {/* ── Deliverable kind ── */}
+            <View style={styles.kindPill}>
+              <SymbolView name={kindIcon(spec.kind)} size={14} tintColor={colors.violetSolid} />
+              <Text style={styles.kindText}>{kindLabel(spec.kind)}</Text>
+            </View>
 
-        <Text style={styles.title}>{activity.title}</Text>
+            <Text style={styles.title}>{activity.title}</Text>
 
-        {/* ── Instructions / prompt ── */}
-        <Text style={styles.prompt}>{spec.prompt}</Text>
+            {/* ── Instructions / prompt ── */}
+            <Text style={styles.prompt}>{spec.prompt}</Text>
+          </>
+        ) : null}
+
+        {map ? (
+          <View style={mapFillsPanel ? styles.mapFill : styles.mapBand}>{map}</View>
+        ) : null}
 
         {/* ── Editor / photo surface ── */}
         {!isMap && (
@@ -398,6 +560,13 @@ export function DeliverablePanel({
             onLayout={(event) => handleEditorLayout(event.nativeEvent.layout.y)}
           >
           <Text style={styles.sectionLabel}>Your work</Text>
+          {!isSlides && !isPendingKind && !isPhoto && artifacts.length >= 2 && (
+            <ArtifactChipStrip
+              artifacts={artifacts}
+              activeArtifactId={activeArtifact?._id ?? null}
+              onSelect={handleSelectArtifact}
+            />
+          )}
           {isSlides ? (
             <SlidesDeliverable sessionId={sessionId} />
           ) : isPendingKind ? (
@@ -482,11 +651,16 @@ export function DeliverablePanel({
                   })
                 }
                 onFocus={handleEditorFocus}
+                codeArtifactRef={codeArtifactRef}
+                onAskTutor={onAskTutor}
+                onAppAiTurn={onAppAiTurn}
+                appAiEnabled={appAiEnabled}
               />
             ) : (
               <ArtifactEditor
                 key={activeArtifact._id}
                 artifact={activeArtifact}
+                sessionId={sessionId}
                 onSave={(content, baseRevision) =>
                   updateArtifact({
                     artifactId: activeArtifact._id,
@@ -521,8 +695,8 @@ export function DeliverablePanel({
         )}
       </ScrollView>
 
-      {/* ── Footer: Check my work ── */}
-      {!isMap && (isPhoto
+      {/* ── Footer: Check my work (deliverables only) ── */}
+      {spec && !isMap && (isPhoto
         ? fileUrl &&
           (criteria.length > 0 || criteriaPending || criteriaFailed) && (
             <View style={styles.footer}>
@@ -682,10 +856,18 @@ function CodeArtifactDeliverable({
   artifact,
   onSave,
   onFocus,
+  codeArtifactRef,
+  onAskTutor,
+  onAppAiTurn,
+  appAiEnabled,
 }: {
   artifact: Doc<"artifacts">;
   onSave: (content: string, baseRevision: number) => Promise<ArtifactSaveResult>;
   onFocus: () => void;
+  codeArtifactRef?: Ref<CodeArtifactWebViewHandle>;
+  onAskTutor?: (request: AppTutorRequest) => void | Promise<void>;
+  onAppAiTurn?: () => void;
+  appAiEnabled?: boolean;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -743,9 +925,13 @@ function CodeArtifactDeliverable({
         ) : (
           <View style={styles.codePreviewFrame}>
             <CodeArtifactWebView
+              ref={codeArtifactRef}
               key={artifact._id}
-              artifactId={artifact._id}
+              scope={{ kind: "session", artifactId: artifact._id }}
               content={artifact.content ?? ""}
+              onAskTutor={onAskTutor}
+              onAppAiTurn={onAppAiTurn}
+              appAiEnabled={appAiEnabled}
             />
           </View>
         )
@@ -763,12 +949,168 @@ function CodeArtifactDeliverable({
 
 // ─── Artifact editor with debounced save ─────────────────────────────────────
 
+/**
+ * Splices dictated text into `content` at the scholar's caret (or the end when
+ * nothing is focused), adding a single space on either side so speech never
+ * fuses onto an adjacent word. Returns the new content and the caret position
+ * just past the insertion so a following dictation chains cleanly.
+ */
+export function spliceDictation(
+  content: string,
+  selection: { start: number; end: number },
+  spoken: string,
+): { next: string; caret: number } {
+  const text = spoken.trim();
+  if (!text) return { next: content, caret: selection.end };
+  const lo = Math.max(0, Math.min(selection.start, selection.end, content.length));
+  const hi = Math.max(0, Math.min(Math.max(selection.start, selection.end), content.length));
+  const before = content.slice(0, lo);
+  const after = content.slice(hi);
+  const lead = before.length > 0 && !/\s$/.test(before) ? " " : "";
+  const trail = after.length > 0 && !/^\s/.test(after) ? " " : "";
+  const insertion = `${lead}${text}${trail}`;
+  return { next: before + insertion + after, caret: before.length + insertion.length };
+}
+
+type SaveState = "idle" | "saving" | "saved" | "error";
+
+/**
+ * The one canonical editor toolbar row: document title + a transient save
+ * indicator, with an optional trailing slot for the dictation mic. Shared by
+ * the text editor (mic in the slot) and the code editor (no slot) so both wear
+ * the same chrome.
+ */
+function EditorToolbarRow({
+  title,
+  saveState,
+  children,
+}: {
+  title: string;
+  saveState: SaveState;
+  children?: ReactNode;
+}) {
+  const colors = useColors();
+  const styles = useMemo(() => makeStyles(colors), [colors]);
+  return (
+    <View style={styles.editorToolbar}>
+      <Text style={styles.editorTitle} numberOfLines={1}>
+        {title}
+      </Text>
+      {saveState !== "idle" && (
+        <Text style={styles.saveIndicator}>
+          {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : "Couldn’t save"}
+        </Text>
+      )}
+      {children}
+    </View>
+  );
+}
+
+/**
+ * The text editor's toolbar, which owns the dictation stack. Split out from
+ * ArtifactEditor so `useStreamingDictation` — and the Expo AudioRecorder + its
+ * 80ms metering poll it constructs — is mounted ONLY for the scholar's writing
+ * box, never the code-source editor. Reuses the chat composer's dictation stack
+ * unchanged (`useStreamingDictation` + `RecordingBar`); the only difference is
+ * the transcript is spliced into the editor at the caret and flows through the
+ * same debounced scholarUpdate save path as typing, instead of sending a chat
+ * turn.
+ */
+function WritingToolbar({
+  title,
+  saveState,
+  sessionId,
+  localContentRef,
+  selectionRef,
+  onInsert,
+}: {
+  title: string;
+  saveState: SaveState;
+  sessionId: Id<"sessions">;
+  localContentRef: { current: string };
+  selectionRef: { current: { start: number; end: number } };
+  onInsert: (text: string) => void;
+}) {
+  const colors = useColors();
+  const styles = useMemo(() => makeStyles(colors), [colors]);
+
+  const insertDictated = useCallback(
+    (spoken: string) => {
+      const { next, caret } = spliceDictation(
+        localContentRef.current,
+        selectionRef.current,
+        spoken,
+      );
+      if (next === localContentRef.current) return;
+      selectionRef.current = { start: caret, end: caret };
+      onInsert(next);
+    },
+    [localContentRef, selectionRef, onInsert],
+  );
+  const dictation = useStreamingDictation(insertDictated, sessionId);
+  // Only one recorder may run at a time; `appStatusBus` is the shared mic-owner
+  // registry the composer's dictation already publishes to.
+  const micOwnedElsewhere = useSyncExternalStore(
+    (fn) => appStatusBus.subscribe(fn),
+    () => appStatusBus.isMicOwned(),
+  );
+  const onDictateStart = useCallback(async () => {
+    if (appStatusBus.isMicOwned()) return; // composer (or anything) holds the mic
+    getNativeTTS().stop(); // don't record over the tutor's voice
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    await dictation.start();
+  }, [dictation]);
+  const onDictateStop = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    dictation.stop();
+  }, [dictation]);
+  const onDictateCancel = useCallback(() => {
+    Haptics.selectionAsync();
+    dictation.cancel();
+  }, [dictation]);
+
+  if (dictation.isRecording || dictation.isTranscribing) {
+    return (
+      <View style={styles.editorDictationBar}>
+        <RecordingBar
+          level={dictation.level}
+          durationMs={dictation.durationMs}
+          isTranscribing={dictation.isTranscribing}
+          onCancel={onDictateCancel}
+          onStop={onDictateStop}
+        />
+      </View>
+    );
+  }
+
+  return (
+    <EditorToolbarRow title={title} saveState={saveState}>
+      <Pressable
+        onPress={onDictateStart}
+        disabled={micOwnedElsewhere}
+        hitSlop={8}
+        style={styles.editorMicBtn}
+        accessibilityRole="button"
+        accessibilityLabel="Dictate into your writing"
+      >
+        <SymbolView
+          name="mic.circle.fill"
+          size={26}
+          tintColor={micOwnedElsewhere ? colors.gray300 : colors.violet}
+        />
+      </Pressable>
+    </EditorToolbarRow>
+  );
+}
+
 function ArtifactEditor({
   artifact,
+  sessionId,
   onSave,
   onFocus,
 }: {
   artifact: Doc<"artifacts">;
+  sessionId?: Id<"sessions">;
   onSave: (content: string, baseRevision: number) => Promise<ArtifactSaveResult>;
   onFocus: () => void;
 }) {
@@ -793,6 +1135,10 @@ function ArtifactEditor({
   const lastSavedRef = useRef(artifact.content ?? "");
   const revisionRef = useRef(artifact.revision ?? 0);
   const conflictRef = useRef(restoredConflict);
+  // The scholar's caret, tracked for voice dictation so a transcript splices
+  // where they're typing. Lives here (above the incoming-content effect) so an
+  // adopted server update can reset it and never overwrite the wrong range.
+  const selectionRef = useRef({ start: localContent.length, end: localContent.length });
 
   useEffect(() => {
     localContentRef.current = localContent;
@@ -839,6 +1185,13 @@ function ArtifactEditor({
       } else {
         localContentRef.current = artifact.content ?? "";
         setLocalContent(artifact.content ?? "");
+        // The adopted content is a different string, so any caret offsets the
+        // scholar had (e.g. while mid-dictation) now point into the wrong text.
+        // Reset to the end so a pending transcript appends instead of replacing.
+        selectionRef.current = {
+          start: (artifact.content ?? "").length,
+          end: (artifact.content ?? "").length,
+        };
         conflictRef.current = false;
         setShowUpdateBanner(false);
         persistDraft();
@@ -948,18 +1301,25 @@ function ArtifactEditor({
     }
   };
 
+  // Voice dictation lives in the WritingToolbar child so its Expo recorder is
+  // constructed ONLY for the scholar's text editor. `sessionId` is what gates
+  // it: the code-source editor never passes one, so it never mounts a recorder.
+  const dictationEnabled = sessionId !== undefined;
+
   return (
     <View style={styles.editorWrap}>
-      <View style={styles.editorToolbar}>
-        <Text style={styles.editorTitle} numberOfLines={1}>
-          {artifact.title}
-        </Text>
-        {saveState !== "idle" && (
-          <Text style={styles.saveIndicator}>
-            {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : "Couldn’t save"}
-          </Text>
-        )}
-      </View>
+      {sessionId !== undefined ? (
+        <WritingToolbar
+          title={artifact.title}
+          saveState={saveState}
+          sessionId={sessionId}
+          localContentRef={localContentRef}
+          selectionRef={selectionRef}
+          onInsert={handleChange}
+        />
+      ) : (
+        <EditorToolbarRow title={artifact.title} saveState={saveState} />
+      )}
       {showUpdateBanner && (
         <View style={styles.conflictBanner}>
           <Text style={styles.conflictText}>This document changed somewhere else</Text>
@@ -977,6 +1337,13 @@ function ArtifactEditor({
         style={styles.editorInput}
         value={localContent}
         onChangeText={handleChange}
+        onSelectionChange={
+          dictationEnabled
+            ? (event) => {
+                selectionRef.current = event.nativeEvent.selection;
+              }
+            : undefined
+        }
         placeholder="Write your work here…"
         placeholderTextColor={colors.charcoalSubtle}
         multiline
@@ -1083,6 +1450,9 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     gap: 16,
     paddingBottom: 12,
   },
+  scrollContentFill: { flexGrow: 1 },
+  mapFill: { flex: 1, minHeight: 240 },
+  mapBand: { height: 400 },
 
   kindPill: {
     flexDirection: "row",
@@ -1185,6 +1555,17 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     justifyContent: "space-between",
     paddingHorizontal: 14,
     paddingVertical: 9,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: c.border,
+    backgroundColor: c.white,
+  },
+  editorMicBtn: {
+    marginLeft: 10,
+    marginVertical: -4,
+  },
+  editorDictationBar: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: c.border,
     backgroundColor: c.white,

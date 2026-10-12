@@ -3,6 +3,7 @@ import { authedQuery } from "./lib/customFunctions";
 import { v } from "convex/values";
 import { internalQuery } from "./_generated/server";
 import { getAuthUserId } from "@convex-dev/auth/server";
+import { assertCanWrite } from "./lib/auth";
 
 /**
  * Generate a short-lived upload URL for file storage.
@@ -15,6 +16,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 export const generateUploadUrl = mutation(async (ctx) => {
   const userId = await getAuthUserId(ctx);
   if (!userId) throw new Error("Not authenticated");
+  await assertCanWrite(ctx);
   return await ctx.storage.generateUploadUrl();
 });
 

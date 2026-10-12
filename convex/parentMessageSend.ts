@@ -5,6 +5,10 @@
 // double-send (the messageDeliveries.by_message_parent_channel uniqueness +
 // the status guard). Email is the only channel here; sms/whatsapp land in a
 // later phase behind the same `deliver` seam.
+//
+// FAMILY ONLY. A mentor/workshop thread never reaches this dispatcher (a
+// mentor's email is batched by scholarMessages.sendMentorEmailBatch), and no
+// recipient here can be a scholar: kid-safe delivery is in-app only.
 
 import { v } from "convex/values";
 import { internalAction, internalQuery, internalMutation } from "./_generated/server";
@@ -24,12 +28,13 @@ import {
   type OffPortalChannel,
 } from "./lib/parentMessageChannels";
 import { appBaseUrl } from "./lib/deploymentConfig";
+import { isFamilySide, isFamilyThread } from "./lib/scholarThreadAccess";
 
 type DispatchInfo = {
   threadId: Id<"parentThreads">;
   body: string;
   retracted: boolean;
-  authorType: "teacher" | "parent" | "bot";
+  authorType: "teacher" | "parent" | "scholar" | "bot";
   teacherName: string;
   teacherReplyEmail: string | null;
   childName: string | null;
@@ -65,6 +70,8 @@ export const getDispatchInfo = internalQuery({
     if (queued.length === 0) return null;
 
     const thread = await ctx.db.get(message.threadId);
+    // Never render or route a non-family thread's queued rows from here.
+    if (!thread || !isFamilyThread(thread)) return null;
     const teacher = thread?.teacherId ? await ctx.db.get(thread.teacherId) : null;
     const child = thread?.scholarId ? await ctx.db.get(thread.scholarId) : null;
     const teacherName = teacher?.name ?? "Your teacher";
@@ -79,10 +86,12 @@ export const getDispatchInfo = internalQuery({
     );
 
     const participantRows = thread
-      ? await ctx.db
-          .query("parentThreadParticipants")
-          .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
-          .collect()
+      ? (
+          await ctx.db
+            .query("parentThreadParticipants")
+            .withIndex("by_thread", (q) => q.eq("threadId", thread._id))
+            .collect()
+        ).filter(isFamilySide)
       : [];
     const participantIds =
       participantRows.length > 0
@@ -93,6 +102,7 @@ export const getDispatchInfo = internalQuery({
     const parentEmails: string[] = [];
     for (const parentUserId of new Set(participantIds)) {
       const parent = await ctx.db.get(parentUserId);
+      if (parent?.role === "scholar") continue; // kid-safe: never email a child
       const prefs = await ctx.db
         .query("notificationPrefs")
         .withIndex("by_user", (q) => q.eq("userId", parentUserId))
@@ -139,17 +149,19 @@ export const getDispatchInfo = internalQuery({
             .query("parentMessageAttachments")
             .withIndex("by_message", (q) => q.eq("messageId", messageId))
             .collect()
-        ).map(async (attachment) => {
-          const path = await ctx.storage.getUrl(attachment.storageId);
-          return path
-            ? {
-                path,
-                filename: attachment.fileName,
-                contentType: attachment.mimeType,
-                sizeBytes: attachment.sizeBytes,
-              }
-            : null;
-        }),
+        )
+          .filter((attachment) => attachment.retractedAt === undefined)
+          .map(async (attachment) => {
+            const path = await ctx.storage.getUrl(attachment.storageId);
+            return path
+              ? {
+                  path,
+                  filename: attachment.fileName,
+                  contentType: attachment.mimeType,
+                  sizeBytes: attachment.sizeBytes,
+                }
+              : null;
+          }),
       )
     ).filter((attachment): attachment is NonNullable<typeof attachment> =>
       attachment !== null
@@ -158,7 +170,7 @@ export const getDispatchInfo = internalQuery({
     return {
       threadId: message.threadId,
       body: message.body,
-      retracted: message.retracted ?? false,
+      retracted: Boolean(message.retracted || message.retractedAt),
       authorType: message.authorType,
       teacherName,
       teacherReplyEmail: teacher?.email ?? null,
@@ -227,6 +239,19 @@ export const dispatch = internalAction({
         { messageId },
       );
       if (!info || info.retracted) continue;
+      if (info.authorType === "scholar") {
+        // Unreachable (scholar messages live only in non-family threads, which
+        // getDispatchInfo refuses) — but a scholar-authored row must never be
+        // relayed off-portal, so skip it rather than trusting that.
+        for (const delivery of info.deliveries) {
+          await ctx.runMutation(internal.parentMessageSend.markDelivery, {
+            deliveryId: delivery.deliveryId,
+            status: "skipped",
+            error: "Scholar messages are in-app only",
+          });
+        }
+        continue;
+      }
       const portalUrl = `${portalBase}/parent/messages?thread=${encodeURIComponent(info.threadId)}`;
       if (info.authorType === "bot") {
         for (const delivery of info.deliveries) {

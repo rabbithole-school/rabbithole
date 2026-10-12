@@ -7,7 +7,7 @@
  * Deliberately does NOT recover the certification/binding-claim or
  * debrief-grounding-comparison helpers from the reference PR (#2375) — those
  * belong to a separate, larger, unshipped feature. This module is scoped to
- * exactly what TODO.html's `#preflight-findings-ux-extraction` asks for:
+ * exactly what the retired TODO.html item #preflight-findings-ux-extraction (git history) asks for:
  * rendering findings and routing "Fix this" to an existing editor.
  */
 import type { PreflightResult } from "@/convex/lib/curriculumPreflightResult";

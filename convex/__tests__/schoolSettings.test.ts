@@ -1,7 +1,7 @@
 import { convexTest } from "convex-test";
 import { describe, expect, test, vi } from "vitest";
 import schema from "../schema";
-import { api } from "../_generated/api";
+import { api, internal } from "../_generated/api";
 import { MAX_PROFILE_IMAGE_BYTES } from "../lib/profileImage";
 import type { Doc, Id } from "../_generated/dataModel";
 
@@ -565,6 +565,130 @@ describe("listAllParents — institution lens", () => {
 
     expect(parents.map((p) => p.name)).toEqual(["Test p-moli"]);
     expect(parents[0]?.children.map((c) => c.name)).toEqual(["Test s-moli"]);
+  });
+
+  test("a staff (admin) guardian appears with their linked child", async () => {
+    const t = convexTest(schema, modules);
+    const caller = await seedUser(t, "platform_admin", "caller");
+    const staffGuardian = await seedUser(
+      t,
+      "platform_admin",
+      "staffparent",
+    );
+    const kai = await seedUser(t, "scholar", "kai");
+    await t.run(async (ctx) => {
+      await ctx.db.patch(staffGuardian, {
+        image: "https://example.com/staff.png",
+      });
+      await ctx.db.patch(kai, { image: "https://example.com/kai.png" });
+    });
+    await linkGuardian(t, staffGuardian, kai);
+
+    const asCaller = await withUser(t, caller);
+    const rows = await asCaller.query(api.parents.listAllParents, {});
+    const row = rows.find((parent) => parent._id === staffGuardian);
+    expect(row).toBeDefined();
+    expect(row).toHaveProperty("image", "https://example.com/staff.png");
+    const kaiRow = row!.children.find((child) => child._id === kai);
+    expect(kaiRow).toBeDefined();
+    expect(kaiRow).toHaveProperty("image", "https://example.com/kai.png");
+  });
+
+  test("a role-parent with zero links still appears (unscoped admin caller)", async () => {
+    const t = convexTest(schema, modules);
+    const caller = await seedUser(t, "platform_admin", "caller");
+    const lonelyParent = await seedParent(t, "lonely");
+
+    const asCaller = await withUser(t, caller);
+    const rows = await asCaller.query(api.parents.listAllParents, {});
+    const row = rows.find((parent) => parent._id === lonelyParent);
+    expect(row).toBeDefined();
+    expect(row!.children).toEqual([]);
+  });
+
+  test("guardian + child rows carry image:null when unset", async () => {
+    const t = convexTest(schema, modules);
+    const caller = await seedUser(t, "platform_admin", "caller");
+    const parent = await seedParent(t, "pat");
+    const kai = await seedUser(t, "scholar", "kai");
+    await linkGuardian(t, parent, kai);
+
+    const asCaller = await withUser(t, caller);
+    const rows = await asCaller.query(api.parents.listAllParents, {});
+    const row = rows.find((candidate) => candidate._id === parent);
+    expect(row).toHaveProperty("image", null);
+    expect(row!.children.find((child) => child._id === kai)).toHaveProperty(
+      "image",
+      null,
+    );
+  });
+
+  test("a plain (non-guardian) staff member is NOT listed", async () => {
+    const t = convexTest(schema, modules);
+    const caller = await seedUser(t, "platform_admin", "caller");
+    const teacher = await seedUser(t, "teacher", "teach");
+
+    const asCaller = await withUser(t, caller);
+    const rows = await asCaller.query(api.parents.listAllParents, {});
+    expect(rows.find((parent) => parent._id === teacher)).toBeUndefined();
+  });
+});
+
+describe("users.internalDeleteUserCascade", () => {
+  test("deletes the user, their authAccounts, memberships, and guardianships", async () => {
+    const t = convexTest(schema, modules);
+    const operator = await seedUser(t, "platform_admin", "operator");
+    const stray = await seedUser(t, "scholar", "stray");
+    const guardian = await seedParent(t, "strayparent");
+
+    const { accountId, membershipId, guardianshipId } = await t.run(
+      async (ctx) => {
+        const accountId = await ctx.db.insert("authAccounts", {
+          userId: stray,
+          provider: "password",
+          providerAccountId: "stray@local",
+        });
+        const membershipId = await ctx.db.insert("memberships", {
+          userId: stray,
+          role: "scholar",
+        });
+        const guardianshipId = await ctx.db.insert("guardianships", {
+          parentUserId: guardian,
+          scholarUserId: stray,
+          createdBy: operator,
+        });
+        return { accountId, membershipId, guardianshipId };
+      },
+    );
+
+    await t.mutation(internal.users.internalDeleteUserCascade, {
+      userId: stray,
+      callerUserId: operator,
+    });
+
+    const [user, account, membership, guardianship] = await t.run(
+      async (ctx) => [
+        await ctx.db.get(stray),
+        await ctx.db.get(accountId),
+        await ctx.db.get(membershipId),
+        await ctx.db.get(guardianshipId),
+      ],
+    );
+    expect(user).toBeNull();
+    expect(account).toBeNull();
+    expect(membership).toBeNull();
+    expect(guardianship).toBeNull();
+  });
+
+  test("refuses self-deletion (caller === target)", async () => {
+    const t = convexTest(schema, modules);
+    const operator = await seedUser(t, "platform_admin", "operator");
+    await expect(
+      t.mutation(internal.users.internalDeleteUserCascade, {
+        userId: operator,
+        callerUserId: operator,
+      }),
+    ).rejects.toThrow(/cannot delete yourself/i);
   });
 });
 

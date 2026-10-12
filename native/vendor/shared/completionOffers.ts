@@ -40,7 +40,7 @@
  *     `story` candidate (passing `undefined`) once the scholar has followed the
  *     thread or started the story's OWN linked application (recorded "tried").
  *     Walking away records nothing (announcement mode): the star is already
- *     minted and the story stands in the scholar-home "New stories" section, so
+ *     minted and the story stands in the scholar-home "New quests" section, so
  *     there is no dismissed-on-walk-away outcome to settle.
  *   - Starting a bonus run still enters a continuation (`inContinuation: true`),
  *     and the pure function drops `primary`/`alternatives` UNCONDITIONALLY in

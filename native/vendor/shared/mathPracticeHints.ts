@@ -58,7 +58,6 @@ const HINTS: { match: (key: string) => boolean; hint: string }[] = [
   { match: (k) => k === "factors_and_multiples", hint: "Factors are numbers that fit evenly inside. Multiples are numbers you reach by skip-counting." },
   { match: (k) => k === "divisibility_rules_3_9", hint: "A number leaves the same remainder as its digit sum does. Divide the digit sum by 3 or 9 and see what is left over." },
   { match: (k) => k === "divisibility_rules_2_5_10", hint: "Look at the last digit. Even endings work for 2; 0 or 5 works for 5; 0 works for 10." },
-  { match: (k) => k === "prime_composite", hint: "Find every factor pair of the number, then count how many different factors that gives you." },
   { match: (k) => k === "prime_or_composite", hint: "Count the factor pairs. Exactly one pair (1 and itself) means prime; more than one means composite." },
   { match: (k) => k === "prime_factorization", hint: "The exponent is the small raised number that tells how many times a prime is multiplied. Find that prime in the factorization and read its exponent (a prime with no raised number counts as 1)." },
   { match: (k) => k.startsWith("equivalent_fractions"), hint: "Multiply or divide the top and bottom by the same number. The pieces change size, but the amount stays equal." },

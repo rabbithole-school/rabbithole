@@ -17,10 +17,7 @@ import {
   type ManagedClaimSubject,
 } from "@/lib/managedClaimReconcile";
 import { getStableDeviceId } from "@/lib/deviceIdentity";
-import {
-  isManagedClaimSuppressed,
-  readManagedClaim,
-} from "@/lib/managedClaim";
+import { readManagedClaim } from "@/lib/managedClaim";
 
 const LAST_EXCHANGED_CLAIM_KEY =
   "rabbithole.managedClaim.lastExchangedToken";
@@ -133,14 +130,6 @@ export function useManagedClaimBootstrap({
             if (mountedRef.current) setPhase("idle");
             continue;
           }
-          if (await isManagedClaimSuppressed(claim.claimToken)) {
-            if (mountedRef.current) {
-              setHasManagedClaim(false);
-              setPhase("idle");
-            }
-            continue;
-          }
-
           if (
             isManagedClaimAttemptLatched(
               attemptStateRef.current,

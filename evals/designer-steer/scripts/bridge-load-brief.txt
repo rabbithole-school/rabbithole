@@ -1,0 +1,20 @@
+BUILD BRIEF: Bridge Load App
+
+Context: The scholar has spent two sessions studying how bridges and trusses carry weight. They sketched a small truss and wrote down which beams they think work hardest and why. Now they direct the AI builder to turn THEIR bridge into a small interactive app. The scholar is the designer and director; the builder writes the code. The scholar owns every design decision.
+
+(a) What the app must let the scholar demonstrate
+- Their bridge: a few beams (members) joined at points, with a place for weight to sit.
+- How a load placed on the bridge is shared among the members it connects to.
+- What happens when a member is pushed past its strength: it breaks, and the load it carried moves onto its neighbours.
+- A way to TEST it: add weight, move the weight, make one beam stronger or weaker, and see which member fails first.
+
+(b) Learning arc (discover by building and observing, in this order)
+1. Start from their own sketch. Ask the scholar which beams they think carry the most, in their own words, before anything is built.
+2. Build the plain beam first, with nothing special: one beam, a weight, load it until it breaks. Let them watch what happens.
+3. Add a second member. Have them PREDICT where the load goes before they run it, then compare.
+4. Break one member on purpose and ask what happened to its neighbours.
+5. Only then: look, story, vehicles, extras.
+
+(c) What the builder must not do
+- Do not explain the rule before the scholar has seen it.
+- Do not let cosmetics come before the plain beam has been loaded once.

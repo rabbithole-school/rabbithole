@@ -1,5 +1,9 @@
 import { v } from "convex/values";
 import {
+  isUnitPublished,
+  scholarHoldsAssignmentForUnit,
+} from "./lib/unitPublication";
+import {
   sessionModeForActivityKind,
   type ActivityKind,
 } from "../lib/activityKinds";
@@ -15,8 +19,14 @@ import {
   isStaffRole,
   isTeacherRole,
 } from "./lib/roles";
+import {
+  resolveTurnMode,
+  resolveWorkshopPolicy,
+  workshopOpeningFor,
+} from "./lib/workshopPolicy";
 import { MODELS } from "./lib/models";
 import { requireAnthropicApiKey } from "./lib/anthropic";
+import { normalizeReflectionSections } from "./lib/reflectionSections";
 import { recordAnthropicUsage } from "./usage";
 import {
   buildReplayScript,
@@ -24,9 +34,14 @@ import {
 } from "./lib/testDriveReplay";
 import { granuleTexts } from "./lib/granules";
 import {
+  appendParkingLotEntry,
+  removeParkingLotEntry,
+} from "./lib/designerTools";
+import {
   firstIncompleteLaunchableActivityInUnit,
   firstIncompleteSessionActivityInUnit,
   isSessionActivityComplete,
+  reopenLiveChecker,
 } from "./lib/scholarReads";
 import {
   requireActiveScholarAccess,
@@ -57,6 +72,7 @@ import {
   ensureSessionProcessState,
 } from "./lib/sessionActivitySetup";
 import { inputModalityValidator } from "./lib/inputModality";
+import { markSeedMomentFollowed } from "./lib/moments/seedMomentLedger";
 import { rubricStarsEarned } from "../shared/rubricScore";
 import {
   hasScholarMembership,
@@ -65,9 +81,106 @@ import {
   requireUnitInLearnerInstitution,
 } from "./lib/scholarEnrollment";
 import { TIME_LIMIT_WRAP_GUIDANCE } from "./lib/tutorClosingGuidance";
+import { assertFreshUpload } from "./lib/freshUpload";
+import {
+  APP_SNAPSHOT_MAX_BYTES,
+  assertValidAppSnapshotMetadata,
+} from "./lib/appSnapshot";
+import {
+  MAX_APP_TUTOR_MESSAGE_CHARS,
+  hasPriorScholarAuthoredTurn,
+} from "../shared/appTutorRequest";
+import type { InputModality } from "./lib/inputModality";
+import {
+  APP_UPDATE_MAX_ASKS,
+  toReplyTimeline,
+  type TimelineSourceMessage,
+} from "./lib/appUpdateTools";
+import { isEmptyAppUpdatePlaceholder } from "./sessionHelpers";
+import { freePlayTitle, resolveFreePlayEligibility } from "./lib/freePlay";
 
 /** Parent password for time limit mode (set via PARENT_PASSWORD env var in Convex dashboard). */
 const PARENT_PASSWORD = process.env.PARENT_PASSWORD ?? "";
+const RENDER_CHECK_MAX_CONSOLE_LINES = 40;
+const RENDER_CHECK_MAX_CONSOLE_LINE_CHARS = 500;
+const RENDER_CHECK_MAX_STATE_JSON_CHARS = 12_000;
+
+async function stampLatestStreamingAssistant(
+  ctx: Pick<MutationCtx, "db" | "scheduler">,
+  sessionId: Id<"sessions">,
+): Promise<boolean> {
+  const recentMessages = await ctx.db
+    .query("messages")
+    .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+    .order("desc")
+    .take(20);
+  const streaming = recentMessages.find(
+    (message) => message.role === "assistant" && message.streamId,
+  );
+  if (!streaming) return false;
+  // A quiet app update has shown nothing, so stopping it ends it without a
+  // trace — exactly as stay_silent would. Its stream reads the vanished row as
+  // the stop (sessionHelpers.isStopRequested) and finalizes nothing.
+  if (isEmptyAppUpdatePlaceholder(streaming)) {
+    await ctx.db.delete(streaming._id);
+    return true;
+  }
+  if (streaming.stopRequestedAt === undefined) {
+    await ctx.db.patch(streaming._id, { stopRequestedAt: Date.now() });
+  }
+  // An EMPTY stored row is not proof the scholar saw nothing: a live stream
+  // can hold text it has shown but not yet stored (the app-written completion
+  // closing, a tool's release of held text). So the row is stamped, never
+  // deleted, here — the live stream finalizes it within seconds of reading the
+  // stop. Only a DEAD stream leaves it, as an empty "Stopped" reply forever
+  // (TRA-501), and the reap at the next send can't help: a steer lands inside
+  // its liveness window. So check back once the liveness window has passed.
+  if (streaming.content.trim() === "") {
+    await ctx.scheduler.runAfter(
+      DEAD_STOPPED_PLACEHOLDER_CHECK_MS,
+      internal.sessions.reapDeadStoppedPlaceholder,
+      { messageId: streaming._id },
+    );
+  }
+  return true;
+}
+
+/** When to check whether a stopped, still-empty placeholder's stream died. */
+const DEAD_STOPPED_PLACEHOLDER_CHECK_MS = 25_000;
+
+/**
+ * Delete a stopped placeholder whose stream died before writing anything.
+ *
+ * Dead means the stream's liveness heartbeat (`lastStreamActivityAt`, stamped
+ * every few seconds by /session-stream) is older than the orphan-reap window.
+ * A live stream is left alone — it is finalizing and will remove or fill the
+ * row itself — and checked again later in case it dies first. A row that has
+ * finalized (no streamId) or holds text is never touched.
+ */
+export const reapDeadStoppedPlaceholder = internalMutation({
+  args: { messageId: v.id("messages") },
+  handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.messageId);
+    if (
+      !message ||
+      message.role !== "assistant" ||
+      !message.streamId ||
+      message.content.trim() !== ""
+    ) {
+      return;
+    }
+    const lastActivityAt = message.lastStreamActivityAt ?? message._creationTime;
+    if (Date.now() - lastActivityAt < STREAM_ORPHAN_REAP_AGE_MS) {
+      await ctx.scheduler.runAfter(
+        DEAD_STOPPED_PLACEHOLDER_CHECK_MS,
+        internal.sessions.reapDeadStoppedPlaceholder,
+        args,
+      );
+      return;
+    }
+    await ctx.db.delete(message._id);
+  },
+});
 
 async function findActiveSessionForScopedActivity(
   ctx: Pick<MutationCtx, "db">,
@@ -87,6 +200,9 @@ async function findActiveSessionForScopedActivity(
         !session.isTestDrive &&
         !session.isOffline &&
         !session.seedExemplar &&
+        // A free-play copy is the scholar's own version, never "the" session
+        // a launch of the activity resumes (TRA-489).
+        !session.freePlay &&
         session.activityId &&
         String(session.activityId) === String(activityId) &&
         (assignmentId
@@ -308,7 +424,7 @@ async function enrichSessionForList(
   // DEPRECATED (anti-parasocial): personas are deprecated, so session
   // cards no longer surface a persona emoji even for legacy persona-wired
   // units. Kept in the return shape (always null) for reversibility.
-  // See TODO.html "Reimagine personas (parasocially-safe)".
+  // See the retired TODO.html "Reimagine personas (parasocially-safe)".
   const personaEmoji: string | null = null;
   if (session.unitId) {
     const unit = await ctx.db.get(session.unitId);
@@ -419,12 +535,13 @@ export const list = authedQuery({
  *   - completed-but-not-archived sessions that carry a real document — i.e. the
  *     activity is complete, the unit has no remaining incomplete activity for
  *     the caller's surface (so the plate has genuinely dropped the row), the
- *     scholar has NOT already re-entered it (reopenedAt unset — those are back
- *     on the active plate), and it holds a non-empty artifact.
+ *     scholar has NOT re-entered it today (isReopenLive — those are back on
+ *     the active plate), and it holds a non-empty artifact.
  *
  * Read-only; never touches completion state. Re-entry still goes through
  * sessions.reopen, which stamps reopenedAt and moves the row onto the active
- * plate — so a session leaves this list exactly when it becomes active again.
+ * plate — so a session leaves this list exactly when it becomes active again,
+ * and returns once that reopen's school day is over.
  * Each row carries `finishedKind` ("archived" | "completed") for the UI.
  */
 export const finishedForScholar = authedQuery({
@@ -436,8 +553,13 @@ export const finishedForScholar = authedQuery({
     // online, Simulator, and Vibecode work; native also counts embedded web
     // activities — exactly like scholarPlate.activeForMe.
     includeWebActivities: v.optional(v.boolean()),
+    // Minute-bucketed client clock. Its only job is to change the args so
+    // Convex re-runs the query when the reopen day rolls over (Date.now() is
+    // not a reactive dependency) — same contract as scholarPlate.activeForMe.
+    now: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    void args.now;
     const isTeacher = isTeacherRole(ctx.user.role);
     const targetUserId =
       isTeacher && args.userId ? args.userId : ctx.user._id;
@@ -455,6 +577,7 @@ export const finishedForScholar = authedQuery({
     const firstIncompleteActivityInUnit = args.includeWebActivities
       ? firstIncompleteLaunchableActivityInUnit
       : firstIncompleteSessionActivityInUnit;
+    const isReopenLive = reopenLiveChecker(ctx, targetUserId, Date.now());
 
     const all = (
       await ctx.db
@@ -482,10 +605,10 @@ export const finishedForScholar = authedQuery({
         finished.push({ session, finishedKind: "archived" });
         continue;
       }
-      // Completed-but-not-archived class-focus work. A scholar who already
-      // chose "Keep working on this" (reopenedAt) is back on the active plate —
-      // don't double-surface them here.
-      if (session.reopenedAt) continue;
+      // Completed-but-not-archived class-focus work. A scholar who chose
+      // "Keep working on this" today is back on the active plate — don't
+      // double-surface them here.
+      if (await isReopenLive(session)) continue;
       if (!session.activityId || !session.unitId) continue;
       const complete = await isSessionActivityComplete(
         ctx,
@@ -568,11 +691,76 @@ export const getWithMessages = authedQuery({
       ctx,
       session,
     );
+    // One activity read drives the teacher-build boolean, the brief, and the
+    // edit-policy verdict below.
+    const activity = session.activityId
+      ? await ctx.db.get(session.activityId)
+      : null;
+    // A test drive with a hand-off appRequest: still what gates the
+    // server-clock saved-at readout below.
+    const isAppRequestTestDrive =
+      session.isTestDrive === true && activity?.appRequest != null;
+    // The activity's app brief (`appRequest`) is the pedagogical target the
+    // activity is meant to elicit, so it must NEVER reach a scholar. It leaves
+    // the server ONLY for the teacher build hand-off — the rehearsal owner (a
+    // teacher) shaping the app — where the Workshop renders it as the designer
+    // thread's opening "The brief" card. Client-side only; never a persisted
+    // message. Everyone else gets the boolean `hasAppRequest` (safe to expose)
+    // so the Workshop can still derive the default screen mode.
+    const appRequest =
+      session.isTestDrive === true &&
+      session.userId === ctx.user._id &&
+      isTeacher
+        ? (activity?.appRequest ?? null)
+        : null;
+    // The saved-at readout in the Workshop's Edit bar comes from the SERVER
+    // (customApps.updatedAt), never a client clock, so it can never claim a
+    // save that did not land (F4).
+    const starterSavedAt =
+      isAppRequestTestDrive && activity?.starterAppId
+        ? ((await ctx.db.get(activity.starterAppId))?.updatedAt ?? null)
+        : null;
+    // The App designer's scholar edit policy, derived ONCE on the server for
+    // THIS caller (TRA-301): the raw activity policy plus the verdict the
+    // Workshop renders (allowed → both segments; locked → lock icon on Edit;
+    // hidden → no Edit | Play control). Same derivation the stream enforces.
+    const workshopPolicy = await resolveWorkshopPolicy(ctx, {
+      session,
+      caller: ctx.user,
+      activity,
+    });
+    // How the Workshop opens for THIS caller (TRA-477): a teacher rehearsing
+    // an app scholars only play opens in Play; a build hand-off opens in Edit.
+    // Both clients read these; neither re-derives them.
+    const opening = workshopOpeningFor({
+      isTestDrive: session.isTestDrive === true,
+      callerRole: ctx.user.role,
+      editAccess: workshopPolicy.editAccess,
+      openedOnStarter: session.vibecodeStarterUsedAt != null,
+      hasAppRequest: activity?.appRequest != null,
+    });
+    const teacherBuildKickoff = opening.teacherBuildKickoff;
+    // Whether sessions.startFreePlay would succeed for THIS caller (TRA-489):
+    // the Workshop shows "Start free play" beside the parking lot only then.
+    // Short-circuits before any read unless this is the owner's vibecode
+    // session with parked ideas.
+    const freePlayEligible = (
+      await resolveFreePlayEligibility(ctx, { session, caller: ctx.user })
+    ).eligible;
 
     return {
       session: {
         ...session,
         id: session._id,
+        appRequest,
+        hasAppRequest: activity?.appRequest != null,
+        starterSavedAt,
+        editAccess: workshopPolicy.editAccess,
+        effectiveEditAccess: workshopPolicy.effectiveEditAccess,
+        defaultWorkshopMode: opening.defaultMode,
+        teacherEditOverride: opening.teacherEditOverride,
+        freePlayEligible,
+        ...(session.isTestDrive === true ? { teacherBuildKickoff } : {}),
       },
       messages: await Promise.all(
         messages.map(async (m) => {
@@ -620,6 +808,12 @@ export const getWithMessages = authedQuery({
             ...m,
             id: m._id,
             createdAt: m._creationTime,
+            // Served here, behind this query's session gate, so clients never
+            // mint a URL from a bare storage id (TRA-389).
+            imageUrl: m.imageId ? await ctx.storage.getUrl(m.imageId) : null,
+            appSnapshotUrl: m.appSnapshotStorageId
+              ? await ctx.storage.getUrl(m.appSnapshotStorageId)
+              : null,
             resourceShare,
             gotItWrong: wrongByMessage.has(String(m._id)),
             gotItWrongReason: wrongByMessage.get(String(m._id)) ?? undefined,
@@ -840,12 +1034,13 @@ export const getBigPicture = authedQuery({
           // Score only the rubric's known criteria, taking the first verdict
           // for each so a stray or duplicate verdict cannot inflate the total.
           const earned = rubricStarsEarned(
-            criteria.map(
-              (criterion) =>
-                d.verdicts?.find(
-                  (verdict) => verdict.criterionId === criterion.id,
-                )?.level,
-            ),
+            criteria.map((criterion) => {
+              const verdict = d.verdicts?.find(
+                (candidate) => candidate.criterionId === criterion.id,
+              );
+              // A waived `full` passed without being demonstrated: no star.
+              return verdict?.waived ? "not" : verdict?.level;
+            }),
           );
           if (earned > best) best = earned;
         }
@@ -950,7 +1145,10 @@ export const sessionForUnit = authedQuery({
     const candidates = sessions
       .filter(
         (session) =>
-          !session.isTestDrive && !session.isOffline && session.unitId === unitId,
+          !session.isTestDrive &&
+          !session.isOffline &&
+          !session.freePlay &&
+          session.unitId === unitId,
       )
       .sort((a, b) => b._creationTime - a._creationTime);
     return { sessionId: candidates[0]?._id ?? null };
@@ -975,6 +1173,22 @@ export const getDeliverableSnapshot = authedQuery({
     };
   },
 });
+
+/**
+ * Refuse a scholar starting an UNPUBLISHED catalog unit (TRA-490) unless a
+ * live assignment of that unit names them. Their own Independent Study units
+ * are never unpublished.
+ */
+async function requireUnitStartableByScholar(
+  ctx: MutationCtx,
+  scholarId: Id<"users">,
+  unitId: Id<"units">,
+) {
+  const unit = await ctx.db.get(unitId);
+  if (!unit || unit.authorScholarId || isUnitPublished(unit)) return;
+  if (await scholarHoldsAssignmentForUnit(ctx, scholarId, unitId)) return;
+  throw new Error("This unit isn't available yet.");
+}
 
 export const create = authedMutation({
   args: {
@@ -1083,6 +1297,12 @@ export const create = authedMutation({
       unitId,
       args.activityId,
     );
+    // An unpublished unit (TRA-490) is teachers-only: a scholar starts it
+    // only through an assignment. Staff sessions (rehearsal, remote mode)
+    // are teacher acts and pass.
+    if (!isTestDrive && !isTeacher && unitId && !assignmentId) {
+      await requireUnitStartableByScholar(ctx, ownerUserId, unitId);
+    }
 
     if (!isTestDrive && args.activityId) {
       const existing = await findActiveSessionForScopedActivity(
@@ -1160,6 +1380,19 @@ export const create = authedMutation({
       ? await ctx.db.get(args.activityId)
       : null;
 
+    // A question a teacher assigned as homework (assignQuestionAsHomework): its
+    // dispatch activity names the scholar's seed, so the session IS that seed's
+    // session — the same thread the question opens from Quests — while staying
+    // anchored to the homework so it completes and closes out like any other.
+    const launchedSeed =
+      !isTestDrive && activityForHooks?.seedId
+        ? await ctx.db.get(activityForHooks.seedId)
+        : null;
+    const seedId =
+      launchedSeed && launchedSeed.scholarId === ownerUserId
+        ? launchedSeed._id
+        : undefined;
+
     const institutionId = isTestDrive
       ? unitInstitutionId ??
         (await resolveActiveMembership(ctx, ctx.user))?.institutionId
@@ -1171,6 +1404,7 @@ export const create = authedMutation({
       lessonId,
       activityId: args.activityId,
       assignmentId,
+      ...(seedId ? { seedId } : {}),
       sessionMode: sessionModeForActivityKind(activityForHooks?.kind),
       // Title stays clean — the cyan "Test Drive" banner makes the mode
       // obvious; a `[Test Drive]` prefix would just clutter every UI that
@@ -1203,6 +1437,10 @@ export const create = authedMutation({
         processId,
       });
     }
+    // Same funnel stamp createFromSeed writes: the scholar followed the card.
+    if (seedId && launchedSeed) {
+      await markSeedMomentFollowed(ctx, ownerUserId, launchedSeed);
+    }
 
     return { id };
   },
@@ -1223,10 +1461,8 @@ export const create = authedMutation({
  * A STRUCTURED destination (the seed points at a unit — a teacher/bot offer)
  * STARTS that unit: land on its first incomplete session-backed activity instead of an
  * anchorless, ad-libbed exploration. Bare proto-activity stars (no unitId) keep
- * their topic-only behavior — as does an offer whose unit has since been
- * DEACTIVATED (we don't anchor a new session to an inactive unit; same isActive
- * guard as startUnit), so the scholar's opt-in still works as a topic-only
- * exploration.
+ * their topic-only behavior. An offer whose unit has since been deactivated is
+ * refused: the teacher-authored route may not silently degrade to an ad-lib chat.
  */
 export async function createSessionFromSeedCore(
   ctx: MutationCtx,
@@ -1235,6 +1471,9 @@ export async function createSessionFromSeedCore(
   // The scholar's chosen bake shape (deep / wide / build) from the
   // "choose your path" menu. Only meaningful for topic seeds (which bake).
   bakePath?: ChosenPath,
+  // The scholar picked "Endless chat" in that menu — an explicit choice, not
+  // merely an absent bakePath (callers that never show the menu omit both).
+  endlessChat = false,
 ): Promise<{ id: Id<"sessions"> }> {
   const institutionId = await requireActiveLearnerInstitution(ctx, userId);
   const seed = await ctx.db.get(seedId);
@@ -1250,30 +1489,51 @@ export async function createSessionFromSeedCore(
   let title = seed.topic;
   if (seed.unitId) {
     const unit = await ctx.db.get(seed.unitId);
-    if (unit && unit.isActive) {
-      await requireUnitInLearnerInstitution(
-        ctx,
-        userId,
-        institutionId,
-        unit,
-      );
-      unitId = unit._id;
-      title = unit.title;
-      const nextIncomplete = await firstIncompleteSessionActivityInUnit(
-        ctx,
-        userId,
-        unit._id,
-      );
-      lessonId = nextIncomplete?.lesson._id;
-      activityId = nextIncomplete?.activity._id;
-      activityForSetup = nextIncomplete?.activity ?? null;
-      processId =
-        nextIncomplete?.activity.processId ??
-        nextIncomplete?.lesson.processId ??
-        unit.processId ??
-        undefined;
+    if (!unit || !unit.isActive) {
+      throw new Error("This quest isn't available right now.");
     }
+    await requireUnitInLearnerInstitution(
+      ctx,
+      userId,
+      institutionId,
+      unit,
+    );
+    // A teacher-planted offer is a teacher act and opens the unit to this
+    // scholar even while it is unpublished (TRA-490). Any other star — a
+    // badge trail followed from a pod-mate — must not reach a unit the
+    // teacher has not released.
+    if (seed.origin !== "teacher") {
+      await requireUnitStartableByScholar(ctx, userId, unit._id);
+    }
+    unitId = unit._id;
+    title = unit.title;
+    const nextIncomplete = await firstIncompleteSessionActivityInUnit(
+      ctx,
+      userId,
+      unit._id,
+    );
+    lessonId = nextIncomplete?.lesson._id;
+    activityId = nextIncomplete?.activity._id;
+    activityForSetup = nextIncomplete?.activity ?? null;
+    processId =
+      nextIncomplete?.activity.processId ??
+      nextIncomplete?.lesson.processId ??
+      unit.processId ??
+      undefined;
   }
+
+  // Topic-seed launch (no structured unit behind the star) normally bakes a
+  // real unit in the background. Story threads and cross-domain previews stay
+  // direct, and so does "Endless chat": its whole promise is "No plan — just
+  // start talking", and a bake would either hold the chat behind a spinner or
+  // swap it into the baked unit's first activity mid-conversation. Decided
+  // before the insert so a bake-bound session is born already marked as
+  // waiting — the client must never observe it in the un-marked state.
+  const willBake =
+    !seed.unitId &&
+    !endlessChat &&
+    seed.origin !== "story" &&
+    seed.suggestionType !== "cross_domain";
 
   const id = await ctx.db.insert("sessions", {
     userId,
@@ -1287,6 +1547,7 @@ export async function createSessionFromSeedCore(
     ...(unitId ? { unitId } : {}),
     ...(lessonId ? { lessonId } : {}),
     ...(activityId ? { activityId } : {}),
+    ...(willBake ? { questBakeStatus: "pending" as const } : {}),
   });
   if (activityForSetup) {
     await ensureSessionActivitySetup(ctx, {
@@ -1299,15 +1560,19 @@ export async function createSessionFromSeedCore(
     await ensureSessionProcessState(ctx, { sessionId: id, processId });
   }
 
-  // Topic-seed launch (no structured unit behind the star): instead of an
-  // ad-lib-forever session, design a small real unit in the BACKGROUND and
-  // upgrade this session in place once it lands. The scholar drops into the
-  // warm ad-lib open immediately (above) and never waits for the ~1-2 min
-  // bake. Structured seeds already start their unit's activity, so skip them.
-  // Story seeds stay as durable grounded threads rather than being converted
-  // into a generic multi-activity quest mid-conversation.
-  // See review/seed-to-unit-bake-plan.md.
-  if (!seed.unitId && seed.origin !== "story") {
+  // A card (story or cross-domain preview) the scholar actually followed.
+  // Recorded here, where every launch surface funnels through — the done-screen
+  // card, Quests, the Sky — see lib/moments/seedMomentLedger.
+  await markSeedMomentFollowed(ctx, userId, seed);
+
+  // Design a small real unit in the BACKGROUND and upgrade this session in
+  // place once it lands. The client shows a "building your quest" state for the
+  // ~1-2 min this takes (questBakeStatus above) instead of opening an ad-lib
+  // conversation it would have to abandon. Structured seeds already start their
+  // unit's activity, so skip them. Story seeds stay as durable grounded threads,
+  // and cross-domain seeds stay short previews rather than becoming generic
+  // multi-activity quests mid-conversation. See review/seed-to-unit-bake-plan.md.
+  if (willBake) {
     await ctx.scheduler.runAfter(
       0,
       internal.bakeUnitFromSeed.bakeUnitFromSeed,
@@ -1324,9 +1589,17 @@ export const createFromSeed = authedMutation({
     // The scholar's chosen bake shape (deep / wide / build) from the
     // "choose your path" menu. Only meaningful for topic seeds (which bake).
     bakePath: v.optional(chosenPathValidator),
+    // "Endless chat" from that menu: open a plain exploration, never bake.
+    endlessChat: v.optional(v.boolean()),
   },
   handler: async (ctx, args) =>
-    createSessionFromSeedCore(ctx, ctx.user._id, args.seedId, args.bakePath),
+    createSessionFromSeedCore(
+      ctx,
+      ctx.user._id,
+      args.seedId,
+      args.bakePath,
+      args.endlessChat === true,
+    ),
 });
 
 /**
@@ -1362,6 +1635,9 @@ export const startUnit = authedMutation({
       learnerInstitutionId,
       unit,
     );
+    if (!isTeacher) {
+      await requireUnitStartableByScholar(ctx, ownerUserId, unit._id);
+    }
     const owner =
       ownerUserId === ctx.user._id ? ctx.user : await ctx.db.get(ownerUserId);
     let programAssignment = isProgramGuest(owner)
@@ -1611,6 +1887,22 @@ export const archive = authedMutation({
 });
 
 /**
+ * Wrap up an open exploration: move it to Finished. A session with no activity
+ * can never become "complete" (isSessionActivityComplete), so archiving is its
+ * only way off the plate — without this, a scholar's Wrap up left the quest
+ * "in progress" forever (TRA-371). Activity sessions are left alone: their
+ * completion is owned by the activity flow. Reversible via Restore / reopen.
+ */
+export const finishOpenExploration = internalMutation({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session || session.activityId || session.isArchived) return;
+    await ctx.db.patch(args.sessionId, { isArchived: true });
+  },
+});
+
+/**
  * Unarchive (restore) a session. Same auth as archive.
  */
 export const unarchive = authedMutation({
@@ -1641,7 +1933,7 @@ export const unarchive = authedMutation({
  * scholarUnitBadges, keyed by scholar/activity/unit), so re-entry is a session
  * visibility/navigation concern — this flips `isArchived` back to false when
  * needed and stamps `reopenedAt` so the still-complete session remains findable
- * on Home. It touches NO completion record. The unit stays complete, the badge
+ * on Home through that school day (isReopenLive), then returns to Finished. It touches NO completion record. The unit stays complete, the badge
  * is kept, and the continuation is new work on top. The session's artifact(s)
  * come along for free (artifacts are keyed by sessionId). Idempotent for
  * completion: safe on an already active session. Same auth as archive/unarchive.
@@ -1691,7 +1983,9 @@ export const reopenableForUnit = authedQuery({
           q.eq("userId", ctx.user._id).eq("unitId", unitId),
         )
         .collect()
-    ).filter((s) => !s.isTestDrive && !s.isOffline && !s.seedExemplar);
+    ).filter(
+      (s) => !s.isTestDrive && !s.isOffline && !s.seedExemplar && !s.freePlay,
+    );
     if (sessions.length === 0) return null;
 
     // Most-recently-active first (lastMessageAt, else creation time).
@@ -1731,7 +2025,11 @@ const STREAM_ORPHAN_REAP_AGE_MS = 20_000;
 export async function reapAndInsertAssistantPlaceholder(
   ctx: MutationCtx,
   session: Doc<"sessions">,
-  options?: { streamTrigger?: "activityKickoff" },
+  options?: {
+    streamTrigger?: "activityKickoff" | "appUpdate";
+    /** App designer thread stamp for the placeholder (vibecode sessions). */
+    thread?: "designer" | "tutor";
+  },
 ): Promise<{ streamId: string; assistantMsgId: Id<"messages"> }> {
   // Dimension snapshot (as strings, for historical reference), resolved from
   // the unit — mirrors the placeholder fields sendMessage used to set inline.
@@ -1751,10 +2049,13 @@ export async function reapAndInsertAssistantPlaceholder(
   for (const m of recentMessages) {
     const lastActivityAt = m.lastStreamActivityAt ?? m._creationTime;
     if (
-      m.role === "assistant" &&
-      m.streamId &&
-      m.content.trim() === "" &&
-      lastActivityAt < reapBefore
+      (m.role === "assistant" &&
+        m.streamId &&
+        m.content.trim() === "" &&
+        lastActivityAt < reapBefore) ||
+      // A quiet app update stamped stopped by an older server, whatever its
+      // age: it showed nothing and its stream is ending.
+      (isEmptyAppUpdatePlaceholder(m) && m.stopRequestedAt !== undefined)
     ) {
       await ctx.db.delete(m._id);
     }
@@ -1768,6 +2069,7 @@ export async function reapAndInsertAssistantPlaceholder(
     content: "",
     streamId,
     streamTrigger: options?.streamTrigger,
+    ...(options?.thread ? { thread: options.thread } : {}),
     promptVersion,
     unitId,
     perspectiveId,
@@ -1777,6 +2079,298 @@ export async function reapAndInsertAssistantPlaceholder(
   });
   return { streamId, assistantMsgId };
 }
+
+/**
+ * App designer (TRA-301): the mode a turn runs in and the thread it is stamped
+ * with, for a vibecode session; `null` for every other session (its messages
+ * stay unstamped). `requested` is the client's mode — a request the server
+ * clamps by the activity's scholar edit policy (lib/workshopPolicy.ts); absent
+ * counts as an Edit request. One helper for every placeholder path (send,
+ * kickoff, retry, rubric check) so none can land in the wrong thread.
+ */
+async function resolveTurnForSession(
+  ctx: Pick<MutationCtx, "db">,
+  session: Doc<"sessions">,
+  caller: Pick<Doc<"users">, "_id" | "role">,
+  requested: "edit" | "play" | null | undefined,
+): Promise<{ mode: "edit" | "play"; thread: "designer" | "tutor" } | null> {
+  if (session.sessionMode !== "vibecode") return null;
+  const policy = await resolveWorkshopPolicy(ctx, { session, caller });
+  return resolveTurnMode(requested, policy.effectiveEditAccess);
+}
+
+/**
+ * Whether the scholar has authored a turn in this session (typed or spoken —
+ * never an app ask, a generated image, or the `<start>` marker). An app may
+ * open a tutor conversation only after this, so a buggy app cannot start one
+ * on load (PR #3814 / TRA-293).
+ */
+async function sessionHasPriorScholarTurn(
+  ctx: Pick<MutationCtx, "db">,
+  sessionId: Id<"sessions">,
+): Promise<boolean> {
+  for await (const message of ctx.db
+    .query("messages")
+    .withIndex("by_session_role", (q) =>
+      q.eq("sessionId", sessionId).eq("role", "user"),
+    )) {
+    if (hasPriorScholarAuthoredTurn([message])) return true;
+  }
+  return false;
+}
+
+/**
+ * Save one user row and denormalize it onto the session. Shared by
+ * `sendMessage` and `startAppUpdateTurn` so an app ask is stored the same way
+ * from both: clamped, stamped `inputModality: "app"`, and kept off the
+ * dashboard preview (which shows only what the scholar wrote). The model-side
+ * untrusted framing is applied at read time
+ * (projectStreamMessages → formatAppTutorRequestForModel).
+ */
+async function persistUserTurnMessage(
+  ctx: MutationCtx,
+  session: Doc<"sessions">,
+  args: {
+    message: string;
+    imageId?: Id<"_storage">;
+    inputModality?: InputModality;
+    thread?: "designer" | "tutor";
+  },
+): Promise<void> {
+  const message =
+    args.inputModality === "app"
+      ? args.message.slice(0, MAX_APP_TUTOR_MESSAGE_CHARS)
+      : args.message;
+
+  // Dimension snapshot (as strings, not IDs, for historical reference)
+  // Resolve building blocks from the unit
+  const unit = session.unitId ? await ctx.db.get(session.unitId) : null;
+  // DEPRECATED (anti-parasocial): personas no longer drive the tutor, so new
+  // messages are not snapshotted with a personaId (it would mislabel a turn
+  // with a character the tutor no longer embodies). Historical snapshots and
+  // the schema field are preserved. See the retired TODO.html "Reimagine personas".
+  const personaId = undefined;
+  const unitId = session.unitId ? String(session.unitId) : undefined;
+  const perspectiveId = unit?.perspectiveId ? String(unit.perspectiveId) : undefined;
+  const processId = unit?.processId ? String(unit.processId) : undefined;
+
+  // Save user message
+  await ctx.db.insert("messages", {
+    sessionId: session._id,
+    role: "user",
+    content: message,
+    personaId,
+    unitId,
+    perspectiveId,
+    processId,
+    flagged: false,
+    ...(args.imageId ? { imageId: args.imageId } : {}),
+    ...(args.inputModality
+      ? { inputModality: args.inputModality }
+      : {}),
+    ...(args.thread ? { thread: args.thread } : {}),
+  });
+
+  // Denormalize last message info onto the session for efficient dashboard queries
+  await ctx.db.patch(session._id, {
+    lastMessageAt: Date.now(),
+    ...(args.inputModality === "app"
+      ? {}
+      : {
+          lastMessageRole: "user",
+          lastMessagePreview: message.slice(0, 120) || undefined,
+        }),
+  });
+}
+
+/**
+ * Whether a tutor turn is streaming in this session right now: an assistant
+ * row still carrying its streamId (finalize and split clear or move it) whose
+ * liveness is inside the same window the orphan reap uses. A dead placeholder
+ * past that window is not "in flight" — the next turn's reap removes it.
+ */
+async function hasLiveTutorStream(
+  ctx: Pick<MutationCtx, "db">,
+  sessionId: Id<"sessions">,
+): Promise<boolean> {
+  const liveAfter = Date.now() - STREAM_ORPHAN_REAP_AGE_MS;
+  const recentMessages = await ctx.db
+    .query("messages")
+    .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+    .order("desc")
+    .take(20);
+  return recentMessages.some(
+    (m) =>
+      m.role === "assistant" &&
+      !!m.streamId &&
+      (m.lastStreamActivityAt ?? m._creationTime) >= liveAfter,
+  );
+}
+
+/**
+ * Whether a finished character exchange or judge ruling exists that the tutor
+ * has not been shown as new (lib/appUpdateTools.placeAppAiTurns states the
+ * rule). Such a row can only exist after a real scholar gesture in the app,
+ * so it is acceptable evidence of intent where no typed turn exists yet.
+ */
+/** A zero-ask app update this soon after the last one is held (server pacing). */
+export const APP_UPDATE_MIN_GAP_MS = 20_000;
+
+async function hasUnseenAppAiTurn(
+  ctx: Pick<MutationCtx, "db">,
+  sessionId: Id<"sessions">,
+  /** Also require the row to be newer than this (the last app-update start). */
+  newerThan?: number,
+): Promise<boolean> {
+  // Walk back to the latest visible reply, then to the turn-start row at or
+  // before it — the same boundary getSessionContext derives from the full
+  // timeline (latestReplyTurnStart), read newest-first so it stops early.
+  let boundary: number | null = null;
+  let seenReply = false;
+  for await (const message of ctx.db
+    .query("messages")
+    .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+    .order("desc")) {
+    const [entry] = toReplyTimeline([message as TimelineSourceMessage]);
+    if (!entry) continue;
+    if (entry.visibleReply) seenReply = true;
+    if (seenReply && entry.turnStart) {
+      boundary = entry.createdAt;
+      break;
+    }
+  }
+  if (newerThan !== undefined) {
+    boundary = boundary === null ? newerThan : Math.max(boundary, newerThan);
+  }
+  // One indexed row per kind: failed and pending rows are outside the range,
+  // so however many an app has piled up, this reads at most two rows.
+  for (const kind of ["exchange", "judgment"] as const) {
+    const row = await ctx.db
+      .query("appAiTurns")
+      .withIndex("by_session_kind_status", (q) => {
+        const done = q
+          .eq("sessionId", sessionId)
+          .eq("kind", kind)
+          .eq("status", "done");
+        return boundary === null ? done : done.gt("createdAt", boundary);
+      })
+      .first();
+    if (row) return true;
+  }
+  return false;
+}
+
+/**
+ * Open a tutor turn from in-app events rather than a scholar message: the
+ * single entry for every app-originated update — coalesced askTutor calls
+ * ("asks") and "something happened with the app's character or judge" (no
+ * asks; the server reads which exchanges are new). Stamps
+ * `streamTrigger: "appUpdate"` on the placeholder; /session-stream reads it.
+ *
+ * Returns a `status`. `started` carries exactly what `sendMessage` returns, so
+ * the client starts the stream POST the same way. The two refusals are normal,
+ * frequent outcomes the client keeps its update queued on, so they are
+ * RETURNED, not thrown (a thrown ConvexError logs as a server error on every
+ * one):
+ *  - `busy` — a tutor turn is streaming; drain again after it.
+ *  - `held` — no scholar-authored turn yet AND no unseen exchange/judgment to
+ *    justify a zero-ask update (asks alone never open a conversation), or a
+ *    zero-ask update with nothing new to show or too soon after the last.
+ * Genuine failures (access, archived session, time limit) still throw.
+ *
+ * An ask's `context` is not stored (as with sendMessage): the client sends
+ * the newest ask's context as the stream body's `appRequest`.
+ */
+export const startAppUpdateTurn = authedMutation({
+  args: {
+    sessionId: v.id("sessions"),
+    asks: v.array(
+      v.object({
+        message: v.string(),
+        context: v.optional(v.any()),
+      }),
+    ),
+  },
+  returns: v.union(
+    v.object({
+      status: v.literal("started"),
+      streamId: v.string(),
+      assistantMsgId: v.id("messages"),
+      sessionId: v.id("sessions"),
+      imageId: v.null(),
+      workshopMode: v.union(v.literal("edit"), v.literal("play"), v.null()),
+    }),
+    v.object({ status: v.literal("held") }),
+    v.object({ status: v.literal("busy") }),
+  ),
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session) throw new Error("Session not found");
+
+    // Same access, ownership and time-limit gates as sendMessage.
+    const isTeacher = isTeacherRole(ctx.user.role);
+    if (!isTeacher && session.userId !== ctx.user._id) {
+      throw new Error("Forbidden");
+    }
+    await requireActiveSessionOwnerAccess(ctx, session);
+    if (!isTeacher && session.sessionTimeLimit && session.sessionStartTime) {
+      const elapsed = Date.now() - session.sessionStartTime;
+      if (elapsed >= session.sessionTimeLimit * 60 * 1000) {
+        throw new Error("Session time limit has expired");
+      }
+    }
+
+    if (await hasLiveTutorStream(ctx, args.sessionId)) {
+      return { status: "busy" as const };
+    }
+
+    const asks = args.asks
+      .map((ask) => ask.message.trim())
+      .filter((message) => message !== "")
+      .slice(-APP_UPDATE_MAX_ASKS);
+    // Asks need a prior scholar turn, exactly as sendMessage's app branch
+    // does. A zero-ask update needs something new to show — an unseen
+    // exchange or ruling, which also stands in for the scholar's gesture —
+    // and it must be newer than the last app-update turn's start, so what a
+    // silent turn was already shown cannot justify another one on its own
+    // (the tutor still reads everything since it last spoke when it runs).
+    // It is also paced on the server, not just by the client's queue.
+    const now = Date.now();
+    const lastStart = session.lastAppUpdateTurnAt;
+    const proceed =
+      asks.length > 0
+        ? await sessionHasPriorScholarTurn(ctx, args.sessionId)
+        : (lastStart === undefined ||
+            now - lastStart >= APP_UPDATE_MIN_GAP_MS) &&
+          (await hasUnseenAppAiTurn(ctx, args.sessionId, lastStart));
+    if (!proceed) return { status: "held" as const };
+
+    // App updates are play: an Edit-mode scholar's robot exchange must reach
+    // the tutor, never the designer agent.
+    const turn = await resolveTurnForSession(ctx, session, ctx.user, "play");
+    for (const message of asks) {
+      await persistUserTurnMessage(ctx, session, {
+        message,
+        inputModality: "app",
+        thread: turn?.thread,
+      });
+    }
+    const { streamId, assistantMsgId } =
+      await reapAndInsertAssistantPlaceholder(ctx, session, {
+        streamTrigger: "appUpdate",
+        thread: turn?.thread,
+      });
+    await ctx.db.patch(args.sessionId, { lastAppUpdateTurnAt: now });
+    return {
+      status: "started" as const,
+      streamId,
+      assistantMsgId,
+      sessionId: args.sessionId,
+      imageId: null,
+      workshopMode: turn?.mode ?? null,
+    };
+  },
+});
 
 /**
  * Send a message: saves user message, creates stream ID, inserts placeholder.
@@ -1791,6 +2385,11 @@ export const sendMessage = authedMutation({
     // Optional at the wire boundary so older installed native clients remain
     // compatible. Current clients always send this for real scholar turns.
     inputModality: v.optional(inputModalityValidator),
+    // App designer (TRA-301): the screen mode the client is in — a REQUEST.
+    // The server clamps it by the activity's scholar edit policy and stamps the
+    // resulting thread on this turn (lib/workshopPolicy.ts). Absent (an older
+    // client) counts as an Edit request, still clamped.
+    mode: v.optional(v.union(v.literal("edit"), v.literal("play"))),
   },
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
@@ -1803,6 +2402,14 @@ export const sendMessage = authedMutation({
       throw new Error("Forbidden");
     }
     await requireActiveSessionOwnerAccess(ctx, session);
+    // The tutor reads this image and the transcript serves it back, so it must
+    // be a fresh upload, not a storage id the caller learned (TRA-394).
+    if (args.imageId) await assertFreshUpload(ctx, args.imageId);
+
+    // Which of the session's two threads this turn belongs to. Only a vibecode
+    // session has two threads; every other session's messages stay unstamped.
+    const turn = await resolveTurnForSession(ctx, session, ctx.user, args.mode);
+    const turnThread = turn?.thread;
 
     // Time limit enforcement: reject messages after timer expires
     if (
@@ -1816,39 +2423,22 @@ export const sendMessage = authedMutation({
       }
     }
 
-    // Dimension snapshot (as strings, not IDs, for historical reference)
-    // Resolve building blocks from the unit
-    const unit = session.unitId ? await ctx.db.get(session.unitId) : null;
-    // DEPRECATED (anti-parasocial): personas no longer drive the tutor, so new
-    // messages are not snapshotted with a personaId (it would mislabel a turn
-    // with a character the tutor no longer embodies). Historical snapshots and
-    // the schema field are preserved. See TODO.html "Reimagine personas".
-    const personaId = undefined;
-    const unitId = session.unitId ? String(session.unitId) : undefined;
-    const perspectiveId = unit?.perspectiveId ? String(unit.perspectiveId) : undefined;
-    const processId = unit?.processId ? String(unit.processId) : undefined;
+    if (
+      args.inputModality === "app" &&
+      !(await sessionHasPriorScholarTurn(ctx, args.sessionId))
+    ) {
+      throw new Error(
+        "The app can ask the tutor only after the scholar has sent a message.",
+      );
+    }
 
-    // Save user message
-    await ctx.db.insert("messages", {
-      sessionId: args.sessionId,
-      role: "user",
-      content: args.message,
-      personaId,
-      unitId,
-      perspectiveId,
-      processId,
-      flagged: false,
-      ...(args.imageId ? { imageId: args.imageId } : {}),
-      ...(args.inputModality
-        ? { inputModality: args.inputModality }
-        : {}),
-    });
+    await stampLatestStreamingAssistant(ctx, args.sessionId);
 
-    // Denormalize last message info onto the session for efficient dashboard queries
-    await ctx.db.patch(args.sessionId, {
-      lastMessageAt: Date.now(),
-      lastMessageRole: "user",
-      lastMessagePreview: args.message.slice(0, 120) || undefined,
+    await persistUserTurnMessage(ctx, session, {
+      message: args.message,
+      imageId: args.imageId,
+      inputModality: args.inputModality,
+      thread: turnThread,
     });
 
     // If there's a pending whisper, record it between user msg and assistant placeholder
@@ -1869,13 +2459,425 @@ export const sendMessage = authedMutation({
     // reapAndInsertAssistantPlaceholder for the liveness rationale) and insert
     // this turn's fresh placeholder in one step.
     const { streamId, assistantMsgId } =
-      await reapAndInsertAssistantPlaceholder(ctx, session);
+      await reapAndInsertAssistantPlaceholder(ctx, session, {
+        thread: turnThread,
+      });
 
     return {
       streamId,
       assistantMsgId,
       sessionId: args.sessionId,
       imageId: args.imageId ?? null,
+      // The mode this turn will run in (null outside a vibecode session). A
+      // client that requested Edit and reads "play" here snaps to Play at once,
+      // before the stream opens — the turn is already in the tutor thread.
+      workshopMode: turn?.mode ?? null,
+    };
+  },
+});
+
+export const attachAppSnapshotToTurn = internalMutation({
+  args: {
+    sessionId: v.id("sessions"),
+    streamId: v.string(),
+    assistantMsgId: v.id("messages"),
+    appSnapshotStorageId: v.id("_storage"),
+    verifiedMimeType: v.string(),
+    verifiedSizeBytes: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const assistant = await ctx.db.get(args.assistantMsgId);
+    if (
+      !assistant ||
+      assistant.sessionId !== args.sessionId ||
+      assistant.role !== "assistant" ||
+      assistant.streamId !== args.streamId
+    ) {
+      throw new Error("App snapshot does not match this stream request");
+    }
+
+    const recentMessages = await ctx.db
+      .query("messages")
+      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+      .order("desc")
+      .take(10);
+    if (recentMessages[0]?._id !== assistant._id) {
+      throw new Error("App snapshot does not match the latest stream request");
+    }
+    // A zero-ask app update persists no user row, so the newest user row is
+    // an OLD turn: attaching there would paint today's screen on yesterday's
+    // bubble and make every later attach throw. Skip cleanly instead; the
+    // asks of an app update are the rows saved right before its placeholder.
+    if (
+      assistant.streamTrigger === "appUpdate" &&
+      !(
+        recentMessages[1]?.role === "user" &&
+        recentMessages[1].inputModality === "app"
+      )
+    ) {
+      return null;
+    }
+    const userMessage = recentMessages
+      .slice(1)
+      .find((message) => message.role === "user");
+    if (!userMessage || userMessage._creationTime > assistant._creationTime) {
+      throw new Error("App snapshot has no matching user turn");
+    }
+    if (
+      userMessage.appSnapshotStorageId &&
+      userMessage.appSnapshotStorageId !== args.appSnapshotStorageId
+    ) {
+      throw new Error("App snapshot is already attached to this turn");
+    }
+
+    const metadata = await ctx.db.system.get(
+      "_storage",
+      args.appSnapshotStorageId,
+    );
+    assertValidAppSnapshotMetadata(
+      metadata,
+      Math.max(userMessage._creationTime, assistant._creationTime),
+      args.verifiedMimeType,
+      args.verifiedSizeBytes,
+    );
+    await ctx.db.patch(userMessage._id, {
+      appSnapshotStorageId: args.appSnapshotStorageId,
+    });
+    return { userMessageId: userMessage._id };
+  },
+});
+
+/**
+ * The stream's stamp for a placeholder that reached it UNSTAMPED (TRA-301).
+ * Every mutation that opens a turn stamps both rows from one verdict, and the
+ * stream honors that stamp (workshopPolicy.resolveTurnModeForStream); this
+ * only closes the gap for a placeholder created by an older path.
+ */
+export const stampTurnThread = internalMutation({
+  args: {
+    sessionId: v.id("sessions"),
+    streamId: v.string(),
+    assistantMsgId: v.id("messages"),
+    thread: v.union(v.literal("designer"), v.literal("tutor")),
+  },
+  handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.assistantMsgId);
+    // The id comes from the stream body: only the LIVE assistant placeholder
+    // of this stream, in this session, may be stamped — never a user row, a
+    // historical turn, or another stream's placeholder (mirrors
+    // attachAppSnapshotToTurn).
+    if (
+      !message ||
+      message.sessionId !== args.sessionId ||
+      message.role !== "assistant" ||
+      message.streamId !== args.streamId
+    ) {
+      return;
+    }
+    if (message.thread === args.thread) return;
+    await ctx.db.patch(args.assistantMsgId, { thread: args.thread });
+  },
+});
+
+export const setAppAutosaveFailed = internalMutation({
+  args: {
+    sessionId: v.id("sessions"),
+    failed: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session) return;
+    // Set a timestamp on failure so the Workshop can toast a NEW failure;
+    // clear it on the next successful save so the toast doesn't recur.
+    await ctx.db.patch(args.sessionId, {
+      appAutosaveFailedAt: args.failed ? Date.now() : undefined,
+    });
+  },
+});
+
+/**
+ * The App designer's park_idea tool (lib/designerTools.ts): append one idea to
+ * the scholar's parking lot for their Free play version. Caps and de-duping
+ * live in `appendParkingLotEntry`; the Workshop renders the lot reactively
+ * from getWithMessages.
+ */
+export const parkIdea = internalMutation({
+  args: {
+    sessionId: v.id("sessions"),
+    text: v.string(),
+    reason: v.optional(v.string()),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<"added" | "duplicate" | "full" | "empty"> => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session || session.sessionMode !== "vibecode") return "empty";
+    const result = appendParkingLotEntry(
+      session.parkingLot,
+      { text: args.text, reason: args.reason },
+      Date.now(),
+    );
+    if (result.kind === "added") {
+      await ctx.db.patch(args.sessionId, { parkingLot: result.lot });
+    }
+    return result.kind;
+  },
+});
+
+export const unparkIdea = internalMutation({
+  args: { sessionId: v.id("sessions"), text: v.string() },
+  handler: async (ctx, args): Promise<"removed" | "missing"> => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session || session.sessionMode !== "vibecode") return "missing";
+    const result = removeParkingLotEntry(session.parkingLot, args.text);
+    if (result.kind === "removed") {
+      await ctx.db.patch(args.sessionId, { parkingLot: result.lot });
+    }
+    return result.kind;
+  },
+});
+
+/**
+ * FREE PLAY (TRA-489): open the scholar's own, contract-free version of a
+ * vibecode app once the assignment version is done — where the ideas the App
+ * designer parked "for Free play" get built. Owner only; eligibility is the
+ * one derivation in lib/freePlay.ts (vibecode, a non-empty parking lot,
+ * editAccess not `never`, the activity completed under the session's
+ * assignment), which getWithMessages also exposes as `freePlayEligible`.
+ *
+ * Creates a new vibecode session for the same scholar and activity with
+ * `freePlay: true` + `freePlayOf`, copying the source's current app (its
+ * newest code artifact, the way the starter clone seeds one) and its parking
+ * lot. NO assignmentId: free-play work belongs to no cohort run and counts
+ * toward nothing. Idempotent per (scholar, source): a second call returns the
+ * existing free-play session.
+ */
+export const startFreePlay = authedMutation({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, args): Promise<{ sessionId: Id<"sessions"> }> => {
+    const source = await ctx.db.get(args.sessionId);
+    if (!source) throw new Error("Session not found");
+    if (source.userId !== ctx.user._id) throw new Error("Forbidden");
+    await requireActiveSessionOwnerAccess(ctx, source);
+
+    const existing = await ctx.db
+      .query("sessions")
+      .withIndex("by_user", (q) => q.eq("userId", source.userId))
+      .filter((q) => q.eq(q.field("freePlayOf"), source._id))
+      .first();
+    if (existing) return { sessionId: existing._id };
+
+    const eligibility = await resolveFreePlayEligibility(ctx, {
+      session: source,
+      caller: ctx.user,
+    });
+    if (!eligibility.eligible) {
+      throw new Error(`Free play is not open yet (${eligibility.reason})`);
+    }
+    const { activity } = eligibility;
+
+    const sessionId = await ctx.db.insert("sessions", {
+      userId: source.userId,
+      ...(source.institutionId ? { institutionId: source.institutionId } : {}),
+      unitId: source.unitId,
+      lessonId: source.lessonId,
+      activityId: activity._id,
+      sessionMode: "vibecode",
+      title: freePlayTitle(activity.title),
+      isArchived: false,
+      freePlay: true,
+      freePlayOf: source._id,
+      parkingLot: source.parkingLot,
+    });
+
+    // The app as it stands now: the newest code artifact (the same pick the
+    // turn recorder versions), with every image it can already load carried as
+    // inherited assets (the artifact's own, the source session's uploads, and
+    // any chat image the HTML references) so the copy renders identically.
+    const sourceArtifacts = await ctx.db
+      .query("artifacts")
+      .withIndex("by_session", (q) => q.eq("sessionId", source._id))
+      .collect();
+    const app = sourceArtifacts
+      .filter((a) => a.type === "code")
+      .sort((a, b) => b._creationTime - a._creationTime)[0];
+    if (app) {
+      const messages = await ctx.db
+        .query("messages")
+        .withIndex("by_session", (q) => q.eq("sessionId", source._id))
+        .collect();
+      const referencedImages = messages.flatMap((m) =>
+        m.imageId && app.content.includes(String(m.imageId)) ? [m.imageId] : [],
+      );
+      const assetIds = [
+        ...new Set([
+          ...(app.appAssetIds ?? []),
+          ...(source.appAssetIds ?? []),
+          ...referencedImages,
+        ]),
+      ];
+      await ctx.db.insert("artifacts", {
+        sessionId,
+        title: app.title,
+        content: app.content,
+        lastEditedBy: app.lastEditedBy,
+        revision: 0,
+        type: "code",
+        language: app.language ?? "html",
+        ...(assetIds.length > 0 ? { appAssetIds: assetIds } : {}),
+        ...(app.appAi ? { appAi: app.appAi } : {}),
+      });
+    }
+    return { sessionId };
+  },
+});
+
+export const requestRenderCheck = internalMutation({
+  args: {
+    sessionId: v.id("sessions"),
+    streamId: v.string(),
+    messageId: v.id("messages"),
+    checkId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const assistant = await ctx.db.get(args.messageId);
+    if (
+      !assistant ||
+      assistant.sessionId !== args.sessionId ||
+      assistant.role !== "assistant" ||
+      assistant.streamId !== args.streamId
+    ) {
+      throw new Error("Render check does not match this stream");
+    }
+    const requestedAt = Date.now();
+    await ctx.db.patch(assistant._id, {
+      renderCheck: {
+        checkId: args.checkId,
+        requestedAt,
+      },
+      lastStreamActivityAt: requestedAt,
+    });
+    return { requestedAt };
+  },
+});
+
+export const getRenderCheckAnswer = internalQuery({
+  args: {
+    sessionId: v.id("sessions"),
+    streamId: v.string(),
+    messageId: v.id("messages"),
+    checkId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const assistant = await ctx.db.get(args.messageId);
+    if (
+      !assistant ||
+      assistant.sessionId !== args.sessionId ||
+      assistant.role !== "assistant" ||
+      assistant.streamId !== args.streamId ||
+      assistant.renderCheck?.checkId !== args.checkId ||
+      assistant.renderCheck.answeredAt === undefined
+    ) {
+      return null;
+    }
+    return assistant.renderCheck;
+  },
+});
+
+export const answerRenderCheck = authedMutation({
+  args: {
+    sessionId: v.id("sessions"),
+    streamId: v.string(),
+    checkId: v.string(),
+    snapshotStorageId: v.optional(v.id("_storage")),
+    consoleLines: v.array(v.string()),
+    stateJson: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session) throw new Error("Session not found");
+    const isTeacher = isTeacherRole(ctx.user.role);
+    if (!isTeacher && session.userId !== ctx.user._id) {
+      throw new Error("Forbidden");
+    }
+    await requireActiveSessionOwnerAccess(ctx, session);
+    if (session.sessionMode !== "vibecode") {
+      throw new Error("Render checks are available only for Vibecode sessions");
+    }
+    if (args.consoleLines.length > RENDER_CHECK_MAX_CONSOLE_LINES) {
+      throw new Error("Render check has too many console lines");
+    }
+    if (
+      args.consoleLines.some(
+        (line) => line.length > RENDER_CHECK_MAX_CONSOLE_LINE_CHARS,
+      )
+    ) {
+      throw new Error("Render check console line is too long");
+    }
+    if (args.stateJson.length > RENDER_CHECK_MAX_STATE_JSON_CHARS) {
+      throw new Error("Render check state is too large");
+    }
+
+    const recentMessages = await ctx.db
+      .query("messages")
+      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+      .order("desc")
+      .take(20);
+    const assistant = recentMessages.find(
+      (message) =>
+        message.role === "assistant" && message.streamId === args.streamId,
+    );
+    if (!assistant) {
+      throw new Error("Render check does not match this stream");
+    }
+    if (
+      assistant.renderCheck?.checkId !== args.checkId ||
+      assistant.renderCheck.answeredAt !== undefined
+    ) {
+      throw new Error("Render check is stale");
+    }
+    if (args.snapshotStorageId) {
+      const metadata = await ctx.db.system.get(
+        "_storage",
+        args.snapshotStorageId,
+      );
+      if (!metadata) throw new Error("Render check snapshot is unavailable");
+      if (metadata._creationTime < assistant.renderCheck.requestedAt) {
+        throw new Error("Render check snapshot predates this request");
+      }
+      if (metadata.size > APP_SNAPSHOT_MAX_BYTES) {
+        throw new Error("Render check snapshot is too large");
+      }
+    }
+
+    const answeredAt = Date.now();
+    await ctx.db.patch(assistant._id, {
+      renderCheck: {
+        ...assistant.renderCheck,
+        answeredAt,
+        snapshotStorageId: args.snapshotStorageId,
+        consoleLines: args.consoleLines,
+        stateJson: args.stateJson,
+      },
+      lastStreamActivityAt: answeredAt,
+    });
+    return { messageId: assistant._id, answeredAt };
+  },
+});
+
+export const requestStop = authedMutation({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session) return { stopped: false };
+    const isTeacher = isTeacherRole(ctx.user.role);
+    if (!isTeacher && session.userId !== ctx.user._id) {
+      throw new Error("Forbidden");
+    }
+    await requireActiveSessionOwnerAccess(ctx, session);
+    return {
+      stopped: await stampLatestStreamingAssistant(ctx, args.sessionId),
     };
   },
 });
@@ -1884,7 +2886,7 @@ export const sendMessage = authedMutation({
  * Start a silent rubric check — the "Check my work" button on a deliverable.
  * Unlike {@link sendMessage}, this persists NO user
  * message: it only reaps orphans and inserts the assistant placeholder + a
- * streamId. The `/project-stream` handler then injects an ephemeral,
+ * streamId. The `/session-stream` handler then injects an ephemeral,
  * non-persisted instruction (see `rubricCheckInstruction`) telling the tutor to
  * re-score the rubric now. That preserves the honesty invariant — clicking
  * "Check my work" never fabricates a scholar turn in the transcript — while the
@@ -1916,8 +2918,140 @@ export const startRubricCheck = authedMutation({
       }
     }
 
+    // A rubric check is a tutor-initiated turn with no scholar request; it
+    // runs in the mode the policy allows (Edit when allowed, else Play).
+    const rubricTurn = await resolveTurnForSession(
+      ctx,
+      session,
+      ctx.user,
+      undefined,
+    );
     const { streamId, assistantMsgId } =
-      await reapAndInsertAssistantPlaceholder(ctx, session);
+      await reapAndInsertAssistantPlaceholder(ctx, session, {
+        thread: rubricTurn?.thread,
+      });
+
+    return {
+      streamId,
+      assistantMsgId,
+      sessionId: args.sessionId,
+    };
+  },
+});
+
+/**
+ * Retry a FAILED tutor turn without persisting a second scholar message.
+ *
+ * A turn can fail such that the assistant placeholder is gone (a hard stream
+ * error with no text finalizes to a delete) or has lost its streamId — so the
+ * client has nothing to re-POST. This mutation inserts a FRESH placeholder for
+ * the trailing turn and returns its ids, but ONLY when doing so cannot
+ * duplicate a real turn:
+ *   • allowed when the last non-tool message is a scholar `user` message (its
+ *     reply never landed), or an empty `assistant` row (a dead / finalized-
+ *     empty placeholder, e.g. a failed kickoff) — that trailing empty row is
+ *     deleted and replaced;
+ *   • refused (returns `null`) when the last non-tool message is an assistant
+ *     row WITH content (the turn already replied) or the session is empty.
+ * The client shows its inline "try again" affordance and calls this; a `null`
+ * result means there is nothing to retry, so it can never stack a turn.
+ */
+export const retryAssistantTurn = authedMutation({
+  args: {
+    sessionId: v.id("sessions"),
+  },
+  handler: async (ctx, args) => {
+    const session = await ctx.db.get(args.sessionId);
+    if (!session) throw new Error("Session not found");
+
+    const isTeacher = isTeacherRole(ctx.user.role);
+    if (!isTeacher && session.userId !== ctx.user._id) {
+      throw new Error("Forbidden");
+    }
+    await requireActiveSessionOwnerAccess(ctx, session);
+
+    if (!isTeacher && session.sessionTimeLimit && session.sessionStartTime) {
+      const elapsed = Date.now() - session.sessionStartTime;
+      if (elapsed >= session.sessionTimeLimit * 60 * 1000) {
+        throw new Error("Session time limit has expired");
+      }
+    }
+
+    const recent = await ctx.db
+      .query("messages")
+      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+      .order("desc")
+      .take(10);
+    // The trailing NON-tool message decides eligibility (tool rows — resource
+    // shares, generated images — never end a turn on their own).
+    const nonTool = recent.filter((m) => m.role !== "tool");
+    const lastNonTool = nonTool[0];
+    if (!lastNonTool) return null;
+
+    // This retry path is for FAILED SCHOLAR (user) turns only. A silent turn
+    // (activity kickoff / rubric check) has no persisted scholar message and
+    // owns its own recovery — kickoff self-recovers through
+    // startActivityKickoff's recoverable branch, and "Check my work" re-runs a
+    // rubric check — so we never fabricate a fresh placeholder for one here.
+    if (lastNonTool.role === "assistant") {
+      if (lastNonTool.content.trim() !== "") {
+        // The turn already produced a reply — retrying would duplicate it.
+        return null;
+      }
+      // A kickoff placeholder is a silent turn — refuse.
+      if (lastNonTool.streamTrigger) {
+        return null;
+      }
+      // The message before this placeholder (skipping tool rows) must be a
+      // scholar `user` message. A rubric-check placeholder is preceded by an
+      // assistant message (or nothing), so this refuses it.
+      const prevNonTool = nonTool[1];
+      if (!prevNonTool || prevNonTool.role !== "user") {
+        return null;
+      }
+      // A still-fresh empty placeholder is a LIVE turn (its owning tab, or
+      // another tab, is streaming or busy-retrying it — /session-stream stamps
+      // liveness on every 429). Deleting it here would race that stream. Only
+      // act once it is past the dead window (mirrors deriveServerTurnState /
+      // STREAM_DEAD_PLACEHOLDER_MS on the client).
+      const lastActivityAt =
+        lastNonTool.lastStreamActivityAt ?? lastNonTool._creationTime;
+      if (Date.now() - lastActivityAt < STREAM_ORPHAN_REAP_AGE_MS) {
+        return null;
+      }
+      // A dead / finalized-empty placeholder after a user turn: remove it, then
+      // insert a fresh one.
+      await ctx.db.delete(lastNonTool._id);
+    } else if (lastNonTool.role !== "user") {
+      return null;
+    }
+
+    // The retried turn follows the thread of the scholar turn it answers
+    // (still clamped by policy, in case the verdict changed since).
+    const retriedUserTurn =
+      lastNonTool.role === "user" ? lastNonTool : nonTool[1];
+    const retryTurn = await resolveTurnForSession(
+      ctx,
+      session,
+      ctx.user,
+      retriedUserTurn?.thread === "tutor" ? "play" : "edit",
+    );
+    // Keep BOTH rows of the retried turn in one thread. If the verdict changed
+    // since the scholar's message was stamped (the teacher flipped the activity
+    // to `never`, or a completion was undone), the new placeholder is clamped
+    // to the tutor thread — restamp the question to match, so the retried turn
+    // is never split with its answer in `tutor` and its question in `designer`.
+    if (
+      retryTurn?.thread &&
+      retriedUserTurn &&
+      retriedUserTurn.thread !== retryTurn.thread
+    ) {
+      await ctx.db.patch(retriedUserTurn._id, { thread: retryTurn.thread });
+    }
+    const { streamId, assistantMsgId } =
+      await reapAndInsertAssistantPlaceholder(ctx, session, {
+        thread: retryTurn?.thread,
+      });
 
     return {
       streamId,
@@ -1983,9 +3117,19 @@ export const startActivityKickoff = authedMutation({
       }
     }
 
+    // A kickoff is an Edit request (the teacher build kickoff builds the app),
+    // clamped by policy like any other turn — a scholar's kickoff under
+    // `never` lands in the tutor thread.
+    const kickoffTurn = await resolveTurnForSession(
+      ctx,
+      session,
+      ctx.user,
+      "edit",
+    );
     const { streamId, assistantMsgId } =
       await reapAndInsertAssistantPlaceholder(ctx, session, {
         streamTrigger: "activityKickoff",
+        thread: kickoffTurn?.thread,
       });
 
     return {
@@ -2414,11 +3558,6 @@ export const resetTestDrive = authedMutation({
     const activityForHooks = session.activityId
       ? await ctx.db.get(session.activityId)
       : null;
-    const needsCriteriaGen =
-      activityForHooks?.deliverable?.mode === "auto";
-    const needsSeededArtifact =
-      activityForHooks?.deliverable?.kind === "text" ||
-      activityForHooks?.deliverable?.kind === "artifact";
 
     const newId = await ctx.db.insert("sessions", {
       userId: ctx.user._id,
@@ -2437,55 +3576,20 @@ export const resetTestDrive = authedMutation({
       testDriveSyntheticDossier: session.testDriveSyntheticDossier,
       replayScript,
       replayStopAfter,
-      deliverableCriteriaStatus: needsCriteriaGen
-        ? ("pending" as const)
-        : undefined,
     });
 
-    if (processId) {
-      await ctx.scheduler.runAfter(0, internal.processState.initialize, {
+    if (activityForHooks) {
+      await ensureSessionActivitySetup(ctx, {
+        sessionId: newId,
+        activity: activityForHooks,
+        unitId: session.unitId,
+        processId,
+      });
+    } else {
+      await ensureSessionProcessState(ctx, {
         sessionId: newId,
         processId,
       });
-    }
-
-    // Seed the empty document for text / artifact deliverables — same
-    // logic as sessions.create. Each reset gets its own fresh blank
-    // canvas (the old session's artifacts stay with the archived row).
-    if (needsSeededArtifact && activityForHooks) {
-      await ctx.db.insert("artifacts", {
-        sessionId: newId,
-        title: activityForHooks.title,
-        content: "",
-        lastEditedBy: "scholar" as const,
-        type:
-          activityForHooks.deliverable?.kind === "artifact"
-            ? ("code" as const)
-            : ("text" as const),
-      });
-    }
-
-    // Regenerate per-scholar criteria for auto-mode deliverables.
-    // The teacher's "view as" reading level determines calibration —
-    // they can flip View as between scholars and Reset to see how the
-    // rubric adapts.
-    if (needsCriteriaGen) {
-      await ctx.scheduler.runAfter(
-        0,
-        internal.deliverables.generateCriteriaForSession,
-        { sessionId: newId },
-      );
-    }
-
-    // Reflection too — test-drive should see how the "big picture"
-    // looks for the chosen view-as scholar.
-    if (session.activityId && session.unitId) {
-      await ctx.db.patch(newId, { reflectionStatus: "pending" as const });
-      await ctx.scheduler.runAfter(
-        0,
-        internal.sessions.generateReflectionForSession,
-        { sessionId: newId },
-      );
     }
 
     return { id: newId };
@@ -2893,18 +3997,9 @@ export const generateReflectionForSession = internalAction({
         usage: response.usage,
         institutionId,
       });
-      const raw = toolBlock.input as {
-        sections: Array<{ heading: string; body: string }>;
-      };
-      // Defensive: clamp to [1,4] in case the model ignores the bounds,
-      // and trim each piece.
-      const sections = (raw.sections ?? [])
-        .slice(0, 4)
-        .map((s) => ({
-          heading: (s.heading ?? "").trim(),
-          body: (s.body ?? "").trim(),
-        }))
-        .filter((s) => s.heading && s.body);
+      // Tool input is model output, not a validated payload — normalize rather
+      // than trust the declared shape (convex/lib/reflectionSections.ts).
+      const sections = normalizeReflectionSections(toolBlock.input);
       if (sections.length === 0) {
         throw new Error("AI returned no usable sections");
       }

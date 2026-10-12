@@ -3,6 +3,7 @@ import { useConvex, useMutation, useQuery } from "convex/react";
 import { useConvexAuth } from "@convex-dev/auth/react";
 import { Stack, useRouter, useFocusEffect } from "expo-router";
 import {
+  ActionSheetIOS,
   ActivityIndicator,
   Alert,
   Pressable,
@@ -29,7 +30,11 @@ import { FocusStrip } from "@/components/FocusStrip";
 import { ArchivedSessions } from "@/components/ArchivedSessions";
 import { CreateQuestDialog } from "@/components/CreateQuestDialog";
 import { DevManipulativeLauncher } from "@/components/EmbeddedWebLaunchButton";
-import { PracticePlaylistCard } from "@/components/practice/PracticePlaylistCard";
+import { ContainmentBoundary } from "@/components/ContainmentBoundary";
+import {
+  PracticePlaylistCard,
+  PracticePlaylistUnavailable,
+} from "@/components/practice/PracticePlaylistCard";
 import { CheckInHomeCard } from "@/components/practice/CheckInHomeCard";
 import { MapHomeCard } from "@/components/MapHomeCard";
 import { MapCompletionCard } from "@/components/MapCompletionCard";
@@ -42,21 +47,17 @@ import {
   SessionsTitleSwitcher,
   type SessionsView,
 } from "@/components/SessionsSwitcher";
-import { SuggestedQuests } from "@/components/SuggestedQuests";
-import { StoryInvitations } from "@/components/StoryInvitations";
+import { QuestionQueueList } from "@/components/QuestionQueue";
 import { PeerTrails } from "@/components/PeerTrails";
 import { UnitBand } from "@/components/UnitBand";
 import { ScholarHomeTabs } from "@/components/ScholarHomeTabs";
 import { PlannedTodayCard } from "@/components/PlannedTodayCard";
 import { ComingUpCard } from "@/components/ComingUpCard";
-import {
-  TakeHomePlan,
-  type TakeHomePinning,
-} from "@/components/TakeHomePlan";
-import { TakeHomePinButton } from "@/components/TakeHomePinButton";
+import { ScholarPrepSections } from "@/components/ScholarPrepSections";
 import { BirthdayConfetti } from "@/components/BirthdayConfetti";
 import { HouseIcon, SunHorizonIcon, TargetIcon } from "@/components/PrepIcons";
 import { api, type Id } from "@/lib/convex";
+import { hasLearnerContext } from "@/lib/learnerContext";
 import { tuning, useTuningValue } from "@/lib/homeGestureTuning";
 import { FORCE_ALL_HOME_CARDS } from "@/lib/homeDevForce";
 import { HOME_GAP, HOME_LABEL_GAP, HOME_SECTION_GAP } from "@/lib/homeRhythm";
@@ -76,6 +77,8 @@ import { fonts, palette, useColors } from "@/theme";
 import { useRoomTurnPhase } from "@/hooks/useRoomTurnPhase";
 import { useActiveRoomCues } from "@/hooks/useActiveRoomCues";
 import { useInstitutionDay } from "@/hooks/useInstitutionDay";
+import { useContainedQuery } from "@/hooks/useContainedQuery";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
 import { RoomCueBanner } from "@/components/RoomCueBanner";
 import { RestOverlay } from "@/components/RestOverlay";
 import {
@@ -102,6 +105,7 @@ import {
   deriveHomeTabs,
   filterHomeworkForNow,
   filterRowsForTab,
+  focusSectionLabel,
   groupHomeRowsByUnit,
   isWithinScheduleWindow,
   matchRowsToFocusOrder,
@@ -337,7 +341,64 @@ function usePrewarmSessions(ids: string[]) {
   }, [convex, key]);
 }
 
+// Home routes on WHO is signed in before mounting anything. ScholarHome's
+// queries are learner-only (`asLearner: true`, `requireActiveLearnerInstitution`)
+// and throw "A learner membership is required" for a staff account — which is
+// exactly what the dev autologin / dev-login button pointed at the seeded
+// teacher produced (TRA-316). A non-learner gets a plain landing instead; the
+// header's AccountMenu (sign out) and deep links (`native:goto /session/<id>`)
+// keep working from there.
 export default function Home() {
+  const { isAuthenticated } = useConvexAuth();
+  const colors = useColors();
+  const styles = useMemo(() => makeStyles(colors), [colors]);
+  const me = useQuery(api.users.currentUser, isAuthenticated ? {} : "skip");
+  const memberships = useQuery(
+    api.memberships.myMemberships,
+    isAuthenticated ? {} : "skip",
+  );
+  const isLearner = hasLearnerContext({ me, memberships });
+  if (!isAuthenticated || isLearner === undefined) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color={colors.violet} />
+      </View>
+    );
+  }
+  if (!isLearner) return <StaffLanding name={me?.name} role={me?.role} />;
+  return <ScholarHome />;
+}
+
+function StaffLanding({
+  name,
+  role,
+}: {
+  name?: string | null;
+  role?: string | null;
+}) {
+  const colors = useColors();
+  const styles = useMemo(() => makeStyles(colors), [colors]);
+  const roleLabel = role
+    ? role.replace(/_/g, " ").replace(/^\w/, (ch) => ch.toUpperCase())
+    : null;
+  return (
+    <View style={styles.staffLanding}>
+      <Text style={styles.staffLandingTitle}>
+        Signed in as {name ?? "a staff member"}
+      </Text>
+      {roleLabel ? (
+        <View style={styles.staffLandingChip}>
+          <Text style={styles.staffLandingChipText}>{roleLabel}</Text>
+        </View>
+      ) : null}
+      <Text style={styles.staffLandingBody}>
+        Rabbithole on iPad is the scholar app. Teacher tools live on the web.
+      </Text>
+    </View>
+  );
+}
+
+function ScholarHome() {
   const { isAuthenticated } = useConvexAuth();
   const convex = useConvex();
   const router = useRouter();
@@ -362,6 +423,9 @@ export default function Home() {
   // Re-entrancy guard only. A ref because it must be read and set
   // synchronously within one refresh, where a state value would be stale.
   const refreshInFlightRef = useRef(false);
+  // Bumped on every pull-to-refresh. The Math tab's card boundaries key on it,
+  // so a card that crashed in render remounts (and resubscribes) on the pull.
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const skyProgress = useSharedValue(0);
@@ -394,9 +458,22 @@ export default function Home() {
   // JS-side guard so openSky can't double-fire (endDrag + momentum both scheduling).
   const openedRef = useRef(false);
   const bounces = useTuningValue("bounces");
-  const plate = useQuery(
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+  const minuteNow = Math.floor(nowMs / 60_000) * 60_000;
+  // Every query fed by minuteNow goes through useSmoothedQuery: a plain
+  // useQuery drops to `undefined` for one round-trip whenever the bucket
+  // changes, and the `plate === undefined` spinner gate below would then
+  // unmount the whole Home once a minute — snapping CreateQuestDialog shut and
+  // wiping its text (scholar bug reports, 2026-09-22).
+  const plate = useSmoothedQuery(
     api.scholarPlate.activeForMe,
-    isAuthenticated ? { includeWebActivities: true } : "skip",
+    isAuthenticated
+      ? { includeWebActivities: true, now: minuteNow }
+      : "skip",
   );
   // Milestone reveals (f6): the pull-to-Sky gesture is inert until at least one
   // of the scholar's two maps first has real data — no surface, no teaser before
@@ -411,14 +488,16 @@ export default function Home() {
   // the effect that syncs them lives next to `skyRevealActive`'s definition.
   const skyRevealActiveRef = useRef(false);
   const mapUnlockedSV = useSharedValue(false);
-  const currentFocus = useQuery(
+  const currentFocus = useSmoothedQuery(
     api.assignments.currentClassFocusForMe,
-    isAuthenticated ? { asLearner: true } : "skip",
+    isAuthenticated ? { asLearner: true, now: minuteNow } : "skip",
   );
-  const archived = useQuery(
+  // `now` lets a reopened session fall back into Finished when its reopen day
+  // ends (sessions.finishedForScholar → isReopenLive).
+  const archived = useSmoothedQuery(
     api.sessions.finishedForScholar,
     isAuthenticated
-      ? { includeWebActivities: true, asLearner: true }
+      ? { includeWebActivities: true, asLearner: true, now: minuteNow }
       : "skip",
   );
   // Room Layer — a teacher's live cue for this scholar's own screens (see
@@ -429,67 +508,16 @@ export default function Home() {
     api.metaChat.myPrepTimeBlock,
     isAuthenticated ? {} : "skip",
   );
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNowMs(Date.now()), 30_000);
-    return () => clearInterval(t);
-  }, []);
   const serverDayRaw = useQuery(
     api.institutions.currentDayForScholar,
     isAuthenticated ? {} : "skip",
   );
   const institutionDay = useInstitutionDay(serverDayRaw);
-  const takeHomePinning = useQuery(
-    api.takeHomePlans.pinningForSelf,
-    isAuthenticated && institutionDay
-      ? { now: institutionDay.dayStart }
-      : "skip",
-  );
-  const addTakeHomeSuggestion = useMutation(api.takeHomePlans.addSuggestion);
-  const removeTakeHomeItem = useMutation(api.takeHomePlans.removeItem);
-  const startTakeHomeSeed = useMutation(api.takeHomePlans.startSeedInPlan);
-  const [takeHomePinPendingKeys, setTakeHomePinPendingKeys] = useState<
-    ReadonlySet<string>
-  >(() => new Set());
-  const takeHomePinInFlightRef = useRef(new Set<string>());
-  const readyTakeHomePinning = takeHomePinning?.dayKey
-    ? takeHomePinning
-    : undefined;
-  const pinByUnitId = useMemo(
-    () => new Map((readyTakeHomePinning?.pins ?? []).filter((p) => p.unitId).map((p) => [String(p.unitId), p])),
-    [readyTakeHomePinning],
-  );
-  const runTakeHomePin = useCallback(async (
-    key: string,
-    action: () => Promise<unknown>,
-  ) => {
-    if (takeHomePinInFlightRef.current.has(key)) return;
-    takeHomePinInFlightRef.current.add(key);
-    setTakeHomePinPendingKeys(new Set(takeHomePinInFlightRef.current));
-    try {
-      await action();
-      Haptics.selectionAsync().catch(() => {});
-    } catch (error) {
-      console.warn("[take-home-pin] update failed", error);
-      Alert.alert("Couldn't update your take-home list", "Please try again.");
-    } finally {
-      takeHomePinInFlightRef.current.delete(key);
-      setTakeHomePinPendingKeys(new Set(takeHomePinInFlightRef.current));
-    }
-  }, []);
-  const toggleQuestPin = useCallback(async (unitId: Id<"units"> | null) => {
-    if (!unitId || !readyTakeHomePinning) return;
-    const existing = pinByUnitId.get(String(unitId));
-    await runTakeHomePin(`unit:${unitId}`, () =>
-      existing
-        ? removeTakeHomeItem({ itemId: existing.itemId })
-        : addTakeHomeSuggestion({ suggestion: { kind: "quest", unitId } }),
-    );
-  }, [addTakeHomeSuggestion, pinByUnitId, readyTakeHomePinning, removeTakeHomeItem, runTakeHomePin]);
   const refreshHome = useCallback(async (owner: string) => {
     if (refreshInFlightRef.current) return;
     refreshInFlightRef.current = true;
     setRefreshOwner(owner);
+    setRefreshGeneration((g) => g + 1);
     // Convex queries are live subscriptions. A refresh updates the only
     // client-owned input and waits until those subscriptions are synced.
     setNowMs(Date.now());
@@ -625,9 +653,9 @@ export default function Home() {
   // Derive tabs from the plate's subject tabs + current rows (Active view only).
   // External apps available to this scholar drive the "Apps" tab (shown only
   // when ≥1 app exists); the launcher grid renders on that tab exclusively.
-  const scholarApps = useQuery(
+  const scholarApps = useSmoothedQuery(
     api.scholarApps.listForLauncher,
-    isAuthenticated ? {} : "skip",
+    isAuthenticated ? { now: minuteNow } : "skip",
   );
   const hasApps = (scholarApps?.length ?? 0) > 0;
   const { tabs } = useMemo(() => {
@@ -792,12 +820,12 @@ export default function Home() {
     isWithinSchoolHours,
     isPrepTime,
   });
-  // After Prep, the canonical take-home card owns these same homework rows plus
-  // the scholar's chosen items. The legacy digest stands down rather than
-  // rendering the assigned rows twice.
-  const takeHomePlanOwnsNow = showHomeworkInNow && !isPrepTime;
-  const homeworkVisibleInNow =
-    showHomeworkInNow && !takeHomePlanOwnsNow ? homeworkForNow : [];
+  // After Prep, the Now tab is the evening Home: the digest renders the
+  // homework itself (the retired "To do tonight" card used to own it here),
+  // and the dated "Coming up" forecast follows it. Web twin:
+  // components/takeHomePlanPlacement.ts → afterPrepEvening.
+  const isAfterPrepEvening = showHomeworkInNow && !isPrepTime;
+  const homeworkVisibleInNow = showHomeworkInNow ? homeworkForNow : [];
   const homeworkDueTodayInNow = homeworkVisibleInNow.filter(
     (r) => dueStatus(r.dueAt, nowMs, institutionTimeZone)?.status === "dueToday",
   );
@@ -856,7 +884,7 @@ export default function Home() {
     const isQuestTab = tab === "quests";
     const tabRows = filterRowsForTab(rows, tab);
     const effectiveRows =
-      isNowTab && (!showHomeworkInNow || takeHomePlanOwnsNow)
+      isNowTab && !showHomeworkInNow
         ? tabRows.filter((row) => row.origin !== "homework")
         : tabRows;
     return ORDER.map((origin) => {
@@ -1154,12 +1182,29 @@ export default function Home() {
     // ONE literal elevated Tree hero, passed by reference into the playlist's
     // loading boundary so the two real surfaces paint together in their final
     // order (caught-up/empty: hero first; actionable playlist: hero second).
-    const mathTreeCardElevated = isMathTab && <MapHomeCard map="tree" slot="elevated" />;
+    //
+    // Every Math card sits behind its own MathCardBoundary: each reads Convex,
+    // and a query that errors RETHROWS in render — with no boundary that is
+    // RCTFatal -> abort() on the iPad (2026-09-22). One per card, so a broken
+    // hero can't take the playlist with it.
+    const mathTreeCardElevated = isMathTab && (
+      <MathCardBoundary card="tree-elevated" resetKey={refreshGeneration}>
+        <MapHomeCard map="tree" slot="elevated" />
+      </MathCardBoundary>
+    );
     // Same pattern for the completion/growth reveal and the check-in
     // accelerator — both self-contained (own their Convex reads/gating), so
     // there's nothing to thread beyond mounting them (mirrors mathTreeCardElevated).
-    const mathCompletionCardElevated = isMathTab && <MapCompletionCard />;
-    const mathCheckInCardElevated = isMathTab && <CheckInHomeCard />;
+    const mathCompletionCardElevated = isMathTab && (
+      <MathCardBoundary card="completion" resetKey={refreshGeneration}>
+        <MapCompletionCard />
+      </MathCardBoundary>
+    );
+    const mathCheckInCardElevated = isMathTab && (
+      <MathCardBoundary card="check-in" resetKey={refreshGeneration}>
+        <CheckInHomeCard />
+      </MathCardBoundary>
+    );
     // Sky treatment (horizon backdrop + pull gesture + top peek padding) is
     // Quests-tab + unlocked-sky ONLY; a locked-sky Quests tab renders as a plain
     // list on the light surface, exactly like every other tab.
@@ -1205,11 +1250,7 @@ export default function Home() {
           // `cond && <Card/>`, so an absent card contributes no gap. Do NOT
           // wrap these in per-card <View>s (see HOME_GAP).
           <View style={[styles.column, styles.stack]}>
-            {/* Live pushes belong to today, so they ride at the top of the Now
-                tab's own list rather than sitting in the chrome above the tab
-                row. As chrome they hovered over Math, Quests and every other
-                tab they had nothing to say about, and never scrolled away. */}
-            {isNowTab ? <FocusStrip /> : null}
+            {isNowTab && !isAfterPrepEvening ? <FocusStrip /> : null}
             {/* The map card, elevated (f6/f14/f21). ONE card per map, whose
                 state picks its heading and tone: the once-ever unlock
                 ("SOMETHING NEW"), or today's movement ("TODAY"). The standing
@@ -1258,8 +1299,12 @@ export default function Home() {
             )}
             {isNowTab && liveFocusRows.length > 0 && (
               <HomeSection
-                label={blockContext?.label ?? "Right now"}
-                detail={blockContext?.detail}
+                label={
+                  isWithinSchoolHours
+                    ? (blockContext?.label ?? focusSectionLabel(true))
+                    : focusSectionLabel(false)
+                }
+                detail={isWithinSchoolHours ? blockContext?.detail : undefined}
               >
                 {liveFocusItems.map((item, index) => (
                   <PlateWorkItem
@@ -1272,6 +1317,7 @@ export default function Home() {
                 ))}
               </HomeSection>
             )}
+            {isNowTab && isAfterPrepEvening ? <FocusStrip /> : null}
             {/* Now tab: planned ghost cards — upcoming only (startsAt ≥ nowMs,
                 filtered by buildNowDigest). Invariant 1: no CTA. */}
             {isNowTab &&
@@ -1311,41 +1357,51 @@ export default function Home() {
                 A legacy nothing-to-serve result removes the skeleton
                 once the playlist query itself answers. */}
             {isMathTab && (
-              <PracticePlaylistCard
-                eyebrow={blockContext?.label}
-                eyebrowDetail={blockContext?.detail}
-                treeHero={mathTreeCardElevated}
-                completionHero={mathCompletionCardElevated}
-                checkInHero={mathCheckInCardElevated}
-              />
+              <MathCardBoundary
+                card="playlist"
+                resetKey={refreshGeneration}
+                fallback={
+                  // The heroes are contained on their own, so they keep
+                  // painting (in the card's caught-up order) around the notice.
+                  <>
+                    {mathCompletionCardElevated}
+                    {mathTreeCardElevated}
+                    {mathCheckInCardElevated}
+                    <PracticePlaylistUnavailable
+                      eyebrow={blockContext?.label}
+                      eyebrowDetail={blockContext?.detail}
+                    />
+                  </>
+                }
+              >
+                <PracticePlaylistCard
+                  eyebrow={blockContext?.label}
+                  eyebrowDetail={blockContext?.detail}
+                  treeHero={mathTreeCardElevated}
+                  completionHero={mathCompletionCardElevated}
+                  checkInHero={mathCheckInCardElevated}
+                />
+              </MathCardBoundary>
             )}
-            {isMathTab && <ScholarCalculatorLicenseCard />}
+            {isMathTab && (
+              <MathCardBoundary card="calculator-license" resetKey={refreshGeneration}>
+                <ScholarCalculatorLicenseCard />
+              </MathCardBoundary>
+            )}
             {isPrepTab && (
               <>
-                <TakeHomePlan
-                  onOpenQuests={() => setActiveTab("quests")}
-                  onTogglePin={async ({ itemId, unitId, sessionId }) => {
-                    if (itemId) await removeTakeHomeItem({ itemId });
-                    else if (unitId) await addTakeHomeSuggestion({ suggestion: { kind: "quest", unitId } });
-                    else if (sessionId) await addTakeHomeSuggestion({ suggestion: { kind: "activity", sessionId } });
-                  }}
-                />
+                {/* The three plain questions — Due · Done today? · Keep going
+                    — then Coming up dates what follows and Prep activities
+                    close it. The old "To do tonight" plan list is retired. */}
+                <ScholarPrepSections />
                 <ComingUpCard />
                 <PrepActivityCards />
               </>
             )}
-            {isNowTab && takeHomePlanOwnsNow && (
-              <TakeHomePlan
-                mode="home"
-                onTogglePin={async ({ itemId }) => {
-                  if (itemId) await removeTakeHomeItem({ itemId });
-                }}
-              />
-            )}
-            {/* Coming up — read-only lookahead below tonight's list on the
-                evening Home. Never null; renders a quiet empty line instead. */}
-            {isNowTab && takeHomePlanOwnsNow && <ComingUpCard />}
-            {isAppsTab && <AppLauncher />}
+            {/* Coming up — read-only lookahead on the evening Home. Never
+                null; renders a quiet empty line instead. */}
+            {isNowTab && isAfterPrepEvening && <ComingUpCard />}
+            {isAppsTab && <AppLauncher minuteNow={minuteNow} />}
             {/* Now tab: homework rows in digest (below practice, above quiet
                 note) — web §5.1 parity. Rendered only when not quiet (quiet
                 state shows the full plate via sections). Two groups sharing the
@@ -1400,7 +1456,7 @@ export default function Home() {
                     gets exactly ONE canonical full-surface empty state, with
                     the same "Start a Quest" way out the Quests tab offers
                     (native's empty states have been dead ends). */}
-            {isNowTab && isQuiet && !takeHomePlanOwnsNow && (
+            {isNowTab && isQuiet && (
               tabSections.length > 0 ? (
                 <HomeSectionHead label="Open work" tint={colors.charcoalSubtle} />
               ) : (
@@ -1502,9 +1558,6 @@ export default function Home() {
                   focusLock={focusLock}
                   nowMs={nowMs}
                   timeZone={institutionTimeZone}
-                  pinning={isQuestTab ? readyTakeHomePinning : undefined}
-                  onToggleQuestPin={isQuestTab ? toggleQuestPin : undefined}
-                  pendingPinKeys={takeHomePinPendingKeys}
                 />
               )
             ) : (
@@ -1513,37 +1566,20 @@ export default function Home() {
                 focusLock={focusLock}
                 nowMs={nowMs}
                 timeZone={institutionTimeZone}
-                pinning={isQuestTab ? readyTakeHomePinning : undefined}
-                onToggleQuestPin={isQuestTab ? toggleQuestPin : undefined}
-                pendingPinKeys={takeHomePinPendingKeys}
               />
             )}
           </View>
         )}
         renderSectionFooter={({ section }) =>
           section.origin === "is" && !newQuestLocked && isQuestTab ? (
-            // Three labeled sections, ALL of which can self-gate to nothing —
-            // so this wrapper carries neither padding nor gap. Spacing that
-            // lived here would be a phantom gap on the (common) day when all
-            // three are empty. Each section owns its LEADING gap instead
-            // (HOME_SECTION_GAP on its own root), which collapses with it.
+            // Both sections can self-gate to nothing — so this wrapper
+            // carries neither padding nor gap. Each section owns its LEADING
+            // gap instead (HOME_SECTION_GAP on its own root), which collapses
+            // with it. The question queue is the ONE list of open questions
+            // + teacher-suggested quests (it replaced Suggested quests + the
+            // story invitations).
             <View style={styles.column}>
-              <SuggestedQuests
-                pinning={readyTakeHomePinning}
-                onStartSeedInPlan={(seedId) =>
-                  runTakeHomePin(`seed:${seedId}`, () =>
-                    startTakeHomeSeed({ seedId }),
-                  )
-                }
-                onTogglePin={toggleQuestPin}
-                onRemovePin={(itemId) =>
-                  runTakeHomePin(`item:${itemId}`, () =>
-                    removeTakeHomeItem({ itemId }),
-                  )
-                }
-                pendingPinKeys={takeHomePinPendingKeys}
-              />
-              <StoryInvitations />
+              <QuestionQueueList />
               <PeerTrails />
             </View>
           ) : null
@@ -1554,7 +1590,11 @@ export default function Home() {
                 the scholar's frontier. It renders only when the elevated slot
                 above is empty (nothing new, nothing moved today), so the two
                 can never both be on screen. */}
-            {isMathTab && <MapHomeCard map="tree" slot="quiet" />}
+            {isMathTab && (
+              <MathCardBoundary card="tree-quiet" resetKey={refreshGeneration}>
+                <MapHomeCard map="tree" slot="quiet" />
+              </MathCardBoundary>
+            )}
             {/* Apps live on the dedicated "Apps" tab now — the footer
                 keeps only the dev manipulative launcher (dev-only). */}
             <DevManipulativeLauncher />
@@ -1714,7 +1754,6 @@ export default function Home() {
       <CreateQuestDialog
         open={createQuestOpen}
         onClose={() => setCreateQuestOpen(false)}
-        mode={effectiveActiveTab === "prep" ? "addToTonight" : "launch"}
       />
       <BirthdayConfetti active={isOwnBirthday} dayKey={institutionDayKey} />
     </>
@@ -1731,9 +1770,47 @@ export default function Home() {
  * gate, no empty wrapper left behind when there's no movement to report.
  */
 
+/**
+ * The Math tab's per-card render-error wall (see ContainmentBoundary). Only
+ * the playlist gets a visible fallback: it is the tab's reason to exist, so a
+ * silent gap there would read as "no math today". Every other Math card
+ * already self-gates to nothing on its own data, so nothing is its honest
+ * failure state too.
+ */
+function MathCardBoundary({
+  card,
+  resetKey,
+  fallback,
+  children,
+}: {
+  card: string;
+  resetKey: number;
+  fallback?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <ContainmentBoundary
+      resetKey={resetKey}
+      fallback={fallback}
+      onCatch={(error) =>
+        console.error(`[home] Math ${card} card threw in render — contained until the next refresh`, error)
+      }
+    >
+      {children}
+    </ContainmentBoundary>
+  );
+}
+
 function QuestEmptyCard({ locked }: { locked: boolean }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
+  // The question queue renders right below this section; "No Quests yet"
+  // above a list of open questions contradicts it. Same subscription the
+  // queue already holds, so this costs no extra read.
+  // Contained: an older backend (deploy skew) lacks this query; an error
+  // just shows the empty line.
+  const { data: queue } = useContainedQuery(api.questionQueue.forSelf, locked ? "skip" : {});
+  if (!locked && queue !== undefined && queue.length > 0) return null;
   // Boring empty state, matching the other tabs' muted line — the section
   // header's "+ Start a Quest" CTA is the affordance for a custom quest, so
   // this no longer needs its own pressable card.
@@ -2034,11 +2111,9 @@ function HomeworkNowNativeRow({
 function PlateUnitBand({
   row,
   showProgress = true,
-  raisedAction,
 }: {
   row: PlateRow;
   showProgress?: boolean;
-  raisedAction?: React.ReactNode;
 }) {
   const router = useRouter();
   const colors = useColors();
@@ -2075,35 +2150,6 @@ function PlateUnitBand({
       }
       onPress={openUnitProgress}
       accessibilityLabel={`Where you are in ${row.unitTitle ?? "this unit"}`}
-      raisedAction={raisedAction}
-    />
-  );
-}
-
-function plateQuestPinAction({
-  row,
-  pinning,
-  onToggleQuestPin,
-  pendingPinKeys,
-}: {
-  row: PlateRow;
-  pinning?: TakeHomePinning;
-  onToggleQuestPin?: (unitId: Id<"units">) => void | Promise<void>;
-  pendingPinKeys?: ReadonlySet<string>;
-}) {
-  const unitId = row.unitId;
-  if (!pinning?.dayKey || row.origin !== "is" || !unitId || !onToggleQuestPin) {
-    return null;
-  }
-  const existing = pinning.pins.find(
-    (pin) => String(pin.unitId) === String(unitId),
-  );
-  return (
-    <TakeHomePinButton
-      selected={!!existing}
-      subject={row.unitTitle ?? "Quest"}
-      busy={pendingPinKeys?.has(`unit:${unitId}`)}
-      onToggle={() => onToggleQuestPin(unitId)}
     />
   );
 }
@@ -2113,27 +2159,16 @@ function PlateWorkItem({
   focusLock,
   nowMs,
   timeZone,
-  pinning,
-  onToggleQuestPin,
-  pendingPinKeys,
 }: {
   item: SectionRow;
   focusLock: PlateFocusLock;
   nowMs: number;
   timeZone: string;
-  pinning?: TakeHomePinning;
-  onToggleQuestPin?: (unitId: Id<"units">) => void | Promise<void>;
-  pendingPinKeys?: ReadonlySet<string>;
 }) {
   if ("kind" in item) {
     if (item.kind === "choice-group") {
       return (
-        <ChoiceMenuCard
-          group={item}
-          pinning={pinning}
-          onToggleQuestPin={onToggleQuestPin}
-          pendingPinKeys={pendingPinKeys}
-        />
+        <ChoiceMenuCard group={item} />
       );
     }
     if (item.kind === "unit-group") {
@@ -2143,9 +2178,6 @@ function PlateWorkItem({
           focusLock={focusLock}
           nowMs={nowMs}
           timeZone={timeZone}
-          pinning={pinning}
-          onToggleQuestPin={onToggleQuestPin}
-          pendingPinKeys={pendingPinKeys}
         />
       );
     }
@@ -2157,9 +2189,6 @@ function PlateWorkItem({
       focusLock={focusLock}
       nowMs={nowMs}
       timeZone={timeZone}
-      pinning={pinning}
-      onToggleQuestPin={onToggleQuestPin}
-      pendingPinKeys={pendingPinKeys}
     />
   );
 }
@@ -2169,17 +2198,11 @@ function UnitActivityGroup({
   focusLock,
   nowMs,
   timeZone,
-  pinning,
-  onToggleQuestPin,
-  pendingPinKeys,
 }: {
   group: UnitActivityGroupRow;
   focusLock: PlateFocusLock;
   nowMs: number;
   timeZone: string;
-  pinning?: TakeHomePinning;
-  onToggleQuestPin?: (unitId: Id<"units">) => void | Promise<void>;
-  pendingPinKeys?: ReadonlySet<string>;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -2201,16 +2224,6 @@ function UnitActivityGroup({
             showDivider={index > 0}
             nowMs={nowMs}
             timeZone={timeZone}
-            raisedAction={
-              index === 0
-                ? plateQuestPinAction({
-                    row: first,
-                    pinning,
-                    onToggleQuestPin,
-                    pendingPinKeys,
-                  })
-                : null
-            }
           />
         ))}
       </View>
@@ -2223,17 +2236,11 @@ function PlateCard({
   focusLock,
   nowMs,
   timeZone,
-  pinning,
-  onToggleQuestPin,
-  pendingPinKeys,
 }: {
   row: PlateRow;
   focusLock: PlateFocusLock;
   nowMs: number;
   timeZone: string;
-  pinning?: TakeHomePinning;
-  onToggleQuestPin?: (unitId: Id<"units">) => void | Promise<void>;
-  pendingPinKeys?: ReadonlySet<string>;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -2253,12 +2260,6 @@ function PlateCard({
           hasUnitStrip={hasUnitStrip}
           nowMs={nowMs}
           timeZone={timeZone}
-          raisedAction={plateQuestPinAction({
-            row,
-            pinning,
-            onToggleQuestPin,
-            pendingPinKeys,
-          })}
         />
       </View>
     </View>
@@ -2272,7 +2273,6 @@ function PlateActivityRow({
   showDivider = false,
   nowMs,
   timeZone,
-  raisedAction,
 }: {
   row: PlateRow;
   focusLock: PlateFocusLock;
@@ -2280,11 +2280,39 @@ function PlateActivityRow({
   showDivider?: boolean;
   nowMs: number;
   timeZone: string;
-  raisedAction?: React.ReactNode;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const { open, starting, isOfflineHomework } = useRowAction(row);
+  const archive = useMutation(api.sessions.archive);
+  // An open exploration (a Quest with no activity) can never become complete,
+  // so moving it to Finished is its only way off the plate. Wrap up inside the
+  // session does this too; long-press is the housekeeping path from Home (web
+  // parity with ScholarPlate's hover archive — a long-press, not a swipe, so it
+  // can't fight the tab pager). Activity sessions finish through their activity.
+  const finishSessionId =
+    row.origin === "is" && !row.activityId ? row.sessionId : null;
+  const moveToFinished = () => {
+    if (!finishSessionId) return;
+    archive({ id: finishSessionId }).catch((err) => {
+      console.error("Failed to move quest to Finished:", err);
+      Alert.alert("Couldn't move that quest", "Please try again.");
+    });
+  };
+  const confirmMoveToFinished = () => {
+    if (!finishSessionId) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    ActionSheetIOS.showActionSheetWithOptions(
+      {
+        title: row.title,
+        options: ["Cancel", "Move to Finished"],
+        cancelButtonIndex: 0,
+      },
+      (i) => {
+        if (i === 1) moveToFinished();
+      },
+    );
+  };
   const progress =
     row.unitCompletedCount != null && row.unitActivityCount != null
       ? `${row.unitCompletedCount} of ${row.unitActivityCount}`
@@ -2329,13 +2357,21 @@ function PlateActivityRow({
     >
       <Pressable
         onPress={open}
+        onLongPress={finishSessionId ? confirmMoveToFinished : undefined}
         disabled={starting}
         accessibilityRole="button"
         accessibilityLabel={row.title}
         accessibilityState={{ disabled: starting }}
+        accessibilityActions={
+          finishSessionId
+            ? [{ name: "moveToFinished", label: "Move to Finished" }]
+            : undefined
+        }
+        onAccessibilityAction={(e) => {
+          if (e.nativeEvent.actionName === "moveToFinished") moveToFinished();
+        }}
         style={({ pressed }) => [
           styles.cardBodyMain,
-          !raisedAction && styles.cardBodyMainWithoutAction,
           pressed && styles.cardPressed,
         ]}
       >
@@ -2389,9 +2425,6 @@ function PlateActivityRow({
         )}
       </View>
       </Pressable>
-      {raisedAction ? (
-        <View style={styles.cardRaisedAction}>{raisedAction}</View>
-      ) : null}
     </View>
   );
 }
@@ -2400,14 +2433,8 @@ function PlateActivityRow({
 // option as a tappable row. Mirrors the web ChoiceMenuCard (scholar parity).
 function ChoiceMenuCard({
   group,
-  pinning,
-  onToggleQuestPin,
-  pendingPinKeys,
 }: {
   group: ChoiceGroupRow;
-  pinning?: TakeHomePinning;
-  onToggleQuestPin?: (unitId: Id<"units">) => void | Promise<void>;
-  pendingPinKeys?: ReadonlySet<string>;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -2430,12 +2457,6 @@ function ChoiceMenuCard({
           <PlateUnitBand
             row={first}
             showProgress={false}
-            raisedAction={plateQuestPinAction({
-              row: first,
-              pinning,
-              onToggleQuestPin,
-              pendingPinKeys,
-            })}
           />
         )}
         <View style={styles.choiceStrip}>
@@ -2527,6 +2548,39 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: c.bgSubtle,
+  },
+  staffLanding: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: c.bgSubtle,
+    paddingHorizontal: 32,
+    gap: 12,
+  },
+  staffLandingTitle: {
+    fontSize: 22,
+    fontFamily: fonts.bold,
+    color: c.navy,
+    textAlign: "center",
+  },
+  staffLandingChip: {
+    backgroundColor: c.violetSubtle,
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+  },
+  staffLandingChipText: {
+    fontSize: 12,
+    fontFamily: fonts.semibold,
+    color: c.violet,
+    letterSpacing: 0.3,
+  },
+  staffLandingBody: {
+    fontSize: 15,
+    fontFamily: fonts.regular,
+    color: c.charcoalSubtle,
+    textAlign: "center",
+    maxWidth: 420,
   },
   homeRoot: {
     flex: 1,
@@ -2720,10 +2774,8 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     gap: 16,
     paddingVertical: 20,
     paddingLeft: 22,
-    paddingRight: 12,
+    paddingRight: 22,
   },
-  cardBodyMainWithoutAction: { paddingRight: 22 },
-  cardRaisedAction: { flexShrink: 0, marginRight: 22 },
   cardPressed: { backgroundColor: c.gray50 },
   cardLeft: { flex: 1, minWidth: 0, gap: 7 },
   titleRow: { flexDirection: "row", alignItems: "center", gap: 12 },

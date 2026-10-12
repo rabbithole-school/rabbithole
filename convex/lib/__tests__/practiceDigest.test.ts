@@ -89,11 +89,11 @@ describe("renderScholarNote", () => {
       NOW,
     );
 
-    expect(note).toContain("🚀 *Amara Okafor*");
+    expect(note).toContain("🚀 **Amara Okafor**");
     expect(note).toContain("practiced 3 of 7 days");
-    expect(note).toContain("confirmed *count to 10* fluent");
+    expect(note).toContain("confirmed **count to 10** fluent");
     expect(note).toContain("moved the frontier forward");
-    expect(note).toContain("at the edge on *count to 20*");
+    expect(note).toContain("at the edge on **count to 20**");
     expect(note).toContain("_counting_");
     expect(note).toContain("3 reviews have since come due");
     expect(note).not.toMatch(BANNED_FRAMING);
@@ -110,9 +110,9 @@ describe("renderScholarNote", () => {
       NOW,
     );
 
-    expect(note).toContain("💤 *Ben Tran* was quiet this week");
+    expect(note).toContain("💤 **Ben Tran** was quiet this week");
     expect(note).toContain("last practiced 4 days ago");
-    expect(note).toContain("Still at the edge on *skip-counting by 2*");
+    expect(note).toContain("Still at the edge on **skip-counting by 2**");
     expect(note).not.toMatch(BANNED_FRAMING);
   });
 
@@ -128,9 +128,9 @@ describe("renderScholarNote", () => {
       NOW,
     );
 
-    expect(note).toContain("🌀 *Cleo Marsh*");
+    expect(note).toContain("🌀 **Cleo Marsh**");
     expect(note).toContain("nothing has crossed into fluent yet");
-    expect(note).toContain("friction is on *regroup in subtraction*");
+    expect(note).toContain("friction is on **regroup in subtraction**");
     expect(note).toContain("6 missed attempts");
     expect(note).toContain("Worth a check-in");
     expect(note).not.toMatch(BANNED_FRAMING);
@@ -141,7 +141,7 @@ describe("renderScholarNote", () => {
       scholar({ name: "Dev Rao", needsPlacement: true }),
       NOW,
     );
-    expect(note).toContain("🌱 *Dev Rao*");
+    expect(note).toContain("🌱 **Dev Rao**");
     expect(note).toContain("hasn't taken a placement yet");
     expect(note).toContain("unblocker");
   });
@@ -177,13 +177,13 @@ describe("computePracticeDigest", () => {
 
     const digest = computePracticeDigest({ now: NOW, cohorts });
 
-    expect(digest.text).toContain("🧭 *Practice Portrait — week of 2026-W27*");
+    expect(digest.text).toContain("🧭 **Practice Portrait — week of 2026-W27**");
     expect(digest.text).toContain("measured only against their own record");
     expect(digest.text).toContain(
       "Across 1 practice cohort: 1 of 2 scholars practiced this week.",
     );
     expect(digest.text).toContain(
-      "• _whole number arithmetic_ · 🌱 *Kai Kahale*",
+      "• _whole number arithmetic_ · 🌱 **Kai Kahale**",
     );
     // Cohort headline is a plain-language state mix.
     expect(digest.text).toContain("1 of 2 scholars practiced this week");
@@ -197,8 +197,8 @@ describe("computePracticeDigest", () => {
     expect(digest.needsPlacementCount).toBe(1);
 
     // Scholar bullets are alphabetical, not ordered by any performance counter.
-    expect(digest.text.indexOf("*Kai Kahale*")).toBeLessThan(
-      digest.text.indexOf("*Lani Kahale*"),
+    expect(digest.text.indexOf("**Kai Kahale**")).toBeLessThan(
+      digest.text.indexOf("**Lani Kahale**"),
     );
     expect(digest.text).not.toMatch(BANNED_FRAMING);
   });
@@ -314,15 +314,15 @@ describe("computePracticeDigest", () => {
         scholarCount: 1,
         topicCount: 3,
       });
-      expect(update.text).toContain("*👥 Geckos*");
+      expect(update.text).toContain("**👥 Geckos**");
       // The cohort's genuine wins are visible, not only the worklist.
       expect(update.text).toContain(
         "_Wins this week: 1 skill crossed into fluent and 1 frontier move._",
       );
-      expect(update.text).toContain("• *Avery &lt;Admin&gt;*");
+      expect(update.text).toContain("• **Avery &lt;Admin&gt;**");
       // Each flagged scholar's misses sit inside their own week.
       expect(update.text).toContain(
-        "This week: practiced 4 of 7 days, confirmed *Adding fractions &amp; mixed numbers* fluent, moved the frontier forward and now at the edge on *Long division* (and 1 more at the edge).",
+        "This week: practiced 4 of 7 days, confirmed **Adding fractions &amp; mixed numbers** fluent, moved the frontier forward and now at the edge on **Long division** (and 1 more at the edge).",
       );
       expect(update.text).toContain(
         "Each scholar's own week first, then the topics worth a 1:1",
@@ -331,16 +331,16 @@ describe("computePracticeDigest", () => {
         "🔴 [Order of operations &amp; grouping](https://example.test/teacher/math-skills?node=grouping) — missed 5 of 7, 3 sittings",
       );
       expect(update.text).toContain(
-        "🟠 *Equivalent fractions* — missed 3 of 4, 1 sitting",
+        "🟠 **Equivalent fractions** — missed 3 of 4, 1 sitting",
       );
-      expect(update.text).toContain("*Rounding* — missed 2 of 3, 1 sitting");
+      expect(update.text).toContain("**Rounding** — missed 2 of 3, 1 sitting");
       expect(update.text).toContain("Due reviews are automatic");
       expect(update.text).not.toMatch(/`(?:ERROR|WARN|INFO)`|🧗/);
       expect(update.text).not.toContain(
         "The same operation-order move resurfaced in later practice.",
       );
       expect(update.threadText).toContain(
-        "*Geckos · Avery &lt;Admin&gt;*",
+        "**Geckos · Avery &lt;Admin&gt;**",
       );
       expect(update.threadText).toContain(
         "• [Order of operations &amp; grouping](https://example.test/teacher/math-skills?node=grouping) — The same operation-order move resurfaced in later practice.",
@@ -391,7 +391,7 @@ describe("computePracticeDigest", () => {
 
       expect(update.text).not.toContain("This week:");
       expect(update.text).not.toContain("Wins this week");
-      expect(update.text).toContain("*Rounding* — missed 2 of 3, 1 sitting");
+      expect(update.text).toContain("**Rounding** — missed 2 of 3, 1 sitting");
       expect(update.text).not.toMatch(BANNED_FRAMING);
     });
 
@@ -435,7 +435,7 @@ describe("computePracticeDigest", () => {
       });
 
       expect(update.text).toContain(
-        "This week: practiced 2 of 7 days and now at the edge on *Long division*.",
+        "This week: practiced 2 of 7 days and now at the edge on **Long division**.",
       );
       // No fabricated fluency claim, and no cohort wins line without crossings.
       expect(update.text).not.toContain("confirmed");
@@ -533,7 +533,7 @@ describe("computePracticeDigest", () => {
     expect(digest.text).toContain(
       "No scholars had practice to narrate this week.",
     );
-    expect(digest.text).toContain("*Honu — daily math*");
+    expect(digest.text).toContain("**Honu — daily math**");
     expect(digest.text).toContain("No scholars in this cohort yet.");
     expect(digest.text).not.toMatch(BANNED_FRAMING);
   });
@@ -558,7 +558,7 @@ describe("computePracticeDigest", () => {
     });
 
     expect(digest.text).toContain(
-      "↳ *Kai Kahale* — practiced 4× in [Carl's Math](https://app.example.invalid/teacher/scholars?group=math-group)",
+      "↳ **Kai Kahale** — practiced 4× in [Carl's Math](https://app.example.invalid/teacher/scholars?group=math-group)",
     );
     expect(digest.text).not.toContain("whole number arithmetic");
     expect(digest.text).not.toContain("Working on");

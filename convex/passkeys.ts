@@ -49,9 +49,10 @@ import {
 import { internal } from "./_generated/api";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { requireActiveScholarAccess } from "./lib/access";
-import { getSessionOwner } from "./lib/auth";
+import { getSessionOwner, assertWritableAction } from "./lib/auth";
 import { getPasskeyConfig, CHALLENGE_TTL_MS } from "./lib/passkeyConfig";
 import { isPasskeyRole, isStaffRole, ROLES, type Role } from "./lib/roles";
+import { sha256Hex } from "./enrollment";
 
 // ── Internal CRUD (callable from actions + auth.ts authorize) ──────────
 
@@ -140,7 +141,22 @@ export const listByUserInternal = internalQuery({
   },
 });
 
-/** Insert a freshly-verified credential. */
+/**
+ * Insert a freshly-verified credential. If `enrollmentToken` is passed (the
+ * token-based bootstrap flow — see `finishEnrollmentWithToken`), the token is
+ * validated + marked used IN THIS SAME MUTATION, atomically with the insert.
+ *
+ * Why here rather than a separate `enrollment.consumeToken` call after: the
+ * three-step action (validate → verify+insert → consume) used to run as
+ * three separate transactions, so two concurrent redemptions of the same
+ * single-use token could each pass validation and each insert a credential
+ * before either consumed it — and a token reissued/deleted between the first
+ * validate and the insert did not stop the insert either. Folding the
+ * consume into this mutation means Convex's OCC serializes concurrent
+ * attempts on the same `enrollmentTokens` row, so only the first can insert;
+ * every later one (concurrent or using a stale/reissued token) fails loudly
+ * here instead of silently minting an extra passkey.
+ */
 export const insertCredential = internalMutation({
   args: {
     userId: v.id("users"),
@@ -151,8 +167,38 @@ export const insertCredential = internalMutation({
     deviceType: v.optional(v.string()),
     backedUp: v.optional(v.boolean()),
     label: v.optional(v.string()),
+    // Raw one-time enrollment token this registration is bootstrapping from
+    // (undefined for the already-signed-in `finishEnrollment` path, which
+    // has no token to consume).
+    enrollmentToken: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const { enrollmentToken, ...credentialArgs } = args;
+    if (enrollmentToken !== undefined) {
+      const tokenHash = await sha256Hex(enrollmentToken);
+      const row = await ctx.db
+        .query("enrollmentTokens")
+        .withIndex("by_tokenHash", (q) => q.eq("tokenHash", tokenHash))
+        .unique();
+      if (
+        !row ||
+        row.usedAt !== undefined ||
+        row.expiresAt < Date.now() ||
+        row.userId !== args.userId
+      ) {
+        throw new Error(
+          "This enrollment link is invalid, expired, or already used.",
+        );
+      }
+      // Re-check the account in the same transaction too: the action's
+      // lookup ran earlier, and the user may since have been deleted or
+      // moved to a role that can't hold a passkey.
+      const user = await ctx.db.get(row.userId);
+      if (!user || !isPasskeyRole(user.role as Role | null)) {
+        throw new Error("This enrollment link is invalid, expired, or already used.");
+      }
+      await ctx.db.patch(row._id, { usedAt: Date.now() });
+    }
     // Guard against a duplicate credential row (idempotent re-enroll).
     const existing = await ctx.db
       .query("passkeys")
@@ -162,7 +208,7 @@ export const insertCredential = internalMutation({
       .unique();
     if (existing) return existing._id;
     const passkeyId = await ctx.db.insert("passkeys", {
-      ...args,
+      ...credentialArgs,
       createdAt: Date.now(),
     });
     // Enrolling a passkey COMPLETES passwordless setup for an invite-created
@@ -232,6 +278,7 @@ export const startEnrollment = action({
   handler: async (ctx): Promise<{ options: unknown; challengeId: string }> => {
     const userId = await getAuthUserId(ctx);
     if (!userId) throw new Error("Not authenticated");
+    await assertWritableAction(ctx);
     return await buildRegistrationOptions(ctx, userId);
   },
 });
@@ -246,6 +293,7 @@ export const finishEnrollment = action({
   handler: async (ctx, args): Promise<{ ok: true }> => {
     const userId = await getAuthUserId(ctx);
     if (!userId) throw new Error("Not authenticated");
+    await assertWritableAction(ctx);
     await verifyAndStoreRegistration(ctx, {
       challengeId: args.challengeId,
       response: args.response,
@@ -310,9 +358,7 @@ export const finishEnrollmentWithToken = action({
       response: args.response,
       label: args.label,
       expectedUserId: result.userId,
-    });
-    await ctx.runMutation(internal.enrollment.consumeToken, {
-      token: args.token,
+      enrollmentToken: args.token,
     });
     return { ok: true };
   },
@@ -362,6 +408,8 @@ async function verifyAndStoreRegistration(
     response: string;
     label?: string;
     expectedUserId: Id<"users">;
+    // Present only for the token-bootstrap flow — see insertCredential.
+    enrollmentToken?: string;
   },
 ): Promise<void> {
   const taken = await ctx.runMutation(internal.passkeys.takeChallenge, {
@@ -396,6 +444,7 @@ async function verifyAndStoreRegistration(
     deviceType: credentialDeviceType,
     backedUp: credentialBackedUp,
     label: args.label,
+    enrollmentToken: args.enrollmentToken,
   });
 }
 

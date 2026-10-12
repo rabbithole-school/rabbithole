@@ -2,7 +2,7 @@ import { makeFunctionReference } from "convex/server";
 import type { Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
 import {
-  managedNativeAppKeyForScheme,
+  managedNativeAppKeyForApp,
   type ManagedNativeAppKey,
 } from "./managedNativeApps";
 
@@ -165,7 +165,7 @@ export async function scheduleUnlockRevocationCheck(
 ): Promise<void> {
   if (args.scholarIds.length === 0) return;
   const app = await ctx.db.get(args.externalAppId);
-  const appKey = managedNativeAppKeyForScheme(app?.nativeUrlScheme);
+  const appKey = managedNativeAppKeyForApp(app ?? {});
   if (!appKey) return;
   await scheduleUnlockRevocationCheckForKey(ctx, {
     appKey,
@@ -219,7 +219,7 @@ export async function schedulePushProjectionRefresh(
   const push = await ctx.db.get(pushId);
   if (!push || push.target.kind !== "app") return;
   const app = await ctx.db.get(push.target.externalAppId);
-  if (!managedNativeAppKeyForScheme(app?.nativeUrlScheme)) return;
+  if (!managedNativeAppKeyForApp(app ?? {})) return;
 
   const audience = push.audience;
   if (audience.kind === "scholars") {

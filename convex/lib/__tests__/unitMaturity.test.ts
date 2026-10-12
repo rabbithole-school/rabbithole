@@ -213,11 +213,6 @@ describe("computeUnitMaturity — shape invariants", () => {
       "debriefed",
     ]);
   });
-
-  test("REHEARSE_PASS_FITNESS is on the 1–5 scale", () => {
-    expect(REHEARSE_PASS_FITNESS).toBeGreaterThan(1);
-    expect(REHEARSE_PASS_FITNESS).toBeLessThanOrEqual(5);
-  });
 });
 
 describe("activityNodeStatus — per-activity dot", () => {
@@ -394,14 +389,5 @@ describe("deriveReadiness — the preflight gate", () => {
     expect(r.ready).toBe(false);
     expect(r.running).toBe(true);
     expect(r.runningStepId).toBe("scholarBotRehearsal");
-  });
-
-  test("labels are the renamed vocabulary", () => {
-    const r = deriveReadiness(ready());
-    expect(r.steps.map((s) => s.label)).toEqual([
-      "Built",
-      "Heuristic review",
-      "Scholar-bot rehearsal",
-    ]);
   });
 });

@@ -8,29 +8,55 @@ import { v } from "convex/values";
 import { action } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireStaffAction } from "./lib/auth";
-import { getValidAccessToken } from "./lib/googleTokens";
-import { getGoogleScopeCapability, INSTITUTION_DRIVE_SYNC_SCOPES } from "./lib/google";
+import { mintDownscopedAccessToken } from "./lib/googleTokens";
+import {
+  getGoogleScopeCapability,
+  includeGrantedScopesFor,
+  INSTITUTION_DRIVE_SYNC_SCOPES,
+  normalizeGoogleScopes,
+  PICKER_DRIVE_SCOPES,
+  type PersonalGooglePurpose,
+  scopesForPersonalGooglePurpose,
+} from "./lib/google";
 
 /**
  * Returns a Google OAuth consent-screen URL the client should navigate
  * to. Validates that the caller is staff and signs the caller's userId into
  * the `state` param so the callback can bind the resulting tokens to the
- * right account without relying on cross-domain session cookies.
+ * right account without relying on cross-domain session cookies. The state's
+ * nonce is stored (googleOAuthNonces) and consumed by the callback, so a
+ * state cannot be replayed. For `admissions`, the callback also requires
+ * the Google account's email to be the Rabbithole user's own.
  *
  * Staff-wide, not curriculum-only: this links the caller's OWN Google
  * account, and Google decides what that account can see. Gating it on
  * curriculum access just locked operations staff out of their own Drive.
+ *
+ * `purpose: "admissions"` asks for calendar.readonly, gmail.readonly and
+ * gmail.compose (ADMISSIONS_GOOGLE_SCOPES) on top of the scopes the user
+ * already granted. It uses incremental auth (`include_granted_scopes=true`)
+ * unless the old grant carries gmail.metadata, which incremental auth would
+ * keep; then it asks for the full set without it (includeGrantedScopesFor).
+ * `prompt=consent` is always set, so Google shows the new scopes and returns
+ * a refresh token for them. Omitted = the default Docs/Slides/Drive set.
  */
 export const beginOAuth = action({
-  args: { returnTo: v.optional(v.string()) },
+  args: {
+    returnTo: v.optional(v.string()),
+    purpose: v.optional(
+      v.union(v.literal("default"), v.literal("admissions")),
+    ),
+  },
   handler: async (ctx, args): Promise<{ url: string }> => {
     const userId = await requireStaffAction(ctx);
+    const purpose: PersonalGooglePurpose = args.purpose ?? "default";
 
     const {
       buildAuthUrl,
       readOAuthConfig,
       readStateSecret,
       signState,
+      STATE_TTL_MS,
     } = await import("./lib/google");
     const { clientId, redirectUri } = readOAuthConfig();
     const stateSecret = readStateSecret();
@@ -40,11 +66,37 @@ export const beginOAuth = action({
         ? args.returnTo
         : "/teacher";
 
+    let scopes: string[] | undefined;
+    let includeGrantedScopes = true;
+    if (purpose === "admissions") {
+      const existing = await ctx.runQuery(
+        internal.googleAccounts.getForUserInternal,
+        { userId },
+      );
+      scopes = scopesForPersonalGooglePurpose(purpose, existing?.scopes ?? []);
+      includeGrantedScopes = includeGrantedScopesFor(purpose, existing?.scopes ?? []);
+    }
+
+    // The nonce is stored and consumed by the callback: a state works once,
+    // only for this user and purpose, and only within STATE_TTL_MS.
+    const nonce = crypto.randomUUID();
+    await ctx.runMutation(internal.googleAccounts.createOAuthNonceInternal, {
+      nonce,
+      userId,
+      purpose,
+      expiresAt: Date.now() + STATE_TTL_MS,
+    });
     const state = await signState(
-      { userId, returnTo, nonce: crypto.randomUUID() },
+      { userId, returnTo, nonce, purpose },
       stateSecret
     );
-    const url = buildAuthUrl({ clientId, redirectUri, state });
+    const url = buildAuthUrl({
+      clientId,
+      redirectUri,
+      state,
+      scopes,
+      includeGrantedScopes,
+    });
     return { url };
   },
 });
@@ -84,29 +136,31 @@ export const disconnect = action({
 });
 
 /**
- * Mint a Drive access token for the SIGNED-IN user server-side so the
+ * Mint a Drive-only access token for the SIGNED-IN user server-side so the
  * Google Picker can open without the browser GIS OAuth popup.
  *
  * Why: `initTokenClient().requestAccessToken()` opens a cross-origin OAuth
  * popup and polls `popup.closed` / postMessage to hand the token back. Under
  * modern popup-isolation / third-party-storage rules that handshake can be
  * severed, so the popup hangs and NEITHER `callback` nor `error_callback`
- * fires — the picker never opens, with only a spinner and a benign
- * "Cross-Origin-Opener-Policy would block the window.closed call" console
- * warning. Minting the token on the server (we already hold the user's Drive
- * refresh token) and feeding it to the picker via `setOAuthToken` sidesteps
- * that popup entirely.
+ * fires. Minting the token on the server and feeding it to the picker via
+ * `setOAuthToken` sidesteps that popup entirely.
+ *
+ * Least privilege: the token returned to browser JS is NEVER the stored
+ * token. The personal link can carry gmail.readonly and gmail.compose
+ * (Admissions), Calendar, Docs and Slides; the browser gets a fresh token
+ * down-scoped on refresh to PICKER_DRIVE_SCOPES (drive.readonly +
+ * drive.file) and nothing else. It is not persisted. If Google will not
+ * down-scope, or answers with any other scope, this returns null.
  *
  * Identity: resolves the REAL session owner (`requireStaffAction`
  * → `getAuthUserId`), matching the OAuth write path, so a platform-admin's own
  * token is minted even while a view-as overlay is active.
  *
- * Fallback-safe: returns `null` (never throws) whenever a server token isn't
- * available — not signed in, not staff, no linked Google
- * account, the link lacks Drive read scope, or the refresh failed — so the
- * client transparently falls back to the in-browser GIS flow. The returned
- * token is the user's OWN token and carries no more privilege than the one
- * GIS would have minted in the browser.
+ * Fallback-safe: returns `null` (never throws) whenever a down-scoped token
+ * isn't available (not signed in, not staff, no linked Google account, the
+ * link lacks Drive read scope, no refresh token, or the refresh failed), so
+ * the client falls back to the in-browser GIS flow.
  */
 export const getDriveAccessToken = action({
   args: {},
@@ -126,7 +180,7 @@ export const getDriveAccessToken = action({
     if (!acct) return null;
     // The Picker's DocsView browses the user's Drive, which needs read access.
     // A `drive.file`-only grant can only see files the app itself created, so
-    // it would show an empty picker — let GIS re-consent for the broader scope
+    // it would show an empty picker; let GIS re-consent for the broader scope
     // in that case instead of handing back a token that can't list anything.
     if (
       !getGoogleScopeCapability(
@@ -136,9 +190,13 @@ export const getDriveAccessToken = action({
     ) {
       return null;
     }
+    // Ask only for the Drive scopes the link actually holds (drive.file may
+    // be absent on an old grant; Google refuses a scope that was never granted).
+    const granted = new Set(normalizeGoogleScopes(acct.scopes));
+    const scopes = PICKER_DRIVE_SCOPES.filter((s) => granted.has(s));
     try {
-      const token = await getValidAccessToken(ctx, userId);
-      return { token, email: acct.email };
+      const token = await mintDownscopedAccessToken(ctx, userId, scopes);
+      return token ? { token, email: acct.email } : null;
     } catch {
       return null;
     }

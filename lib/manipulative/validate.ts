@@ -13,6 +13,8 @@
 import {
   ALL_MANIPULATIVE_KINDS,
   isCurrentManipulativeKind,
+  type MoleculeAtom,
+  type MoleculeBond,
   type ManipulativeSpec,
 } from "./types";
 import {
@@ -20,6 +22,11 @@ import {
   assertRenderableManipulative,
   isGradableManipulative,
 } from "./authoring";
+import {
+  MAX_MOLECULE_HEAVY_ATOMS,
+  moleculeFormula,
+  validateMolecule,
+} from "./molecule";
 
 export type ManipulativeValidationResult =
   | { ok: true; spec: ManipulativeSpec }
@@ -56,6 +63,10 @@ const nonEmptyString: FieldChecker = {
 const nonEmptyArray: FieldChecker = {
   label: "a non-empty array",
   ok: (v) => Array.isArray(v) && v.length > 0,
+};
+const array: FieldChecker = {
+  label: "an array",
+  ok: (v) => Array.isArray(v),
 };
 const object: FieldChecker = {
   label: "an object",
@@ -96,6 +107,14 @@ const STRUCTURE: Record<string, Record<string, FieldChecker>> = {
   clock: { startHour: finiteNumber, startMinute: finiteNumber },
   liquid: { unit: enumOf("cup", "L", "mL"), vessels: nonEmptyArray },
   money: { available: nonEmptyArray },
+  molecule: {
+    query: nonEmptyString,
+    resolvedName: nonEmptyString,
+    cid: int,
+    formula: nonEmptyString,
+    atoms: nonEmptyArray,
+    bonds: array,
+  },
 };
 
 const observed = (v: unknown): string =>
@@ -127,6 +146,38 @@ function structuralReason(kind: string, raw: Record<string, unknown>): string | 
   if (kind === "functionMachine") {
     const inconsistency = functionMachineInconsistency(raw);
     if (inconsistency) return inconsistency;
+  }
+  if (kind === "molecule") {
+    if ((raw.cid as number) <= 0) return `molecule.cid must be a positive integer, got ${observed(raw.cid)}`;
+    const molecule = {
+      atoms: raw.atoms as MoleculeAtom[],
+      bonds: raw.bonds as MoleculeBond[],
+    };
+    const invalid = validateMolecule(molecule, {
+      maxHeavyAtoms: MAX_MOLECULE_HEAVY_ATOMS,
+    });
+    if (invalid) return `molecule structure is invalid: ${invalid}`;
+    const derivedFormula = moleculeFormula(molecule);
+    if (raw.formula !== derivedFormula) {
+      return `molecule.formula must match the structure (${derivedFormula}), got ${observed(raw.formula)}`;
+    }
+    const highlight = raw.highlight;
+    if (highlight != null) {
+      if (!highlight || typeof highlight !== "object" || Array.isArray(highlight)) {
+        return `molecule.highlight must be an object, got ${observed(highlight)}`;
+      }
+      const h = highlight as Record<string, unknown>;
+      if (
+        h.kind !== "bridgingOxygen" &&
+        !(
+          h.kind === "element" &&
+          typeof h.el === "string" &&
+          /^[A-Z][a-z]?$/.test(h.el)
+        )
+      ) {
+        return 'molecule.highlight must be {"kind":"bridgingOxygen"} or {"kind":"element","el":"O"}';
+      }
+    }
   }
   return null;
 }

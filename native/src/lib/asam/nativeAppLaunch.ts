@@ -125,6 +125,40 @@ export function notInstalledMessage(): string {
   return "It may not be installed on this iPad yet.";
 }
 
+/**
+ * Title for the Home-Screen handoff — a managed app with no URL scheme, which
+ * nothing can open programmatically. It gives the scholar the INSTRUCTION
+ * rather than asserting a state.
+ *
+ * It deliberately does NOT claim the app is already there. This path has no
+ * readiness proof: `canOpenURL` needs a scheme, so unlike the direct path
+ * there is nothing to probe, and a tile tapped before its allowlist projection
+ * lands would make any "it is on your Home Screen" claim false. Copy is the
+ * cheap half of that fix; the real one is giving this path a server-side
+ * readiness probe so it can wait like the direct path does.
+ */
+export function handoffTitle(appName: string): string {
+  return `Open ${appName} from your Home Screen`;
+}
+
+/**
+ * Body for the handoff. Two things it gets right on purpose:
+ *
+ *  - It names the ACTUAL gesture. The fleet iPads are home-button-less (iPad
+ *    A16), so "press the Home button" would send a six-year-old looking for
+ *    hardware that does not exist.
+ *  - It covers both states without promising a duration. The app is usually
+ *    already there (a standing grant converged long ago), and when it is not,
+ *    what it is waiting on is the allowlist projection — a cron plus a nudge,
+ *    normally seconds but not bounded by any number we could honestly print.
+ *    "Give it a few seconds" is true either way; "within 10-15 seconds" would
+ *    be a second unkeepable promise, and slower than reality on the common
+ *    path.
+ */
+export function handoffMessage(appName: string): string {
+  return `Swipe up from the bottom of the screen, then tap ${appName}. If it isn't there yet, give it a few seconds.`;
+}
+
 /** Body when the Single App Mode exit itself failed, so no switch was tried. */
 export function stillLockedMessage(): string {
   return "This iPad's lock didn't release. Try again, or ask a teacher.";

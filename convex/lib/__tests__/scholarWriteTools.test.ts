@@ -96,6 +96,9 @@ describe("makeScholarWriteTools — tool layer", () => {
       kind: "assessment",
     });
     expect(out).toMatch(/attached to Kai Nakamura/i);
+    // Hands the model the Documents tab, where the file lands and can be
+    // deleted, so it can point staff there rather than guess.
+    expect(out).toContain("/teacher/scholars/scholar1/documents");
     const docCall = calls.find((c) => c.fnName.includes("aideRegisterFromSlack"));
     expect(docCall?.args.storageId).toBe("s_pdf");
     expect(docCall?.args.fileMimeType).toBe("application/pdf");
@@ -207,6 +210,62 @@ describe("makeScholarWriteTools — tool layer", () => {
     expect(call?.args.periodId).toBeUndefined();
   });
 
+  test("grant_calculator_license reports an existing license instead of re-granting", async () => {
+    const { ctx, calls } = makeCtx();
+    (ctx.runMutation as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      async (fn: unknown, args: Record<string, unknown>) => {
+        calls.push({ fnName: getFunctionName(fn as Parameters<typeof getFunctionName>[0]), args });
+        return {
+          status: "already_licensed",
+          scholarName: "Kai Nakamura",
+          issuedOn: "Oct 7, 2026",
+          issuedByName: "Lehua Torres",
+          printsCard: false,
+        };
+      },
+    );
+    const tools = await build(TEACHER_PRIVATE, ctx);
+    const out = await pick(tools, "grant_calculator_license").run({ scholarName: "Kai" });
+    expect(out).toMatch(/already has a calculator license \(granted Oct 7, 2026 by Lehua Torres\)/);
+    const call = calls.find((c) => c.fnName.includes("calculatorLicenses:grantForCaller"));
+    expect(call?.args).toMatchObject({ scholarId: "scholar1", rerecord: false, callerUserId: "u_t" });
+  });
+
+  test("grant_calculator_license says the card is printing only when it prints", async () => {
+    for (const printsCard of [true, false]) {
+      const { ctx } = makeCtx();
+      (ctx.runMutation as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => ({
+        status: "granted",
+        scholarName: "Kai Nakamura",
+        issuedOn: "Oct 7, 2026",
+        issuedByName: "Lehua Torres",
+        printsCard,
+      }));
+      const tools = await build(TEACHER_PRIVATE, ctx);
+      const out = await pick(tools, "grant_calculator_license").run({ scholarName: "Kai" });
+      expect(out).toMatch(/Granted Kai Nakamura's calculator license/);
+      expect(/printing/.test(out)).toBe(printsCard);
+      expect(out).toContain("/teacher/scholars/scholar1");
+    }
+  });
+
+  test("calculator license tools refuse an ambiguous partial name without writing", async () => {
+    const { ctx, calls } = makeCtx();
+    (ctx.runQuery as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+      scholars: [
+        { id: "scholar1", name: "Kai Nakamura" },
+        { id: "scholar2", name: "Kaia Lee" },
+      ],
+      extendedEducationOmitted: 0,
+    }));
+    const tools = await build(TEACHER_PRIVATE, ctx);
+    for (const name of ["grant_calculator_license", "revoke_calculator_license"]) {
+      const out = await pick(tools, name).run({ scholarName: "Kai" });
+      expect(out).toMatch(/more than one scholar/);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
   test("surface + role gating: channel withholds credential/destructive/upload; operations staff (the retired registrar role's successor) gets account-only", async () => {
     const { ctx } = makeCtx();
     const names = async (
@@ -233,6 +292,8 @@ describe("makeScholarWriteTools — tool layer", () => {
     expect(teacherChannel).not.toContain("add_whole_child_input");
     expect(teacherChannel).not.toContain("reset_scholar_password");
     expect(teacherChannel).not.toContain("upload_scholar_document");
+    expect(teacherChannel).toContain("grant_calculator_license");
+    expect(teacherChannel).toContain("revoke_calculator_license");
 
     const adminPrivate = await names(ROLES.PLATFORM_ADMIN, "private");
     expect(adminPrivate).toContain("delete_scholar");
@@ -245,6 +306,7 @@ describe("makeScholarWriteTools — tool layer", () => {
     expect(registrar).not.toContain("add_scholar_observation");
     expect(registrar).not.toContain("upload_scholar_document");
     expect(registrar).not.toContain("delete_scholar");
+    expect(registrar).not.toContain("grant_calculator_license");
 
     const designer = await names(ROLES.CURRICULUM_DESIGNER, "private");
     expect(designer).toHaveLength(0);

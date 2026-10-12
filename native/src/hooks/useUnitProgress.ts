@@ -175,12 +175,19 @@ export function useUnitProgress({
   const completedCount = onlineActivities.filter((item) => item.isCompleted).length;
   const progressPct =
     activityTotal > 0 ? Math.round((completedCount / activityTotal) * 100) : 0;
+  // The count is the whole label — there is deliberately no "unit complete"
+  // branch. `activityTotal` counts only the activities THIS assignment made
+  // live (`activities.listByUnitPublic` filters to the assignment's schedule),
+  // narrowed again to the online-ish kinds above, so `completedCount ===
+  // activityTotal` never proves the unit is finished: a homework session
+  // carrying one activity out of a multi-lesson unit satisfies it the moment
+  // that one activity is marked done. Home owns the real unit picture, and
+  // `maybeAwardUnitBadge` (`convex/lib/badgeAward.ts`) owns the genuine unit
+  // celebration — it walks every lesson with no assignment filter.
   const progressLabel =
     activityTotal === 0
       ? "No activities yet"
-      : completedCount === activityTotal
-        ? "Unit complete"
-        : `${completedCount} of ${activityTotal} done`;
+      : `${completedCount} of ${activityTotal} done`;
   const currentActivity =
     flatActivities.find((item) => item.isCurrent) ??
     (activityId

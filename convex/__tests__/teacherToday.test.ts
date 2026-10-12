@@ -5,7 +5,11 @@ import { api } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { QueryCtx } from "../_generated/server";
 import { STRUGGLING_MISS_THRESHOLD } from "../lib/practice/scheduler";
-import { strugglingSkillCount } from "../teacherToday";
+import {
+  overnightLaneTitle,
+  sinceDayTitle,
+  strugglingSkillCount,
+} from "../teacherToday";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -250,11 +254,14 @@ async function seedWorld(t: ReturnType<typeof convexTest>) {
 
     return {
       teacherId,
+      homeInstitutionId,
       homeScholarId,
       otherScholarId,
       unaffiliatedHomeScholarId,
       assignmentId,
       activityId,
+      lessonId,
+      unitId,
     };
   });
 }
@@ -359,6 +366,53 @@ describe("teacherToday.todayForTeacher", () => {
       expect(row.label).not.toContain("since yesterday");
       expect(row.label).not.toContain("overnight");
     }
+  });
+
+  test("the practice row reads only attempts inside the overnight window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+    const world = await seedWorld(t);
+    await t.run(async (ctx) => {
+      const seeded = await ctx.db
+        .query("practiceAttempts")
+        .withIndex("by_scholar", (q) => q.eq("scholarId", world.homeScholarId))
+        .collect();
+      for (const row of seeded) await ctx.db.delete(row._id);
+      // Weeks of history before the window: none of it is "since this morning".
+      for (let index = 0; index < 50; index += 1) {
+        await ctx.db.insert("practiceAttempts", {
+          scholarId: world.homeScholarId,
+          nodeKey: "adding",
+          correct: true,
+          domain: "whole-number-arithmetic",
+          lane: "frontier",
+          createdAt: NOW - (3 + index) * 24 * 60 * 60 * 1000,
+        });
+      }
+    });
+    const asTeacher = await withUser(t, world.teacherId);
+    const query = () =>
+      asTeacher.query(api.teacherToday.todayForTeacher, {
+        institutionScope: "home-school",
+      });
+
+    const before = await query();
+    expect(before.overnight.some((row) => row.kind === "practice")).toBe(false);
+
+    await t.run(async (ctx) => {
+      await ctx.db.insert("practiceAttempts", {
+        scholarId: world.homeScholarId,
+        nodeKey: "adding",
+        correct: true,
+        domain: "whole-number-arithmetic",
+        lane: "frontier",
+        createdAt: NOW - 2 * 60 * 1000,
+      });
+    });
+    const after = await query();
+    const practiceRow = after.overnight.find((row) => row.kind === "practice");
+    expect(practiceRow?.label).toBe("1 scholar completed practice just now.");
   });
 
   test("surfaces a struggling scholar in Needs a look", async () => {
@@ -844,5 +898,337 @@ describe("birthday surfacing", () => {
         nthLabel: "9th Birthday",
       }),
     ]);
+  });
+
+  test("birthdaysForRoster returns only enrolled scholars in the institution lens", async () => {
+    const t = convexTest(schema, modules);
+    const world = await seedWorld(t);
+    await t.run(async (ctx) => {
+      await ctx.db.patch(world.homeScholarId, { dateOfBirth: "2015-07-13" });
+      await ctx.db.patch(world.unaffiliatedHomeScholarId, {
+        dateOfBirth: "2016-03-05",
+      });
+      await ctx.db.patch(world.otherScholarId, { dateOfBirth: "2017-01-02" });
+      const guestId = await ctx.db.insert("users", {
+        name: "Visiting Scholar",
+        username: "visiting-scholar",
+        role: "scholar",
+        institutionId: world.homeInstitutionId,
+        enrollmentStanding: "program_guest",
+        dateOfBirth: "2018-02-03",
+      });
+      await ctx.db.insert("memberships", {
+        userId: guestId,
+        role: "scholar",
+        institutionId: world.homeInstitutionId,
+      });
+    });
+    const asTeacher = await withUser(t, world.teacherId);
+
+    const rows = await asTeacher.query(
+      api.birthdays.birthdaysForRoster,
+      { institutionScope: "home-school" },
+    );
+
+    expect(rows).toEqual([
+      {
+        scholarId: world.unaffiliatedHomeScholarId,
+        name: "Unaffiliated Home Scholar",
+        username: "unaffiliated-home-scholar",
+        month: 3,
+        day: 5,
+      },
+      {
+        scholarId: world.homeScholarId,
+        name: "Home Scholar",
+        username: "home-scholar",
+        month: 7,
+        day: 13,
+      },
+    ]);
+  });
+});
+
+describe("digest suppression on completion", () => {
+  test("a completion since generation suppresses the contradicted digest row", async () => {
+    // The Today suppression is watermark-only by design (counts alone never
+    // suppressed), so before the completion leg existed a digest written
+    // before a scholar finished kept its row — beside a Run page that already
+    // said the work was done.
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+    const world = await seedWorld(t);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("classDigests", {
+        scope: "cohort",
+        assignmentId: world.assignmentId,
+        status: "ready",
+        // Newest read on this assignment, so it is the one row dedupe keeps.
+        generatedAt: NOW - 60 * 1000,
+        headline: "Nobody has finished this yet.",
+        sourceSnapshot: {
+          completedCount: 0,
+          startedCount: 1,
+          deliverableCount: 0,
+          // Analysis + message legs deliberately ahead of current source, so
+          // the ONLY thing that can trail is completion.
+          latestAnalysisAt: NOW + DAY_MS,
+          latestMessageAt: NOW + DAY_MS,
+          latestCompletionAt: NOW - 20 * 60 * 1000,
+        },
+      });
+    });
+    const asTeacher = await withUser(t, world.teacherId);
+
+    const before = await asTeacher.query(api.teacherToday.todayForTeacher, {
+      institutionScope: "home-school",
+    });
+    expect(
+      before.waitingOnYou.some((row) =>
+        row.label.includes("Nobody has finished this yet"),
+      ),
+    ).toBe(true);
+
+    await t.run(async (ctx) => {
+      await ctx.db.insert("activityCompletions", {
+        scholarId: world.homeScholarId,
+        activityId: world.activityId,
+        lessonId: world.lessonId,
+        unitId: world.unitId,
+        assignmentId: world.assignmentId,
+        completedAt: NOW - 60 * 1000,
+      });
+    });
+
+    const after = await asTeacher.query(api.teacherToday.todayForTeacher, {
+      institutionScope: "home-school",
+    });
+    expect(
+      after.waitingOnYou.some((row) =>
+        row.label.includes("Nobody has finished this yet"),
+      ),
+    ).toBe(false);
+  });
+
+  // Rows generated BEFORE the completion leg shipped carry the two original
+  // watermark legs and no `latestCompletionAt`. `watermarkAdvanced` skips an
+  // absent leg by design, and this surface is watermark-only — so without a
+  // fallback a completion landing after deploy would leave a pre-deploy digest
+  // standing in Today, which is the very hole this work closes.
+  async function seedLegacyDigest(
+    t: ReturnType<typeof convexTest>,
+    world: Awaited<ReturnType<typeof seedWorld>>,
+    completedCount: number,
+  ) {
+    await t.run(async (ctx) => {
+      await ctx.db.insert("classDigests", {
+        scope: "cohort",
+        assignmentId: world.assignmentId,
+        status: "ready",
+        generatedAt: NOW - 60 * 1000,
+        headline: "A digest written before completion watermarks existed.",
+        sourceSnapshot: {
+          completedCount,
+          startedCount: 1,
+          deliverableCount: 0,
+          // Both original legs pinned AHEAD of current source, so the only
+          // thing that can trail is completion.
+          latestAnalysisAt: NOW + DAY_MS,
+          latestMessageAt: NOW + DAY_MS,
+          // latestCompletionAt deliberately absent — this is the legacy shape.
+        },
+      });
+    });
+  }
+
+  async function legacyDigestShows(
+    t: ReturnType<typeof convexTest>,
+    world: Awaited<ReturnType<typeof seedWorld>>,
+  ) {
+    const asTeacher = await withUser(t, world.teacherId);
+    const result = await asTeacher.query(api.teacherToday.todayForTeacher, {
+      institutionScope: "home-school",
+    });
+    return result.waitingOnYou.some((row) =>
+      row.label.includes("written before completion watermarks existed"),
+    );
+  }
+
+  async function completeOnce(
+    t: ReturnType<typeof convexTest>,
+    world: Awaited<ReturnType<typeof seedWorld>>,
+    scholarId: Id<"users">,
+  ) {
+    await t.run(async (ctx) => {
+      await ctx.db.insert("activityCompletions", {
+        scholarId,
+        activityId: world.activityId,
+        lessonId: world.lessonId,
+        unitId: world.unitId,
+        assignmentId: world.assignmentId,
+        completedAt: NOW - 60 * 1000,
+      });
+    });
+  }
+
+  test("a legacy digest with no completion leg still trails once a completion lands", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+    const world = await seedWorld(t);
+    // Snapshotted at 0 completions; one lands afterwards.
+    await seedLegacyDigest(t, world, 0);
+    expect(await legacyDigestShows(t, world)).toBe(true);
+
+    await completeOnce(t, world, world.homeScholarId);
+
+    expect(await legacyDigestShows(t, world)).toBe(false);
+  });
+
+  test("a legacy digest whose completion count is unchanged is left alone", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+    const world = await seedWorld(t);
+    // The completion already existed when the digest was written, so its
+    // snapshot matches current source: nothing has happened since, and an
+    // absent leg must NOT be read as "stale".
+    await completeOnce(t, world, world.homeScholarId);
+    await seedLegacyDigest(t, world, 1);
+
+    expect(await legacyDigestShows(t, world)).toBe(true);
+  });
+
+  test("a digest with no snapshot at all keeps its pre-watermark behavior", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+    const world = await seedWorld(t);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("classDigests", {
+        scope: "cohort",
+        assignmentId: world.assignmentId,
+        status: "ready",
+        generatedAt: NOW - 60 * 1000,
+        headline: "No snapshot at all.",
+        // sourceSnapshot absent — no counts to compare either.
+      });
+    });
+    await completeOnce(t, world, world.homeScholarId);
+
+    const asTeacher = await withUser(t, world.teacherId);
+    const result = await asTeacher.query(api.teacherToday.todayForTeacher, {
+      institutionScope: "home-school",
+    });
+    expect(
+      result.waitingOnYou.some((row) => row.label.includes("No snapshot at all")),
+    ).toBe(true);
+  });
+});
+
+describe("waiting-on-you digest rows", () => {
+  test("one assignment yields one digest row, not one per digest scope", async () => {
+    // The walkthrough saw two near-identical "class digest is ready" rows for
+    // a single assignment: an assignment carries a cohort digest AND a digest
+    // per activity, and every ready one used to emit its own row. Today is a
+    // to-do list, so the unit of work is the assignment (T1 — one canonical
+    // rendering per signal).
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+    const world = await seedWorld(t);
+    await t.run(async (ctx) => {
+      // seedWorld already inserted a ready ACTIVITY digest on this assignment.
+      await ctx.db.insert("classDigests", {
+        scope: "cohort",
+        assignmentId: world.assignmentId,
+        status: "ready",
+        generatedAt: NOW - 5 * 60 * 1000,
+        headline: "A second read of the same dispatch.",
+      });
+    });
+
+    const asTeacher = await withUser(t, world.teacherId);
+    const result = await asTeacher.query(api.teacherToday.todayForTeacher, {
+      institutionScope: "home-school",
+    });
+
+    const digestRows = result.waitingOnYou.filter(
+      (row) => row.kind === "digest",
+    );
+    expect(digestRows).toHaveLength(1);
+    // Newest-first: the freshest read is the one that survives.
+    expect(digestRows[0].label).toContain("A second read of the same dispatch");
+  });
+
+  test("digests on different assignments each keep their row", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const t = convexTest(schema, modules);
+    const world = await seedWorld(t);
+    await t.run(async (ctx) => {
+      const first = await ctx.db.get(world.assignmentId);
+      const secondAssignmentId = await ctx.db.insert("assignments", {
+        teacherId: world.teacherId,
+        unitId: first!.unitId,
+        title: "Second Assignment",
+        scholarIds: [world.homeScholarId],
+        startedAt: NOW - DAY_MS,
+      });
+      await ctx.db.insert("classDigests", {
+        scope: "cohort",
+        assignmentId: secondAssignmentId,
+        status: "ready",
+        generatedAt: NOW - 5 * 60 * 1000,
+        headline: "A different dispatch entirely.",
+      });
+    });
+
+    const asTeacher = await withUser(t, world.teacherId);
+    const result = await asTeacher.query(api.teacherToday.todayForTeacher, {
+      institutionScope: "home-school",
+    });
+    expect(
+      result.waitingOnYou.filter((row) => row.kind === "digest"),
+    ).toHaveLength(2);
+  });
+});
+
+describe("overnight lane title", () => {
+  // The walkthrough: a lane headed "SO FAR TODAY" whose only row read "1 of 1
+  // finished last night's Show that 1/2 = 2/4". A heading is a claim (T7), so
+  // it has to cover the oldest row the lane actually shows.
+  test("names the previous school day when the lane carries a look-back row", () => {
+    expect(overnightLaneTitle("So far today", false, "Since yesterday")).toBe(
+      "Since yesterday",
+    );
+  });
+
+  test("keeps the window title when there is no look-back row", () => {
+    expect(overnightLaneTitle("So far today", false, null)).toBe("So far today");
+  });
+
+  test("keeps the window title when the window already reaches back", () => {
+    // Before first bell the window itself spans the weekend, so its title is
+    // already honest about the older rows — don't override it.
+    expect(overnightLaneTitle("Over the weekend", true, "Since Friday")).toBe(
+      "Over the weekend",
+    );
+  });
+});
+
+describe("sinceDayTitle", () => {
+  test("the immediately preceding calendar day reads as yesterday", () => {
+    expect(sinceDayTitle("2026-07-12", "2026-07-13")).toBe("Since yesterday");
+  });
+
+  test("a gap names the day the class was last in", () => {
+    // Monday looking back across the weekend to Friday.
+    expect(sinceDayTitle("2026-07-10", "2026-07-13")).toBe("Since Friday");
+  });
+
+  test("crosses a month boundary without claiming a gap", () => {
+    expect(sinceDayTitle("2026-06-30", "2026-07-01")).toBe("Since yesterday");
   });
 });

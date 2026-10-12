@@ -1,10 +1,15 @@
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
-import { grantInstitutionMembership, seedTestInstitution } from "./institutionTestHelpers";
 import { api } from "../_generated/api";
 import { DEFAULT_TIMEZONE, dueStatus } from "../../shared/institutionDay";
-import type { Doc, Id } from "../_generated/dataModel";
+import type { Id } from "../_generated/dataModel";
+import {
+  makeActivity,
+  makeLesson,
+  makeUnit,
+  makeWorld,
+} from "./factories/world";
 
 // "The turn, not the bell" (item 1): every class-focus entry a scholar or
 // teacher can see must carry the INSTITUTION's timezone, so the frontend can
@@ -18,28 +23,6 @@ const modules = (
     glob: (pattern: string) => Record<string, () => Promise<unknown>>;
   }
 ).glob("../**/*.ts");
-
-async function seedUser(
-  t: ReturnType<typeof convexTest>,
-  role: "scholar" | "teacher" = "scholar",
-  overrides: Partial<Doc<"users">> = {},
-) {
-  const institutionId = overrides.institutionId ?? (await seedTestInstitution(t));
-  const userId = await t.run(async (ctx) =>
-    ctx.db.insert("users", {
-      name: overrides.name ?? `Test ${role}`,
-      username: overrides.username ?? `test${role}`,
-      role,
-      institutionId: overrides.institutionId,
-    }),
-  );
-
-  await t.run((ctx) => ctx.db.patch(userId, { institutionId }));
-  if (role === "teacher") {
-    await grantInstitutionMembership(t, userId, institutionId, role);
-  }
-  return userId;
-}
 
 async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) =>
@@ -56,43 +39,43 @@ async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 
 async function seedUnitWithActivity(
   t: ReturnType<typeof convexTest>,
-  teacherId: Id<"users">,
+  school: Awaited<ReturnType<typeof makeWorld>>["schools"][number],
 ) {
-  return await t.run(async (ctx) => {
-    const unitId = await ctx.db.insert("units", {
-      teacherId,
-      title: "Test Unit",
-      isActive: true,
-    });
-    const lessonId = await ctx.db.insert("lessons", {
-      unitId,
-      title: "Test Lesson",
-      order: 0,
-    });
-    const activityId = await ctx.db.insert("activities", {
-      lessonId,
-      title: "Test Activity",
-      kind: "online",
-      systemPrompt: "...",
-      order: 0,
-      defaultMode: "classFocus",
-    });
-    return { unitId, activityId };
+  const unitId = await makeUnit(t, school.teacher, school, {
+    title: "Test Unit",
+    isActive: true,
   });
+  const lessonId = await makeLesson(t, unitId, {
+    title: "Test Lesson",
+    order: 0,
+  });
+  const activityId = await makeActivity(t, lessonId, {
+    title: "Test Activity",
+    kind: "online",
+    systemPrompt: "...",
+    order: 0,
+    defaultMode: "classFocus",
+  });
+  return { unitId, activityId };
 }
 
 describe("class-focus reads carry an institution timeZone", () => {
   test("currentClassFocusForMe defaults to Pacific/Honolulu with no institution set", async () => {
     const t = convexTest(schema, modules);
-    const teacherId = await seedUser(t, "teacher");
-    const scholarId = await seedUser(t, "scholar");
-    const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
-    const asTeacher = await withUser(t, teacherId);
-    const asScholar = await withUser(t, scholarId);
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const school = world.schools[0];
+    const { unitId, activityId } = await seedUnitWithActivity(t, school);
+    const asTeacher = await world.as.staffOf(school);
+    const asScholar = await world.as.scholar(school.scholars[0]);
 
     const assignmentId = await asTeacher.mutation(api.assignments.create, {
       unitId,
-      scholarIds: [scholarId],
+      scholarIds: [school.scholars[0].id],
     });
     await asTeacher.mutation(api.assignments.pushActivity, {
       assignmentId,
@@ -109,23 +92,23 @@ describe("class-focus reads carry an institution timeZone", () => {
 
   test("currentClassFocusForMe reflects the scholar's OWN institution timezone", async () => {
     const t = convexTest(schema, modules);
-    const institutionId = await t.run(async (ctx) =>
-      ctx.db.insert("institutions", {
-        name: "Test School",
-        slug: "test-school",
-        kind: "school",
-        timeZone: "America/New_York",
-      }),
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const school = world.schools[0];
+    await t.run((ctx) =>
+      ctx.db.patch(school.id, { timeZone: "America/New_York" }),
     );
-    const teacherId = await seedUser(t, "teacher", { institutionId });
-    const scholarId = await seedUser(t, "scholar", { institutionId });
-    const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
-    const asTeacher = await withUser(t, teacherId);
-    const asScholar = await withUser(t, scholarId);
+    const { unitId, activityId } = await seedUnitWithActivity(t, school);
+    const asTeacher = await world.as.staffOf(school);
+    const asScholar = await world.as.scholar(school.scholars[0]);
 
     const assignmentId = await asTeacher.mutation(api.assignments.create, {
       unitId,
-      scholarIds: [scholarId],
+      scholarIds: [school.scholars[0].id],
     });
     await asTeacher.mutation(api.assignments.pushActivity, {
       assignmentId,
@@ -141,22 +124,22 @@ describe("class-focus reads carry an institution timeZone", () => {
 
   test("activePushesForTeacher carries the teacher's own institution timezone", async () => {
     const t = convexTest(schema, modules);
-    const institutionId = await t.run(async (ctx) =>
-      ctx.db.insert("institutions", {
-        name: "Test School",
-        slug: "test-school",
-        kind: "school",
-        timeZone: "America/Chicago",
-      }),
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const school = world.schools[0];
+    await t.run((ctx) =>
+      ctx.db.patch(school.id, { timeZone: "America/Chicago" }),
     );
-    const teacherId = await seedUser(t, "teacher", { institutionId });
-    const scholarId = await seedUser(t, "scholar", { institutionId });
-    const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
-    const asTeacher = await withUser(t, teacherId);
+    const { unitId, activityId } = await seedUnitWithActivity(t, school);
+    const asTeacher = await world.as.staffOf(school);
 
     const assignmentId = await asTeacher.mutation(api.assignments.create, {
       unitId,
-      scholarIds: [scholarId],
+      scholarIds: [school.scholars[0].id],
     });
     await asTeacher.mutation(api.assignments.pushActivity, {
       assignmentId,
@@ -172,31 +155,31 @@ describe("class-focus reads carry an institution timeZone", () => {
 
   test("second-school homework carries its calendar through both plate and assignment reads at midnight", async () => {
     const t = convexTest(schema, modules);
+    const world = await makeWorld(t, {
+      schools: 2,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const [primary, second] = world.schools;
     await t.run(async (ctx) => {
-      await ctx.db.insert("institutions", {
+      await ctx.db.patch(primary.id, {
         name: "Primary School",
         slug: "primary-school",
-        kind: "school",
-        isPrimary: true,
         timeZone: "Pacific/Honolulu",
       });
-    });
-    const institutionId = await t.run(async (ctx) =>
-      ctx.db.insert("institutions", {
+      await ctx.db.patch(second.id, {
         name: "Second School",
         slug: "second-school",
-        kind: "school",
         timeZone: "America/New_York",
-      }),
-    );
-    const teacherId = await seedUser(t, "teacher", { institutionId });
-    const scholarId = await seedUser(t, "scholar", { institutionId });
-    const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
-    const asTeacher = await withUser(t, teacherId);
-    const asScholar = await withUser(t, scholarId);
+      });
+    });
+    const { unitId, activityId } = await seedUnitWithActivity(t, second);
+    const asTeacher = await world.as.staffOf(second);
+    const asScholar = await world.as.scholar(second.scholars[0]);
     const assignmentId = await asTeacher.mutation(api.assignments.create, {
       unitId,
-      scholarIds: [scholarId],
+      scholarIds: [second.scholars[0].id],
     });
     const dueAt = Date.parse("2026-06-15T16:00:00.000Z");
     await asTeacher.mutation(api.assignments.pushActivity, {
@@ -224,27 +207,29 @@ describe("class-focus reads carry an institution timeZone", () => {
 
   test("a second school missing a timezone uses only the static legacy default", async () => {
     const t = convexTest(schema, modules);
-    const secondId = await t.run(async (ctx) => {
-      await ctx.db.insert("institutions", {
+    const world = await makeWorld(t, {
+      schools: 2,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const [primary, second] = world.schools;
+    await t.run(async (ctx) => {
+      await ctx.db.patch(primary.id, {
         name: "Primary School",
         slug: "primary-school",
-        kind: "school",
-        isPrimary: true,
         timeZone: "America/Chicago",
       });
-      return await ctx.db.insert("institutions", {
+      await ctx.db.patch(second.id, {
         name: "Second School",
         slug: "second-school",
-        kind: "school",
       });
     });
-    const teacherId = await seedUser(t, "teacher", { institutionId: secondId });
-    const scholarId = await seedUser(t, "scholar", { institutionId: secondId });
-    const { unitId } = await seedUnitWithActivity(t, teacherId);
-    const asTeacher = await withUser(t, teacherId);
+    const { unitId } = await seedUnitWithActivity(t, second);
+    const asTeacher = await world.as.staffOf(second);
     const assignmentId = await asTeacher.mutation(api.assignments.create, {
       unitId,
-      scholarIds: [scholarId],
+      scholarIds: [second.scholars[0].id],
     });
     const assignment = await asTeacher.query(api.assignments.get, {
       assignmentId,
@@ -293,13 +278,21 @@ describe("class-focus reads carry an institution timeZone", () => {
 
   test("a roster mixing legacy and institution scholars has no timezone", async () => {
     const t = convexTest(schema, modules);
-    const { teacherId, assignmentId } = await t.run(async (ctx) => {
-      const institutionId = await ctx.db.insert("institutions", {
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const school = world.schools[0];
+    await t.run((ctx) =>
+      ctx.db.patch(school.id, {
         name: "Test School",
         slug: "test-school",
-        kind: "school",
         timeZone: "America/New_York",
-      });
+      }),
+    );
+    const { teacherId, assignmentId } = await t.run(async (ctx) => {
       const teacherId = await ctx.db.insert("users", {
         name: "Teacher",
         username: "teacher",
@@ -310,12 +303,6 @@ describe("class-focus reads carry an institution timeZone", () => {
         username: "legacy-scholar",
         role: "scholar",
       });
-      const institutionScholarId = await ctx.db.insert("users", {
-        name: "Institution Scholar",
-        username: "institution-scholar",
-        role: "scholar",
-        institutionId,
-      });
       const unitId = await ctx.db.insert("units", {
         teacherId,
         title: "Mixed Unit",
@@ -324,7 +311,7 @@ describe("class-focus reads carry an institution timeZone", () => {
       const assignmentId = await ctx.db.insert("assignments", {
         teacherId,
         unitId,
-        scholarIds: [legacyScholarId, institutionScholarId],
+        scholarIds: [legacyScholarId, school.scholars[0].id],
         startedAt: Date.now(),
         activitySchedule: [],
       });

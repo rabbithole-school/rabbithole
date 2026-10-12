@@ -1,5 +1,4 @@
 import { convexTest } from "convex-test";
-import type { TestConvex } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
@@ -7,11 +6,9 @@ import type { Id } from "../_generated/dataModel";
 import type { QueryCtx } from "../_generated/server";
 import { readScholarRoster } from "../lib/scholarReads";
 import {
-  grantInstitutionMembership,
-  seedScholarInInstitution,
-  seedStaffWithMembership,
-  seedTestInstitution,
-} from "./institutionTestHelpers";
+  makeScholar,
+  makeWorld,
+} from "./factories/world";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -19,41 +16,21 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
-type TC = TestConvex<typeof schema>;
-
-async function withUser(t: TC, userId: Id<"users">) {
-  const sessionId = await t.run((ctx) =>
-    ctx.db.insert("authSessions", {
-      userId,
-      expirationTime: Date.now() + 3_600_000,
-    }),
-  );
-  return t.withIdentity({
-    subject: `${userId}|${sessionId}`,
-    issuer: "https://convex.dev",
-  });
-}
-
 describe("users.listDirectoryScholars", () => {
   test("returns only directory identity and credential fields", async () => {
     const t = convexTest(schema, modules);
-    const institutionId = await seedTestInstitution(t, {
-      name: "Moli School",
-      slug: "moli",
-      isPrimary: true,
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
     });
-    const teacher = await seedStaffWithMembership(t, {
-      institutionId,
-      name: "Lehua Torres",
-      username: "lehua",
-    });
-    const scholar = await seedScholarInInstitution(t, {
-      institutionId,
-      name: "Kai Kealoha",
-      username: "kai",
-    });
+    const school = world.schools[0];
+    const scholar = school.scholars[0];
     await t.run(async (ctx) => {
-      await ctx.db.patch(scholar, {
+      await ctx.db.patch(scholar.id, {
+        name: "Kai Kealoha",
+        username: "kai",
         image: "https://example.com/kai.png",
         email: "kai@example.com",
         phone: "555-0100",
@@ -63,20 +40,20 @@ describe("users.listDirectoryScholars", () => {
         enrollmentStanding: "program_guest",
       });
       await ctx.db.insert("authAccounts", {
-        userId: scholar,
+        userId: scholar.id,
         provider: "password",
         providerAccountId: "kai@local",
       });
     });
 
-    const directory = await (await withUser(t, teacher)).query(
+    const directory = await (await world.as.staffOf(school)).query(
       api.users.listDirectoryScholars,
       {},
     );
 
     expect(directory).toEqual([
       {
-        _id: scholar,
+        _id: scholar.id,
         name: "Kai Kealoha",
         image: "https://example.com/kai.png",
         username: "kai",
@@ -96,27 +73,27 @@ describe("users.listDirectoryScholars", () => {
 
   test("honors a multi-membership caller's requested school and falls back on invalid or non-member scopes", async () => {
     const t = convexTest(schema, modules);
-    const moli = await seedTestInstitution(t, {
-      name: "Moli School",
-      slug: "moli",
-      isPrimary: true,
+    const world = await makeWorld(t, {
+      schools: 3,
+      scholarsPerSchool: 0,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
     });
-    const kona = await seedTestInstitution(t, {
-      name: "Kona Learning",
-      slug: "kona",
+    const [moli, kona, guests] = world.schools;
+    await t.run(async (ctx) => {
+      await ctx.db.patch(moli.id, { name: "Moli School", slug: "moli" });
+      await ctx.db.patch(kona.id, { name: "Kona Learning", slug: "kona" });
+      await ctx.db.patch(guests.id, {
+        name: "Guests School",
+        slug: "guests",
+      });
+      await ctx.db.insert("memberships", {
+        userId: moli.teacher.id,
+        role: "teacher",
+        institutionId: kona.id,
+      });
     });
-    const guests = await seedTestInstitution(t, {
-      name: "Guests School",
-      slug: "guests",
-    });
-    const teacher = await seedStaffWithMembership(t, {
-      institutionId: moli,
-      name: "Lehua Torres",
-      username: "lehua",
-    });
-    await grantInstitutionMembership(t, teacher, kona);
-    await seedScholarInInstitution(t, {
-      institutionId: moli,
+    await makeScholar(t, moli, {
       name: "Moli Scholar",
       username: "moli-scholar",
     });
@@ -127,17 +104,15 @@ describe("users.listDirectoryScholars", () => {
         role: "scholar",
       }),
     );
-    await seedScholarInInstitution(t, {
-      institutionId: kona,
+    await makeScholar(t, kona, {
       name: "Kona Scholar",
       username: "kona-scholar",
     });
-    await seedScholarInInstitution(t, {
-      institutionId: guests,
+    await makeScholar(t, guests, {
       name: "Guest Scholar",
       username: "guest-scholar",
     });
-    const asTeacher = await withUser(t, teacher);
+    const asTeacher = await world.as.staffOf(moli);
 
     expect(
       (await asTeacher.query(api.users.listDirectoryScholars, {
@@ -158,54 +133,70 @@ describe("users.listDirectoryScholars", () => {
 
   test("rejects non-scholar-admin roles", async () => {
     const t = convexTest(schema, modules);
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 1,
+      includePlatformAdmin: false,
+    });
+    const school = world.schools[0];
     for (const [role, username] of [
       ["scholar", "kai"],
       ["parent", "avery"],
       ["curriculum_designer", "hoku"],
       ["lifelong_learner", "noa"],
     ] as const) {
-      const userId = await t.run((ctx) =>
-        ctx.db.insert("users", {
-          name: `Fixture ${username}`,
-          username,
-          role,
-        }),
-      );
+      const asUser =
+        role === "scholar"
+          ? await world.as.scholar(school.scholars[0])
+          : role === "parent"
+            ? await world.as.parent(school.parents[0])
+            : await (async () => {
+                const userId = await t.run((ctx) =>
+                  ctx.db.insert("users", {
+                    name: `Fixture ${username}`,
+                    username,
+                    role,
+                  }),
+                );
+                const sessionId = await t.run((ctx) =>
+                  ctx.db.insert("authSessions", {
+                    userId,
+                    expirationTime: Date.now() + 3_600_000,
+                  }),
+                );
+                return t.withIdentity({
+                  subject: `${userId}|${sessionId}`,
+                  issuer: "https://convex.dev",
+                });
+              })();
       await expect(
-        (await withUser(t, userId)).query(api.users.listDirectoryScholars, {}),
+        asUser.query(api.users.listDirectoryScholars, {}),
       ).rejects.toThrow("Forbidden");
     }
   });
 
   test("lets a platform admin choose one school, with global visibility only for all", async () => {
     const t = convexTest(schema, modules);
-    const moli = await seedTestInstitution(t, {
-      name: "Moli School",
-      slug: "moli",
-      isPrimary: true,
+    const world = await makeWorld(t, {
+      schools: 2,
+      scholarsPerSchool: 0,
+      parentsPerSchool: 0,
     });
-    const kona = await seedTestInstitution(t, {
-      name: "Kona Learning",
-      slug: "kona",
+    const [moli, kona] = world.schools;
+    await t.run(async (ctx) => {
+      await ctx.db.patch(moli.id, { name: "Moli School", slug: "moli" });
+      await ctx.db.patch(kona.id, { name: "Kona Learning", slug: "kona" });
     });
-    const admin = await t.run((ctx) =>
-      ctx.db.insert("users", {
-        name: "Avery Stone",
-        username: "avery",
-        role: "platform_admin",
-      }),
-    );
-    await seedScholarInInstitution(t, {
-      institutionId: moli,
+    await makeScholar(t, moli, {
       name: "Moli Scholar",
       username: "moli-scholar",
     });
-    await seedScholarInInstitution(t, {
-      institutionId: kona,
+    await makeScholar(t, kona, {
       name: "Kona Scholar",
       username: "kona-scholar",
     });
-    const asAdmin = await withUser(t, admin);
+    const asAdmin = await world.as.platformAdmin();
 
     expect(
       (await asAdmin.query(api.users.listDirectoryScholars, {
@@ -225,41 +216,29 @@ describe("users.listDirectoryScholars", () => {
 describe("readScholarRoster", () => {
   test("ignores missing and non-scholar allowed ids, while the unrestricted path returns every scholar", async () => {
     const t = convexTest(schema, modules);
-    const firstScholar = await t.run((ctx) =>
-      ctx.db.insert("users", {
-        name: "Kai Kealoha",
-        username: "kai",
-        role: "scholar",
-      }),
-    );
-    const secondScholar = await t.run((ctx) =>
-      ctx.db.insert("users", {
-        name: "Lani Kealoha",
-        username: "lani",
-        role: "scholar",
-      }),
-    );
-    const staffId = await t.run((ctx) =>
-      ctx.db.insert("users", {
-        name: "Lehua Torres",
-        username: "lehua",
-        role: "teacher",
-      }),
-    );
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 2,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const school = world.schools[0];
+    const firstScholar = school.scholars[0].id;
+    const secondScholar = school.scholars[1].id;
+    const staffId = school.teacher.id;
+    const removedScholar = await makeScholar(t, school, {
+      name: "Removed Fixture",
+      username: "removed-fixture",
+    });
     const missingScholarId = await t.run(async (ctx) => {
-      const id = await ctx.db.insert("users", {
-        name: "Removed Fixture",
-        username: "removed-fixture",
-        role: "scholar",
-      });
-      await ctx.db.delete(id);
-      return id;
+      await ctx.db.delete(removedScholar.id);
+      return removedScholar.id;
     });
 
     const allowedRoster = await t.run((ctx) =>
       readScholarRoster(
         ctx as unknown as QueryCtx,
-        new Set([firstScholar, staffId, missingScholarId]),
+        new Set([firstScholar, staffId, missingScholarId as Id<"users">]),
       ),
     );
     const unrestrictedRoster = await t.run((ctx) =>

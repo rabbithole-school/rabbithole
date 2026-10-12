@@ -9,36 +9,53 @@
  * file entirely and scores the shipped messages as-is.
  */
 import Anthropic from "@anthropic-ai/sdk";
-import { buildSystemPrompt } from "../../../convex/sessionHelpers";
-import { MODELS } from "../../../convex/lib/models";
+import { buildSystemPromptParts } from "../../../convex/sessionHelpers";
+import { appendTurnContext } from "../../../convex/sessionStreamHelpers";
+import type { ModelId } from "../../../convex/lib/models";
+import type { AideEffort } from "../../../convex/lib/aideModel";
+import { TUTOR_DEFAULT_MODEL, tutorRuntime } from "../../../convex/lib/tutorModel";
 import type { ScholarContext, Turn, TutorCase } from "./types";
 
 const anthropic = new Anthropic();
 
 /**
- * Model override + token accounting for the Sonnet-vs-Opus bake-off.
- * Set TUTOR_MODEL env var (e.g. "claude-opus-4-8") to swap. Defaults to MODELS.SONNET.
- * Token totals are accumulated across generateAssistantTurn calls so the harness
- * can report per-case cost.
+ * Model override + token/latency accounting for model bake-offs.
+ * TUTOR_MODEL swaps the model (default: the live tutor, TUTOR_DEFAULT_MODEL). max_tokens and effort
+ * come from the live `tutorRuntime` so a run matches what the tutor stream
+ * would send; TUTOR_EFFORT overrides the effort (e.g. "low" for Opus 5.5).
+ * Totals accumulate across generateAssistantTurn calls so the harness can
+ * report per-case cost and latency.
  */
-export const tutorModel = process.env.TUTOR_MODEL || MODELS.SONNET;
+export const tutorModel = process.env.TUTOR_MODEL || TUTOR_DEFAULT_MODEL;
+const runtime = tutorRuntime(tutorModel as ModelId);
+export const tutorEffort: AideEffort | undefined =
+  (process.env.TUTOR_EFFORT as AideEffort | undefined) || runtime.effort;
 export const tokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
+/** Per tutor call: ms to the first visible text delta, and to the end. */
+export const turnLatency: Array<{ firstTextMs: number | null; totalMs: number }> = [];
 export function resetTokenUsage() {
   tokenUsage.input = 0;
   tokenUsage.output = 0;
   tokenUsage.cacheRead = 0;
   tokenUsage.cacheCreate = 0;
+  turnLatency.length = 0;
 }
 
-/** Assemble the production tutor system prompt with the params this eval varies. */
+/**
+ * Assemble the production tutor prompt with the params this eval varies, split
+ * the way /session-stream sends it: `system` is stable + dynamic, and the
+ * minute-varying turn context (clock, pacing) rides at the end of the latest
+ * user message (TRA-407).
+ */
 export function assemblePrompt(
   scholar: ScholarContext,
   isFirstTurn: boolean,
   isFirstSession: boolean,
   masteryContext: TutorCase["masteryContext"] = undefined,
   practiceSkillsContext: TutorCase["practiceSkillsContext"] = undefined,
-): string {
-  return buildSystemPrompt(
+  offersWrapUp = false,
+): { system: string; turnContext: string } {
+  const { stable, dynamic, turnContext } = buildSystemPromptParts(
     null, // teacherWhisper
     scholar.readingLevel, // readingLevel
     scholar.name, // scholarName
@@ -50,7 +67,16 @@ export function assemblePrompt(
     null, // lastSessionAt
     null, null, null, null, null, null, null, // web practice..advance rubric
     practiceSkillsContext ?? null,
+    // Positions 33-49 (physical environment … playMode … dossier interests)
+    // keep their defaults; `undefined` selects the default, so the off-flag
+    // prompt is byte-identical to the pre-flag harness.
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined,
+    // The open-exploration "Wrap up" note (TRA-371), off unless the case asks.
+    offersWrapUp,
   );
+  return { system: stable + dynamic, turnContext };
 }
 
 /**
@@ -62,14 +88,16 @@ export async function generateAssistantTurn(
   history: Turn[],
   masteryContext: TutorCase["masteryContext"] = undefined,
   practiceSkillsContext: TutorCase["practiceSkillsContext"] = undefined,
+  offersWrapUp = false,
 ): Promise<string> {
   const isFirstTurn = history.length === 1 && history[0]?.content === "<start>";
-  const system = assemblePrompt(
+  const { system, turnContext } = assemblePrompt(
     scholar,
     isFirstTurn,
     /* isFirstSession */ false,
     masteryContext,
     practiceSkillsContext,
+    offersWrapUp,
   );
   // Strip the "<start>" sentinel — the live path treats it as a trigger, not a message.
   const stripped = history.filter(
@@ -95,12 +123,21 @@ export async function generateAssistantTurn(
     // First-turn opener: pass a single seed user message so the model greets.
     messages.push({ role: "user", content: "(start)" });
   }
-  const response = await anthropic.messages.create({
+  // Streamed, like the live tutor, so time-to-first-text is measurable.
+  const started = Date.now();
+  let firstTextMs: number | null = null;
+  const stream = anthropic.beta.messages.stream({
     model: tutorModel,
-    max_tokens: 1024,
+    max_tokens: runtime.maxTokens,
     system,
-    messages,
+    messages: appendTurnContext(messages, turnContext),
+    ...(tutorEffort ? { output_config: { effort: tutorEffort } } : {}),
   });
+  stream.on("text", () => {
+    if (firstTextMs === null) firstTextMs = Date.now() - started;
+  });
+  const response = await stream.finalMessage();
+  turnLatency.push({ firstTextMs, totalMs: Date.now() - started });
   const usage = response.usage as unknown as Record<string, number | undefined>;
   tokenUsage.input += usage.input_tokens ?? 0;
   tokenUsage.output += usage.output_tokens ?? 0;

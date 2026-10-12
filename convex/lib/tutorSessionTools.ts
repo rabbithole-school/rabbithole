@@ -1,6 +1,6 @@
 // Bot DRY Layer 5 sibling — the scholar-facing *tutor-session* tool group.
 //
-// The nineteen tools a scholar's own tutor turn (`/project-stream` in
+// The nineteen tools a scholar's own tutor turn (`/session-stream` in
 // convex/http.ts) can call — process-step tracking, rubric scoring, activity
 // completion, the IS-unit co-design tools, documents/code/maps/images, the
 // physical-task + resource-share tools, the dossier writer, check_work, and
@@ -32,7 +32,16 @@ import type { Id } from "../_generated/dataModel";
 import { isTextArtifact } from "../../shared/textArtifacts";
 import type { FunctionReturnType } from "convex/server";
 import type { AideEmit } from "./aideStream";
-import { imageBytesToContentPart, toStorageBlob } from "./imageBytes";
+import {
+  checkSlideDeckLayoutOnly,
+  checkSlideOpsLayoutOnly,
+} from "./tutorWriteBoundary";
+import {
+  imageBytesToContentPart,
+  sniffImageMime,
+  toStorageBlob,
+  type ImageMime,
+} from "./imageBytes";
 import { geminiGenerateImage } from "./gemini";
 import { recordImageUsage } from "../usage";
 import { registryKeys } from "../../lib/geomap/registry";
@@ -96,6 +105,35 @@ import {
   IMAGE_SEARCH_WINDOW_MS,
   isWatermarkedStockHost,
 } from "./imageSearch";
+import { resolvePubChemMolecule } from "./pubchem";
+import {
+  appAssetRef,
+  MAX_APP_ASSETS,
+  MAX_APP_ASSET_BYTES,
+} from "../../shared/appAssets";
+import { appCharmThemeLabel } from "./themeIconArt";
+import {
+  MAX_CHARACTER_REPLY_CHARS,
+  MAX_DIRECTION_CHARS,
+  MAX_DIRECTOR_NOTES_CHARS,
+  MAX_JUDGES,
+  MAX_MOODS,
+  MAX_PERSONA_CHARS,
+  MAX_RUBRIC_CHARS,
+  MAX_VERDICTS,
+} from "../../shared/appAiPolicy";
+
+/**
+ * The tutor's director tools. They act on the app's character behind the
+ * scholar's back by design, so they never split the stream, drop a tool chip,
+ * or emit tool events of their own; the record is `appAiTurns`, which only
+ * teachers read. The stream's generic per-tool_use `toolStart` event must skip
+ * these names too, or the scholar's client learns a direction was given.
+ */
+export const CHARACTER_DIRECTOR_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "direct_character",
+  "speak_as_character",
+]);
 
 /**
  * The one rule that decides between the tutor's two image tools, appended
@@ -151,6 +189,28 @@ export interface TutorToolSessionState {
   activityCompletedThisStream: boolean;
 }
 
+/**
+ * How `edit_document` "view" shows a document to the model: every line is
+ * prefixed `N: `. The note says so inside the tool_result, so the model never
+ * has to work out (and say out loud, where the scholar can read it) whether
+ * the space after the colon is part of the code. Live 2026-10-08: a vibecode
+ * turn wrote "Lines start with one space." into the scholar-visible
+ * transcript, between a view and the edit that followed it.
+ */
+export const VIEW_LINE_NUMBER_NOTE =
+  "Each line below starts with its line number, a colon and one space (`N: `). That prefix is not part of the code: leave it out of old_str and new_str.";
+
+export function numberDocumentLines(content: string): {
+  lineCount: number;
+  numbered: string;
+} {
+  const lines = content.split("\n");
+  return {
+    lineCount: lines.length,
+    numbered: lines.map((l, i) => `${i + 1}: ${l}`).join("\n"),
+  };
+}
+
 function frameUntrustedAppActionResult(value: unknown): string {
   const suffix = Array.from(crypto.getRandomValues(new Uint8Array(4)), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -172,7 +232,7 @@ function simulatorVocabulary(message: string): string {
 }
 
 /**
- * Build the scholar tutor-session toolset for one `/project-stream` turn.
+ * Build the scholar tutor-session toolset for one `/session-stream` turn.
  * Returns the SAME ordered, gated array `http.ts` used to assemble inline —
  * six always-on tools, then each conditionally-offered tool/group in the
  * same order its `tools.push(...)` used to run.
@@ -184,6 +244,9 @@ export async function makeTutorSessionTools(
     session: TutorSessionContext;
     projId: Id<"sessions">;
     callerUserId: Id<"users">;
+    // The caller's role, used to bill a teacher's test-drive spend as staff
+    // usage rather than scholar tutor usage. Absent → billed as the scholar.
+    callerRole?: string;
     institutionId?: Id<"institutions"> | null;
     state: TutorToolSessionState;
     // Finalizes the pre-tool text into its own bubble, drops a tool chip, and
@@ -213,6 +276,7 @@ export async function makeTutorSessionTools(
     session,
     projId,
     callerUserId,
+    callerRole,
     institutionId: imageInstitutionId = null,
     state,
     splitAfterTool,
@@ -245,6 +309,38 @@ export async function makeTutorSessionTools(
       session.sessionMode === "workbench") &&
     appActionArtifactId !== undefined &&
     registeredAppActions.length > 0;
+  const isVibecode = session.sessionMode === "vibecode";
+  // The scholar's own tutor directs the app's character, when the app has one.
+  const directableCharacter =
+    isVibecode && callerUserId === session.scholarId
+      ? await ctx.runQuery(
+          internal.appAiDirector.directableCharacterForSession,
+          { sessionId: projId, callerUserId },
+        )
+      : null;
+
+  const storeTutorImage = async (
+    blob: Blob,
+  ): Promise<{
+    storageId: Id<"_storage">;
+    appAssetReference: string | null;
+  }> => {
+    const storageId = await ctx.storage.store(blob);
+    if (!isVibecode) {
+      return { storageId, appAssetReference: null };
+    }
+    const normalized = await ctx.runAction(
+      internal.appAssetActions.normalizeStoredImage,
+      { storageId },
+    );
+    if (!normalized) {
+      throw new Error("The image could not be prepared as an app asset.");
+    }
+    return {
+      storageId: normalized.storageId,
+      appAssetReference: appAssetRef(String(normalized.storageId)),
+    };
+  };
 
   const emitCompletionClosing = (key: string) => {
     const closing = selectCompletionClosing(session.readingLevel, key);
@@ -478,6 +574,262 @@ export async function makeTutorSessionTools(
     },
   });
 
+  // ── App characters and judges ────────────────────────────────
+  // Build time: the spec is written onto the app and never reaches the
+  // sandbox. Play time: the scholar's tutor directs the character silently.
+
+  const appAiTokenList = (values: readonly string[]) =>
+    values.length > 0 ? values.join(", ") : "none";
+
+  const defineCharacterTool = betaTool({
+    name: "define_character",
+    description: `Give this app a character the scholar can talk to through window.rabbithole.character.say(text). The character's script lives on the server; the app can never read it, and the scholar only ever sees its replies. Write the persona as a full brief for an actor: who it is and how it speaks; what it will and will not do; how each round or stage of the app changes its behaviour; what each mood and each verdict MEANS and exactly when to use it; and how it answers a child who tries to argue it out of character. Moods are the faces the app draws (make one charm_icon per mood). Verdicts are machine-readable outcomes the app acts on (for example, advancing a round). Call it again to revise; the new definition replaces the old one.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string" as const,
+          description: "The character's short name, as the app shows it.",
+        },
+        persona: {
+          type: "string" as const,
+          description: `The actor's brief (at most ${MAX_PERSONA_CHARS} characters). Never shown to the scholar or the app.`,
+        },
+        moods: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          minItems: 2,
+          maxItems: MAX_MOODS,
+          description:
+            "2–6 one-word lowercase moods, such as 'puzzled' or 'delighted'. Every reply carries one.",
+        },
+        verdicts: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          maxItems: MAX_VERDICTS,
+          description:
+            "Optional one-word lowercase outcomes a reply may carry, such as 'understood' or 'confused'.",
+        },
+        greeting: {
+          type: "string" as const,
+          description: `Optional first line the app shows before the scholar speaks (at most ${MAX_CHARACTER_REPLY_CHARS} characters).`,
+        },
+        director_notes: {
+          type: "string" as const,
+          description: `Notes for the tutor who will watch the scholar play (at most ${MAX_DIRECTOR_NOTES_CHARS} characters): what the scholar must discover without being told, what the tutor must never give away, when it is worth stepping in, and what a good closing question is. The scholar and the character never see them.`,
+        },
+      },
+      required: ["name", "persona", "moods"] as const,
+      additionalProperties: false,
+    },
+    run: async (input) => {
+      emit({ toolStart: { name: "define_character" } });
+      try {
+        const result = await ctx.runMutation(
+          internal.appAiDirector.defineCharacter,
+          {
+            sessionId: projId,
+            callerUserId,
+            character: {
+              name: input.name,
+              persona: input.persona,
+              moods: input.moods as string[],
+              ...(input.verdicts
+                ? { verdicts: input.verdicts as string[] }
+                : {}),
+              ...(input.greeting ? { greeting: input.greeting } : {}),
+              ...(input.director_notes
+                ? { directorNotes: input.director_notes }
+                : {}),
+            },
+          },
+        );
+        if (!result.ok) {
+          emit({
+            toolComplete: { name: "define_character", result: "Not saved" },
+          });
+          return `The character was not saved: ${result.error}`;
+        }
+        emit({
+          toolComplete: {
+            name: "define_character",
+            result: `Character ${input.name.trim()} saved`,
+          },
+        });
+        const moods = (input.moods as string[]).map((m) => m.trim().toLowerCase());
+        const verdicts = ((input.verdicts as string[] | undefined) ?? []).map(
+          (m) => m.trim().toLowerCase(),
+        );
+        return `Saved "${input.name.trim()}" on the server${result.starterSynced ? " and on the activity's saved starter" : ""}. Moods: ${appAiTokenList(moods)}. Verdicts: ${appAiTokenList(verdicts)}. Map each mood to its face in the app. Tell the teacher the name, moods, and verdicts; do not repeat the persona.`;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        emit({
+          toolComplete: { name: "define_character", result: `Failed: ${message}` },
+        });
+        return `The character was not saved: ${message}`;
+      }
+    },
+  });
+
+  const defineJudgeTool = betaTool({
+    name: "define_judge",
+    description: `Give this app a judge for answers written in the child's own words that code cannot check; the app calls window.rabbithole.judge(id, answer) and gets back one verdict and optional feedback. The rubric lives on the server; the app can never read it. Say what a good answer shows and what each verdict means. Feedback must never give the answer away. Do not use a judge for arithmetic or anything code can check exactly. At most ${MAX_JUDGES} judges per app; defining an existing id replaces it.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        id: {
+          type: "string" as const,
+          description:
+            "The id the app passes to rabbithole.judge: a letter, then letters, digits, - or _.",
+        },
+        rubric: {
+          type: "string" as const,
+          description: `What a good answer shows and what each verdict means (at most ${MAX_RUBRIC_CHARS} characters). Never shown to the scholar or the app.`,
+        },
+        verdicts: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          minItems: 1,
+          maxItems: MAX_VERDICTS,
+          description:
+            "One-word lowercase verdicts the app acts on, such as 'clear', 'partial', 'unclear'.",
+        },
+      },
+      required: ["id", "rubric", "verdicts"] as const,
+      additionalProperties: false,
+    },
+    run: async (input) => {
+      emit({ toolStart: { name: "define_judge" } });
+      try {
+        const result = await ctx.runMutation(
+          internal.appAiDirector.defineJudge,
+          {
+            sessionId: projId,
+            callerUserId,
+            judge: {
+              id: input.id,
+              rubric: input.rubric,
+              verdicts: input.verdicts as string[],
+            },
+          },
+        );
+        if (!result.ok) {
+          emit({ toolComplete: { name: "define_judge", result: "Not saved" } });
+          return `The judge was not saved: ${result.error}`;
+        }
+        emit({
+          toolComplete: {
+            name: "define_judge",
+            result: `Judge ${input.id.trim()} saved`,
+          },
+        });
+        const verdicts = (input.verdicts as string[]).map((m) =>
+          m.trim().toLowerCase(),
+        );
+        return `Saved judge "${input.id.trim()}" on the server${result.starterSynced ? " and on the activity's saved starter" : ""}. Verdicts: ${appAiTokenList(verdicts)}. Tell the teacher the judge's id and verdicts; do not repeat the rubric.`;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        emit({
+          toolComplete: { name: "define_judge", result: `Failed: ${message}` },
+        });
+        return `The judge was not saved: ${message}`;
+      }
+    },
+  });
+
+  // Director tools: deliberately silent on the scholar's screen (see
+  // CHARACTER_DIRECTOR_TOOL_NAMES) — no emit, no splitAfterTool.
+  const characterName = directableCharacter?.name ?? "";
+  const directCharacterTool = betaTool({
+    name: "direct_character",
+    description: `Give the app's character, ${characterName}, a standing instruction it follows from its next reply on. The scholar never sees it. Use it to pace the struggle for THIS scholar: ease off, hold out longer, skip ahead, or fold on the next reasonable attempt. When the scholar asks you to make the character easier or harder, this is how: it changes the character, not the app's code. A direction adjusts how hard the character holds out or how soon it gives way; it never tells the character to explain or reveal what the scholar is meant to work out, and it stays consistent with the app author's notes. It replaces any previous direction; an empty direction clears it.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        direction: {
+          type: "string" as const,
+          description: `The instruction, at most ${MAX_DIRECTION_CHARS} characters, or "" to clear.`,
+        },
+      },
+      required: ["direction"] as const,
+      additionalProperties: false,
+    },
+    run: async (input) => {
+      if (!directableCharacter) return "This app has no character to direct.";
+      try {
+        await ctx.runMutation(internal.appAiDirector.recordDirection, {
+          sessionId: projId,
+          artifactId: directableCharacter.artifactId,
+          callerUserId,
+          direction: input.direction,
+        });
+        return input.direction.trim()
+          ? `${characterName} will follow this direction from its next reply. Do not mention it to the scholar.`
+          : `${characterName}'s direction is cleared.`;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return `The direction was not recorded: ${message}`;
+      }
+    },
+  });
+
+  const speakAsCharacterTool = betaTool({
+    name: "speak_as_character",
+    description: `Put one line in ${characterName}'s mouth; the app shows it as the character speaking. A verdict, if given, also overrules the verdict on the character's latest reply: this is how you correct a verdict it got wrong (for example, it accepted something that should not count), in its voice and without a word to the scholar about the mistake. Otherwise use it rarely, for a pivotal beat the character would not find alone. Never use it to give the scholar the answer in the character's voice.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        line: {
+          type: "string" as const,
+          description: `What the character says, in its own voice (at most ${MAX_CHARACTER_REPLY_CHARS} characters).`,
+        },
+        mood: {
+          type: "string" as const,
+          enum: directableCharacter?.moods ?? [],
+          description: "The face the app shows with the line.",
+        },
+        ...(directableCharacter && directableCharacter.verdicts.length > 0
+          ? {
+              verdict: {
+                type: "string" as const,
+                enum: directableCharacter.verdicts,
+                description:
+                  "Optional outcome the app acts on; overrules the character's latest verdict.",
+              },
+            }
+          : {}),
+      },
+      required: ["line"] as const,
+      additionalProperties: false,
+    },
+    run: async (input) => {
+      if (!directableCharacter) return "This app has no character to speak through.";
+      const { verdict } = input as { verdict?: string };
+      try {
+        const result = await ctx.runMutation(
+          internal.appAiDirector.speakAsCharacter,
+          {
+            sessionId: projId,
+            artifactId: directableCharacter.artifactId,
+            callerUserId,
+            line: input.line,
+            ...(input.mood ? { mood: input.mood } : {}),
+            ...(verdict ? { verdict } : {}),
+          },
+        );
+        const override = verdict
+          ? result.overrodeVerdict
+            ? ` Its latest verdict is now "${verdict}".`
+            : " There was no earlier reply whose verdict to overrule."
+          : "";
+        return `The app will show ${characterName} saying that line.${override} Do not repeat it in chat.`;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return `The line was not delivered: ${message}`;
+      }
+    },
+  });
+
   const processStepTool = betaTool({
     name: "update_process_step",
     description: "Update the scholar's progress on a process step. Call this when the scholar begins a step, completes a step, or you want to record a brief observation.",
@@ -571,6 +923,11 @@ export async function makeTutorSessionTools(
                   "each'). Never name the criterion, quote the rubric, or use " +
                   "the words full/half/not.",
               },
+              waived: {
+                type: "boolean" as const,
+                description:
+                  "Set true ONLY when you scored 'full' because the writing-conventions policy says this activity does not assess that criterion (a criterion that is only about spelling/punctuation/capitalization/typing). It still counts toward passing but earns no flair. Omit otherwise.",
+              },
             },
             required: ["criterion_id", "level", "note"] as const,
           },
@@ -597,11 +954,13 @@ export async function makeTutorSessionTools(
             criterion_id: string;
             level: "not" | "half" | "full";
             note?: string;
+            waived?: boolean;
           }[]
         ).map((v) => ({
           criterionId: v.criterion_id,
           level: v.level,
           ...(v.note?.trim() ? { note: v.note.trim() } : {}),
+          ...(v.waived === true && v.level === "full" ? { waived: true } : {}),
         }));
         const rejectPassingScore =
           !activityWasAlreadyComplete &&
@@ -956,6 +1315,7 @@ export async function makeTutorSessionTools(
           scholarId: session.scholarId,
           title: input.title,
           strand: input.strand,
+          sessionId: projId,
         });
         emit({ toolComplete: { name: "create_lesson", result: `Created lesson "${input.title}"` } });
         return `Created lesson "${input.title}" (lessonId: ${lessonId}). Now create its activities with create_activity using this lessonId.`;
@@ -1019,6 +1379,7 @@ export async function makeTutorSessionTools(
           kind: input.kind,
           systemPrompt: input.systemPrompt,
           deliverable: input.deliverable,
+          sessionId: projId,
         });
         emit({ toolComplete: { name: "create_activity", result: `Created activity "${input.title}"` } });
         return `Created activity "${input.title}".`;
@@ -1099,63 +1460,65 @@ export async function makeTutorSessionTools(
 
   const editDocumentTool = betaTool({
     name: "edit_document",
-    description: "Create, view, rename, or edit the scholar's working documents using targeted edits. Use this to help the scholar build written work. Multiple documents can exist — use document_id to target a specific one. The \"transcribe\" command is reserved for copying the scholar's OWN words into their document after they have agreed to it; never use it to write something they did not tell you. Conversely, when you are writing down words the scholar gave you, always use \"transcribe\" — never \"insert\" or \"str_replace\" — so their authorship is recorded.",
+    description:
+      "View or rename any text or code document; create an empty titled text document for the scholar to write in. str_replace and insert work only on code artifacts. Multiple documents can exist, so use document_id to target one.",
     inputSchema: {
       type: "object" as const,
       properties: {
         command: {
           type: "string" as const,
-          enum: ["create", "view", "rename", "str_replace", "insert", "transcribe"] as const,
-          description: "The operation to perform on the document",
+          enum: ["create", "view", "rename", "str_replace", "insert"] as const,
+          description:
+            "create an empty text document; view or rename a text/code document; or edit code with str_replace/insert",
         },
         document_id: {
           type: "string" as const,
-          description: "ID of specific document to edit. If omitted, edits the most recent document. Required for str_replace, insert, and rename when multiple documents exist.",
+          description:
+            "ID of a specific document. If omitted, uses the default document selected by the artifact tools.",
         },
         base_revision: {
           type: "number" as const,
-          description: "Revision returned by view or shown in DOCUMENTS. Required for rename, str_replace, and insert on an existing document.",
+          description:
+            "Revision returned by view or shown in DOCUMENTS. Required for rename and code edits on an existing document.",
         },
         title: {
           type: "string" as const,
           description: "Document title (for create or rename)",
         },
-        file_text: {
-          type: "string" as const,
-          description: "Full initial content (for create)",
-        },
         old_str: {
           type: "string" as const,
-          description: "Exact text to find (for str_replace). Must match exactly.",
+          description:
+            "Code only: exact text to find for str_replace. Must match exactly.",
         },
         new_str: {
           type: "string" as const,
-          description: "Replacement text (for str_replace)",
+          description: "Code only: replacement text for str_replace",
         },
         insert_line: {
           type: "number" as const,
-          description: "Line number to insert after (for insert, 0 = beginning)",
+          description:
+            "Code only: line number to insert after (0 = beginning)",
         },
         insert_text: {
           type: "string" as const,
-          description: "Text to insert (for insert). If this text is the scholar's own words being copied down for them, use the \"transcribe\" command instead so their authorship is recorded.",
-        },
-        transcribe_text: {
-          type: "string" as const,
-          description: "The scholar's own words, copied down exactly as they gave them (for transcribe). Keep their misspellings, invented spellings, and childlike grammar. Never tidy, correct, expand, or add anything they did not say.",
+          description: "Code only: text to insert",
         },
       },
       required: ["command"] as const,
     },
     run: async (input) => {
       const docId = (input as { document_id?: string }).document_id as Id<"artifacts"> | undefined;
+      const command = (input as { command?: string }).command;
+      const isCodeEdit = command === "str_replace" || command === "insert";
+      const scholarWritingRefusal =
+        "This is the scholar's writing. You can't write in it — they type or dictate into the box themselves. Point them to the box once, then keep the conversation going.";
 
       // A document_id from another session trips the artifact↔session
       // membership guard (aiGetContent / aiRename / aiStrReplace /
       // aiInsert all throw "Artifact does not belong to session"). Turn
       // that throw into a tool-facing error string so the model can
       // recover instead of the exception escaping and aborting the whole
-      // /project-stream turn as a generic "Stream error". Only wrap the
+      // /session-stream turn as a generic "Stream error". Only wrap the
       // pre-mutation read and the mutation calls themselves — never the
       // post-mutation stream/split emission (a failure after the edit
       // already applied must NOT look retryable, or the model re-edits).
@@ -1170,17 +1533,17 @@ export async function makeTutorSessionTools(
       // Maps are not documents. If the model targets a map artifact by
       // id (view/rename/str_replace/insert), send it to show_map instead
       // of letting edit_document scribble text into the map's spec JSON.
-      if (docId) {
+      if (docId || isCodeEdit) {
         let target;
         try {
           target = await ctx.runQuery(internal.artifacts.aiGetContent, {
             sessionId: projId,
-            artifactId: docId,
+            ...(docId ? { artifactId: docId } : {}),
           });
         } catch (err) {
           return docGuardError(err);
         }
-        if (target && !Array.isArray(target) && !isTextArtifact(target)) {
+        if (docId && target && !Array.isArray(target) && !isTextArtifact(target)) {
           if (target.type === "map") {
             return "Use show_map to change the map — edit_document only works on text or code documents.";
           }
@@ -1189,14 +1552,18 @@ export async function makeTutorSessionTools(
           }
           return "Use slides tools to change slides — edit_document only works on text or code documents.";
         }
+        const editTarget = Array.isArray(target) ? target[0] : target;
+        if (isCodeEdit && editTarget && editTarget.type !== "code") {
+          return scholarWritingRefusal;
+        }
       }
 
-      switch (input.command) {
+      switch (command) {
         case "create": {
           const newArtifactId = await ctx.runMutation(internal.artifacts.aiCreate, {
             sessionId: projId,
             title: (input as { title?: string }).title || "Document",
-            content: (input as { file_text?: string }).file_text || "",
+            content: "",
           });
           emit({ artifactUpdate: true, newArtifactId: String(newArtifactId) });
           emit({ toolComplete: { name: "edit_document", result: "Document created" } });
@@ -1210,7 +1577,7 @@ export async function makeTutorSessionTools(
           state.fullContent = "";
           state.lastPersistLength = 0;
           emit({ newAssistantMsg: String(newId) });
-          return `Document created successfully. Document ID: ${String(newArtifactId)}. Current revision: 0.`;
+          return `Empty document created successfully. Document ID: ${String(newArtifactId)}. Current revision: 0. The scholar writes in it.`;
         }
         case "view": {
           if (docId) {
@@ -1219,10 +1586,10 @@ export async function makeTutorSessionTools(
               artifactId: docId,
             });
             if (!artifact || Array.isArray(artifact)) return "Error: Document not found.";
-            const lines = artifact.content.split("\n");
+            const { numbered } = numberDocumentLines(artifact.content);
             emit({ toolComplete: { name: "edit_document", result: `Viewed "${artifact.title}"` } });
             await splitAfterTool("Viewed document");
-            return `[${String(artifact._id)}] Title: ${artifact.title} (revision ${artifact.revision})\n` + lines.map((l: string, i: number) => `${i + 1}: ${l}`).join("\n");
+            return `[${String(artifact._id)}] Title: ${artifact.title} (revision ${artifact.revision})\n${VIEW_LINE_NUMBER_NOTE}\n${numbered}`;
           }
           // No document_id — return ALL documents IN FULL. (Previously
           // this returned only a 5-line preview per doc, so the tutor
@@ -1245,9 +1612,8 @@ export async function makeTutorSessionTools(
           emit({ toolComplete: { name: "edit_document", result: "Viewed documents" } });
           await splitAfterTool("Viewed document");
           return docs.map((doc: { _id: Id<"artifacts">; title: string; content: string; revision: number }) => {
-            const lines = doc.content.split("\n");
-            const numbered = lines.map((l: string, i: number) => `${i + 1}: ${l}`).join("\n");
-            return `[${String(doc._id)}] "${doc.title}" (revision ${doc.revision}, ${lines.length} lines)\n${numbered}`;
+            const { lineCount, numbered } = numberDocumentLines(doc.content);
+            return `[${String(doc._id)}] "${doc.title}" (revision ${doc.revision}, ${lineCount} lines)\n${VIEW_LINE_NUMBER_NOTE}\n${numbered}`;
           }).join("\n\n");
         }
         case "rename": {
@@ -1349,50 +1715,8 @@ export async function makeTutorSessionTools(
           }
           return `Text inserted successfully. Current revision: ${result.artifact.revision}.`;
         }
-        case "transcribe": {
-          const transcribeText = (input as { transcribe_text?: string })
-            .transcribe_text;
-          if (!transcribeText) {
-            return "Error: transcribe requires transcribe_text — the scholar's own words, copied exactly.";
-          }
-          let result;
-          try {
-            result = await ctx.runMutation(internal.artifacts.aiTranscribe, {
-              sessionId: projId,
-              text: transcribeText,
-              baseRevision: (input as { base_revision?: number }).base_revision,
-              ...(docId ? { artifactId: docId } : {}),
-            });
-            if (result.kind === "conflict") {
-              return `Conflict: the document changed. Re-view it and retry with base_revision ${result.artifact.revision}.`;
-            }
-            if (result.kind === "refused") return result.error;
-          } catch (err) {
-            return docGuardError(err);
-          }
-          emit({ artifactUpdate: true });
-          emit({
-            toolComplete: {
-              name: "edit_document",
-              result: "Wrote down the scholar's words",
-            },
-          });
-          {
-            const newId = await ctx.runMutation(internal.sessionHelpers.splitStream, {
-              currentMessageId: state.assistantMsgId as Id<"messages">,
-              sessionId: projId,
-              contentSoFar: state.fullContent,
-              toolAction: "Wrote down your words",
-            });
-            state.assistantMsgId = newId;
-            state.fullContent = "";
-            state.lastPersistLength = 0;
-            emit({ newAssistantMsg: String(newId) });
-          }
-          return `Transcribed into the document. Current revision: ${result.artifact.revision}. Now hand it back: tell the scholar you put their words in and ask them to read it and confirm you got it right.`;
-        }
         default:
-          return "Unknown command. Use create, view, rename, str_replace, insert, or transcribe.";
+          return "Unknown command. Use create, view, rename, str_replace, or insert.";
       }
     },
   });
@@ -1597,7 +1921,8 @@ export async function makeTutorSessionTools(
       "• ruler — linear measurement — unit:\"cm\"|\"in\", length, startEnd; set startAt≠0 for the broken-ruler case\n" +
       "• clock — telling/elapsed time — startHour (1..12), startMinute (0..59); goal showTime{hour,minute} or advanceBy{minutes}\n" +
       "• liquid — capacity / liquid volume — unit:\"cup\"|\"L\"|\"mL\", vessels:[{capacity}]\n" +
-      "• money — counting coins & bills — available: (\"penny\"|\"nickel\"|\"dime\"|\"quarter\"|\"halfDollar\"|\"dollarCoin\"|\"oneDollarBill\"|\"fiveDollarBill\"|\"tenDollarBill\")[]\n\n" +
+      "• money — counting coins & bills — available: (\"penny\"|\"nickel\"|\"dime\"|\"quarter\"|\"halfDollar\"|\"dollarCoin\"|\"oneDollarBill\"|\"fiveDollarBill\"|\"tenDollarBill\")[]\n" +
+      "• molecule — inspect a real PubChem 2D structure — query:\"<compound name or PubChem CID>\"; author ONLY {kind:\"molecule\",concept,prompt,query} plus optional highlight:{kind:\"bridgingOxygen\"}|{kind:\"element\",el:\"O\"}; no goal\n\n" +
       "Every spec also needs `prompt` (REQUIRED — the one-line stem the scholar reads) and `concept` (REQUIRED — a few muted words naming the idea). `id` is minted for you if omitted.\n\n" +
       "EXAMPLES (compact JSON):\n" +
       "  sandbox rekenrek: {\"kind\":\"rekenrek\",\"concept\":\"Number bonds\",\"prompt\":\"Push beads into two groups. Which pairs make 10?\",\"total\":10}\n" +
@@ -1623,8 +1948,32 @@ export async function makeTutorSessionTools(
       const spec = (input as { spec?: unknown }).spec;
       emit({ toolStart: { name: "show_manipulative" } });
 
-      const specJson =
+      let specJson =
         typeof spec === "string" ? spec : JSON.stringify(spec ?? null);
+      let moleculeResolution: string | null = null;
+      try {
+        const parsed = JSON.parse(specJson) as unknown;
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          (parsed as { kind?: unknown }).kind === "molecule"
+        ) {
+          const resolution = await resolvePubChemMolecule(parsed);
+          if (!resolution.ok) {
+            emit({
+              toolComplete: {
+                name: "show_manipulative",
+                result: `Couldn't set it up: ${resolution.reason}`,
+              },
+            });
+            return `The manipulative was not created: ${resolution.reason}`;
+          }
+          specJson = JSON.stringify(resolution.spec);
+          moleculeResolution = resolution.message;
+        }
+      } catch {
+        // The mutation owns the canonical malformed-JSON error wording.
+      }
       const result = await ctx.runMutation(
         internal.artifacts.aiCreateManipulativeArtifact,
         { sessionId: projId, ...(title ? { title } : {}), specJson },
@@ -1643,7 +1992,7 @@ export async function makeTutorSessionTools(
       emit({
         toolComplete: {
           name: "show_manipulative",
-          result: "Set up a hands-on model",
+          result: moleculeResolution ?? "Set up a hands-on model",
         },
       });
       const newId = await ctx.runMutation(internal.sessionHelpers.splitStream, {
@@ -1656,7 +2005,7 @@ export async function makeTutorSessionTools(
       state.fullContent = "";
       state.lastPersistLength = 0;
       emit({ newAssistantMsg: String(newId) });
-      return `The manipulative is on screen for the scholar. Now start the beat: open from what THEY notice or do with it ("try pushing…", "what do you see when…?"), not an explanation. Never just state the answer the manipulative is there to let them discover.`;
+      return `${moleculeResolution ? `${moleculeResolution} ` : ""}The manipulative is on screen for the scholar. Now start the beat: open from what THEY notice or do with it ("try pushing…", "what do you see when…?"), not an explanation. Never just state the answer the manipulative is there to let them discover.`;
     },
   });
 
@@ -1673,19 +2022,20 @@ export async function makeTutorSessionTools(
   const editSlidesTool = betaTool({
     name: "edit_slides",
     description:
-      "Build and edit the scholar's Rabbit Slides deck (NOT Google Slides, NOT a generated image). One deck lives per session. Three ops:\n" +
-      "• op:\"create\" — pass the WHOLE deck as `deck` (JSON). Use ONCE to start a deck; focuses the panel on it.\n" +
+      "Arrange the scholar's Rabbit Slides deck (NOT Google Slides, NOT a generated image). You may move, resize, restyle, add empty text boxes, or move words already in the deck, but never write words, a deck title, alt text, or speaker notes. One deck lives per session. Three ops:\n" +
+      "• op:\"create\" — pass the WHOLE empty-text layout scaffold as `deck` (JSON). Use ONCE to start a deck; focuses the panel on it.\n" +
       "• op:\"read\" — returns a compact, id-addressed summary of the current deck. You MUST call read before patch to learn the slide + element ids you will address.\n" +
-      "• op:\"patch\" — pass `ops` (an id-addressed op batch) and the `baseRevision` you last read. NEVER re-send a whole deck to make a small change — patch the specific elements.\n\n" +
+      "• op:\"patch\" — pass layout-only `ops` and the `baseRevision` you last read. NEVER re-send a whole deck to make a small change — patch the specific elements.\n\n" +
       "Canvas: fixed 1280x720 logical units, origin TOP-LEFT, +x right, +y down; renderers scale it to fit. Text is ALWAYS axis-aligned — `rotation` is ignored for text (only rect/ellipse/line/image rotate, clockwise degrees about their own centre). Colors are \"#rrggbb\".\n\n" +
-      "Deck JSON (create): { title?, slides:[ { id, background:\"#rrggbb\", elementIds:[...back-to-front z-order], elements:{ <id>: <element> }, speakerNotes? } ] }. An element is one of:\n" +
+      "Deck JSON (create): { slides:[ { id, background:\"#rrggbb\", elementIds:[...back-to-front z-order], elements:{ <id>: <element> } ] }. An element is one of:\n" +
       "  text  { type:\"text\", frame:{x,y,w,h}, text, style?:{fontSize,bold,italic,color,align:left|center|right,verticalAlign:top|middle|bottom} }\n" +
       "  shape { type:\"rect\"|\"ellipse\"|\"line\", frame:{x,y,w,h,rotation?}, style?:{fill,stroke,strokeWidth} }\n" +
       "  image { type:\"image\", frame:{x,y,w,h,rotation?}, assetId, alt }  (assetId is a Convex file id — never inline image bytes).\n\n" +
       "Ops (patch) — each addressed by a STABLE id and applied ALL-OR-NOTHING (one bad op fails the whole batch and the deck is left unchanged):\n" +
-      "  addElement{slideId,afterId?,element}  patchElement{slideId,id,frame?,text?,style?}  removeElement{slideId,id}\n" +
+      "  addElement{slideId,afterId?,element}  patchElement{slideId,id,frame?,style?}  removeElement{slideId,id}\n" +
       "  moveElement{slideId,id,afterId?}  addSlide{afterSlideId?}  removeSlide{slideId}\n" +
-      "  setBackground{slideId,color}  setSpeakerNotes{slideId,notes}  setTitle{title}\n" +
+      "  setBackground{slideId,color}\n" +
+      "Text addElement is only for an empty box or for moving text already present in the deck. setSpeakerNotes, setTitle, and patchElement.text are refused.\n" +
       "The server mints ids, so after create you do NOT know them — always op:\"read\" first. If a patch reports your view is stale, read again and retry.",
     inputSchema: {
       type: "object" as const,
@@ -1695,10 +2045,6 @@ export async function makeTutorSessionTools(
           enum: ["create", "read", "patch"] as const,
           description:
             "\"create\" to write a whole new deck (focuses the panel); \"read\" to fetch the id-addressed summary (no panel change); \"patch\" to apply an op batch to the existing deck (refreshes in place, no refocus).",
-        },
-        title: {
-          type: "string" as const,
-          description: "create only: a short deck title.",
         },
         deck: {
           type: "object" as const,
@@ -1721,6 +2067,8 @@ export async function makeTutorSessionTools(
     },
     run: async (input) => {
       const op = (input as { op?: string }).op;
+      const slidesWritingRefusal =
+        "You can arrange the scholar's slides — move, resize, restyle, add an empty text box, or move their existing words — but you can't write the words. They type those themselves.";
 
       // read: hand the model the id-addressed summary. Emits nothing — it is
       // a silent lookup the model does before patching.
@@ -1735,11 +2083,19 @@ export async function makeTutorSessionTools(
         );
       }
 
-      emit({ toolStart: { name: "edit_slides" } });
-
       if (op === "patch") {
         const ops = (input as { ops?: unknown }).ops;
         const baseRevision = (input as { baseRevision?: number }).baseRevision;
+        const deck = await ctx.runQuery(internal.artifacts.aiReadDeck, {
+          sessionId: projId,
+        });
+        if ("error" in deck) {
+          return `${deck.error ?? "No deck could be read."} Create one first.`;
+        }
+        if (!checkSlideOpsLayoutOnly(ops, deck.textStrings).ok) {
+          return slidesWritingRefusal;
+        }
+        emit({ toolStart: { name: "edit_slides" } });
         const result = await ctx.runMutation(internal.artifacts.aiApplySlideOps, {
           sessionId: projId,
           opsJson: JSON.stringify(ops ?? null),
@@ -1764,10 +2120,12 @@ export async function makeTutorSessionTools(
 
       // Default / "create": write a whole deck and focus the panel.
       const deck = (input as { deck?: unknown }).deck;
-      const title = (input as { title?: string }).title;
+      if (!checkSlideDeckLayoutOnly(deck).ok) {
+        return slidesWritingRefusal;
+      }
+      emit({ toolStart: { name: "edit_slides" } });
       const result = await ctx.runMutation(internal.artifacts.aiCreateSlidesDeck, {
         sessionId: projId,
-        ...(title ? { title } : {}),
         deckJson: JSON.stringify(deck ?? null),
       });
       if ("error" in result) {
@@ -1904,13 +2262,13 @@ export async function makeTutorSessionTools(
   });
 
   const updateDossierTool = betaTool({
-    name: "update_dossier",            description: "Update the persistent scholar profile with learning patterns, interests, strengths, and growth areas you've observed. Only call this when you have a genuine new insight — not on every message.",
+    name: "update_dossier",            description: "Update the persistent scholar profile with learning patterns, strengths, growth areas, and working habits you've observed. Interests are recorded by the observer, not here — never write an Interests section. Only call this when you have a genuine new insight.",
     inputSchema: {
       type: "object" as const,
       properties: {
         content: {
           type: "string" as const,
-          description: "The full updated dossier content. Use terse bullet points grouped by category (e.g., Learning Style, Interests, Strengths, Growth Areas, Behavioral Patterns). Under 500 words.",
+          description: "The full updated dossier content. Use terse bullet points grouped by category (e.g., Learning Style, Strengths, Growth Areas, Behavioral Patterns). Under 500 words.",
         },
       },
       required: ["content"] as const,
@@ -2005,11 +2363,16 @@ export async function makeTutorSessionTools(
   // capping the pathological case at a bounded number of paid Gemini calls.
   const GENERATE_IMAGE_MAX_ATTEMPTS_PER_TURN = 4;
   let generateImageAttempts = 0;
+  const CHARM_ICON_MAX_GENERATIONS_PER_TURN = 4;
+  let charmIconGenerations = 0;
 
   const generateImageTool = betaTool({
     name: "generate_image",
     description:
       "Invent an educational illustration with an AI image model. Use this for pictures that do not exist to be found: analogies and metaphors, imagined scenes, stylized concept art, an arrangement composed for this one explanation. The image comes back to you as well as to the scholar, so look at what was actually generated before describing it — if it does not match what you asked for, call this again with a corrected prompt. You may also call this more than once in the same reply for a genuinely different image (e.g. two things to compare side by side) — there is a shared, limited budget for the whole turn." +
+      (isVibecode
+        ? " In APP BUILDER MODE, the result also includes an /app-assets/... reference. Paste that exact path into the app HTML instead of embedding bytes or using a remote URL."
+        : "") +
       CHOOSING_AN_IMAGE_TOOL,
     inputSchema: {
       type: "object" as const,
@@ -2053,17 +2416,17 @@ export async function makeTutorSessionTools(
           return "Image generation failed. I'll describe the concept in words instead.";
         }
         void recordImageUsage(ctx, {
-          source: "tutor-image",
-          role: "scholar",
+          source: session.isTestDrive ? "tutor-test-drive" : "tutor-image",
+          role: session.isTestDrive ? (callerRole ?? "scholar") : "scholar",
           institutionId: imageInstitutionId,
           model: image.model,
           sessionId: projId,
         });
 
-        // Store in Convex file storage
-        const storageId = await ctx.storage.store(
-          toStorageBlob(image.bytes, image.mimeType)
+        const stored = await storeTutorImage(
+          toStorageBlob(image.bytes, image.mimeType),
         );
+        const storageId = stored.storageId;
 
         // Split the stream with imageId on the tool message
         const newId = await ctx.runMutation(internal.sessionHelpers.splitStream, {
@@ -2111,18 +2474,21 @@ export async function makeTutorSessionTools(
         const routingReminder = !isFirstCallThisTurn
           ? " If you now realize this subject actually has one true real-world structure (a molecule, anatomy, a map, a specific real object) — the kind of thing generation cannot reliably get right — say so and use search_image instead of trying to fix it here."
           : "";
+        const assetInstruction = stored.appAssetReference
+          ? ` For the app, use exactly <img src="${stored.appAssetReference}" alt=${JSON.stringify(input.alt_text)}>; never hot-link or paste a storage URL.`
+          : "";
 
         if (!imagePart) {
           // Too large to send back to the model (>3.5MB raw). Degrade to
           // text rather than failing the whole streaming turn — but never
           // let the model claim it looked when it didn't.
-          return `Image generated and is now on the scholar's screen, but it was too large to send back to you, so you did NOT see it. Describe only what you asked for in the prompt — do not claim to have checked the result — and if the scholar seems confused by what's on their screen, ask them to describe it to you.${routingReminder}`;
+          return `Image generated and is now on the scholar's screen, but it was too large to send back to you, so you did NOT see it. Describe only what you asked for in the prompt — do not claim to have checked the result — and if the scholar seems confused by what's on their screen, ask them to describe it to you.${routingReminder}${assetInstruction}`;
         }
 
         return [
           {
             type: "text" as const,
-            text: `Image generated. Look at it now, below, BEFORE you describe it — compare it against exactly what you asked for: "${input.prompt}". ${retryInstruction}${routingReminder}`,
+            text: `Image generated. Look at it now, below, BEFORE you describe it — compare it against exactly what you asked for: "${input.prompt}". ${retryInstruction}${routingReminder}${assetInstruction}`,
           },
           imagePart,
         ];
@@ -2146,6 +2512,9 @@ export async function makeTutorSessionTools(
     name: "search_image",
     description:
       "Find a real photograph or published diagram on the web and show it to the scholar. Use this for anything with one true real-world appearance or structure — molecules, anatomy, maps, real places and people, specific organisms, equipment, labeled scientific diagrams. The image comes back to you as well as to the scholar, so you can look at what the search actually found and check it before you describe it." +
+      (isVibecode
+        ? " In APP BUILDER MODE, the result also includes an /app-assets/... reference. Paste that exact path into the app HTML instead of embedding bytes or using a remote URL."
+        : "") +
       CHOOSING_AN_IMAGE_TOOL,
     inputSchema: {
       type: "object" as const,
@@ -2199,7 +2568,14 @@ export async function makeTutorSessionTools(
         // can't find pictures". downloadWithProxyFallback throws rather than
         // returning null, so each attempt is guarded individually.
         let picked:
-          | { blob: Blob; sourceHost: string; title: string | null }
+          | {
+              bytes: Uint8Array;
+              mimeType: ImageMime;
+              sourceHost: string;
+              title: string | null;
+              storageId?: Id<"_storage">;
+              appAssetReference?: string | null;
+            }
           | null = null;
         for (const result of search.results.slice(0, IMAGE_SEARCH_MAX_ATTEMPTS)) {
           // Skipped blind: this tool auto-picks, so nobody is looking at the
@@ -2210,10 +2586,33 @@ export async function makeTutorSessionTools(
               result.imageUrl,
               result.proxyUrl,
             );
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            // A format the scholar's device cannot decode is the same dead end
+            // as a 403 — take the next ranked result instead of storing it.
+            // `downloadImage` refuses a corrupt PNG/WebP/GIF (`isIntactImage`),
+            // but passes any other type the response claims is `image/*`, and
+            // the open web serves plenty that no phone or tablet will draw
+            // (SVG — routine for the chemistry and biology diagrams this tool
+            // exists to find — plus AVIF, HEIC, TIFF, BMP). Web browsers paper
+            // over some of those; the native iPad session view does not, and a
+            // scholar there got a permanently blank frame under a "Found image
+            // · host" caption that no retry could fix, because the unreadable
+            // bytes were already in storage. Sniffed, not trusted: the
+            // content-type header is unreliable (see `sniffImageMime`). The
+            // four sniffed types are also exactly what the model can be shown,
+            // so this keeps the tutor from describing a picture it never saw.
+            const mimeType = sniffImageMime(bytes);
+            if (!mimeType) continue;
+            const stored = isVibecode
+              ? await storeTutorImage(toStorageBlob(bytes, mimeType))
+              : null;
             picked = {
-              blob,
+              bytes,
+              mimeType,
               sourceHost: result.sourceHost ?? "the web",
               title: result.title?.trim() || null,
+              storageId: stored?.storageId,
+              appAssetReference: stored?.appAssetReference,
             };
             break;
           } catch {
@@ -2224,7 +2623,9 @@ export async function makeTutorSessionTools(
           return `No usable image was found for "${query}". Tell the scholar you could not find a good picture of this, and explain it in words instead — do not generate one, because this subject has a real structure that an invented picture would get wrong.`;
         }
 
-        const storageId = await ctx.storage.store(picked.blob);
+        const storageId =
+          picked.storageId ??
+          (await ctx.storage.store(toStorageBlob(picked.bytes, picked.mimeType)));
 
         const newId = await ctx.runMutation(internal.sessionHelpers.splitStream, {
           currentMessageId: state.assistantMsgId as Id<"messages">,
@@ -2256,21 +2657,22 @@ export async function makeTutorSessionTools(
         // the two rings SEPARATE, and the tutor said they were "joined by that
         // one link". Telling it to hedge, or asking the scholar to check, only
         // moves that burden onto a nine-year-old. Letting it see removes it.
-        const imagePart = imageBytesToContentPart(
-          new Uint8Array(await picked.blob.arrayBuffer()),
-        );
+        const imagePart = imageBytesToContentPart(picked.bytes);
 
         const provenance = `This image is now on the scholar's screen. It came from ${picked.sourceHost}, found by searching "${query}".${
           picked.title ? ` The page it came from is titled "${picked.title}".` : ""
+        }${
+          picked.appAssetReference
+            ? ` For the app, use exactly <img src="${picked.appAssetReference}" alt=${JSON.stringify(input.alt_text)}>; never hot-link or paste the source URL.`
+            : ""
         }`;
 
         if (!imagePart) {
-          // Too large to send, or not one of Anthropic's four supported raster
-          // types — web search results are frequently SVG, especially for the
-          // chemistry and biology diagrams this tool exists to find. Sniffed
-          // and rejected here rather than mislabeled and sent, which used to
-          // 400 the whole turn and kill the reply mid-sentence. Degrade to
-          // text rather than failing — but never let the model imply it looked.
+          // Only oversize reaches here now that the candidate loop rejects any
+          // type Anthropic (and the scholar's device) cannot read. A mislabeled
+          // block used to 400 the whole turn and kill the reply mid-sentence,
+          // so this still degrades to text rather than failing — but never lets
+          // the model imply it looked.
           return `${provenance} You could NOT see this image, so do not describe what is in it. Say where it came from and what the title suggests, and ask the scholar to tell you what they see.`;
         }
 
@@ -2284,6 +2686,109 @@ export async function makeTutorSessionTools(
       } catch (err) {
         console.error("Image search error:", err);
         return "Image search encountered an error. Describe the concept in words instead.";
+      }
+    },
+  });
+
+  const charmIconTool = betaTool({
+    name: "charm_icon",
+    description:
+      "Create or reuse one small transparent CHARM-style app sprite and return an /app-assets/... reference for HTML. Use flat for a face-on icon or isometric for a three-quarter game-board sprite. This is for a single object or creature, not a scene, diagram, photograph, background, or text.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string" as const,
+          description:
+            "A short concrete noun for the single icon, such as 'parrotfish', 'mangrove tree', or 'telescope'.",
+        },
+        style: {
+          type: "string" as const,
+          enum: ["flat", "isometric"] as const,
+          description:
+            "flat = face-on icon; isometric = three-quarter sprite facing left.",
+        },
+      },
+      required: ["name", "style"] as const,
+    },
+    run: async (input) => {
+      emit({ toolStart: { name: "charm_icon" } });
+      try {
+        const name = input.name.replace(/\s+/g, " ").trim();
+        if (!name) return "Name the object the charm icon should show.";
+        const label = appCharmThemeLabel(name, input.style);
+        const prepared = await ctx.runMutation(
+          internal.manipulativeThemeIcons.prepareManualGeneration,
+          { label },
+        );
+        if (!prepared) return "That charm icon name is too long.";
+        let row = await ctx.runQuery(
+          internal.manipulativeThemeIcons.getForGeneration,
+          { id: prepared.id },
+        );
+        if (row?.hidden) {
+          return "That charm icon is hidden. Use another picture tool or choose a different subject.";
+        }
+        if (
+          !row ||
+          row.status !== "ready" ||
+          !row.imageStorageId
+        ) {
+          if (charmIconGenerations >= CHARM_ICON_MAX_GENERATIONS_PER_TURN) {
+            return `You've reached this turn's limit of ${CHARM_ICON_MAX_GENERATIONS_PER_TURN} new charm icons. Reuse the icons already returned or continue with the app and add more next turn.`;
+          }
+          charmIconGenerations += 1;
+          await ctx.runAction(
+            internal.manipulativeThemeIconActions.generateThemeIcon,
+            {
+              id: prepared.id,
+              preserveExistingOnFailure: prepared.preserveExisting,
+            },
+          );
+          row = await ctx.runQuery(
+            internal.manipulativeThemeIcons.getForGeneration,
+            { id: prepared.id },
+          );
+        }
+        if (
+          !row ||
+          row.status !== "ready" ||
+          !row.imageStorageId ||
+          row.hidden
+        ) {
+          return "The charm icon could not be prepared. Use generate_image for an invented illustration or search_image for a real subject.";
+        }
+        const blob = await ctx.storage.get(row.imageStorageId);
+        if (!blob || blob.size > MAX_APP_ASSET_BYTES) {
+          return "The charm icon is unavailable as an app asset.";
+        }
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        const mime = sniffImageMime(bytes);
+        if (!mime || mime === "image/gif") {
+          return "The charm icon is unavailable as an app asset.";
+        }
+        const sessionCopyId = await ctx.storage.store(
+          toStorageBlob(bytes, mime),
+        );
+        const registered = await ctx.runMutation(
+          internal.sessionHelpers.registerAppAsset,
+          { sessionId: projId, storageId: sessionCopyId },
+        );
+        if (!registered) {
+          await ctx.storage.delete(sessionCopyId);
+          return `This app already has ${MAX_APP_ASSETS} session-owned charm assets. Reuse one of those icons or remove an unused picture before adding another.`;
+        }
+        const reference = appAssetRef(String(sessionCopyId));
+        emit({ toolComplete: { name: "charm_icon", result: "Icon ready" } });
+        const text = {
+          type: "text" as const,
+          text: `Charm icon ready. Use exactly <img src="${reference}" alt=${JSON.stringify(name)}> in the app HTML. Never hot-link the web.`,
+        };
+        const imagePart = imageBytesToContentPart(bytes);
+        return imagePart ? [text, imagePart] : [text];
+      } catch (error) {
+        console.error("Charm icon error:", error);
+        return "The charm icon could not be prepared. Use another picture tool or continue without it.";
       }
     },
   });
@@ -2516,9 +3021,18 @@ export async function makeTutorSessionTools(
     editDocumentTool, // Always enabled — needed to edit code artifacts and create/edit documents
     generateImageTool, // Always enabled — AI image generation
     searchImageTool, // Always enabled — real images for real subjects (see CHOOSING_AN_IMAGE_TOOL)
+    ...(isVibecode ? [charmIconTool] : []),
+    // Build-time app AI, teacher builds only for now: a character's script is
+    // authored by staff. Play drops both (WORKSHOP_CODE_TOOL_NAMES).
+    ...(isVibecode && session.isTestDrive === true
+      ? [defineCharacterTool, defineJudgeTool]
+      : []),
     checkWorkTool, // Always enabled — sandboxed self-verification of tutor-composed content
     ...(isWorkbenchOwner ? [viewWorkbenchTool, updateWorldTool] : []),
     ...(canRunAppAction ? [runAppActionTool] : []),
+    ...(directableCharacter
+      ? [directCharacterTool, speakAsCharacterTool]
+      : []),
     ...(hasProcess ? [processStepTool] : []),
     ...(hasRubric ? [rubricScoreTool] : []),
     ...(hasConversationCompletion ? [markActivityCompleteTool] : []),

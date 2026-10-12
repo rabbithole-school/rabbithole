@@ -43,6 +43,7 @@ import {
   MIN_PASSWORD_LENGTH,
   normalizePassword,
 } from "../shared/password";
+import { assertWritableAction } from "./lib/auth";
 
 export { MIN_PASSWORD_LENGTH };
 
@@ -112,6 +113,7 @@ export const setMyPassword = action({
   handler: async (ctx, args): Promise<{ ok: true }> => {
     const userId = await getAuthUserId(ctx);
     if (!userId) throw new Error("Not authenticated.");
+    await assertWritableAction(ctx);
 
     const newPassword = normalizePassword(args.newPassword);
     if (newPassword.length < MIN_PASSWORD_LENGTH) {

@@ -6,39 +6,47 @@
 // convex/lib/aideModel.ts. Small enough to live in every aide header.
 //
 // Deliberately staff-honest about the trade-off — one clean speed↔smarts axis:
-// Sonnet is the fastest, Opus is smart and quick, Fable is the smartest (it
-// takes its time) and is the default (teacher reasoning is upstream of
-// everything).
+// Sonnet is the fastest, Opus 5.5 is smart and quicker and is the default,
+// Fable is the smartest.
+//
+// Two things this control must make true, both learned from a real incident
+// (2026-09-03) where staff sat pinned to an older model through a fleet
+// upgrade without anyone — themselves included — being able to tell:
+//
+//  1. "Default" is a choice you can make. Picking it CLEARS the pin, so the
+//     person follows the fleet default and inherits every future upgrade.
+//     Un-pinning was always supported by the mutation and reachable from
+//     nowhere; the picker only ever offered three permanent pins.
+//  2. A pin is VISIBLE. This used to render `aideModel ?? "fable"`, so being
+//     unpinned looked exactly like being pinned to Fable — which is precisely
+//     how the stale pins survived a model change unnoticed. Pinned state now
+//     carries a pin glyph on the trigger.
+//
+// Every model name is derived from MODEL_DISPLAY so a model bump can't leave
+// stale copy behind (the old aide tool advertised "Claude Fable 5" for the
+// entire Fable 5 → 5.1 rollout).
 
 import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { Menu, Portal, Button, Text, Box } from "@chakra-ui/react";
-import { CaretDown, Check } from "@phosphor-icons/react";
+import { CaretDown, Check, PushPin } from "@phosphor-icons/react";
 import { toaster } from "@/lib/toaster";
+import { MODELS, modelLabel } from "@/convex/lib/models";
+import { resolveAideModel } from "@/convex/lib/aideModel";
 
 type Choice = "sonnet" | "opus" | "fable";
 
-const OPTIONS: Array<{
-  value: Choice;
-  label: string;
-  hint: string;
-}> = [
-  {
-    value: "fable",
-    label: "Fable",
-    hint: "Smartest — takes its time (the default)",
-  },
-  {
-    value: "opus",
-    label: "Opus",
-    hint: "Smart and quick",
-  },
-  {
-    value: "sonnet",
-    label: "Sonnet",
-    hint: "Fastest",
-  },
+/** "Claude Fable 5.1" → "Fable 5.1" — the header has no room to repeat the
+ *  vendor on every entry, and the full name still shows in the menu. */
+const short = (id: string) => modelLabel(id).replace(/^Claude /, "");
+
+const DEFAULT_MODEL = resolveAideModel(undefined);
+
+const OPTIONS: Array<{ value: Choice; model: string; hint: string }> = [
+  { value: "fable", model: MODELS.FABLE, hint: "Smartest" },
+  { value: "opus", model: MODELS.OPUS_5_5, hint: "Smart and quicker" },
+  { value: "sonnet", model: MODELS.SONNET, hint: "Fastest" },
 ];
 
 export default function AideModelPicker({
@@ -53,17 +61,23 @@ export default function AideModelPicker({
   const setAideModel = useMutation(api.users.setAideModel);
 
   if (!user) return null;
-  const current: Choice = (user.aideModel as Choice | undefined) ?? "fable";
-  const currentOption = OPTIONS.find((o) => o.value === current) ?? OPTIONS[0];
+  // Absent means unpinned — the state this control previously could neither
+  // show nor set.
+  const pinned = (user.aideModel as Choice | undefined) ?? null;
+  const activeModel = resolveAideModel(pinned ?? undefined);
   const compact = size === "xs";
 
-  const pick = async (value: Choice) => {
-    if (value === current) return;
+  const pick = async (value: Choice | null) => {
+    if (value === pinned) return;
     try {
-      await setAideModel({ model: value });
+      await setAideModel(value ? { model: value } : {});
       toaster.success({
-        title: `Chat model: Claude ${OPTIONS.find((o) => o.value === value)?.label}`,
-        description: "Takes effect from your next message.",
+        title: value
+          ? `Chat model: ${modelLabel(resolveAideModel(value))}`
+          : `Chat model: the default (${modelLabel(DEFAULT_MODEL)})`,
+        description: value
+          ? "Pinned for you everywhere, from your next message."
+          : "You'll follow the default from your next message, upgrades included.",
       });
     } catch {
       toaster.error({ title: "Couldn't switch model" });
@@ -82,21 +96,44 @@ export default function AideModelPicker({
           color="charcoal.400"
           _hover={{ color: "charcoal.600" }}
           aria-label="Choose chat model"
-          title="Which Claude model powers your chat (your personal preference, all surfaces)"
+          title={
+            pinned
+              ? `Pinned to ${modelLabel(activeModel)} — you won't follow future default changes. Choose "Default" to follow them again.`
+              : `Following the default (${modelLabel(activeModel)}) — which Claude model powers your chat, on every surface`
+          }
         >
-          {currentOption.label}
+          {short(activeModel)}
+          {pinned && (
+            <PushPin
+              size={compact ? 9 : 11}
+              weight="fill"
+              style={{ marginLeft: "3px" }}
+              aria-label="pinned"
+            />
+          )}
           <CaretDown size={compact ? 10 : 14} style={{ marginLeft: "3px" }} />
         </Button>
       </Menu.Trigger>
       <Portal>
         <Menu.Positioner>
           <Menu.Content
-            minW="220px"
+            minW="240px"
             shadow="md"
             borderRadius="lg"
             border="1px solid"
             borderColor="gray.200"
           >
+            <Menu.Item value="default" onClick={() => void pick(null)} py={2}>
+              <Box flex={1}>
+                <Text fontFamily="heading" fontSize="xs" fontWeight="600" color="navy.500">
+                  Default
+                </Text>
+                <Text fontSize="2xs" color="charcoal.400">
+                  {modelLabel(DEFAULT_MODEL)} today — follows future upgrades
+                </Text>
+              </Box>
+              {!pinned && <Check size={12} weight="bold" />}
+            </Menu.Item>
             {OPTIONS.map((o) => (
               <Menu.Item
                 key={o.value}
@@ -106,13 +143,13 @@ export default function AideModelPicker({
               >
                 <Box flex={1}>
                   <Text fontFamily="heading" fontSize="xs" fontWeight="600" color="navy.500">
-                    Claude {o.label}
+                    {modelLabel(o.model)}
                   </Text>
                   <Text fontSize="2xs" color="charcoal.400">
-                    {o.hint}
+                    {o.hint} — pinned until you change it
                   </Text>
                 </Box>
-                {o.value === current && <Check size={12} weight="bold" />}
+                {o.value === pinned && <Check size={12} weight="bold" />}
               </Menu.Item>
             ))}
           </Menu.Content>

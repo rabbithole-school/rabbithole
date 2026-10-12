@@ -18,6 +18,8 @@
  * no truncation as shells grow past ~8 sections) and the shell's existing
  * single-line horizontal strip below that. Only one is in the accessibility
  * tree at a time — the other is `display: none`, which removes it entirely.
+ * A `fill` rail sits in a `CollapsibleRailLayout`, which owns the narrow-screen
+ * form (a drawer), so it is the rail at every width and never the strip.
  *
  * Callers own item filtering (role gates, feature flags) and pass resolved
  * items plus the current `pathname`.
@@ -39,6 +41,11 @@ export interface ShellNavProps {
   pathname: string;
   /** Accessible name for the `<nav>` landmark, e.g. "School sections". */
   ariaLabel: string;
+  /** Fill the parent instead of the fixed rail width, for a rail that already
+   *  sits in a sized column (a `CollapsibleRailLayout` panel or drawer). The
+   *  rail form then shows at every width and the horizontal strip is never
+   *  rendered. */
+  fill?: boolean;
 }
 
 /** Desktop rail width — fixed, per the "rails fixed, content splits resize" rule. */
@@ -65,7 +72,7 @@ function NavIcon({ icon }: { icon: ReactNode }) {
   );
 }
 
-export function ShellNav({ items, pathname, ariaLabel }: ShellNavProps) {
+export function ShellNav({ items, pathname, ariaLabel, fill = false }: ShellNavProps) {
   const narrowNavRef = useRef<HTMLDivElement>(null);
   const narrowActiveRef = useRef<HTMLAnchorElement>(null);
   const activeHref = items.find((item) => isActive(pathname, item.href))?.href;
@@ -96,8 +103,8 @@ export function ShellNav({ items, pathname, ariaLabel }: ShellNavProps) {
       <Stack
         as="nav"
         aria-label={ariaLabel}
-        display={{ base: "none", lg: "flex" }}
-        w={RAIL_WIDTH}
+        display={fill ? "flex" : { base: "none", lg: "flex" }}
+        w={fill ? "full" : RAIL_WIDTH}
         flexShrink={0}
         gap={0.5}
         align="stretch"
@@ -141,59 +148,61 @@ export function ShellNav({ items, pathname, ariaLabel }: ShellNavProps) {
           rather than wrapping, with the violet underline active treatment.
           `minW={0}` + `overflowX="auto"` keep it the shrinkable region; the
           scrollbar stays visible so there's an affordance for the overflow. */}
-      <HStack
-        ref={narrowNavRef}
-        as="nav"
-        aria-label={ariaLabel}
-        display={{ base: "flex", lg: "none" }}
-        borderBottom="1px solid"
-        borderColor="gray.200"
-        gap={1}
-        align="stretch"
-        w="full"
-        minW={0}
-        overflowX="auto"
-        position="relative"
-      >
-        {items.map((item) => {
-          const active = isActive(pathname, item.href);
-          return (
-            <Link
-              ref={active ? narrowActiveRef : undefined}
-              key={item.href}
-              href={item.href}
-              aria-current={active ? "page" : undefined}
-              // The anchor is the flex item here, so it — not just its inner
-              // row — must refuse to shrink, or long labels wrap/compress.
-              style={{ textDecoration: "none", display: "block", flexShrink: 0 }}
-            >
-              <HStack
-                gap={2}
-                px={4}
-                py={2}
-                minH={MIN_TARGET}
-                flexShrink={0}
-                whiteSpace="nowrap"
-                color={active ? "violet.600" : "charcoal.400"}
-                borderBottomWidth="2px"
-                borderColor={active ? "violet.500" : "transparent"}
-                transition="color 0.12s"
-                _hover={{ color: active ? "violet.600" : "navy.500" }}
+      {!fill && (
+        <HStack
+          ref={narrowNavRef}
+          as="nav"
+          aria-label={ariaLabel}
+          display={{ base: "flex", lg: "none" }}
+          borderBottom="1px solid"
+          borderColor="gray.200"
+          gap={1}
+          align="stretch"
+          w="full"
+          minW={0}
+          overflowX="auto"
+          position="relative"
+        >
+          {items.map((item) => {
+            const active = isActive(pathname, item.href);
+            return (
+              <Link
+                ref={active ? narrowActiveRef : undefined}
+                key={item.href}
+                href={item.href}
+                aria-current={active ? "page" : undefined}
+                // The anchor is the flex item here, so it — not just its inner
+                // row — must refuse to shrink, or long labels wrap/compress.
+                style={{ textDecoration: "none", display: "block", flexShrink: 0 }}
               >
-                <NavIcon icon={item.icon} />
-                <Text
-                  fontFamily="heading"
-                  fontSize="sm"
-                  fontWeight={active ? "600" : "500"}
-                  lineHeight="1.3"
+                <HStack
+                  gap={2}
+                  px={4}
+                  py={2}
+                  minH={MIN_TARGET}
+                  flexShrink={0}
+                  whiteSpace="nowrap"
+                  color={active ? "violet.600" : "charcoal.400"}
+                  borderBottomWidth="2px"
+                  borderColor={active ? "violet.500" : "transparent"}
+                  transition="color 0.12s"
+                  _hover={{ color: active ? "violet.600" : "navy.500" }}
                 >
-                  {item.label}
-                </Text>
-              </HStack>
-            </Link>
-          );
-        })}
-      </HStack>
+                  <NavIcon icon={item.icon} />
+                  <Text
+                    fontFamily="heading"
+                    fontSize="sm"
+                    fontWeight={active ? "600" : "500"}
+                    lineHeight="1.3"
+                  >
+                    {item.label}
+                  </Text>
+                </HStack>
+              </Link>
+            );
+          })}
+        </HStack>
+      )}
     </>
   );
 }

@@ -19,6 +19,7 @@ const { items, NativeManipulative, Pressable, passthrough } = vi.hoisted(() => {
 
 vi.mock("react-native", () => ({
   ActivityIndicator: passthrough,
+  Keyboard: { dismiss: vi.fn() },
   Modal: passthrough,
   Pressable,
   StyleSheet: { create: <T,>(styles: T) => styles },
@@ -26,6 +27,8 @@ vi.mock("react-native", () => ({
   View: passthrough,
 }));
 vi.mock("react-native-gesture-handler", () => ({ ScrollView: passthrough }));
+vi.mock("react-native-reanimated", () => ({ default: { View: passthrough } }));
+vi.mock("@/hooks/useKeyboardInset", () => ({ useKeyboardInset: () => ({ style: {} }) }));
 vi.mock("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => ({ top: 0 }),
 }));
@@ -74,11 +77,13 @@ vi.mock("@/lib/externalAppHost", () => ({ openManipulativeEmbed: vi.fn() }));
 vi.mock("../kit", async () => {
   const { createContext } = await vi.importActual<typeof import("react")>("react");
   return {
+    ManipulativeIdleContext: createContext(true),
     ManipulativeScrollContext: createContext(null),
     successNotify: vi.fn(),
     warningNotify: vi.fn(),
   };
 });
+vi.mock("@/components/AppTextInput", () => ({ AppTextInput: passthrough }));
 vi.mock("../NativeManipulative", () => ({
   isNativeManipulativeKind: () => true,
   NativeManipulative,

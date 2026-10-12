@@ -82,6 +82,10 @@ export function teacherNavKeysForRole(
   hasCurriculumAccess = false,
   hasProgramPublishingAccess = false,
   hasSchoolOperationsAccess = false,
+  scholarMessaging: { mentor: boolean; mentorOnly: boolean } = {
+    mentor: false,
+    mentorOnly: false,
+  },
 ): TeacherNavKey[] {
   // Every role that reaches either shell is staff, and every staff role may
   // enter `/school` (the school shell then filters its own left rail per role),
@@ -97,15 +101,30 @@ export function teacherNavKeysForRole(
     ];
   }
   if (role === "staff") {
+    // A mentor (a `scholars:mentor` grant and no other staff surface) gets
+    // exactly one tab: Messages, where their mentor threads live. Nothing
+    // else — not even School, whose rail would be empty for them.
+    if (scholarMessaging.mentorOnly) return ["messages"];
     return [
       ...(hasProgramPublishingAccess && hasCurriculumAccess
         ? (["schedule"] as const)
         : []),
       ...(hasSchoolOperationsAccess ? (["scholars"] as const) : []),
       ...(hasCurriculumAccess ? (["curriculum"] as const) : []),
-      "apps",
+      // Apps is school:operations-gated, NOT free for every staff role: the
+      // tab's own first query (`appAudiences.listAppsWithAudiences`) is a
+      // `scholarAdminQuery`, so offering it to a base staffer without that
+      // grant hands them a tab that throws "Forbidden: scholar-admin role
+      // required" the moment it mounts. Worse, `teacherHomePath` used to make
+      // it that staffer's HOME, so their only /teacher destination was the one
+      // they could not load. Keep this gate in lockstep with the query's.
+      ...(hasSchoolOperationsAccess ? (["apps"] as const) : []),
       "school",
-      ...(hasSchoolOperationsAccess ? (["messages"] as const) : []),
+      // Messages carries family threads (school:operations) and mentor
+      // threads (a scholars:mentor grant) — either opens it.
+      ...(hasSchoolOperationsAccess || scholarMessaging.mentor
+        ? (["messages"] as const)
+        : []),
     ];
   }
   return [

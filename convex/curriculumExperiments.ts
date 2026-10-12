@@ -38,6 +38,7 @@ import {
   type TutorPromptContext,
 } from "./sessionStreamHelpers";
 import { DEFAULT_CAST } from "./lib/curriculumSimShared";
+import { isPlayOnlyApp } from "../shared/workshopMode";
 import { preflightResultValidator } from "./lib/curriculumPreflightResult";
 import { meanProbe } from "./lib/curriculumProbe";
 import { MAX_TURNS, turnsForMinutes } from "./lib/rehearsalBudget";
@@ -195,9 +196,21 @@ async function ensureDefaultCast(
 }
 
 function simRehearsalUnavailableMessage(
-  activity: Pick<Doc<"activities">, "kind" | "title">,
+  activity: Pick<
+    Doc<"activities">,
+    "kind" | "title" | "editAccess" | "starterAppId"
+  >,
 ): string {
   if (activity.kind === "vibecode") {
+    // An app scholars only play: no mention of building (TRA-477).
+    if (
+      isPlayOnlyApp({
+        editAccess: activity.editAccess,
+        hasStarter: activity.starterAppId != null,
+      })
+    ) {
+      return `Scholar-bot sims don't play apps yet — rehearse "${activity.title}" as a scholar would.`;
+    }
     return `Scholar-bot sims don't build apps yet — rehearse "${activity.title}" manually in the scholar workshop.`;
   }
   if (activity.kind === "simulator") {
@@ -677,6 +690,7 @@ export const getRunInput = internalQuery({
       deliverablePrompt: activityDoc.deliverable?.prompt ?? null,
       durationMinutes: activityDoc.durationMinutes ?? null,
       unitDesign: await serializeUnitDesign(ctx, activityDoc, systemPrompt),
+      tutorModel: activityDoc.tutorModel ?? null,
       probeSkillKeys:
         activityDoc.problemSet?.targetSkillKeys ??
         activityDoc.probeSkillKeys ??

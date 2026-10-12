@@ -28,6 +28,7 @@ import type { Id } from "../_generated/dataModel";
 import { isTeacherRole, type Role } from "./roles";
 import { matchScholarByName } from "./scholarReadTools";
 import { makeUnitResolver } from "./aideResolvers";
+import { youtubeVideoId } from "../../shared/activityResourceEmbed";
 import {
   withBase,
   unitPath,
@@ -36,6 +37,252 @@ import {
   hstLabel,
 } from "./channels";
 import type { AideEmit } from "./aideStream";
+
+export type AssignmentCohortInput = {
+  groupName?: string;
+  scholarNames?: string[];
+};
+
+export type AssignmentCohortResolution =
+  | {
+      ok: true;
+      ids: Id<"users">[];
+      audienceLabel: string;
+    }
+  | { ok: false; message: string };
+
+async function resolveAssignmentScholars(
+  ctx: ActionCtx,
+  names: string[],
+  allowedScholarIds?: ReadonlySet<Id<"users">>,
+): Promise<{
+  ids: Id<"users">[];
+  resolvedNames: string[];
+  unresolved: string[];
+  ambiguous: { name: string; candidates: string[] }[];
+}> {
+  const { scholars } = await ctx.runQuery(
+    internal.curriculumAssistant.listScholarsInternal,
+    {
+      includeProgramGuests: true,
+      ...(allowedScholarIds
+        ? { allowedScholarIds: [...allowedScholarIds] }
+        : {}),
+    },
+  );
+  const ids: Id<"users">[] = [];
+  const resolvedNames: string[] = [];
+  const unresolved: string[] = [];
+  const ambiguous: { name: string; candidates: string[] }[] = [];
+  for (const name of names) {
+    const match = matchScholarByName(name, scholars);
+    if (match.kind === "match") {
+      ids.push(match.scholar.id as Id<"users">);
+      resolvedNames.push(match.scholar.name);
+    } else if (match.kind === "ambiguous") {
+      ambiguous.push({
+        name,
+        candidates: match.candidates.map((candidate) => candidate.name),
+      });
+    } else {
+      unresolved.push(name);
+    }
+  }
+  return { ids, resolvedNames, unresolved, ambiguous };
+}
+
+async function resolveAssignmentGroup(
+  ctx: ActionCtx,
+  groupName: string,
+  allowedScholarIds?: ReadonlySet<Id<"users">>,
+) {
+  const groups = await ctx.runQuery(
+    internal.curriculumAssistant.listScholarGroupsInternal,
+    {
+      includeProgramGuests: true,
+      ...(allowedScholarIds
+        ? { allowedScholarIds: [...allowedScholarIds] }
+        : {}),
+    },
+  );
+  return matchScholarByName(groupName, groups);
+}
+
+/** The shared strict groupName-XOR-scholarNames resolver for assignment tools. */
+export function makeAssignmentCohortResolver(
+  ctx: ActionCtx,
+  allowedScholarIds?: ReadonlySet<Id<"users">>,
+) {
+  return async (
+    input: AssignmentCohortInput,
+  ): Promise<AssignmentCohortResolution> => {
+    const hasGroup = input.groupName != null && input.groupName.trim() !== "";
+    const hasNames =
+      Array.isArray(input.scholarNames) && input.scholarNames.length > 0;
+    if (hasGroup && hasNames) {
+      return {
+        ok: false,
+        message: "Provide groupName OR scholarNames, not both.",
+      };
+    }
+    if (!hasGroup && !hasNames) {
+      return {
+        ok: false,
+        message:
+          "Provide either a groupName (scholar group) or scholarNames (individual scholars).",
+      };
+    }
+    if (hasGroup) {
+      const match = await resolveAssignmentGroup(
+        ctx,
+        input.groupName!,
+        allowedScholarIds,
+      );
+      if (match.kind === "ambiguous") {
+        return {
+          ok: false,
+          message: `Ambiguous group name "${input.groupName}" matches ${match.candidates
+            .map((candidate) => candidate.name)
+            .join(", ")}. No assignment created — use the exact group name.`,
+        };
+      }
+      if (match.kind === "none") {
+        return {
+          ok: false,
+          message: `No scholar group found matching "${input.groupName}". Call list_scholar_groups to see available groups.`,
+        };
+      }
+      const group = match.scholar;
+      if (group.members.length === 0) {
+        return {
+          ok: false,
+          message: `Scholar group "${group.name}" exists but has no members. Add scholars to the group first.`,
+        };
+      }
+      return {
+        ok: true,
+        ids: group.members.map((member) => member.id as Id<"users">),
+        audienceLabel: group.name,
+      };
+    }
+    const { ids, resolvedNames, unresolved, ambiguous } =
+      await resolveAssignmentScholars(
+        ctx,
+        input.scholarNames!,
+        allowedScholarIds,
+      );
+    if (ambiguous.length > 0) {
+      const detail = ambiguous
+        .map(
+          (match) =>
+            `"${match.name}" matches ${match.candidates.join(", ")}`,
+        )
+        .join("; ");
+      return {
+        ok: false,
+        message: `Ambiguous scholar name(s): ${detail}. No assignment created — use a full name to disambiguate.`,
+      };
+    }
+    if (unresolved.length > 0) {
+      return {
+        ok: false,
+        message: `Could not resolve these scholar names: ${unresolved.join(", ")}. No assignment created.`,
+      };
+    }
+    if (ids.length === 0) {
+      return {
+        ok: false,
+        message: "No scholars given — refusing to create an empty cohort.",
+      };
+    }
+    return { ok: true, ids, audienceLabel: resolvedNames.join(", ") };
+  };
+}
+
+export type AssignActivityNowExecution =
+  | {
+      status: "live";
+      assignmentId: Id<"assignments">;
+      created: boolean;
+    }
+  | { status: "assign_failed"; error: string }
+  | {
+      status: "push_failed";
+      assignmentId: Id<"assignments">;
+      created: boolean;
+      error: string;
+    };
+
+export const CLASS_FOCUS_ENDS_AT_DESCRIPTION =
+  "classFocus only: keep it on the scholar's screen until this time (epoch ms). Omit unless the teacher gave a time or a lifetime (for example, \"through Friday\" or \"for the week\"); when omitted it fades after today. Never guess.";
+
+export function classFocusLifetimeConfirmation(
+  endsAtMs: number | undefined,
+  live = true,
+): string {
+  if (endsAtMs !== undefined) {
+    return `${live ? "Live now" : "Queued"} · stays until ${hstLabel(endsAtMs)}`;
+  }
+  return live
+    ? 'Live now · fades from their screen after today. Say "make it homework" or give a lifetime to keep it.'
+    : 'Queued · fades from their screen after the day it goes live. Say "make it homework" or give a lifetime to keep it.';
+}
+
+/** Compose the canonical assignment creation/reuse and immediate live push. */
+export async function assignAndPushActivityNow(
+  ctx: ActionCtx,
+  args: {
+    callerUserId: Id<"users">;
+    unitId: Id<"units">;
+    activityId: Id<"activities">;
+    scholarIds: Id<"users">[];
+    mode: "classFocus" | "homework";
+    endsAt?: number;
+    dueAt?: number;
+  },
+): Promise<AssignActivityNowExecution> {
+  let assignment: { assignmentId: Id<"assignments">; created: boolean };
+  try {
+    assignment = await ctx.runMutation(
+      internal.assignments.aideAssignWork,
+      {
+        callerUserId: args.callerUserId,
+        unitId: args.unitId,
+        scholarIds: args.scholarIds,
+        startsAt: Date.now(),
+        target: {
+          kind: "activity",
+          activityId: args.activityId,
+          mode: args.mode,
+          endsAt: args.endsAt,
+          dueAt: args.dueAt,
+        },
+      },
+    );
+  } catch (error) {
+    return {
+      status: "assign_failed",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  try {
+    await ctx.runMutation(internal.assignments.aidePushActivityNow, {
+      callerUserId: args.callerUserId,
+      assignmentId: assignment.assignmentId,
+      activityId: args.activityId,
+      mode: args.mode,
+      endsAt: args.endsAt,
+      dueAt: args.dueAt,
+    });
+    return { status: "live", ...assignment };
+  } catch (error) {
+    return {
+      status: "push_failed",
+      ...assignment,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
 
 /**
  * Build the assignment-scheduling toolset for one aide turn. Returns `[]` for
@@ -89,139 +336,12 @@ export async function makeAssignmentTools(
     ? ` The unit currently in scope is "${currentUnit.title}"; when the teacher says "this unit", pass unitTitle "${currentUnit.title}".`
     : "";
 
-  // Batch name → id resolution for the roster-edit tools. Returns the
-  // resolved ids, names that didn't match, and names that matched MULTIPLE
-  // scholars (a collision). The roster write tools refuse on ANY unresolved
-  // OR ambiguous name rather than silently dropping or mis-matching one — a
-  // roster op that quietly omits or swaps a child is worse than one that
-  // fails. Uses the STRICT matcher (exact full-name wins, partial only when
-  // unambiguous), not the read-path first-substring-wins resolver, because a
-  // wrong match here puts the wrong child into/out of a cohort.
-  const resolveScholars = async (
-    names: string[],
-  ): Promise<{
-    ids: Id<"users">[];
-    unresolved: string[];
-    ambiguous: { name: string; candidates: string[] }[];
-  }> => {
-    // Naming is the opt-in: an explicitly named scholar must resolve even if
-    // they're Extended Education (lib/scholarParticipationTooling.ts).
-    const { scholars } = await ctx.runQuery(
-      internal.curriculumAssistant.listScholarsInternal,
-      {
-        includeProgramGuests: true,
-        ...(allowedScholarIds
-          ? { allowedScholarIds: [...allowedScholarIds] }
-          : {}),
-      },
-    );
-    const ids: Id<"users">[] = [];
-    const unresolved: string[] = [];
-    const ambiguous: { name: string; candidates: string[] }[] = [];
-    for (const name of names) {
-      const m = matchScholarByName(name, scholars);
-      if (m.kind === "match") ids.push(m.scholar.id as Id<"users">);
-      else if (m.kind === "ambiguous")
-        ambiguous.push({ name, candidates: m.candidates.map((c) => c.name) });
-      else unresolved.push(name);
-    }
-    return { ids, unresolved, ambiguous };
-  };
-
-  // Helper: resolve scholar group name → row. Uses the SAME strict matcher as
-  // the scholar-name path (matchScholarByName): prefer an exact case-insensitive
-  // name match, and refuse (ambiguous) when a partial matches multiple groups —
-  // a loose first-substring-wins match would silently assign the unit to the
-  // wrong cohort (e.g. "Seals" resolving to "Navy Seals"). Matched groups carry
-  // their already-resolved member list (active scholars only — dropped ids
-  // omitted, matching the ScholarPicker behaviour).
-  const resolveGroup = async (groupName: string) => {
-    // Naming the group is the opt-in: its roster is factual membership, so
-    // Extended Education members stay in (lib/scholarParticipationTooling.ts).
-    const groups = await ctx.runQuery(
-      internal.curriculumAssistant.listScholarGroupsInternal,
-      {
-        includeProgramGuests: true,
-        ...(allowedScholarIds
-          ? { allowedScholarIds: [...allowedScholarIds] }
-          : {}),
-      },
-    );
-    return matchScholarByName(groupName, groups);
-  };
-
-  // Shared cohort resolver for the assignment tools: takes the SAME
-  // groupName-XOR-scholarNames shape and returns either the resolved roster or
-  // a ready-to-return error message. Extracted so assign_unit and
-  // assign_activity_now resolve scholars identically (strict matching, empty-
-  // group / unresolved / ambiguous refusal) instead of duplicating the logic.
-  const resolveCohort = async (input: {
-    groupName?: string;
-    scholarNames?: string[];
-  }): Promise<
-    { ok: true; ids: Id<"users">[] } | { ok: false; message: string }
-  > => {
-    const hasGroup = input.groupName != null && input.groupName.trim() !== "";
-    const hasNames =
-      Array.isArray(input.scholarNames) && input.scholarNames.length > 0;
-    if (hasGroup && hasNames) {
-      return { ok: false, message: "Provide groupName OR scholarNames, not both." };
-    }
-    if (!hasGroup && !hasNames) {
-      return {
-        ok: false,
-        message:
-          "Provide either a groupName (scholar group) or scholarNames (individual scholars).",
-      };
-    }
-    if (hasGroup) {
-      const match = await resolveGroup(input.groupName!);
-      if (match.kind === "ambiguous") {
-        return {
-          ok: false,
-          message: `Ambiguous group name "${input.groupName}" matches ${match.candidates
-            .map((c) => c.name)
-            .join(", ")}. No assignment created — use the exact group name.`,
-        };
-      }
-      if (match.kind === "none") {
-        return {
-          ok: false,
-          message: `No scholar group found matching "${input.groupName}". Call list_scholar_groups to see available groups.`,
-        };
-      }
-      const group = match.scholar;
-      if (group.members.length === 0) {
-        return {
-          ok: false,
-          message: `Scholar group "${group.name}" exists but has no members. Add scholars to the group first.`,
-        };
-      }
-      return { ok: true, ids: group.members.map((m) => m.id as Id<"users">) };
-    }
-    const { ids, unresolved, ambiguous } = await resolveScholars(
-      input.scholarNames!,
-    );
-    if (ambiguous.length > 0) {
-      const detail = ambiguous
-        .map((a) => `"${a.name}" matches ${a.candidates.join(", ")}`)
-        .join("; ");
-      return {
-        ok: false,
-        message: `Ambiguous scholar name(s): ${detail}. No assignment created — use a full name to disambiguate.`,
-      };
-    }
-    if (unresolved.length > 0) {
-      return {
-        ok: false,
-        message: `Could not resolve these scholar names: ${unresolved.join(", ")}. No assignment created.`,
-      };
-    }
-    if (ids.length === 0) {
-      return { ok: false, message: "No scholars given — refusing to create an empty cohort." };
-    }
-    return { ok: true, ids };
-  };
+  const resolveCohort = makeAssignmentCohortResolver(
+    ctx,
+    allowedScholarIds,
+  );
+  const resolveScholars = (names: string[]) =>
+    resolveAssignmentScholars(ctx, names, allowedScholarIds);
 
   // Resolve an activity by title WITHIN a unit (case-insensitive; exact title
   // wins over an ambiguous partial). Walks the unit's lessons and their
@@ -385,10 +505,53 @@ export async function makeAssignmentTools(
     },
   });
 
+  // Publication (TRA-490): a new unit is teachers-only until published or
+  // assigned. Assigning publishes on its own; this is the tool for "let
+  // scholars find it" without assigning, and for taking it back.
+  const publishUnitTool = betaTool({
+    name: "publish_unit",
+    description:
+      "Publish a unit so scholars can find it in Start a Quest and start it on their own, or unpublish it (published: false) to make it teachers-only again. A new unit starts UNPUBLISHED; assign_unit and every other assign/place tool publish it automatically, so call this only when the teacher wants the unit open to scholars WITHOUT assigning it, or wants it hidden again. Unpublishing never takes away work a scholar was already assigned. Not for a scholar's own Quest (independent study), which is private to that scholar." +
+      currentUnitIdHint,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        unitId: {
+          type: "string" as const,
+          description:
+            "The unit's Convex ID (from list_units, get_unit_details, or a create_unit result).",
+        },
+        published: {
+          type: "boolean" as const,
+          description: "true (default) to publish, false to unpublish.",
+        },
+      },
+      required: ["unitId"] as const,
+    },
+    run: async (input: { unitId: string; published?: boolean }) => {
+      try {
+        const res = await ctx.runMutation(internal.units.aideSetUnitPublished, {
+          callerUserId,
+          unitId: input.unitId as Id<"units">,
+          published: input.published ?? true,
+        });
+        emit({
+          toolComplete: {
+            name: "publish_unit",
+            result: `${res.published ? "Published" : "Unpublished"} "${res.title}"`,
+          },
+        });
+        return JSON.stringify(res);
+      } catch (e) {
+        return `Could not change publication: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    },
+  });
+
   const assignActivityNowTool = betaTool({
     name: "assign_activity_now",
     description:
-      "Assign ONE activity to scholars and start it LIVE right now — it appears for the resolved scholars immediately (no scheduling, no separate push step). Use this when the teacher wants a specific activity in front of scholars NOW (\"put the Tide Pool activity up for the Geckos\", \"give Kai the fractions warm-up now\"). Resolves the unit by title, the activity by title WITHIN that unit, and the scholars by groupName OR scholarNames — exactly like assign_unit. It creates (or reuses) the cohort assignment for EXACTLY those scholars, then pushes the activity live in one call. `mode` classFocus = in-the-room focus (optional endsAtMs auto-clears it then); homework = on their plate (optional dueAtMs). Times are epoch-ms (Hawaii time). Because this makes work appear for scholars instantly, CONFIRM the unit, activity, roster, and mode with the teacher before calling. Note: it targets exactly the scholars you name — a named subset becomes its OWN right-sized assignment, so this cannot push to only part of a pre-existing larger cohort; to push to a subset of an EXISTING assignment, use push_activity_now on that assignment instead." +
+      "Assign ONE activity to scholars and start it LIVE right now — it appears for the resolved scholars immediately (no scheduling, no separate push step). Use this when the teacher wants a specific activity in front of scholars NOW (\"put the Tide Pool activity up for the Geckos\", \"give Kai the fractions warm-up now\"). Resolves the unit by title, the activity by title WITHIN that unit, and the scholars by groupName OR scholarNames — exactly like assign_unit. It creates (or reuses) the cohort assignment for EXACTLY those scholars, then pushes the activity live in one call. `mode` classFocus = in-the-room focus; homework = on their plate (optional dueAtMs). Times are epoch-ms (Hawaii time). Because this makes work appear for scholars instantly, CONFIRM the unit, activity, roster, and mode with the teacher before calling. Note: it targets exactly the scholars you name — a named subset becomes its OWN right-sized assignment, so this cannot push to only part of a pre-existing larger cohort; to push to a subset of an EXISTING assignment, use push_activity_now on that assignment instead." +
       currentUnitTitleHint,
     inputSchema: {
       type: "object" as const,
@@ -417,11 +580,11 @@ export async function makeAssignmentTools(
           type: "string" as const,
           enum: ["classFocus", "homework"],
           description:
-            "classFocus = in-the-room focus (optionally auto-clears at endsAtMs); homework = on their plate (optionally due at dueAtMs).",
+            "classFocus = in-the-room focus; homework = on their plate (optionally due at dueAtMs).",
         },
         endsAtMs: {
           type: "number" as const,
-          description: "classFocus only: auto-clear time (epoch ms).",
+          description: CLASS_FOCUS_ENDS_AT_DESCRIPTION,
         },
         dueAtMs: {
           type: "number" as const,
@@ -459,63 +622,51 @@ export async function makeAssignmentTools(
       );
       if (!activity.ok) return activity.message;
 
-      // Create/reuse the cohort assignment (planning this one activity), then
-      // stamp it live now. Two existing internal mutations, composed — no new
-      // backend surface. The two steps fail SEPARATELY: a push failure after
-      // the assignment committed is a partial result the model must relay
-      // accurately (the work exists, planned, not live), never "nothing
-      // happened".
-      let res: { assignmentId: Id<"assignments">; created: boolean };
-      try {
-        res = await ctx.runMutation(internal.assignments.aideAssignWork, {
-          callerUserId,
-          unitId: unit.id as Id<"units">,
-          scholarIds: cohort.ids,
-          startsAt: Date.now(),
-          target: {
-            kind: "activity",
-            activityId: activity.activityId,
-            mode: input.mode,
-            endsAt: input.endsAtMs,
-            dueAt: input.dueAtMs,
-          },
-        });
-      } catch (e) {
-        return `Could not assign activity: ${e instanceof Error ? e.message : String(e)}`;
+      const result = await assignAndPushActivityNow(ctx, {
+        callerUserId,
+        unitId: unit.id as Id<"units">,
+        activityId: activity.activityId,
+        scholarIds: cohort.ids,
+        mode: input.mode,
+        endsAt: input.endsAtMs,
+        dueAt: input.dueAtMs,
+      });
+      if (result.status === "assign_failed") {
+        return `Could not assign activity: ${result.error}`;
       }
-      try {
-        await ctx.runMutation(internal.assignments.aidePushActivityNow, {
-          callerUserId,
-          assignmentId: res.assignmentId,
-          activityId: activity.activityId,
-          mode: input.mode,
-          endsAt: input.endsAtMs,
-          dueAt: input.dueAtMs,
-        });
+      if (result.status === "live") {
+        const confirmation =
+          input.mode === "classFocus"
+            ? classFocusLifetimeConfirmation(input.endsAtMs)
+            : null;
         emit({
           toolComplete: {
             name: "assign_activity_now",
-            result: `${activity.title} live (${input.mode}) for ${cohort.ids.length} scholar${cohort.ids.length === 1 ? "" : "s"}`,
+            result:
+              confirmation === null
+                ? `${activity.title} live (${input.mode}) for ${cohort.ids.length} scholar${cohort.ids.length === 1 ? "" : "s"}`
+                : `${activity.title} live for ${cohort.ids.length} scholar${cohort.ids.length === 1 ? "" : "s"} · ${confirmation}`,
           },
         });
         return JSON.stringify({
           ok: true,
           live: true,
           mode: input.mode,
-          assignmentId: res.assignmentId,
-          created: res.created,
+          assignmentId: result.assignmentId,
+          created: result.created,
           unitTitle: unit.title,
           activityTitle: activity.title,
           rosterSize: cohort.ids.length,
-          url: withBase(linkBase, assignmentPath(res.assignmentId)),
+          url: withBase(linkBase, assignmentPath(result.assignmentId)),
+          ...(confirmation === null ? {} : { confirmation }),
         });
-      } catch (e) {
-        return `PARTIAL: the assignment was created (${
-          res.created ? "new" : "reused"
-        }, ${assignmentPath(res.assignmentId)}) with "${activity.title}" PLANNED, but the live push failed: ${
-          e instanceof Error ? e.message : String(e)
-        }. Scholars do NOT see it yet — retry with push_activity_now on that assignment, and tell the teacher exactly this state.`;
       }
+      // Keep this absolute on external channels, matching the success response's assignment URL.
+      return `PARTIAL: the assignment was created (${
+        result.created ? "new" : "reused"
+      }, ${withBase(linkBase, assignmentPath(result.assignmentId))}) with "${activity.title}" PLANNED, but the live push failed: ${
+        result.error
+      }. Scholars do NOT see it yet — retry with push_activity_now on that assignment, and tell the teacher exactly this state.`;
     },
   });
 
@@ -635,7 +786,10 @@ export async function makeAssignmentTools(
         activityId: { type: "string" as const },
         mode: { type: "string" as const, enum: ["classFocus", "homework"] },
         startsAtMs: { type: "number" as const, description: "When it goes live (epoch ms)." },
-        endsAtMs: { type: "number" as const, description: "classFocus only: auto-clear time (epoch ms)." },
+        endsAtMs: {
+          type: "number" as const,
+          description: CLASS_FOCUS_ENDS_AT_DESCRIPTION,
+        },
         dueAtMs: { type: "number" as const, description: "homework only: due date (epoch ms)." },
       },
       required: ["assignmentId", "activityId", "mode", "startsAtMs"] as const,
@@ -700,7 +854,7 @@ export async function makeAssignmentTools(
   const clearActivityTool = betaTool({
     name: "clear_activity",
     description:
-      "Remove an activity from an assignment's schedule (un-plans a planned push, or clears a live one). Identify by assignmentId + activityId.",
+      "Remove an activity from an assignment's schedule (un-plans a planned push, or clears a live one). Identify by assignmentId + activityId. This removes it for the assignment's WHOLE roster — before clearing in reply to an end-of-day past-due homework question, check the roster with get_assignment, and if it includes scholars beyond the ones named in the question, say so and confirm before clearing.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -772,14 +926,17 @@ export async function makeAssignmentTools(
   const pushActivityNowTool = betaTool({
     name: "push_activity_now",
     description:
-      "Start an activity LIVE right now (push-now / set focus) for the assignment's whole cohort — it becomes visible to every scholar on the roster immediately. This is the difference from `schedule_activity`, which only PLANS a future push: use push_activity_now when the teacher wants the class working on something NOW (\"put the Tide Pool activity up\", \"set focus to the Weekend News write-up\"). `mode` classFocus = in-the-room focus (optional `endsAtMs` auto-clears it then); homework = on their plate (optional `dueAtMs`). Get the activityId from get_assignment. Confirm before pushing.",
+      "Start an activity LIVE right now (push-now / set focus) for the assignment's whole cohort — it becomes visible to every scholar on the roster immediately. This is the difference from `schedule_activity`, which only PLANS a future push: use push_activity_now when the teacher wants the class working on something NOW (\"put the Tide Pool activity up\", \"set focus to the Weekend News write-up\"). `mode` classFocus = in-the-room focus; homework = on their plate (optional `dueAtMs`). Get the activityId from get_assignment. Confirm before pushing.",
     inputSchema: {
       type: "object" as const,
       properties: {
         assignmentId: { type: "string" as const },
         activityId: { type: "string" as const },
         mode: { type: "string" as const, enum: ["classFocus", "homework"] },
-        endsAtMs: { type: "number" as const, description: "classFocus only: auto-clear time (epoch ms)." },
+        endsAtMs: {
+          type: "number" as const,
+          description: CLASS_FOCUS_ENDS_AT_DESCRIPTION,
+        },
         dueAtMs: { type: "number" as const, description: "homework only: due date (epoch ms)." },
       },
       required: ["assignmentId", "activityId", "mode"] as const,
@@ -803,8 +960,20 @@ export async function makeAssignmentTools(
       } catch (e) {
         return `Could not push: ${e instanceof Error ? e.message : String(e)}`;
       }
-      emit({ toolComplete: { name: "push_activity_now", result: `Pushed live (${input.mode})` } });
-      return JSON.stringify({ ok: true, live: true, mode: input.mode });
+      if (input.mode === "homework") {
+        emit({ toolComplete: { name: "push_activity_now", result: "Pushed live (homework)" } });
+        return JSON.stringify({ ok: true, live: true, mode: input.mode });
+      }
+      const confirmation = classFocusLifetimeConfirmation(input.endsAtMs);
+      emit({
+        toolComplete: { name: "push_activity_now", result: confirmation },
+      });
+      return JSON.stringify({
+        ok: true,
+        live: true,
+        mode: input.mode,
+        confirmation,
+      });
     },
   });
 
@@ -926,8 +1095,190 @@ export async function makeAssignmentTools(
     },
   });
 
+  // Resolve one of the caller's assignments by its human name (its unit title,
+  // or the ad-hoc dispatch title). Strict like the rest of the aide: an exact
+  // name wins, a unique partial wins, an ambiguous partial is refused with the
+  // candidates so the model can retry with the exact one (or an assignmentId).
+  const resolveAssignmentByTitle = async (
+    title: string,
+  ): Promise<
+    | { ok: true; assignmentId: Id<"assignments"> }
+    | { ok: false; message: string }
+  > => {
+    const lower = title.trim().toLowerCase();
+    if (!lower) return { ok: false, message: "Provide an assignment title." };
+    const rows: Array<{
+      assignmentId: Id<"assignments">;
+      title: string | null;
+      unitTitle: string;
+    }> = await ctx.runQuery(internal.assignments.aideListAssignments, {
+      callerUserId,
+    });
+    const label = (r: { title: string | null; unitTitle: string }) =>
+      (r.title ?? r.unitTitle).toLowerCase();
+    const matches = rows.filter((r) => label(r).includes(lower));
+    if (matches.length === 0) {
+      return {
+        ok: false,
+        message: `No assignment matching "${title}". Use list_assignments to find it, or pass an assignmentId.`,
+      };
+    }
+    const exact = matches.filter((r) => label(r) === lower);
+    if (exact.length === 1) {
+      return { ok: true, assignmentId: exact[0].assignmentId };
+    }
+    if (matches.length === 1) {
+      return { ok: true, assignmentId: matches[0].assignmentId };
+    }
+    return {
+      ok: false,
+      message: `Ambiguous assignment "${title}" matches ${matches
+        .map((r) => r.title ?? r.unitTitle)
+        .join(", ")}. Use the exact name or an assignmentId.`,
+    };
+  };
+
+  const addActivityResourceTool = betaTool({
+    name: "add_activity_resource",
+    description:
+      "Attach a VIDEO (or a web LINK) to an EXISTING activity as a resource — the canonical home for a video a cohort should watch. It becomes a resource card the tutor hands out with share_resource; a YouTube video plays in the sandboxed youtube-nocookie player (it does NOT host-lock a WebView to all of youtube.com), one card for the whole cohort, and it carries no clock. PREFER THIS over dispatch_activity's web kind for any YouTube URL whenever a target activity already exists. Identify the activity by its assignment (assignmentId preferred, or assignmentTitle — its unit/dispatch name) PLUS activityTitle, matched strictly within that assignment's unit: an exact title wins, an ambiguous partial is refused. `kind` defaults to video when the URL is a YouTube link, otherwise link.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        assignmentId: {
+          type: "string" as const,
+          description:
+            "The assignment's Convex id (from list_assignments / get_assignment). PREFERRED. Provide this OR assignmentTitle.",
+        },
+        assignmentTitle: {
+          type: "string" as const,
+          description:
+            "The assignment's name (its unit title, or an ad-hoc dispatch title), matched strictly — exact wins, ambiguous refused. Provide this OR assignmentId.",
+        },
+        activityTitle: {
+          type: "string" as const,
+          description:
+            "The target activity's title WITHIN that assignment's unit (case-insensitive; exact title wins, ambiguous refused).",
+        },
+        url: {
+          type: "string" as const,
+          description:
+            "The resource URL (https). A YouTube watch/share/shorts/embed URL is embedded as a sandboxed video.",
+        },
+        title: {
+          type: "string" as const,
+          description:
+            "Optional display title for the resource card (defaults to 'Video' or 'Website').",
+        },
+        kind: {
+          type: "string" as const,
+          enum: ["video", "link"] as const,
+          description:
+            "video = embedded player (YouTube → sandboxed youtube-nocookie); link = a website card. Defaults to video for a YouTube URL, else link.",
+        },
+      },
+      required: ["activityTitle", "url"] as const,
+    },
+    run: async (input: {
+      assignmentId?: string;
+      assignmentTitle?: string;
+      activityTitle: string;
+      url?: string;
+      title?: string;
+      kind?: "video" | "link";
+    }) => {
+      const hasId = input.assignmentId?.trim();
+      const hasTitle = input.assignmentTitle?.trim();
+      if (hasId && hasTitle) {
+        return "Provide assignmentId OR assignmentTitle, not both; no resource was added.";
+      }
+      if (!hasId && !hasTitle) {
+        return "Provide assignmentId or assignmentTitle; no resource was added.";
+      }
+      const url = input.url?.trim();
+      if (!url) return "Provide a resource URL; no resource was added.";
+
+      let assignmentId: Id<"assignments">;
+      if (hasId) {
+        assignmentId = hasId as Id<"assignments">;
+      } else {
+        const resolved = await resolveAssignmentByTitle(hasTitle!);
+        if (!resolved.ok) return `${resolved.message} No resource was added.`;
+        assignmentId = resolved.assignmentId;
+      }
+
+      const data = await ctx.runQuery(internal.assignments.aideGetAssignment, {
+        callerUserId,
+        assignmentId,
+      });
+      if (!data) {
+        return `No assignment found with id "${assignmentId}" (or it isn't yours); no resource was added.`;
+      }
+
+      const lower = input.activityTitle.trim().toLowerCase();
+      if (!lower) return "Provide an activity title; no resource was added.";
+      const candidates = data.availableActivities.filter((a) =>
+        a.title.toLowerCase().includes(lower),
+      );
+      if (candidates.length === 0) {
+        return `No activity matching "${input.activityTitle}" in ${data.unitTitle}; no resource was added.`;
+      }
+      const exact = candidates.filter((a) => a.title.toLowerCase() === lower);
+      let activity: (typeof candidates)[number];
+      if (exact.length === 1) {
+        activity = exact[0];
+      } else if (candidates.length === 1) {
+        activity = candidates[0];
+      } else {
+        return `Ambiguous activity "${input.activityTitle}" matches ${candidates
+          .map((a) => a.title)
+          .join(", ")}. Use the exact title; no resource was added.`;
+      }
+
+      const kind: "video" | "link" =
+        input.kind ?? (youtubeVideoId(url) ? "video" : "link");
+
+      let res: { resourceId: Id<"activityResources">; title: string };
+      try {
+        res = await ctx.runMutation(
+          internal.activityResources.aideAddUrlResource,
+          {
+            callerUserId,
+            activityId: activity.activityId,
+            title: input.title ?? "",
+            url,
+            kind,
+          },
+        );
+      } catch (e) {
+        return `Could not add the resource: ${e instanceof Error ? e.message : String(e)}`;
+      }
+
+      const assignmentName = data.title ?? data.unitTitle;
+      const noun = kind === "video" ? "video" : "link";
+      emit({
+        toolComplete: {
+          name: "add_activity_resource",
+          result: `Added ${noun} "${res.title}" to ${activity.title}`,
+        },
+      });
+      return JSON.stringify({
+        ok: true,
+        kind,
+        resourceId: res.resourceId,
+        resourceTitle: res.title,
+        activityId: activity.activityId,
+        activityTitle: activity.title,
+        assignmentId: data.assignmentId,
+        assignmentTitle: assignmentName,
+        message: `Added ${noun} "${res.title}" to ${activity.title} (${assignmentName})`,
+      });
+    },
+  });
+
   return [
     assignUnitTool,
+    publishUnitTool,
     // One-call live delivery of a single activity (assign + push now).
     assignActivityNowTool,
     listAssignmentsTool,
@@ -943,5 +1294,8 @@ export async function makeAssignmentTools(
     setAssignmentScholarsTool,
     addAssignmentScholarsTool,
     archiveAssignmentTool,
+    // Attach a video/link to an activity as a resource (the canonical home for
+    // a video — vs. dispatch_activity's per-scholar web assignment).
+    addActivityResourceTool,
   ];
 }

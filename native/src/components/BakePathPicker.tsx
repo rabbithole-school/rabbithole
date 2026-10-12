@@ -10,6 +10,7 @@ import {
 
 import { api, type Id } from "@/lib/convex";
 import { fonts, useColors } from "@/theme";
+import { withTimeout } from "../../vendor/shared/withTimeout";
 
 export interface SuggestedPath {
   emoji: string;
@@ -19,6 +20,13 @@ export interface SuggestedPath {
 
 export const ENDLESS_CHAT = "endless-chat" as const;
 export type PathChoice = SuggestedPath | typeof ENDLESS_CHAT;
+
+/**
+ * The Convex client queues a call while its socket is down and never gives up
+ * on it; past this deadline the picker shows the fallback paths instead of
+ * placeholders forever.
+ */
+const PATH_SUGGEST_TIMEOUT_MS = 15_000;
 
 export type BakePathSource =
   | { kind: "seed"; seedId: Id<"seeds"> }
@@ -185,7 +193,9 @@ export function BakePathPicker({
             ...(sourceRationale ? { rationale: sourceRationale } : {}),
           };
 
-    suggest(params)
+    // The server always answers with fallbacks on its own failure; this covers
+    // a call that never reaches it, so the picker can't sit on placeholders.
+    withTimeout(suggest(params), PATH_SUGGEST_TIMEOUT_MS, "Path suggestions timed out")
       .then((result) => {
         if (cancelled) return;
         const nextPaths = result.paths?.length ? result.paths : FALLBACK_PATHS;

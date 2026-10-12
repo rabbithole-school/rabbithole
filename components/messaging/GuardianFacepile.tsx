@@ -10,27 +10,39 @@ export interface GuardianAvatar {
 }
 
 /**
- * Compact participant treatment for a scholar's shared family conversation.
- * It intentionally renders only the guardians who can read and reply here.
+ * Compact participant treatment for a conversation: a scholar's guardians on
+ * a family thread, or the scholar + named adults on a mentor/Workshop thread.
+ * It renders only the people who can read and reply here.
  */
 export function GuardianFacepile({
   guardians,
   size = "xs",
   max = 3,
+  viewerId,
 }: {
   guardians: GuardianAvatar[];
   size?: "2xs" | "xs" | "sm";
   max?: number;
+  /** The signed-in user — never shown their own avatar (or name). */
+  viewerId?: string | null;
 }) {
-  const visible = guardians.slice(0, max);
-  const overflow = guardians.length - visible.length;
+  // A facepile answers "who else is in this conversation"; the viewer
+  // already knows they are. One face per person: a staffer who is also a
+  // guardian can be on both sides of a family thread.
+  const others = guardians.filter(
+    (guardian, index) =>
+      guardian._id !== viewerId &&
+      guardians.findIndex((other) => other._id === guardian._id) === index,
+  );
+  const visible = others.slice(0, max);
+  const overflow = others.length - visible.length;
+  if (others.length === 0) return null;
+  const label = `Conversation with ${others.map((guardian) => guardian.name).join(", ")}`;
 
   return (
-    <HStack
-      gap={1}
-      align="center"
-      aria-label={`Conversation with ${guardians.map((guardian) => guardian.name).join(", ")}`}
-    >
+    // `role="group"` makes the label nameable — on a generic element with its
+    // avatars aria-hidden, assistive tech would announce nothing.
+    <HStack gap={1} align="center" role="group" aria-label={label}>
       <HStack gap={0} align="center" aria-hidden="true">
         {visible.map((guardian, index) => (
           <Box

@@ -1,4 +1,5 @@
-import { convexAuth } from "@convex-dev/auth/server";
+import { convexAuth, type SignInAction } from "@convex-dev/auth/server";
+import type { FunctionArgs, FunctionReturnType } from "convex/server";
 import { Password } from "@convex-dev/auth/providers/Password";
 import { ConvexCredentials } from "@convex-dev/auth/providers/ConvexCredentials";
 import { Email } from "@convex-dev/auth/providers/Email";
@@ -22,13 +23,14 @@ import {
   assertNotPendingEnrollment,
   assertScholarAdoptionAuthorized,
 } from "./lib/authGuards";
-import { sendMagicLinkEmail } from "./lib/magicLinkEmail";
+import { sendMagicLinkEmail, type MagicLinkBrand } from "./lib/magicLinkEmail";
 import { MAGIC_LINK_PROVIDER_ID } from "./lib/authConstants";
 import { passwordCrypto } from "./lib/passwordCrypto";
 import { isPublicProductionDeployment } from "./lib/deploymentSafety";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import type { ActionCtx } from "./_generated/server";
+import { action, type ActionCtx } from "./_generated/server";
+import { v } from "convex/values";
 import {
   MIN_PASSWORD_LENGTH,
   normalizePassword,
@@ -40,7 +42,7 @@ import {
 const MAGIC_LINK_TTL_SECONDS = 15 * 60; // 15 minutes
 
 
-export const { auth, signIn, signOut, store } = convexAuth({
+const convexAuthExports = convexAuth({
   providers: [
     // ── Password (scholars; staff during rollout until passwordless) ────
     Password({
@@ -165,6 +167,35 @@ export const { auth, signIn, signOut, store } = convexAuth({
         if (challenge !== grant.codeChallenge) return null;
 
         return { userId: grant.userId };
+      },
+    }),
+
+    // ── MCP service-account bearer token ────────────────────────────────
+    // The machine-identity twin of the "mcp" provider above. A school admin
+    // issues a long-lived `rhsa_<kind>_…` token on the School settings page
+    // (convex/mcpServiceAccounts.ts) for the per-institution Teacher/Staff
+    // service `users` row (isSystem). The /api/mcp route exchanges it here
+    // for a normal, short-lived Convex Auth session so every downstream query
+    // runs as that service user with the stock role→tool policy. Only the
+    // sha256 hash is stored; a revoked token yields null (→ 401). This is the
+    // ONLY sign-in path for a service account — password / passkey / magic
+    // link refuse isSystem rows (assertNotSystemAccount).
+    ConvexCredentials({
+      id: "mcpServiceToken",
+      authorize: async (
+        credentials,
+        ctx,
+      ): Promise<{ userId: Id<"users">; sessionId: Id<"authSessions"> } | null> => {
+        const { token } = credentials;
+        if (typeof token !== "string" || !token.startsWith("rhsa_")) return null;
+        const grant = await ctx.runMutation(
+          internal.mcpServiceAccounts.redeemToken,
+          { tokenHash: await sha256Hex(token) },
+        );
+        if (!grant) return null;
+        // Returning the token's own session makes Convex Auth mint the JWT on
+        // it rather than create a row per exchange (signIn.js handleCredentials).
+        return { userId: grant.userId, sessionId: grant.sessionId };
       },
     }),
 
@@ -308,6 +339,10 @@ export const { auth, signIn, signOut, store } = convexAuth({
           username,
         });
         if (!user) return null;
+        // System accounts (onboarding guide, MCP service accounts) are never
+        // browser-sign-in-able, on dev either — a service account's only
+        // sign-in path is the mcpServiceToken exchange.
+        assertNotSystemAccount(user);
         // Clear the staff passkey-enrollment gate so the /dev-login handoff +
         // Playwright land straight on the dashboard (no /setup-passkey detour).
         // No-op for non-staff; idempotent. Dev-only by virtue of the guards above.
@@ -359,7 +394,8 @@ export const { auth, signIn, signOut, store } = convexAuth({
           { email },
         );
         if (!eligible) return;
-        await sendMagicLinkEmail({ to: email, url });
+        let brand: MagicLinkBrand | undefined;
+        await sendMagicLinkEmail({ to: email, url, brand });
       },
     }),
   ],
@@ -435,5 +471,49 @@ export const { auth, signIn, signOut, store } = convexAuth({
       // system replaces them.)
       throw new Error("Registration requires an invite");
     },
+  },
+});
+
+export const { auth, signOut, store } = convexAuthExports;
+
+// The library's own `signIn` action, called through its handler so it is not
+// exported (and so not reachable) on its own. `_handler` is how Convex keeps a
+// registered function's body (convex/server registration_impl, also what
+// convex-test calls).
+const librarySignIn = (
+  convexAuthExports.signIn as unknown as {
+    _handler: (ctx: ActionCtx, args: SignInArgs) => Promise<SignInResult>;
+  }
+)._handler;
+
+type SignInArgs = FunctionArgs<SignInAction>;
+type SignInResult = FunctionReturnType<SignInAction>;
+
+/**
+ * `auth:signIn`, the client's one sign-in action: the library's, with a gate
+ * in front of the magic-link REQUEST leg. Without it, an unknown email threw
+ * "not authorized" from `resolveMagicLinkUser` at request time, which told
+ * any caller whether that address had an account (that a family had
+ * applied). Now an unknown, ineligible or over-limit address gets the same
+ * `{ started: true }` as a real one, and nothing is written or sent. The
+ * verify leg (a `code` in params) and every other provider pass straight
+ * through. See `admitMagicLinkRequest` in lib/authGuards.ts.
+ */
+export const signIn = action({
+  args: {
+    provider: v.optional(v.string()),
+    params: v.optional(v.any()),
+    verifier: v.optional(v.string()),
+    refreshToken: v.optional(v.string()),
+    calledBy: v.optional(v.string()),
+  },
+  handler: async (ctx, args): Promise<SignInResult> => {
+    const params = (args.params ?? {}) as Record<string, unknown>;
+    if (args.provider === MAGIC_LINK_PROVIDER_ID && params.code === undefined) {
+      const email = typeof params.email === "string" ? params.email : "";
+      const admitted = await ctx.runMutation(internal.magicLinkRequests.admit, { email });
+      if (!admitted) return { started: true } as SignInResult;
+    }
+    return await librarySignIn(ctx, args);
   },
 });

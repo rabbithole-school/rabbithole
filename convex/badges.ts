@@ -36,6 +36,7 @@ export const getBadgeForArt = internalQuery({
     if (!badge) return null;
     const unit = badge.unitId ? await ctx.db.get(badge.unitId) : null;
     return {
+      kind: badge.kind ?? null,
       style: (badge.style ?? DEFAULT_BADGE_STYLE) as BadgeStyle,
       colorway: (badge.colorway ?? DEFAULT_BADGE_COLORWAY) as BadgeColorway,
       previousImageStorageId: badge.imageStorageId ?? null,
@@ -91,7 +92,10 @@ export const allBadgeIds = internalQuery({
   args: {},
   handler: async (ctx) => {
     const rows = await ctx.db.query("scholarUnitBadges").collect();
-    return rows.map((r) => r._id);
+    // The Calculator License badge's image is the license card, not art.
+    return rows
+      .filter((r) => r.kind !== "calculator_license")
+      .map((r) => r._id);
   },
 });
 
@@ -131,6 +135,11 @@ export const customizeBadge = authedMutation({
     if (!badge) throw new Error("Badge not found");
     if (String(badge.scholarId) !== String(ctx.user._id)) {
       throw new Error("Not your badge");
+    }
+    // The Calculator License badge is the license card itself — there is no
+    // art to remix (the surfaces hide the strip; this refuses it server-side).
+    if (badge.kind === "calculator_license") {
+      throw new Error("This badge can't be remixed");
     }
     if (!isBadgeStyle(args.style)) throw new Error("Unknown badge style");
     if (!isBadgeColorway(args.colorway)) throw new Error("Unknown colorway");

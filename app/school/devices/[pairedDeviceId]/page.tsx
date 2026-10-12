@@ -122,7 +122,7 @@ export default function DeviceSettingsPage() {
           {detail.scholarName && (
             <RoboticsCaptureStationModeControl pairedDeviceId={detail._id} />
           )}
-          <LostModeControl pairedDeviceId={detail._id} />
+          <LostModeControl pairedDeviceId={detail._id} snapshot={detail.simpleMdm} />
         </VStack>
         <VStack align="stretch" gap={6}>
           <Surface p={6}>

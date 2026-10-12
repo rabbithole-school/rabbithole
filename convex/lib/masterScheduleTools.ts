@@ -8,8 +8,9 @@
 // EVERY direct-manipulation affordance in the grid has a matching tool here, so
 // the schedule is fully drivable without a mouse (the project's accessibility
 // story is the bot, not a keyboard-drag sensor). Each tool calls a verified
-// internal.masterSchedule.aide* fn with the caller's real id; those re-check the
-// caller is a teacher/admin (they have no ctx.user).
+// internal.masterSchedule.aide* fn with the caller's real id; those verify the
+// caller document and tenant access to named groups, staff, and assignments
+// (they have no ctx.user).
 //
 // Composed into assembleCurriculumTools (lib/aideTools.ts) behind the same
 // teacher/admin gate as the assignment-scheduling tools (it shows teacher +
@@ -27,9 +28,20 @@ import { scheduleWeekStartMs } from "../../shared/scheduleWeek";
 import { isTeacherRole, type Role } from "./roles";
 import type { AideEmit } from "./aideStream";
 import { matchScholarByName } from "./scholarReadTools";
+import {
+  CLASS_FOCUS_ENDS_AT_DESCRIPTION,
+  classFocusLifetimeConfirmation,
+} from "./assignmentTools";
 
 const WEEKDAY_DESC =
   "Weekday 1–5 (1 = Monday … 5 = Friday). The master schedule is a recurring Mon–Fri week.";
+
+// Steers the aide away from enable_app_for_group, whose grant has no clock.
+const APP_TARGET_DESC =
+  "Optional: place a catalog app (id from list_external_apps) on this block. This is the " +
+  "correct, CLOCK-BOUNDED way to give a group an app — it goes live at the block's start " +
+  "and clears ten minutes after the block ends. Prefer it over enable_app_for_group, which " +
+  "grants the app around the clock. A cell can carry an app or a curriculum activity, not both.";
 
 function parseSchoolDate(date: string):
   | { weekday: number; weekStartMs: number }
@@ -282,6 +294,7 @@ export async function makeMasterScheduleTools(
         teacherId: { type: "string" as const, description: "Optional teacher (from get_master_schedule.teachers)." },
         assignmentId: { type: "string" as const, description: "Optional: link a live assignment (cohort × unit)." },
         activityId: { type: "string" as const, description: "Optional: which activity of that assignment to materialize." },
+        externalAppId: { type: "string" as const, description: APP_TARGET_DESC },
         mode: { type: "string" as const, enum: ["classFocus", "homework"] as const },
         note: { type: "string" as const, description: "Optional free note (good for not-yet-scheduled items)." },
       },
@@ -297,6 +310,7 @@ export async function makeMasterScheduleTools(
       teacherId?: string;
       assignmentId?: string;
       activityId?: string;
+      externalAppId?: string;
       mode?: "classFocus" | "homework";
       note?: string;
     }) => {
@@ -315,6 +329,9 @@ export async function makeMasterScheduleTools(
           teacherId: input.teacherId ? (input.teacherId as Id<"users">) : undefined,
           assignmentId: input.assignmentId ? (input.assignmentId as Id<"assignments">) : undefined,
           activityId: input.activityId ? (input.activityId as Id<"activities">) : undefined,
+          externalAppId: input.externalAppId
+            ? (input.externalAppId as Id<"externalApps">)
+            : undefined,
           mode: input.mode,
           note: input.note,
           weekStartMs: parsedDate?.weekStartMs,
@@ -423,7 +440,7 @@ export async function makeMasterScheduleTools(
   const updateClassTool = betaTool({
     name: "update_class",
     description:
-      "Edit ONE class cell in place: rename its subject, change its teacher (teacherId), clear its teacher (unassignTeacher:true → leaves the slot unstaffed so the coverage rail flags it), set mode, or edit its note. Identify by placementId. To move it use move_class/shift_class instead.",
+      "Edit ONE class cell in place: rename its subject, change its teacher (teacherId), clear its teacher (unassignTeacher:true → leaves the slot unstaffed so the coverage rail flags it), attach or detach a catalog app (externalAppId / detachApp:true), set mode, or edit its note. Identify by placementId. To move it use move_class/shift_class instead.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -431,6 +448,8 @@ export async function makeMasterScheduleTools(
         subject: { type: "string" as const },
         teacherId: { type: "string" as const, description: "New teacher id (from get_master_schedule.teachers)." },
         unassignTeacher: { type: "boolean" as const, description: "Clear the teacher (leave unstaffed)." },
+        externalAppId: { type: "string" as const, description: APP_TARGET_DESC },
+        detachApp: { type: "boolean" as const, description: "Remove this cell's catalog app, ending the block-scoped grant." },
         mode: { type: "string" as const, enum: ["classFocus", "homework"] as const },
         note: { type: "string" as const },
       },
@@ -441,6 +460,8 @@ export async function makeMasterScheduleTools(
       subject?: string;
       teacherId?: string;
       unassignTeacher?: boolean;
+      externalAppId?: string;
+      detachApp?: boolean;
       mode?: "classFocus" | "homework";
       note?: string;
     }) => {
@@ -449,12 +470,24 @@ export async function makeMasterScheduleTools(
         : input.teacherId
           ? (input.teacherId as Id<"users">)
           : undefined;
+      if (input.detachApp && input.externalAppId) {
+        return validationError(
+          "update_class",
+          "Pass externalAppId to attach an app or detachApp to remove one, not both.",
+        );
+      }
+      const externalAppId = input.detachApp
+        ? null
+        : input.externalAppId
+          ? (input.externalAppId as Id<"externalApps">)
+          : undefined;
       try {
         await ctx.runMutation(internal.masterSchedule.aideUpdatePlacement, {
           callerUserId,
           placementId: input.placementId as Id<"schedulePlacements">,
           subject: input.subject,
           teacherId,
+          externalAppId,
           mode: input.mode,
           note: input.note,
         });
@@ -542,7 +575,7 @@ export async function makeMasterScheduleTools(
   const dispatchActivityTool = betaTool({
     name: "dispatch_activity",
     description:
-      "Give ONE scholar ad-hoc work, identified by scholarName (preferred) or scholarId. Creates a one-scholar assignment and, by default, makes it LIVE immediately; pass live:false to queue it for later, or mode:'homework' + dueAt for take-home work. activityKind:'online' creates a Socratic tutor chat. For offline homework, pass activityKind:'offline' AND mode:'homework'; description is REQUIRED and must contain the teacher's complete scholar-facing instructions and pasted reading verbatim. Never invent or summarize missing source material. activityKind:'web' assigns a specific HTTPS URL — use the SAME kind for a video or a reading; Rabbithole's existing web-assignment surface embeds it on iPad and opens it on desktop, so do NOT invent a reading type. activityKind:'problem_set' creates targeted adaptive practice; first call list_practice_nodes for the relevant domain, choose the ONE serveable node that exactly matches the teacher's topic, and pass its nodeKey as the sole targetSkillKeys entry. Never infer a skill key from prose. For online work, give a clear systemPrompt that keeps the tutor Socratic.",
+      "Give ONE scholar ad-hoc work, identified by scholarName (preferred) or scholarId. Creates a one-scholar assignment and, by default, makes it LIVE immediately; pass live:false to queue it for later, or mode:'homework' + dueAt for take-home work. activityKind:'online' creates a Socratic tutor chat. For offline homework, pass activityKind:'offline' AND mode:'homework'; description is REQUIRED and must contain the teacher's complete scholar-facing instructions and pasted reading verbatim. Never invent or summarize missing source material. activityKind:'web' assigns a specific HTTPS URL — the web surface embeds it on iPad and opens it on desktop, so do NOT invent a reading type. But for a VIDEO do NOT use web: when a target activity already exists, attach the video with add_activity_resource — that is a video's canonical home (one sandboxed youtube-nocookie player card for the whole cohort, with no clock), whereas a YouTube web assignment host-locks the WebView to all of youtube.com, fans out one assignment per scholar, and can never be completed. NEVER dispatch a YouTube URL as web; if you do, it is automatically turned into an online tutor activity with the video attached as a sandboxed resource instead. Non-YouTube readings keep using web. activityKind:'problem_set' creates targeted adaptive practice; first call list_practice_nodes for the relevant domain, choose the ONE serveable node that exactly matches the teacher's topic, and pass its nodeKey as the sole targetSkillKeys entry. Never infer a skill key from prose. For online work, give a clear systemPrompt that keeps the tutor Socratic.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -561,13 +594,13 @@ export async function makeMasterScheduleTools(
           type: "string" as const,
           enum: ["online", "offline", "web", "problem_set"] as const,
           description:
-            "online = tutor chat; offline = scholar-facing instructions/reading in description (required; also pass mode:'homework' for take-home work); web = a video or reading URL; problem_set = targeted adaptive practice. Defaults to online.",
+            "online = tutor chat; offline = scholar-facing instructions/reading in description (required; also pass mode:'homework' for take-home work); web = a (non-YouTube) reading/web URL — for a video prefer add_activity_resource, and a YouTube URL dispatched here is auto-attached to an online activity; problem_set = targeted adaptive practice. Defaults to online.",
         },
         systemPrompt: { type: "string" as const, description: "Optional tutor system prompt for the activity (defaults to a Socratic exploration prompt)." },
         description: { type: "string" as const, description: "Required for offline: complete scholar-facing instructions and any pasted reading, preserved verbatim. Optional short scholar-facing context for other kinds." },
         webUrl: {
           type: "string" as const,
-          description: "Required for activityKind:'web'. The specific HTTPS video or reading URL to open.",
+          description: "Required for activityKind:'web'. The specific HTTPS reading/web URL to open. For a YouTube video prefer add_activity_resource; a YouTube URL passed here is auto-attached to a tutor activity as a sandboxed video.",
         },
         targetSkillKeys: {
           type: "array" as const,
@@ -582,6 +615,10 @@ export async function makeMasterScheduleTools(
         mode: { type: "string" as const, enum: ["classFocus", "homework"] as const, description: "classFocus (in-the-moment focus) or homework. Default classFocus." },
         live: { type: "boolean" as const, description: "true (default) = live NOW; false = plan it for startsAt (add to queue)." },
         startsAt: { type: "number" as const, description: "Epoch ms — planned start when live:false." },
+        endsAtMs: {
+          type: "number" as const,
+          description: CLASS_FOCUS_ENDS_AT_DESCRIPTION,
+        },
         dueAt: { type: "number" as const, description: "Epoch ms — due time for mode:'homework'." },
       },
       required: ["title"] as const,
@@ -599,10 +636,18 @@ export async function makeMasterScheduleTools(
       mode?: "classFocus" | "homework";
       live?: boolean;
       startsAt?: number;
+      endsAtMs?: number;
       dueAt?: number;
     }) => {
       const hasName = input.scholarName?.trim();
       const hasId = input.scholarId?.trim();
+      const mode = input.mode ?? "classFocus";
+      if (mode === "homework" && input.endsAtMs !== undefined) {
+        return validationError(
+          "dispatch_activity",
+          "endsAtMs is only valid for classFocus mode; no activity was dispatched.",
+        );
+      }
       if (hasName && hasId) {
         return validationError(
           "dispatch_activity",
@@ -675,20 +720,31 @@ export async function makeMasterScheduleTools(
           mode: input.mode,
           live: input.live,
           startsAt: input.startsAt,
+          endsAt: input.endsAtMs,
           dueAt: input.dueAt,
         });
+        const confirmation =
+          mode === "classFocus"
+            ? classFocusLifetimeConfirmation(
+                input.endsAtMs,
+                input.live !== false,
+              )
+            : null;
         emit({
           toolComplete: {
             name: "dispatch_activity",
-            result: `Dispatched "${input.title}" to ${scholarName ?? "the scholar"} ${input.live === false ? "(queued)" : "(live now)"}`,
+            result:
+              confirmation === null
+                ? `Dispatched "${input.title}" to ${scholarName ?? "the scholar"} ${input.live === false ? "(queued)" : "(live now)"}`
+                : `Dispatched "${input.title}" to ${scholarName ?? "the scholar"}. ${confirmation}`,
           },
         });
         return JSON.stringify({
           ok: true,
-          activityKind: input.activityKind ?? "online",
           scholarId,
           scholarName: scholarName ?? null,
           ...res,
+          ...(confirmation === null ? {} : { confirmation }),
         });
       } catch (e) {
         emitCaughtError("dispatch_activity", e);
@@ -804,7 +860,7 @@ export async function makeMasterScheduleTools(
   const markClassActivityDoneTool = betaTool({
     name: "mark_class_activity_done",
     description:
-      "Record that a class DID an activity (typically offline) — the [Yes — mark as done] answer to 'did this activity happen?'. Also use it when a teacher confirms one-scholar ad-hoc offline homework is complete; that assignment's roster is just the one scholar. Marks the activity complete for the assignment's roster (idempotent per scholar), so badges, digests, and due-counts update. Pass scholarIds to mark only a subset (e.g. exclude absentees); omit it to mark the whole roster. Posts ONE class-level Slack message, not one per scholar. This writes the learning record only — it does NOT move any cell (use reflow_unit for that).",
+      "Record that a class DID an activity (typically offline) — the [Yes — mark as done] answer to 'did this activity happen?'. Also use it when a teacher confirms homework is complete, including one-scholar ad-hoc offline or web homework; that assignment's roster is just the one scholar, so homework sent as several one-scholar copies takes one call per copy (the end-of-day past-due question links each scholar's name to their copy's assignment; read the activityId off that assignment with get_assignment). When answering an end-of-day past-due homework question, ALWAYS pass scholarIds for exactly the scholars the teacher confirmed, resolved by name from get_assignment's roster: a cohort assignment's roster can include scholars outside that channel, and omitting scholarIds marks all of them. Marks the activity complete for the assignment's roster (idempotent per scholar), so badges, digests, and due-counts update. Pass scholarIds to mark only a subset (e.g. exclude absentees); omit it to mark the whole roster. Posts ONE class-level Slack message, not one per scholar. This writes the learning record only — it does NOT move any cell (use reflow_unit for that).",
     inputSchema: {
       type: "object" as const,
       properties: {

@@ -570,10 +570,9 @@ describe("an overrun focus keeps its label and loses its wall", () => {
   // (rendering its "Open work" fallback) while the plate directly below kept
   // printing "Class focus" for the very same row.
   //
-  // The fix separates the two jobs a focus does. It still SHOWS until it is
-  // wrapped, so both surfaces agree; it stops BLOCKING at `endsAt`, so a
-  // slipped clear job costs a stale line on a screen rather than a scholar
-  // sealed inside one unit with no teacher around to release them.
+  // The fix separates the two jobs a focus does. It still SHOWS for the day it
+  // was set, so both surfaces agree; it stops BLOCKING at `endsAt`, so a
+  // slipped clear job cannot seal a scholar inside one unit.
 
   async function overrunFocus() {
     const t = convexTest(schema, modules);
@@ -628,5 +627,149 @@ describe("an overrun focus keeps its label and loses its wall", () => {
     // this is what takes the wall down — the activity is an `online` kind
     // that would otherwise qualify.
     expect(focus[0].soloStartableByMe).toBe(false);
+  });
+});
+
+describe("class focus expires by institution day", () => {
+  async function focusWithTiming({
+    setAt,
+    endsAt,
+  }: {
+    setAt: number;
+    endsAt?: number;
+  }) {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { unitId, activityId } = await seedUnitWithActivity(t, teacherId);
+    const asTeacher = await withUser(t, teacherId);
+    const asScholar = await withUser(t, scholarId);
+    const assignmentId = await asTeacher.mutation(api.assignments.create, {
+      unitId,
+      scholarIds: [scholarId],
+    });
+    await asTeacher.mutation(api.assignments.pushActivity, {
+      assignmentId,
+      activityId,
+      mode: "classFocus",
+    });
+    await t.run(async (ctx) => {
+      const assignment = await ctx.db.get(assignmentId);
+      await ctx.db.patch(assignmentId, {
+        activitySchedule: assignment!.activitySchedule!.map((entry) => ({
+          ...entry,
+          setAt,
+          endsAt,
+        })),
+      });
+    });
+    return {
+      t,
+      asScholar,
+      asTeacher,
+      assignmentId,
+      scholarId,
+      unitId,
+      activityId,
+    };
+  }
+
+  test("an unbounded focus from yesterday disappears for scholar and teacher", async () => {
+    const { asScholar, asTeacher, assignmentId } = await focusWithTiming({
+      setAt: Date.now() - 36 * 60 * 60_000,
+    });
+
+    expect(
+      await asScholar.query(api.assignments.currentClassFocusForMe, {}),
+    ).toHaveLength(0);
+    expect(
+      await asTeacher.query(api.assignments.currentClassFocusForMe, {}),
+    ).toHaveLength(0);
+    expect(
+      await asScholar.query(api.scholarPlate.activeForMe, {}),
+    ).toMatchObject({ rows: [] });
+    const assignment = await asTeacher.query(api.assignments.get, {
+      assignmentId,
+    });
+    expect(assignment?.classFocusCount).toBe(0);
+    const teacherList = await asTeacher.query(
+      api.assignments.listForTeacher,
+      {},
+    );
+    expect(teacherList[0].classFocusCount).toBe(0);
+    expect(
+      await asTeacher.query(api.assignments.activePushesForTeacher, {}),
+    ).toHaveLength(0);
+    const [agenda] = await asTeacher.query(
+      api.assignments.scheduleForTeacher,
+      {},
+    );
+    expect(agenda.state).toBe("done");
+  });
+
+  test("an older focus with an explicit future endsAt remains live", async () => {
+    const { asScholar, asTeacher, assignmentId } = await focusWithTiming({
+      setAt: Date.now() - 36 * 60 * 60_000,
+      endsAt: Date.now() + 60 * 60_000,
+    });
+
+    expect(
+      await asScholar.query(api.assignments.currentClassFocusForMe, {}),
+    ).toHaveLength(1);
+    expect(
+      await asTeacher.query(api.assignments.currentClassFocusForMe, {}),
+    ).toHaveLength(1);
+    expect(
+      await asScholar.query(api.scholarPlate.activeForMe, {}),
+    ).toMatchObject({
+      rows: [
+        expect.objectContaining({
+          origin: "classFocus",
+          notStarted: true,
+        }),
+      ],
+    });
+    const assignment = await asTeacher.query(api.assignments.get, {
+      assignmentId,
+    });
+    expect(assignment?.classFocusCount).toBe(1);
+    const teacherList = await asTeacher.query(
+      api.assignments.listForTeacher,
+      {},
+    );
+    expect(teacherList[0].classFocusCount).toBe(1);
+    expect(
+      await asTeacher.query(api.assignments.activePushesForTeacher, {}),
+    ).toHaveLength(1);
+  });
+
+  test("an opened session survives after its focus stops showing", async () => {
+    const { t, asScholar, assignmentId, scholarId, unitId, activityId } =
+      await focusWithTiming({
+        setAt: Date.now() - 36 * 60 * 60_000,
+      });
+    await t.run((ctx) =>
+      ctx.db.insert("sessions", {
+        userId: scholarId,
+        unitId,
+        activityId,
+        assignmentId,
+        title: "Opened class work",
+        isArchived: false,
+      }),
+    );
+
+    expect(
+      await asScholar.query(api.assignments.currentClassFocusForMe, {}),
+    ).toHaveLength(0);
+    const plate = await asScholar.query(api.scholarPlate.activeForMe, {});
+    expect(plate.rows).toEqual([
+      expect.objectContaining({
+        assignmentId,
+        activityId,
+        origin: "classFocus",
+        sessionId: expect.any(String),
+      }),
+    ]);
   });
 });

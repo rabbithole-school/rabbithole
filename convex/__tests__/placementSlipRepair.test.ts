@@ -15,8 +15,8 @@
  *     so a cleanly-converged run is never disturbed.
  */
 
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
@@ -27,11 +27,24 @@ const modules = (
 ).glob("../**/*.ts");
 
 const WHOLE = "whole-number-arithmetic";
-type Tester = ReturnType<typeof convexTest>;
+type Tester = TestConvex<typeof schema>;
+
+let sharedT: Tester;
+let scholarCounter = 0;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
 
 async function seedScholar(t: Tester) {
+  const username = `slip_${++scholarCounter}`;
   return await t.run(async (ctx) =>
-    ctx.db.insert("users", { name: "slip", username: "slip", role: "scholar" }),
+    ctx.db.insert("users", { name: "slip", username, role: "scholar" }),
   );
 }
 
@@ -69,8 +82,7 @@ async function seedSlipCappedRun(
 
 describe("reopenSlipCappedPlacement", () => {
   test("dry run reports the confirm and writes NOTHING", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedScholar(t);
     const { strand, keys } = await firstStrand(t);
     const rowId = await seedSlipCappedRun(t, scholarId, strand, keys[1]);
@@ -116,8 +128,7 @@ describe("reopenSlipCappedPlacement", () => {
     // a domain the scholar was already 87/87 credited in. Re-opening there can
     // only cost — no ground to win back, and a second miss would cap a strand
     // that is currently complete. The repair must give ground back, never take it.
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedScholar(t);
     const { strand, keys } = await firstStrand(t);
     const rowId = await seedSlipCappedRun(t, scholarId, strand, keys[1]);
@@ -152,8 +163,7 @@ describe("reopenSlipCappedPlacement", () => {
   });
 
   test("a cleanly-converged run is left alone", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedScholar(t);
     const { strand, keys } = await firstStrand(t);
     // every probe answered CORRECTLY — no pending confirm anywhere

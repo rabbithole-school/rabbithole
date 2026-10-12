@@ -16,37 +16,12 @@ import { internal } from "./_generated/api";
  *    files it hasn't already seen (dedupe on driveFileId).
  */
 const crons = cronJobs();
-const scanDailyRotationAndNotifyRef = makeFunctionReference<
-  "action",
-  Record<string, never>
->("improvementLoopNotifications:scanDailyRotationAndNotify");
-const dispatchRoundsRemindersRef = makeFunctionReference<
-  "action",
-  Record<string, never>
->("improvementLoopNotifications:dispatchRoundsReminders");
 const reconcileActiveAppUnlocksRef = makeFunctionReference<
   "action",
   { nowMs?: number },
   { considered: number; locked: number; authorized: number; failed: number }
 >("deviceAppUnlock:reconcileActiveUnlocks");
 
-// Slack gets generic pointers only. The daily action performs the rotating
-// Coherence scan before posting, avoiding two independent, race-prone crons.
-crons.daily(
-  "scan coherence and notify improvement loop",
-  { hourUTC: 16, minuteUTC: 15 },
-  scanDailyRotationAndNotifyRef,
-  {},
-);
-
-// Each hourly tick resolves institution-local configured meeting days. Durable
-// per-institution + cadence + week markers make each reminder fire once.
-crons.hourly(
-  "dispatch Rounds reminders",
-  { minuteUTC: 0 },
-  dispatchRoundsRemindersRef,
-  {},
-);
 
 // Weekly SEL synthesis batch. Each hourly tick resolves institution-local SEL
 // meeting mornings and writes every enrolled scholar's synthesis a few hours
@@ -60,7 +35,6 @@ crons.hourly(
   internal.selSynthesisCron.dispatchSelSyntheses,
   {},
 );
-
 
 crons.daily(
   "renew drive watch",
@@ -252,6 +226,7 @@ crons.hourly(
 
 
 
+
 /**
  * Weekly AI usage & cost report — a deterministic $ + token roll-up (by source
  * bucket and model, with week-over-week deltas) posted as a Slack canvas to
@@ -274,6 +249,17 @@ crons.hourly(
  * daily tick clears any backlog on its own.
  */
 
+/**
+ * Trim scholar-facing LLM lease rows once they are older than the rolling
+ * start window. The mutation self-drains in bounded batches.
+ */
+crons.interval(
+  "sweep stale llm leases",
+  { minutes: 10 },
+  internal.llmLimiter.retentionSweep,
+  {},
+);
+
 // Reception review is deliberately bounded: unknown, visitor, and rejected
 // events expire after 14 days; an operations staffer-confirmed scholar attendance row
 // expires after 180 days. The attendance table contains metadata only.
@@ -291,6 +277,19 @@ crons.daily(
   {},
 );
 
+
+// The ONE scheduled read of SimpleMDM's fleet state (device inventory + claim
+// read-back) into `simpleMdmDeviceSnapshots`. The devices console renders
+// this dated copy ("checked 40 minutes ago") and offers "Check now"; it never
+// calls SimpleMDM because a page opened. Hourly: SimpleMDM's own inventory
+// refresh is on a similar cadence, and one roster walk an hour is a budget
+// the undocumented rate limit tolerates.
+crons.hourly(
+  "refresh SimpleMDM device snapshots",
+  { minuteUTC: 17 },
+  internal.simplemdm.refreshSimpleMdmSnapshots,
+  {},
+);
 
 // The ONE authoritative correctness mechanism for managed-native app access.
 // Every 5 minutes it does two things, in that order:
@@ -317,5 +316,18 @@ crons.interval(
   reconcileActiveAppUnlocksRef,
   {},
 );
+
+// Guest mode's counters are its ONLY persistence, and they stop being able to
+// affect a decision after a day (see GUEST_ROW_TTL_MS). Deleting them is the
+// second half of the promise the surface makes — "nothing outlives the
+// exchange" is only true if something actually does the deleting. A no-op on
+// any deployment where guest mode has never run.
+crons.daily(
+  "purge guest tutor rate-limit rows",
+  { hourUTC: 11, minuteUTC: 20 },
+  internal.guestTutor.purgeGuestRateLimits,
+  {},
+);
+
 
 export default crons;

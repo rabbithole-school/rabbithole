@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { useConvex, useMutation } from "convex/react";
+import { useConvex, useMutation, useQuery } from "convex/react";
+import { useRouter } from "expo-router";
 import { SymbolView, type SymbolViewProps } from "expo-symbols";
 import * as Haptics from "expo-haptics";
 import {
@@ -28,6 +29,7 @@ import {
   type UnitProgressActivityItem,
   useUnitProgress,
 } from "@/hooks/useUnitProgress";
+import { activityTapAction, findActivitySession } from "@/lib/activitySession";
 import { api, type Id } from "@/lib/convex";
 import { openWebActivity } from "@/lib/externalAppHost";
 import { openGameActivity } from "@/lib/gameHost";
@@ -43,6 +45,12 @@ export type WhereAmIPanelProps = {
   assignmentId?: Id<"assignments"> | null;
   activityCompleted?: boolean;
   title?: string | null;
+  /**
+   * The session screen's `shouldSkipLearnerQueries` verdict. A teacher's test
+   * drive cannot read `sessions.list` as a learner (TRA-321), so its chat rows
+   * stay unopenable rather than starting a real session.
+   */
+  skipLearnerQueries?: boolean;
 };
 
 type ConfirmMode = "complete" | "undo" | null;
@@ -90,10 +98,13 @@ export function WhereAmIPanel({
   assignmentId,
   activityCompleted = false,
   title,
+  skipLearnerQueries = false,
 }: WhereAmIPanelProps) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const convex = useConvex();
+  const router = useRouter();
+  const createSession = useMutation(api.sessions.create);
   const insets = useSafeAreaInsets();
   const markComplete = useMutation(api.activityCompletions.markComplete);
   const unmarkComplete = useMutation(api.activityCompletions.unmarkComplete);
@@ -103,6 +114,17 @@ export function WhereAmIPanel({
     assignmentId,
     enabled: visible,
   });
+
+  // The scholar's sessions, so a chat activity reopens its existing session
+  // instead of starting a duplicate (the session screen already holds this
+  // subscription with the same args, so Convex shares it).
+  const canStartSessions = !!unitId && !skipLearnerQueries;
+  const activeSessions = useQuery(
+    api.sessions.list,
+    visible && canStartSessions ? { asLearner: true } : "skip",
+  );
+  const [startingActivityId, setStartingActivityId] =
+    useState<Id<"activities"> | null>(null);
 
   const [confirmMode, setConfirmMode] = useState<ConfirmMode>(null);
   const [saving, setSaving] = useState(false);
@@ -207,6 +229,59 @@ export function WhereAmIPanel({
         "Check your connection and try again.",
       );
     }
+  };
+
+  const openSessionActivityRow = async (activity: UnitProgressActivity) => {
+    if (startingActivityId) return;
+    Haptics.selectionAsync();
+    setStartingActivityId(activity._id);
+    try {
+      const existing = findActivitySession(
+        activeSessions,
+        activity._id,
+        assignmentId,
+      );
+      const targetId =
+        existing ??
+        (
+          await createSession({
+            activityId: activity._id,
+            // Pass the unit like web does, so the server never has to derive
+            // it (an activity without a lesson would otherwise get a thin
+            // Independent Study unit).
+            ...(unitId ? { unitId } : {}),
+            ...(assignmentId ? { assignmentId } : {}),
+          })
+        )?.id;
+      if (!targetId) return;
+      onClose();
+      // Replace, don't push — the same stepping rule as the activity nav and
+      // Up next, so a back-swipe from any activity returns to Home.
+      router.replace({
+        pathname: "/session/[id]",
+        params: { id: targetId, title: activity.title },
+      });
+    } catch (e) {
+      console.warn("[where-am-i] activity launch failed", e);
+      Alert.alert("Couldn't start that activity", "Please try again.");
+    } finally {
+      setStartingActivityId(null);
+    }
+  };
+
+  // Offline / share-back work happens in class, not in a chat — the same
+  // explanation web's activity navigator shows (OfflineActivityDialog).
+  const explainInClassActivityRow = (activity: UnitProgressActivity) => {
+    Haptics.selectionAsync();
+    Alert.alert(
+      activity.title,
+      [
+        activity.description,
+        "This is an in-class activity — your teacher will run it. Do your work on paper, then hand it to your teacher — they’ll scan it in so it shows up here.",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    );
   };
 
   const requestStatusChange = (mode: Exclude<ConfirmMode, null>) => {
@@ -426,8 +501,17 @@ export function WhereAmIPanel({
                           <ActivityProgressRow
                             key={String(item.activity._id)}
                             item={item}
+                            sessionActivityId={activityId}
+                            canStartSessions={canStartSessions}
+                            starting={
+                              String(startingActivityId) ===
+                              String(item.activity._id)
+                            }
                             onOpenWeb={openWebActivityRow}
                             onOpenGame={openGameActivityRow}
+                            onOpenSession={openSessionActivityRow}
+                            onExplainInClass={explainInClassActivityRow}
+                            onClose={onClose}
                           />
                         ))}
                       </View>
@@ -553,12 +637,24 @@ function CompletionCard({
 
 function ActivityProgressRow({
   item,
+  sessionActivityId,
+  canStartSessions,
+  starting,
   onOpenWeb,
   onOpenGame,
+  onOpenSession,
+  onExplainInClass,
+  onClose,
 }: {
   item: UnitProgressActivityItem;
+  sessionActivityId: Id<"activities"> | null | undefined;
+  canStartSessions: boolean;
+  starting: boolean;
   onOpenWeb: (activity: UnitProgressActivity) => void;
   onOpenGame: (activity: UnitProgressActivity) => void;
+  onOpenSession: (activity: UnitProgressActivity) => void;
+  onExplainInClass: (activity: UnitProgressActivity) => void;
+  onClose: () => void;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -574,22 +670,39 @@ function ActivityProgressRow({
     item.activity.durationMinutes ? `${item.activity.durationMinutes} min` : null,
   ].filter(Boolean) as string[];
 
-  const isWeb = item.activity.kind === "web";
-  const isGame = item.activity.kind === "game";
-  const openable = isWeb || isGame;
+  const action = activityTapAction({
+    kind: item.activity.kind,
+    activityId: item.activity._id,
+    sessionActivityId,
+  });
+  const isWeb = action === "web";
+  const onPress =
+    action === "web"
+      ? () => onOpenWeb(item.activity)
+      : action === "game"
+        ? () => onOpenGame(item.activity)
+        : action === "in-class"
+          ? () => onExplainInClass(item.activity)
+          : action === "current"
+            ? onClose
+            : action === "session" && canStartSessions
+              ? () => onOpenSession(item.activity)
+              : undefined;
+  const openable = !!onPress;
+  const accessibilityLabel =
+    action === "current"
+      ? `${item.activity.title}, the activity you are in. Closes the map`
+      : action === "in-class"
+        ? `About ${item.activity.title}, an in-class activity`
+        : `Open ${item.activity.title}`;
 
   return (
     <Pressable
-      onPress={
-        isWeb
-          ? () => onOpenWeb(item.activity)
-          : isGame
-            ? () => onOpenGame(item.activity)
-            : undefined
-      }
-      disabled={!openable}
+      onPress={onPress}
+      disabled={!openable || starting}
       accessibilityRole={openable ? "button" : undefined}
-      accessibilityLabel={openable ? `Open ${item.activity.title}` : undefined}
+      accessibilityLabel={openable ? accessibilityLabel : undefined}
+      accessibilityState={openable ? { busy: starting } : undefined}
       style={({ pressed }) => [
         styles.activityRow,
         { backgroundColor: meta.background, borderColor: meta.border },
@@ -628,7 +741,11 @@ function ActivityProgressRow({
           <Text style={styles.activityMeta}>{detail.join(" · ")}</Text>
         )}
       </View>
-      {isWeb ? <Text style={styles.webOpen}>Open ›</Text> : null}
+      {starting ? (
+        <ActivityIndicator size="small" color={colors.violet} />
+      ) : isWeb ? (
+        <Text style={styles.webOpen}>Open ›</Text>
+      ) : null}
     </Pressable>
   );
 }

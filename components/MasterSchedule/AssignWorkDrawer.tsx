@@ -1,8 +1,11 @@
 "use client";
 
 /**
- * AssignWorkDrawer — the ONE "Assign work" verb, one drawer, two entry points
- * (review/now-view-redesign.html §6). The surface supplies the default target:
+ * AssignWorkDrawer — the ONE "Assign work" verb, one modal, two entry points
+ * (review/now-view-redesign.html §6). Rendered as a centered Dialog: the learner
+ * flow is a wide two-column layout (who + what kind | details), the group flow a
+ * single narrow column. The component keeps its historical name; every host
+ * imports it by that name. The surface supplies the default target:
  *
  *   • Schedule (Now / Day / Week) → a GROUP in a block. Writes a
  *     `schedulePlacements` row via `masterSchedule.placeClass` (optionally
@@ -23,36 +26,37 @@
  *     stops "assign existing" and "invent new" from hiding behind one word.
  *
  * When the surface supplies no scholar (e.g. the Schedule > Now "Assign to a
- * scholar" button), the drawer shows an inline ScholarPicker so the teacher can
- * choose the child right here.
+ * scholar" button), the modal shows an inline ScholarPicker in the left column
+ * so the teacher can choose the child right here.
  *
  * Both flows converge on the same confirmation shape — target · work · timing ·
  * mode — so Assign and "Dispatch" are one concept, not competing products. The
  * bot (dispatch_activity / place_class tools) is the text/voice twin of this
- * GUI; the "Ask the bot instead" door hands the same intent to the aide, which
- * is also the accessibility path.
+ * GUI and remains the accessibility path; it has its own door (the aide dock),
+ * so this modal no longer carries an "Ask the bot instead" button.
  */
 import { useMemo, useState } from "react";
 import {
   Box,
   Button,
-  Drawer,
+  Dialog,
   Flex,
   HStack,
   Input,
   Portal,
+  SimpleGrid,
   Text,
   Textarea,
   VStack,
   chakra,
 } from "@chakra-ui/react";
-import { CaretLeft, CaretRight, Robot, X } from "@phosphor-icons/react";
+import { CaretLeft, CaretRight, X } from "@phosphor-icons/react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { toaster } from "@/lib/toaster";
-import { useAideDock } from "@/components/aide/AideDockProvider";
 import { ScholarPicker } from "@/components/ScholarPicker";
+import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { useScholarRoster } from "@/hooks/useScholarRoster";
 
 export type AssignMode = "classFocus" | "homework";
@@ -124,33 +128,39 @@ export function AssignWorkDrawer({
   onClose: () => void;
   target: AssignTarget | null;
 }) {
+  // The learner flow carries a scholar picker + kind switch + details, so it
+  // gets a wide two-column modal; the group flow is a title + mode and stays
+  // a single narrow column.
+  const wide = target?.kind === "learner";
   return (
-    <Drawer.Root
+    <Dialog.Root
       open={open}
       onOpenChange={(d) => {
         if (!d.open) onClose();
       }}
-      placement="end"
-      size="sm"
+      placement="center"
+      size={wide ? "xl" : "md"}
+      scrollBehavior="inside"
     >
       <Portal>
-        <Drawer.Backdrop />
-        <Drawer.Positioner>
-          <Drawer.Content
+        <Dialog.Backdrop />
+        <Dialog.Positioner>
+          <StyledDialogContent
+            maxW={wide ? "6xl" : "lg"}
             display="flex"
             flexDirection="column"
             bg="white"
             shadow="lg"
-            pt="env(safe-area-inset-top)"
-            pb="env(safe-area-inset-bottom)"
+            h={wide ? "min(800px, calc(100dvh - 3rem))" : undefined}
+            maxH="calc(100dvh - 3rem)"
           >
             {target && (
               <AssignWorkForm key={targetKey(target)} target={target} onClose={onClose} />
             )}
-          </Drawer.Content>
-        </Drawer.Positioner>
+          </StyledDialogContent>
+        </Dialog.Positioner>
       </Portal>
-    </Drawer.Root>
+    </Dialog.Root>
   );
 }
 
@@ -172,7 +182,6 @@ function AssignWorkForm({
   const offerQuest = useMutation(api.units.createAndOfferQuestForScholar);
   const assignWork = useMutation(api.assignments.assignWork);
   const pushActivity = useMutation(api.assignments.pushActivity);
-  const aide = useAideDock();
   const { scholars: roster } = useScholarRoster();
 
   const intent: LearnerIntent = target.kind === "learner" ? target.intent ?? "custom" : "custom";
@@ -266,7 +275,6 @@ function AssignWorkForm({
         // find-or-creates the assignment and PLANS the activity; when starting
         // now we follow with pushActivity to make it live immediately.
         const now = Date.now();
-        const endsAt = mode === "classFocus" ? now + 3_600_000 : undefined;
         for (const s of scholars) {
           const assignmentId = await assignWork({
             unitId: curSel.unitId,
@@ -276,7 +284,6 @@ function AssignWorkForm({
               kind: "activity",
               activityId: curSel.activityId,
               mode,
-              ...(endsAt ? { endsAt } : {}),
             },
           });
           if (timing === "now") {
@@ -284,13 +291,16 @@ function AssignWorkForm({
               assignmentId,
               activityId: curSel.activityId,
               mode,
-              ...(endsAt ? { endsAt } : {}),
             });
           }
         }
         toaster.create({
           title: timing === "now" ? "Assigned now" : "Added to queue",
-          description: `${curSel.activityTitle} · ${contextLine}`,
+          description: `${curSel.activityTitle} · ${contextLine}${
+            timing === "now" && mode === "classFocus"
+              ? " · Live now · fades after today"
+              : ""
+          }`,
           type: "success",
         });
       } else if (isQuest) {
@@ -321,7 +331,11 @@ function AssignWorkForm({
         }
         toaster.create({
           title: timing === "now" ? "Dispatched now" : "Added to queue",
-          description: `${title.trim()} · ${contextLine}`,
+          description: `${title.trim()} · ${contextLine}${
+            timing === "now" && mode === "classFocus"
+              ? " · Live now · fades after today"
+              : ""
+          }`,
           type: "success",
         });
       }
@@ -333,28 +347,13 @@ function AssignWorkForm({
     }
   }
 
-  function askBot() {
-    const learnerNames =
-      target.kind === "learner" ? scholars.map((s) => s.name).join(", ") : "";
-    const text =
-      target.kind === "group"
-        ? `Help me assign work to ${target.groupLabel}${target.slotLabel ? ` in ${target.slotLabel}` : ""}: `
-        : isQuest
-          ? `Offer ${learnerNames || "a scholar"} a quest${title.trim() ? ` about ${title.trim()}` : ": "}`
-          : isCurriculum
-            ? `Assign ${learnerNames || "a scholar"} the activity${curSel ? ` "${curSel.activityTitle}"` : ": "}`
-            : `Dispatch ${learnerNames || "a scholar"} a new activity${title.trim() ? ` to ${title.trim()}` : ": "}`;
-    aide.seedComposer(text);
-    onClose();
-  }
-
   return (
     <>
       {/* Header */}
       <Flex
         align="center"
         justify="space-between"
-        px={5}
+        px={isLearner ? 6 : 5}
         py={4}
         borderBottom="1px solid"
         borderColor="gray.100"
@@ -386,25 +385,64 @@ function AssignWorkForm({
         </chakra.button>
       </Flex>
 
-      {/* Body */}
-      <VStack align="stretch" gap={5} px={5} py={5} flex={1} overflowY="auto">
-        {needsScholarPick && (
-          <Field label="Scholar">
-            <Box borderWidth="1px" borderColor="gray.100" borderRadius="lg" p={1}>
-              <ScholarPicker
-                mode="single"
-                selected={pickedId}
-                onChange={setPickedId}
-                searchable
-                autoFocusSearch
-                showGroups
-                maxH="220px"
-              />
-            </Box>
-          </Field>
+      {/* Body — learner flow: two columns (who | what + details); group flow:
+          one column. The body itself never scrolls: the scholar list fills the
+          left column and scrolls inside itself; the right column scrolls only
+          if the viewport is shorter than its content. */}
+      <SimpleGrid
+        columns={isLearner ? { base: 1, md: 2 } : 1}
+        gap={isLearner ? 8 : 5}
+        px={isLearner ? 6 : 5}
+        py={5}
+        flex={1}
+        minH={0}
+        overflow="hidden"
+        alignItems="stretch"
+      >
+        {isLearner && (
+          <Flex direction="column" minH={0}>
+            {needsScholarPick ? (
+              <Field label="Scholar" fill>
+                <Flex
+                  direction="column"
+                  flex={1}
+                  minH={0}
+                  borderWidth="1px"
+                  borderColor="gray.100"
+                  borderRadius="lg"
+                  p={1}
+                >
+                  <ScholarPicker
+                    mode="single"
+                    selected={pickedId}
+                    onChange={setPickedId}
+                    searchable
+                    autoFocusSearch
+                    showGroups
+                    fill
+                  />
+                </Flex>
+              </Field>
+            ) : (
+              <Field label={scholars.length === 1 ? "Scholar" : "Scholars"}>
+                <Box
+                  borderWidth="1px"
+                  borderColor="gray.100"
+                  borderRadius="lg"
+                  px={3}
+                  py={2.5}
+                >
+                  <Text fontSize="sm" color="navy.700" fontWeight="600">
+                    {scholars.map((s) => s.name).join(", ")}
+                  </Text>
+                </Box>
+              </Field>
+            )}
+          </Flex>
         )}
 
-        {target.kind === "learner" && (
+        <Flex direction="column" gap={5} minH={0} overflowY="auto">
+        {isLearner && (
           <Field label="What to assign">
             <Segmented
               fitted
@@ -430,7 +468,7 @@ function AssignWorkForm({
         )}
 
         {isCurriculum && (
-          <Field label="Activity">
+          <Field label="Activity" fill={!curSel}>
             {curSel ? (
               <Flex
                 align="center"
@@ -464,7 +502,7 @@ function AssignWorkForm({
                 </chakra.button>
               </Flex>
             ) : (
-              <CurriculumActivityPicker onPick={setCurSel} />
+              <CurriculumActivityPicker onPick={setCurSel} autoFocus={!needsScholarPick} fill />
             )}
           </Field>
         )}
@@ -502,39 +540,41 @@ function AssignWorkForm({
         )}
 
         {!isQuest && (
-          <Field label="Mode">
-            <Segmented
-              options={[
-                { value: "classFocus", label: "Class focus" },
-                { value: "homework", label: "Homework" },
-              ]}
-              value={mode}
-              onChange={(v) => setMode(v as AssignMode)}
-            />
-            <Text fontSize="2xs" color="charcoal.300" mt={1.5}>
-              {mode === "homework"
-                ? "Shows on the scholar's homework rail, done on their own time."
-                : "In-class work the scholar sees during the block."}
-            </Text>
-          </Field>
-        )}
+          <SimpleGrid columns={isLearner ? 2 : 1} gap={5}>
+            <Field label="Mode">
+              <Segmented
+                options={[
+                  { value: "classFocus", label: "Class focus" },
+                  { value: "homework", label: "Homework" },
+                ]}
+                value={mode}
+                onChange={(v) => setMode(v as AssignMode)}
+              />
+              <Text fontSize="2xs" color="charcoal.300" mt={1.5}>
+                {mode === "homework"
+                  ? "Shows on the scholar's homework rail, done on their own time."
+                  : "In-class work the scholar sees during the block."}
+              </Text>
+            </Field>
 
-        {target.kind === "learner" && !isQuest && (
-          <Field label="Timing">
-            <Segmented
-              options={[
-                { value: "now", label: "Start now" },
-                { value: "queue", label: "Add to queue" },
-              ]}
-              value={timing}
-              onChange={(v) => setTiming(v as "now" | "queue")}
-            />
-            <Text fontSize="2xs" color="charcoal.300" mt={1.5}>
-              {timing === "now"
-                ? "Goes live for this scholar immediately."
-                : "Staged for you to start later. This scholar cannot see it yet."}
-            </Text>
-          </Field>
+            {isLearner && (
+              <Field label="Timing">
+                <Segmented
+                  options={[
+                    { value: "now", label: "Start now" },
+                    { value: "queue", label: "Add to queue" },
+                  ]}
+                  value={timing}
+                  onChange={(v) => setTiming(v as "now" | "queue")}
+                />
+                <Text fontSize="2xs" color="charcoal.300" mt={1.5}>
+                  {timing === "now"
+                    ? "Goes live for this scholar immediately."
+                    : "Staged for you to start later. This scholar cannot see it yet."}
+                </Text>
+              </Field>
+            )}
+          </SimpleGrid>
         )}
 
         {target.kind === "group" && !target.slotLabel && (
@@ -543,13 +583,15 @@ function AssignWorkForm({
             day/block to schedule it.
           </Text>
         )}
-      </VStack>
+        </Flex>
+      </SimpleGrid>
 
       {/* Footer */}
-      <VStack
-        align="stretch"
+      <Flex
+        align="center"
+        justify="flex-end"
         gap={2}
-        px={5}
+        px={isLearner ? 6 : 5}
         py={4}
         borderTop="1px solid"
         borderColor="gray.100"
@@ -570,21 +612,30 @@ function AssignWorkForm({
                   : "Dispatch now"
                 : "Add to queue"}
         </Button>
-        <Button variant="ghost" size="sm" onClick={askBot} color="charcoal.500">
-          <HStack gap={1.5}>
-            <Robot size={15} /> Ask the bot instead
-          </HStack>
-        </Button>
-      </VStack>
+      </Flex>
     </>
   );
 }
 
 // ── Small local form primitives ──────────────────────────────────────────────
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  children,
+  fill = false,
+}: {
+  label: string;
+  children: React.ReactNode;
+  /** Stretch to the parent's height as a flex column (for a scrolling child). */
+  fill?: boolean;
+}) {
   return (
-    <Box>
+    <Box
+      display={fill ? "flex" : undefined}
+      flexDirection={fill ? "column" : undefined}
+      flex={fill ? 1 : undefined}
+      minH={fill ? 0 : undefined}
+    >
       <Text
         fontSize="xs"
         color="charcoal.400"
@@ -653,16 +704,22 @@ function Segmented<T extends string>({
 }
 
 /**
- * CurriculumActivityPicker — a compact, in-drawer Unit → Activity drill-down
+ * CurriculumActivityPicker — a compact, in-modal Unit → Activity drill-down
  * for the "Curriculum" kind. Lists real curriculum units (scholar-owned IS /
  * quest units are filtered out), then the activities inside the chosen unit
  * (flattened across its lessons via `activities.listByUnitPublic`). The lesson
  * level is skipped: `assignWork`'s activity target only needs unitId +
- * activityId, and the drawer is too narrow for the 3-column dialog picker.
+ * activityId, and a form column is too narrow for the 3-column dialog picker.
  */
 function CurriculumActivityPicker({
   onPick,
+  autoFocus = true,
+  fill = false,
 }: {
+  /** False when another field (the scholar search) should own initial focus. */
+  autoFocus?: boolean;
+  /** Fill the parent flex column instead of capping the list at 220px. */
+  fill?: boolean;
   onPick: (sel: {
     unitId: Id<"units">;
     unitTitle: string;
@@ -710,7 +767,14 @@ function CurriculumActivityPicker({
   // Unit chosen → show its activities.
   if (unitId) {
     return (
-      <Box borderWidth="1px" borderColor="gray.100" borderRadius="lg">
+      <Flex
+        direction="column"
+        flex={1}
+        minH={0}
+        borderWidth="1px"
+        borderColor="gray.100"
+        borderRadius="lg"
+      >
         <Flex
           align="center"
           gap={2}
@@ -741,7 +805,7 @@ function CurriculumActivityPicker({
             {unitTitle}
           </Text>
         </Flex>
-        <Box p={2}>
+        <Flex direction="column" flex={1} minH={0} p={2}>
           <Input
             size="sm"
             placeholder="Search activities…"
@@ -753,7 +817,9 @@ function CurriculumActivityPicker({
           <VStack
             align="stretch"
             gap={0.5}
-            maxH="220px"
+            flex={1}
+            minH={fill ? "160px" : 0}
+            maxH={fill ? undefined : "220px"}
             overflowY="auto"
             role="listbox"
             aria-label="Curriculum activities"
@@ -807,26 +873,36 @@ function CurriculumActivityPicker({
               </chakra.button>
             ))}
           </VStack>
-        </Box>
-      </Box>
+        </Flex>
+      </Flex>
     );
   }
 
   // No unit chosen yet → show the unit list.
   return (
-    <Box borderWidth="1px" borderColor="gray.100" borderRadius="lg" p={2}>
+    <Flex
+      direction="column"
+      flex={1}
+      minH={0}
+      borderWidth="1px"
+      borderColor="gray.100"
+      borderRadius="lg"
+      p={2}
+    >
       <Input
         size="sm"
         placeholder="Search units…"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         mb={2}
-        autoFocus
+        autoFocus={autoFocus}
       />
       <VStack
         align="stretch"
         gap={0.5}
-        maxH="220px"
+        flex={1}
+        minH={fill ? "160px" : 0}
+        maxH={fill ? undefined : "220px"}
         overflowY="auto"
         role="listbox"
         aria-label="Curriculum units"
@@ -877,6 +953,6 @@ function CurriculumActivityPicker({
           </chakra.button>
         ))}
       </VStack>
-    </Box>
+    </Flex>
   );
 }

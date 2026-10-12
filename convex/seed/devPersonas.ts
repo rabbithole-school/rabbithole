@@ -20,7 +20,7 @@
 //
 // NEVER runs on prod: it would attach parent contexts to the real admin and
 // create fictional scholars. Real families are onboarded
-// separately (seed/enrolledFamilies), with NO usernames (see TODO.html
+// separately (seed/enrolledFamilies), with NO usernames (see the retired TODO.html
 // "Rationalize how scholars/parents claim accounts on prod").
 
 import { internalMutation } from "../_generated/server";
@@ -30,6 +30,7 @@ import { ROLES } from "../lib/roles";
 import { ensureMembership } from "../memberships";
 import { ensureActiveStaffCapabilityGrant } from "../lib/staffCapabilities";
 import { ensureDevInstitutions } from "./institutions";
+import { seedScholarMessagingFixtures } from "./scholarMessaging";
 
 /** Dev-only guard — never reshape prod identities. */
 function isProdDeployment(): boolean {
@@ -362,6 +363,11 @@ export const seedDevPersonas = internalMutation({
       role: ROLES.SCHOOL_ADMIN,
       institutionId: konaTutoring,
     });
+
+    // Scholar ↔ staff messaging: test-mentor-001 + one mentor thread, one
+    // Workshop idea conversation, one team-started Workshop conversation.
+    // Runs after the cast above exists; idempotent, outside any skip-guard.
+    await seedScholarMessagingFixtures(ctx, moli);
 
     console.log(
       "seedDevPersonas: Avery + Ursula (parents→Oliver), Sloane (Staff+parent with school operations and scoped Robotics capabilities→Kai,Lani) @ Moli, Lehua (teacher @ Moli + Kona Tutoring), Hoku (school_admin @ Moli), Kalei (school_admin @ Kona Tutoring).",

@@ -1,14 +1,20 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useEffect, useRef } from "react";
-import { Box, Flex, Spinner, Text } from "@chakra-ui/react";
-import { Keyboard, Microphone } from "@phosphor-icons/react";
+import { useEffect, useRef, useState } from "react";
+import { Box, Button, Flex, Spinner, Text } from "@chakra-ui/react";
+import {
+  ArrowClockwise,
+  ChatCircle,
+  Keyboard,
+  Microphone,
+} from "@phosphor-icons/react";
 
 import type { ToolActivity } from "@/hooks/useAgentStream";
 import { MarkdownBlock } from "@/components/StreamingMarkdown";
 import { StreamingText } from "@/components/StreamingText";
 import { ToolActivityIndicator } from "@/components/ToolActivityIndicator";
+import { pendingTurnLabel } from "@/shared/streamRetry";
 
 export interface SessionTranscriptMessage {
   id: string;
@@ -20,7 +26,7 @@ export interface ReconciledSessionMessage<T extends SessionTranscriptMessage> {
   isActiveStream: boolean;
 }
 
-export type MessageInputModality = "typed" | "spoken";
+export type MessageInputModality = "typed" | "spoken" | "app";
 
 export function SessionInputModality({
   modality,
@@ -29,8 +35,10 @@ export function SessionInputModality({
 }) {
   if (!modality) return null;
 
-  const label = modality === "spoken" ? "Spoken" : "Typed";
-  const Icon = modality === "spoken" ? Microphone : Keyboard;
+  const label =
+    modality === "spoken" ? "Spoken" : modality === "app" ? "App" : "Typed";
+  const Icon =
+    modality === "spoken" ? Microphone : modality === "app" ? ChatCircle : Keyboard;
 
   return (
     <Flex
@@ -132,6 +140,7 @@ export function SessionAssistantMessageBody({
   generatingImage = false,
   settled,
   fontSize = "lg",
+  stopRequestedAt,
 }: {
   content: string;
   isStreaming?: boolean;
@@ -140,6 +149,11 @@ export function SessionAssistantMessageBody({
   // The full-screen session chat reads at "lg"; compact side-panel hosts
   // (VibecodeWorkshop) pass their own scale so one surface never mixes sizes.
   fontSize?: string;
+  // When set on a finalized (non-streaming) turn, the user cut this reply
+  // short — render a muted "Stopped" caption under the body. Opt-in: the
+  // full-screen session chat renders its own caption in MessageBubble, so it
+  // leaves this undefined to avoid double-rendering.
+  stopRequestedAt?: number | null;
 }) {
   return (
     <Box
@@ -166,6 +180,11 @@ export function SessionAssistantMessageBody({
           </Text>
         </Flex>
       )}
+      {!isStreaming && stopRequestedAt && (
+        <Text fontSize="xs" fontFamily="heading" color="fg.muted" mt={1}>
+          Stopped
+        </Text>
+      )}
     </Box>
   );
 }
@@ -176,14 +195,25 @@ export function SessionStreamStatus({
   generatingImage = false,
   toolActivity,
   scholarSafe = false,
+  pending = false,
+  pendingSince = null,
 }: {
   isStreaming: boolean;
   streamingContent: string;
   generatingImage?: boolean;
   toolActivity: ToolActivity[];
   scholarSafe?: boolean;
+  /**
+   * The turn is pending from server truth (an empty assistant placeholder with
+   * a streamId) even if this client is not itself streaming — so a remount or a
+   * wait-and-retry keeps the "thinking" indicator up instead of flashing empty.
+   */
+  pending?: boolean;
+  /** When the pending turn began (ms), for the escalating "thinking" copy. */
+  pendingSince?: number | null;
 }) {
-  if (!isStreaming) return null;
+  const active = isStreaming || pending;
+  if (!active) return null;
 
   if (toolActivity.length > 0) {
     return (
@@ -196,20 +226,71 @@ export function SessionStreamStatus({
 
   if (streamingContent || generatingImage) return null;
 
+  return <TutorThinkingIndicator pendingSince={pendingSince} />;
+}
+
+/**
+ * The single canonical "thinking" state for a pending tutor turn: the typing
+ * dots, with copy that escalates the longer the scholar waits ("Still
+ * thinking…" then "Taking a little longer than usual…"). One place, per
+ * surface — it must NOT vanish when a tool event arrives (the caller keeps it
+ * mounted; see SessionStreamStatus) and it survives a wait-and-retry.
+ */
+function TutorThinkingIndicator({
+  pendingSince,
+}: {
+  pendingSince?: number | null;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (pendingSince == null) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [pendingSince]);
+
+  const label =
+    pendingSince != null ? pendingTurnLabel(now - pendingSince) : null;
+
   return (
-    <Box
-      alignSelf="flex-start"
-      bg="gray.100"
-      px={4}
-      py={3}
-      borderRadius="xl"
-      borderBottomLeftRadius="sm"
-    >
-      <div className="typing-indicator">
-        <span></span>
-        <span></span>
-        <span></span>
-      </div>
-    </Box>
+    <Flex align="center" gap={2} alignSelf="flex-start">
+      <Box bg="gray.100" px={4} py={3} borderRadius="xl" borderBottomLeftRadius="sm">
+        <div className="typing-indicator">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </Box>
+      {label && (
+        <Text fontSize="sm" fontFamily="heading" color="charcoal.300">
+          {label}
+        </Text>
+      )}
+    </Flex>
+  );
+}
+
+/**
+ * A failed turn never evaporates: the scholar's message stays visible and this
+ * calm inline notice offers a one-tap retry that re-runs the same turn (no
+ * retyping, no duplicate message). Shown only when the placeholder is dead —
+ * the client gave up, or the server's orphan-reap window has passed.
+ */
+export function TutorTurnFailedNotice({ onRetry }: { onRetry: () => void }) {
+  return (
+    <Flex align="center" gap={2} alignSelf="flex-start" px={4} py={1}>
+      <Text fontSize="sm" fontFamily="body" color="charcoal.300">
+        Didn&apos;t go through
+      </Text>
+      <Button
+        size="xs"
+        variant="ghost"
+        color="violet.500"
+        fontFamily="heading"
+        onClick={onRetry}
+      >
+        <ArrowClockwise size={12} weight="bold" />
+        Try again
+      </Button>
+    </Flex>
   );
 }

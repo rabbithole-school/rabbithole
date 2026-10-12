@@ -10,7 +10,7 @@
  * tab itself fully focused on Units.
  *
  * (Personas used to be a third type here but are DEPRECATED —
- * anti-parasocial; see TODO.html — and no longer surfaced.)
+ * anti-parasocial; see the retired TODO.html — and no longer surfaced.)
  *
  * Internal layout is itself a 2-column Finder (Type → Items), with
  * the existing EntityManager rendered inline as the body for the
@@ -50,7 +50,7 @@ export function ComponentsDrawer({ open, onClose }: ComponentsDrawerProps) {
   // Counts so the Type column reads as "Perspectives · 18 / Processes
   // · 14". Cheap — they reuse the same queries the EntityManager would
   // fetch anyway. (Personas are DEPRECATED — anti-parasocial — and no
-  // longer surfaced here; see TODO.html.)
+  // longer surfaced here; see the retired TODO.html.)
   const perspectives = useQuery(api.perspectives.list, open ? {} : "skip");
   const processes = useQuery(api.processes.list, open ? {} : "skip");
 

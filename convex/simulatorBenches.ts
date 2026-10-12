@@ -608,8 +608,6 @@ export const getBench = authedQuery({
       description: activity.scholarDescription,
       emoji: ACTIVITY_KIND.simulator.emoji,
       simulatorSpec: spec,
-      // worldBenches.getBench is a thin alias for this endpoint until the next
-      // fleet release, so keep its released response contract intact.
       worldSpec: spec,
       specVersion: bench.specVersion ?? 0,
       specForkedAt: bench.specForkedAt ?? null,

@@ -8,11 +8,14 @@
  * OfflineSessionView in components/OfflineSessionView.tsx).
  */
 
-import { useQuery } from "convex/react";
+import { useState } from "react";
+import { useMutation, useQuery } from "convex/react";
 import { Image } from "expo-image";
 import { SymbolView } from "expo-symbols";
+import * as Haptics from "expo-haptics";
 import {
   ActivityIndicator,
+  Alert,
   Linking,
   Pressable,
   ScrollView,
@@ -26,6 +29,8 @@ import { colors, fonts } from "@/theme";
 import {
   offlineHomeworkContext,
   offlineHomeworkDueText,
+  offlineHomeworkFinishCopy,
+  offlineHomeworkMarkedText,
 } from "../../vendor/shared/offlineHomework";
 import { ResourceShareCard } from "@/components/ResourceShareCard";
 
@@ -35,7 +40,6 @@ type Item = {
   caption: string | null;
   thumbUrl: string | null;
   fileUrl: string | null;
-  magicUrl: string | null;
   overall: string | null;
   rubricPassed: boolean | null;
   checkedAt: number | null;
@@ -55,15 +59,14 @@ function isChecked(item: Item): boolean {
 function ScanCard({ item }: { item: Item }) {
   const checked = isChecked(item);
   const openFile = () => {
-    const url = item.magicUrl ?? item.fileUrl;
-    if (url) Linking.openURL(url);
+    if (item.fileUrl) Linking.openURL(item.fileUrl);
   };
 
   return (
     <View style={styles.card}>
       {/* Thumbnail / placeholder */}
       <Pressable
-        onPress={item.fileUrl || item.magicUrl ? openFile : undefined}
+        onPress={item.fileUrl ? openFile : undefined}
         style={styles.thumb}
         accessibilityRole="button"
         accessibilityLabel={`Open ${item.title}`}
@@ -85,7 +88,7 @@ function ScanCard({ item }: { item: Item }) {
             />
           </View>
         )}
-        {(item.fileUrl || item.magicUrl) && (
+        {item.fileUrl && (
           <View style={styles.openBadge}>
             <SymbolView
               name="arrow.up.right.square"
@@ -153,6 +156,11 @@ export function OfflineSessionView({
 
   const context = offlineHomeworkContext(data);
   const dueText = offlineHomeworkDueText(data.dueAt, data.timeZone);
+  // The finish block replaces the big paper cue with one quiet line: some
+  // offline homework is a worksheet, but most (a read-aloud) has no paper.
+  const showFinish =
+    !data.viewerCanGrade && (data.canMarkDone || data.selfMark != null);
+  const finishCopy = offlineHomeworkFinishCopy(data.teacherName);
 
   return (
     <ScrollView
@@ -183,6 +191,27 @@ export function OfflineSessionView({
             ))}
           </View>
         ) : null}
+        {showFinish && data.assignmentId && data.activityId ? (
+          <FinishBlock
+            assignmentId={data.assignmentId}
+            activityId={data.activityId}
+            selfMark={data.selfMark}
+            markedText={
+              data.selfMark
+                ? offlineHomeworkMarkedText(
+                    data.selfMark.completedAt,
+                    data.timeZone,
+                    data.teacherName,
+                  )
+                : null
+            }
+            prompt={finishCopy.prompt}
+            detail={finishCopy.detail}
+          />
+        ) : null}
+        {showFinish && !data.selfMark && data.items.length === 0 ? (
+          <Text style={styles.paperLine}>{finishCopy.paperLine}</Text>
+        ) : null}
       </View>
 
       {data.items.length > 0 ? (
@@ -192,8 +221,8 @@ export function OfflineSessionView({
         </View>
       ) : null}
 
-      {data.items.length === 0 &&
-      (data.description || data.resources.length === 0) ? (
+      {showFinish && data.items.length === 0 ? null : data.items.length === 0 &&
+        (data.description || data.resources.length === 0) ? (
         <View style={styles.emptyCue}>
           <SymbolView name="doc.fill" size={22} tintColor={colors.violet} />
           <Text style={styles.emptyCueTitle}>This one&apos;s on paper</Text>
@@ -216,7 +245,169 @@ export function OfflineSessionView({
   );
 }
 
+/**
+ * "I did it" for offline homework (TRA-458). One tap, no confirm — the undo
+ * sits where the tap happened, which is cheaper than an "Are you sure?" on
+ * every mark. Flips in place from the live query. There is no Home toast on
+ * native (no toast primitive, and adding one is a new surface), so the flip is
+ * the confirmation; once the scholar leaves, the teacher's Run page undo covers
+ * a later mistake.
+ */
+function FinishBlock({
+  assignmentId,
+  activityId,
+  selfMark,
+  markedText,
+  prompt,
+  detail,
+}: {
+  assignmentId: Id<"assignments">;
+  activityId: Id<"activities">;
+  selfMark: {
+    completionId: Id<"activityCompletions">;
+    completedAt: number;
+    canUndo: boolean;
+  } | null;
+  markedText: string | null;
+  prompt: string;
+  detail: string;
+}) {
+  const markDone = useMutation(api.activityCompletions.markHomeworkDoneForSelf);
+  const undo = useMutation(api.activityCompletions.undoHomeworkDoneForSelf);
+  const [busy, setBusy] = useState(false);
+
+  const run = async (
+    write: () => Promise<{ ok: true } | { ok: false; message: string }>,
+    successHaptic: boolean,
+  ) => {
+    if (busy) return;
+    setBusy(true);
+    const result = await write().catch(() => null);
+    setBusy(false);
+    if (!result) {
+      Alert.alert("Not saved", "Rabbithole couldn't save that. Try again.");
+    } else if (!result.ok) {
+      Alert.alert("Not saved", result.message);
+    } else if (successHaptic) {
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+  };
+
+  if (selfMark) {
+    return (
+      <View style={[styles.finish, styles.finishDone]}>
+        <SymbolView name="checkmark.circle.fill" size={26} tintColor={colors.green} />
+        <View style={styles.finishDoneText}>
+          <Text style={styles.finishTitle}>You marked this done</Text>
+          {markedText ? <Text style={styles.finishDetail}>{markedText}</Text> : null}
+        </View>
+        {selfMark.canUndo ? (
+          <Pressable
+            onPress={() =>
+              void run(() => undo({ completionId: selfMark.completionId }), false)
+            }
+            disabled={busy}
+            accessibilityRole="button"
+            accessibilityLabel="Undo marking this done"
+            style={({ pressed }) => [styles.undoButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.undoText}>Undo</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.finish}>
+      <Text style={styles.finishTitle}>{prompt}</Text>
+      <Text style={styles.finishDetail}>{detail}</Text>
+      <Pressable
+        onPress={() => void run(() => markDone({ assignmentId, activityId }), true)}
+        disabled={busy}
+        accessibilityRole="button"
+        style={({ pressed }) => [
+          styles.doneButton,
+          (pressed || busy) && styles.pressed,
+        ]}
+      >
+        {busy ? (
+          <ActivityIndicator color={colors.white} />
+        ) : (
+          <Text style={styles.doneButtonText}>I did it</Text>
+        )}
+      </Pressable>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
+  finish: {
+    marginTop: 24,
+    padding: 16,
+    gap: 6,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.gray200,
+    alignItems: "flex-start",
+  },
+  finishDone: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    borderColor: colors.green + "55",
+    backgroundColor: colors.green + "12",
+  },
+  finishDoneText: {
+    flex: 1,
+    gap: 2,
+  },
+  finishTitle: {
+    fontFamily: fonts.semibold,
+    fontSize: 17,
+    color: colors.navy,
+  },
+  finishDetail: {
+    fontFamily: fonts.regular,
+    fontSize: 15,
+    lineHeight: 21,
+    color: colors.charcoalMuted,
+  },
+  doneButton: {
+    marginTop: 8,
+    minWidth: 140,
+    minHeight: 44,
+    paddingHorizontal: 22,
+    borderRadius: 12,
+    backgroundColor: colors.violetSolid,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  doneButtonText: {
+    fontFamily: fonts.semibold,
+    fontSize: 16,
+    color: colors.white,
+  },
+  undoButton: {
+    minHeight: 44,
+    paddingHorizontal: 14,
+    justifyContent: "center",
+  },
+  undoText: {
+    fontFamily: fonts.semibold,
+    fontSize: 15,
+    color: colors.violet,
+  },
+  pressed: {
+    opacity: 0.6,
+  },
+  paperLine: {
+    marginTop: 12,
+    fontFamily: fonts.regular,
+    fontSize: 14,
+    lineHeight: 20,
+    color: colors.charcoalMuted,
+  },
   root: {
     flex: 1,
     backgroundColor: colors.white,

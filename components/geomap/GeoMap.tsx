@@ -10,9 +10,9 @@
  * lazy-load {@link ./MapCanvas} (ssr:false), so SSR and the tokenless path cost
  * nothing.
  *
- * `NEXT_PUBLIC_MAPBOX_TOKEN` IS provisioned in Vercel — Production, Preview and
- * Development, on both `rabbithole` and `rhtest` — so every deployed environment
- * takes the MapCanvas branch. Local dev is the only tokenless one, and only
+ * `NEXT_PUBLIC_MAPBOX_TOKEN` IS provisioned in Vercel Production, Preview and
+ * Development, so every deployed environment takes the MapCanvas branch. Local
+ * dev is the only tokenless one, and only
  * because nothing populates the var in a checkout's `.env.local`. Treat the
  * offline state as the local-dev/offline path, NOT as production reality: a
  * stale "no key is provisioned yet" note here previously sent a debugging

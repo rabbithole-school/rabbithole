@@ -15,12 +15,21 @@
  * review/design-vs-execution-split.md.
  *
  * The list follows the institution switcher (`?inst=`), like the Quests
- * board: `units.list` scopes scholar-authored (independent-study) units to
- * the active institution lens.
+ * board: `units.listForBrowser` scopes scholar-authored (independent-study)
+ * units to the active institution lens.
+ *
+ * Infinite scroll (TRA-468): the catalog arrives a page at a time, newest
+ * first, and the next page loads as a sentinel below the last row nears the
+ * viewport — no page controls. The Author / Subject / Archived filters are
+ * server-side args, so every page is already filtered.
  */
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery } from "convex/react";
+// The convex-helpers hook, not convex/react's: `units.listForBrowser` paginates
+// a filtered stream, which needs `endCursor` threaded back to keep reactive
+// pages contiguous.
+import { usePaginatedQuery } from "convex-helpers/react";
 import {
   Box,
   Flex,
@@ -40,16 +49,17 @@ import {
   HierarchyRow,
 } from "@/components/hierarchy";
 import { Avatar } from "@/components/Avatar";
-import { uniqueSubjects } from "@/lib/subjects";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 import { isCurriculumRole, ROLES } from "@/convex/lib/roles";
 import {
   SubjectFilterChips,
   UnitAuthorFilterMenu,
-  unitAuthorOptions,
-  unitMatchesFilters,
 } from "@/components/SubjectFilterChips";
+
+/** Rows per fetch. A screenful-and-a-bit, so the first paint fills the column
+ *  and the next page is usually in hand before the scroll reaches it. */
+const PAGE_SIZE = 30;
 
 export function CurriculumUnitsBrowser({
   leading,
@@ -67,8 +77,7 @@ export function CurriculumUnitsBrowser({
 } = {}) {
   const router = useRouter();
   const { scopeParam } = useActiveInstitution();
-  const units = useQuery(api.units.list, { scope: scopeParam });
-  const { user: currentUser } = useCurrentUser();
+  const { user: currentUser, isLoading: userLoading } = useCurrentUser();
   const [showArchived, setShowArchived] = useState(false);
   const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
   // Derive the role-appropriate default until the viewer explicitly chooses a
@@ -86,31 +95,64 @@ export function CurriculumUnitsBrowser({
     authorFilterOverride ?? (defaultsToOwnUnits ? meId : "all");
   const createUnit = useMutation(api.units.create);
 
-  // Subjects are derived from the units in scope (after the
-  // archived toggle) so the chip row only offers subjects that have a
-  // currently-visible unit.
-  const subjectSource = useMemo(
-    () => (units ?? []).filter((u) => showArchived || u.isActive),
-    [units, showArchived],
-  );
-  const subjects = useMemo(
-    () => uniqueSubjects(subjectSource),
-    [subjectSource],
-  );
+  // Menu options + the archived count come from a slim companion query, so
+  // the menus span the whole catalog rather than just the loaded pages.
+  // Subjects only offer ones with a unit visible under the archived toggle.
+  const filterOptions = useQuery(api.units.browserFilterOptions, {
+    scope: scopeParam,
+    showArchived,
+  });
+  const subjects = filterOptions?.subjects ?? [];
+  const authorList = filterOptions?.authors ?? [];
+  const archivedCount = filterOptions?.archivedCount ?? 0;
 
-  const authorList = useMemo(
-    () => unitAuthorOptions(units ?? []),
-    [units],
+  // Held until the viewer resolves: the author default depends on who they
+  // are, and starting on "all" would fetch a page only to throw it away.
+  const {
+    results: visibleUnits,
+    status,
+    loadMore,
+  } = usePaginatedQuery(
+    api.units.listForBrowser,
+    userLoading
+      ? "skip"
+      : {
+          scope: scopeParam,
+          authorId:
+            authorFilter === "all"
+              ? undefined
+              : (authorFilter as Id<"users">),
+          subject: selectedSubject ?? undefined,
+          showArchived,
+        },
+    { initialNumItems: PAGE_SIZE },
   );
+  const firstPageLoading = userLoading || status === "LoadingFirstPage";
 
-  const visibleUnits = useMemo(
-    () =>
-      subjectSource.filter((unit) =>
-        unitMatchesFilters(unit, authorFilter, selectedSubject),
-      ),
-    [subjectSource, selectedSubject, authorFilter],
-  );
-  const archivedCount = (units ?? []).filter((u) => !u.isActive).length;
+  // Infinite scroll: whenever the sentinel under the last row is within a
+  // few rows of the column's viewport and more exist, fetch the next page.
+  // Re-checked on every status change, so a short page (a filter that
+  // matches sparsely) keeps loading until the column is full or exhausted.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const [sentinelNear, setSentinelNear] = useState(false);
+  useEffect(() => {
+    const root = scrollRef.current;
+    const sentinel = sentinelRef.current;
+    if (!root || !sentinel) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setSentinelNear(entry.isIntersecting),
+      { root, rootMargin: "0px 0px 320px 0px" },
+    );
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+      setSentinelNear(false);
+    };
+  }, [firstPageLoading]);
+  useEffect(() => {
+    if (sentinelNear && status === "CanLoadMore") loadMore(PAGE_SIZE);
+  }, [sentinelNear, status, loadMore]);
 
   // Each unit row is a real link into the Curriculum column-view surface
   // (cmd-click opens a new tab). Existing units open on Summary (the bare
@@ -180,8 +222,8 @@ export function CurriculumUnitsBrowser({
           </HStack>
         }
       />
-      <Box flex={1} minH={0} overflowY="auto" p={1.5}>
-        {units === undefined ? (
+      <Box ref={scrollRef} flex={1} minH={0} overflowY="auto" p={1.5}>
+        {firstPageLoading ? (
           <HierarchyListSkeleton rows={6} />
           ) : (
             <Stack gap={0.5}>
@@ -192,7 +234,7 @@ export function CurriculumUnitsBrowser({
                   onClick={handleCreateUnit}
                 />
               </Box>
-              {visibleUnits.length === 0 && (
+              {visibleUnits.length === 0 && status === "Exhausted" && (
                 <HierarchyRow
                   variant="empty"
                   label={
@@ -208,7 +250,7 @@ export function CurriculumUnitsBrowser({
                   label={u.title}
                   sublabel={
                     u.isActive
-                      ? `${u.lessonCount} lesson${u.lessonCount === 1 ? "" : "s"}`
+                      ? `${u.unpublished ? "Unpublished · " : ""}${u.lessonCount} lesson${u.lessonCount === 1 ? "" : "s"}`
                       : "archived"
                   }
                   accentBadge={
@@ -231,7 +273,11 @@ export function CurriculumUnitsBrowser({
                   trailing={{ kind: "chevron" }}
                 />
               ))}
-              {archivedCount > 0 && (
+              {/* Infinite-scroll sentinel; the placeholder rows keep the
+                  column from looking finished while the next page is out. */}
+              <Box ref={sentinelRef} h="1px" aria-hidden />
+              {status !== "Exhausted" && <HierarchyListSkeleton rows={2} />}
+              {status === "Exhausted" && archivedCount > 0 && (
                 <Flex justify="center" pt={3} pb={2}>
                   <Box
                     as="button"

@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -22,13 +22,25 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
-async function seedScholar(t: ReturnType<typeof convexTest>, username = "museum-scholar") {
+let sharedT: TestConvex<typeof schema>;
+let scholarCounter = 0;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function seedScholar(t: TestConvex<typeof schema>, username = `museum-scholar_${++scholarCounter}`) {
   return await t.run(async (ctx) =>
     ctx.db.insert("users", { name: "Museum Scholar", username, role: "scholar" }),
   );
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -39,7 +51,7 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
   return t.withIdentity({ subject: `${userId}|${sessionId}`, issuer: "https://convex.dev" });
 }
 
-async function observerSeed(t: ReturnType<typeof convexTest>, scholarId: Id<"users">, topic: string) {
+async function observerSeed(t: TestConvex<typeof schema>, scholarId: Id<"users">, topic: string) {
   return await t.run(async (ctx) =>
     ctx.db.insert("seeds", {
       scholarId,
@@ -56,8 +68,7 @@ async function observerSeed(t: ReturnType<typeof convexTest>, scholarId: Id<"use
 
 describe("skyForSelf — lit constellation (mastery layer)", () => {
   test("a demonstrated-fluent practice skill lights as a mastery star", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     await t.run((ctx) =>
       ctx.db.insert("practiceMastery", {
@@ -88,8 +99,7 @@ describe("skyForSelf — lit constellation (mastery layer)", () => {
   });
 
   test("an inferred (placement) credit at FLUENT_REPS does NOT light — only real practice does", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     await t.run((ctx) =>
       ctx.db.insert("practiceMastery", {
@@ -110,8 +120,7 @@ describe("skyForSelf — lit constellation (mastery layer)", () => {
   });
 
   test("most-recently-earned fluent skills come first", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const now = Date.now();
     await t.run((ctx) =>
@@ -168,8 +177,7 @@ describe("skyForSelf — warm cold-start layer", () => {
   });
 
   test("a scholar's frontier skill surfaces as a starter 'next step' star", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     await t.run((ctx) =>
       ctx.db.insert("practiceMastery", {

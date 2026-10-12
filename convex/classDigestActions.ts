@@ -8,8 +8,8 @@ import { recordAnthropicUsage } from "./usage";
 import { ROLES } from "./lib/roles";
 import type { Id } from "./_generated/dataModel";
 import {
-  SCHOLAR_NAME_PRONOUN_HINT,
   SCHOLAR_PRONOUN_GUIDANCE,
+  scholarNamePronounHint,
 } from "./lib/scholarPronouns";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -28,7 +28,7 @@ import {
 // ─────────────────────────────────────────────────────────────────────
 
 const SHARED_STRUCTURE = `Produce a glanceable digest a teacher can absorb in seconds, with depth a click away:
-- headline: ONE line (<= 100 chars) that captures how it landed across the class. Concrete, not generic. E.g. "11 of 13 finished — strong sensory detail, two drifted off-task."
+- headline: ONE line (<= 100 chars) that captures how it landed across the class. Concrete, not generic. E.g. "Strong sensory detail across the board — two got stuck on cause and effect."
 - summary: 2-4 sentences naming the shape of what the class did and where they diverged.
 - themes: 1-3 entries { title, body } — common moves, shared strengths, or shared stumbles. Body is one sentence grounded in what scholars actually did.
 - moments: 2-5 entries worth the teacher's attention. Each { kind, scholarId, headline, detail }:
@@ -41,7 +41,9 @@ const SHARED_STRUCTURE = `Produce a glanceable digest a teacher can absorb in se
 
 Name the idea or the move, never grade the scholar ("led with a sensory hook", not "brilliant writer"). Be concrete and refer to real work.
 
-SCOPE: This digest covers ONLY this assignment. When nothing is finished, say so IN THAT SCOPE (e.g. "No activities in this dispatch are marked finished yet") — never an unqualified, day-wide claim that the scholar has finished nothing, since work under other assignments isn't visible here.`;
+SCOPE: This digest covers ONLY this assignment. Never make an unqualified, day-wide claim about a scholar from what you see here — their work under other assignments isn't visible to you.
+
+NEVER narrate completion. Don't say who has or hasn't finished, don't say "nobody has finished yet", and don't count how many activities are done — in the headline, the summary, a theme, or a moment. Completion is the run record's job and the teacher is already reading it beside you; a frozen sentence about it is wrong the moment the next scholar finishes. Write about the WORK — the thinking, the moves, the stumbles, what's worth discussing. If a scholar hasn't started, you simply have nothing to say about them; leave them out rather than reporting their status.`;
 
 const ACTIVITY_LENS = `You are helping a teacher review how ONE activity landed across their whole class, just after running it. Your job is the post-class read: what did the cohort collectively produce, who's flying, who's stuck, what's worth discussing next.`;
 
@@ -265,7 +267,7 @@ export const generate = internalAction({
         });
         lines.push("");
         lines.push(`--- scholarId: ${s.scholarId}`);
-        lines.push(`Name: ${s.name} ${SCHOLAR_NAME_PRONOUN_HINT}`);
+        lines.push(`Name: ${s.name} ${scholarNamePronounHint(s.pronouns)}`);
         lines.push(
           `Status: ${s.completed ? "finished" : s.started ? "in progress" : "not started"}`,
         );
@@ -290,9 +292,7 @@ export const generate = internalAction({
         return null;
       }
       lines.push(`Assignment unit: "${data.unitTitle}"`);
-      lines.push(
-        `Class size: ${data.rosterSize} · total activities finished across the cohort: ${data.completionsTotal}`,
-      );
+      lines.push(`Class size: ${data.rosterSize}`);
       lines.push("");
       lines.push("PER-SCHOLAR (most recent work):");
       for (const s of data.scholars) {
@@ -303,7 +303,7 @@ export const generate = internalAction({
         });
         lines.push("");
         lines.push(`--- scholarId: ${s.scholarId}`);
-        lines.push(`Name: ${s.name} ${SCHOLAR_NAME_PRONOUN_HINT}`);
+        lines.push(`Name: ${s.name} ${scholarNamePronounHint(s.pronouns)}`);
         if (s.currentActivityTitle)
           lines.push(`Currently on: ${s.currentActivityTitle}`);
         lines.push(`Activities finished: ${s.completedCount}`);

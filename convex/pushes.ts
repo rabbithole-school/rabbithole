@@ -22,14 +22,21 @@ import { authedQuery, teacherMutation, teacherQuery } from "./lib/customFunction
 import {
   institutionIdInLens,
   resolveInstitutionLens,
+  scholarInstitutionReadableInLens,
 } from "./lib/institutionLens";
 import type { ResolvedInstitutionLens } from "./lib/institutionLens";
 import { filterToAccessibleScholars } from "./lib/access";
 import { isTeacherRole } from "./lib/roles";
 import { resolveAppIconUrl } from "./lib/externalAppIconUrl";
+import {
+  assignmentIdsCovering,
+  catalogAppIsVisible,
+} from "./lib/deviceAppProjection";
 import { groupIdsForScholar } from "./lib/scholarGroupMembership";
 import { schedulePushProjectionRefresh } from "./lib/deviceAppUnlockScheduling";
 import { pushSummaryLine, pushTimeLeftLabel } from "../shared/pushCopy";
+import { dayKeyForTimezone } from "../shared/institutionDay";
+import { timeZoneForInstitution } from "./lib/institutionTime";
 import {
   FOCUS_DURATION_CHOICES_MIN,
   assertBlockingAllowed,
@@ -62,48 +69,11 @@ const targetValidator = v.union(
 
 /**
  * The scholar-side facts a push audience resolves against. Group membership
- * comes from `lib/scholarGroupMembership.ts` — the managed-app allowlist
- * projector needs the identical answer to resolve a live push audience
- * (lib/deviceAppProjection.ts), so neither caller re-derives the scan rule.
+ * comes from `lib/scholarGroupMembership.ts` and assignment rosters from
+ * `lib/deviceAppProjection.ts`: the managed-app allowlist projector and the
+ * launch gates resolve a live push audience the same way, so no caller
+ * re-derives either rule.
  */
-/**
- * Assignments referenced by `candidates` whose roster contains this scholar.
- *
- * Driven by the candidate pushes rather than by scanning the scholar's
- * assignments: `assignments.scholarIds` is an array, so there is no index to
- * read it by scholar, and the table is a growing historical record. The set
- * of OPEN pushes is small and bounded by the school day.
- *
- * Tenancy needs no separate check here: `assignments` carries no
- * institutionId, and both gates are already in place — the push itself is
- * institution-stamped (pushCoversScholar refuses a cross-school push), and
- * matching requires this scholar to be on the roster.
- */
-async function assignmentIdsForScholar(
-  ctx: QueryCtx,
-  scholar: Doc<"users">,
-  candidates: ReadonlyArray<Doc<"pushes">>,
-): Promise<Id<"assignments">[]> {
-  const referenced = new Map<string, Id<"assignments">>();
-  for (const push of candidates) {
-    if (push.audience.kind === "assignment") {
-      referenced.set(String(push.audience.assignmentId), push.audience.assignmentId);
-    }
-  }
-  if (referenced.size === 0) return [];
-
-  const assignments = await Promise.all(
-    [...referenced.values()].map((id) => ctx.db.get(id)),
-  );
-  return assignments
-    .filter(
-      (a) =>
-        a !== null &&
-        a.scholarIds.some((id) => String(id) === String(scholar._id)),
-    )
-    .map((a) => a!._id);
-}
-
 async function audienceContextFor(
   ctx: QueryCtx,
   scholar: Doc<"users">,
@@ -113,7 +83,7 @@ async function audienceContextFor(
     scholarId: scholar._id,
     institutionId: scholar.institutionId,
     groupIds: await groupIdsForScholar(ctx, scholar),
-    assignmentIds: await assignmentIdsForScholar(ctx, scholar, candidates),
+    assignmentIds: await assignmentIdsCovering(ctx, scholar, candidates),
   };
 }
 
@@ -138,7 +108,7 @@ async function openPushesForInstitution(
   // the same class focus a second time, under a second heading, which is
   // the exact duplication this migration exists to remove. Mirrors stay
   // write-only until the read switch deletes the thing they mirror.
-  // See TODO.html#pushes-migrate-activity-schedule.
+  // See Linear TRA-13.
   return open.filter((p) => p.scheduleMirror !== true);
 }
 
@@ -341,10 +311,11 @@ async function createFocus(
   } else if (args.groupId) {
     const group = await ctx.db.get(args.groupId);
     if (!group) throw new Error("That group no longer exists.");
-    // institutionIdInLens, not a bare id compare: an unstamped legacy group
+    // The lens helper, not a bare id compare: an unstamped legacy group
     // rides the PRIMARY school's lens, so `!group.institutionId` would hand
-    // every other school the primary school's groups.
-    if (!institutionIdInLens(lens, group.institutionId)) {
+    // every other school the primary school's groups. Scholar-read standing,
+    // not curriculum-only lens standing, is what a group push needs (TRA-386).
+    if (!scholarInstitutionReadableInLens(lens, group.institutionId)) {
       throw new Error("Forbidden: that group belongs to another school.");
     }
     audience = { kind: "group", groupId: args.groupId };
@@ -372,7 +343,7 @@ async function createFocus(
   // Latency optimization only — `isPushBlocking` independently refuses to
   // wall a scholar in past the window at read time, so a delayed or dropped
   // job can never trap anyone. What the job buys is tidiness: it retires the
-  // card instead of leaving it showing as "running long" forever.
+  // card promptly instead of leaving it showing for the rest of the day.
   const scheduledFnId = await ctx.scheduler.runAt(
     endsAt,
     internal.pushes.autoClearPush,
@@ -461,28 +432,82 @@ export const autoClearPush = internalMutation({
  * same card from the same fields — scholar-facing parity is not optional.
  */
 export const livePushesForMe = authedQuery({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    // Minute-rounded client clock used only to re-arm the reactive query across
+    // institution-local midnight. The server still derives the effective day.
+    now: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    void args.now;
     const scholar = ctx.user;
     if (!scholar.institutionId) return [];
 
+    const nowMs = Date.now();
+    const timeZone = await timeZoneForInstitution(ctx, scholar.institutionId);
+    const clock = {
+      nowMs,
+      todayDayKey: dayKeyForTimezone(nowMs, timeZone),
+      timeZone,
+    };
     const open = await openPushesForInstitution(ctx, scholar.institutionId);
     const context = await audienceContextFor(ctx, scholar, open);
-    const live = livePushesForScholar(open, context);
+    const live = livePushesForScholar(open, context, clock);
+    const visible = await withoutArchivedAppPushes(ctx, live);
 
-    return await Promise.all(live.map((push) => hydratePush(ctx, push)));
+    return await Promise.all(visible.map((push) => hydratePush(ctx, push, clock)));
   },
 });
 
+/**
+ * Drop a push targeting an app that has since been archived from the
+ * catalog — the exact exclusion `livePushedAppIdsForScholar`
+ * (`lib/deviceAppProjection.ts`) already applies to the launcher tile and
+ * the launch gate, reused here (`catalogAppIsVisible`) so this scholar-
+ * facing "Right now" read can't disagree with what the scholar is actually
+ * authorized to open. This filters the READ, not the row: unarchiving the
+ * app makes the push reappear with no write to `pushes` needed.
+ *
+ * Scoped to scholar-facing live reads only (`livePushesForMe`) — the
+ * teacher's own view (`livePushesForScope`) and the Slack surface
+ * (`liveFocusForSlack`) deliberately keep showing an archived-app push, so
+ * staff can still see and clear/wrap it.
+ */
+async function withoutArchivedAppPushes(
+  ctx: QueryCtx,
+  pushes: ReadonlyArray<PushDoc>,
+): Promise<PushDoc[]> {
+  const visible: PushDoc[] = [];
+  for (const push of pushes) {
+    if (push.target.kind === "app") {
+      const app = await ctx.db.get(push.target.externalAppId);
+      if (!catalogAppIsVisible(app)) continue;
+    }
+    visible.push(push);
+  }
+  return visible;
+}
+
 /** Everything currently live for a school — the teacher's own view. */
 export const livePushesForScope = teacherQuery({
-  args: { scope: v.optional(v.string()) },
-  handler: async (ctx, { scope }) => {
+  args: {
+    scope: v.optional(v.string()),
+    // Same cache-buster contract as livePushesForMe; never a time authority.
+    now: v.optional(v.number()),
+  },
+  handler: async (ctx, { scope, now: clientNow }) => {
+    void clientNow;
     const lens = await resolveInstitutionLens(ctx, ctx.user, scope);
     if (!lens.institution) return [];
+    const nowMs = Date.now();
+    const timeZone = await timeZoneForInstitution(ctx, lens.institution._id);
+    const clock = {
+      nowMs,
+      todayDayKey: dayKeyForTimezone(nowMs, timeZone),
+      timeZone,
+    };
     const open = await openPushesForInstitution(ctx, lens.institution._id);
-    const live = open.filter(isPushShowing);
-    return await Promise.all(live.map((push) => hydratePush(ctx, push)));
+    const live = open.filter((push) => isPushShowing(push, clock));
+    return await Promise.all(live.map((push) => hydratePush(ctx, push, clock)));
   },
 });
 
@@ -505,6 +530,7 @@ export type HydratedPush = {
   // exact same path the launcher tile does — not a second mechanism.
   webAllowedHosts?: string[];
   nativeUrlScheme?: string;
+  nativeBundleId?: string;
   note?: string;
   blocking: boolean;
   endsAt: number | null;
@@ -515,6 +541,7 @@ export type HydratedPush = {
 async function hydratePush(
   ctx: QueryCtx,
   push: PushDoc,
+  clock: Parameters<typeof isPushBlocking>[1],
 ): Promise<HydratedPush> {
   const base = {
     _id: push._id,
@@ -525,7 +552,7 @@ async function hydratePush(
     // holds anyone inside it — see `isPushBlocking`. Deriving it here means
     // every consumer, on either surface, gets the same answer without having
     // to remember the rule.
-    blocking: isPushBlocking(push, Date.now()),
+    blocking: isPushBlocking(push, clock),
     endsAt: push.timing.kind === "focus" ? push.timing.endsAt : null,
     dueAt: push.timing.kind === "homework" ? (push.timing.dueAt ?? null) : null,
     setAt: push.setAt,
@@ -561,6 +588,7 @@ async function hydratePush(
         color: app?.color,
         webAllowedHosts: app?.webAllowedHosts,
         nativeUrlScheme: app?.nativeUrlScheme,
+        nativeBundleId: app?.nativeBundleId,
         externalAppId: push.target.externalAppId,
       };
     }
@@ -637,7 +665,7 @@ export const focusOptionsForSlack = internalQuery({
       .map((a) => ({ appId: a._id, name: a.name, webUrl: a.webUrl }));
 
     const groups = (await ctx.db.query("scholarGroups").collect())
-      .filter((g) => institutionIdInLens(lens, g.institutionId))
+      .filter((g) => scholarInstitutionReadableInLens(lens, g.institutionId))
       .map((g) => ({
         groupId: g._id,
         name: g.name,
@@ -733,11 +761,17 @@ export const liveFocusForSlack = internalQuery({
     if (!lens.institution) return { ok: true as const, pushes: [] };
 
     const now = Date.now();
+    const timeZone = await timeZoneForInstitution(ctx, lens.institution._id);
+    const clock = {
+      nowMs: now,
+      todayDayKey: dayKeyForTimezone(now, timeZone),
+      timeZone,
+    };
     const open = await openPushesForInstitution(ctx, lens.institution._id);
-    const live = open.filter(isPushShowing);
+    const live = open.filter((push) => isPushShowing(push, clock));
     const rows = await Promise.all(
       live.map(async (push) => {
-        const hydrated = await hydratePush(ctx, push);
+        const hydrated = await hydratePush(ctx, push, clock);
         const pusher = await ctx.db.get(push.pushedBy);
         const group =
           push.audience.kind === "group"

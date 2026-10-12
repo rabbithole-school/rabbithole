@@ -548,7 +548,7 @@ function DeliverableEditorModal({
                         Describe the quality bar, what dimensions matter,
                         any pitfalls. The AI calibrates per scholar &mdash;
                         a 1st-grader and a 5th-grader doing this activity
-                        will see different bars for length and mechanics
+                        will see different bars for length and vocabulary
                         but the same bar for specificity / structure.
                       </Text>
                       <Textarea
@@ -563,7 +563,7 @@ function DeliverableEditorModal({
                           borderColor: "violet.400",
                           boxShadow: "none",
                         }}
-                        placeholder="e.g. Look for a clear narrative arc, specific details (a named person or moment), grade-appropriate mechanics. Avoid 'I had fun' style summaries."
+                        placeholder="e.g. Look for a clear narrative arc, specific details (a named person or moment), a clear reason. Avoid 'I had fun' style summaries."
                       />
                     </Stack>
                   )}

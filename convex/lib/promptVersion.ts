@@ -9,14 +9,23 @@
  * WHAT FEEDS THE HASH — a *canonical reference render* of the STATIC,
  * tutor-visible prompt constants that ship in `convex/prompts.ts`, built with
  * FIXED synthetic inputs so nothing per-session leaks in:
- *   - buildBasePrompt (BOTH the intro / non-intro `<start>` branches, so a
- *     change to either startBullet moves the hash) — with the runtime
- *     date/time line normalized out (see below).
+ *   - buildBasePrompt — with the runtime date/time line normalized out (see
+ *     below). Its `<start>` bullet is turn-invariant since TRA-234.
+ *   - buildOpeningTurnSection (both the first-ever FIRST MESSAGE directive and
+ *     the returning-scholar fresh-start guards) — the turn-1-only directives
+ *     that used to be branches inside buildBasePrompt / SESSION CONTEXT.
  *   - buildSoulSection() — the soul-doc text as the live env flag
  *     (RABBITHOLE_SOUL_DOC) renders it. This is what makes the hash change when
  *     the soul doc is edited or switched off.
  *   - buildNonHumanIntroSection(true) — the static first-session self-intro.
  *   - buildToolsSection() — the static tool-affordance description.
+ *   - buildOpenExplorationWrapUpSection() — the static "how an open
+ *     exploration ends" note (rendered only for activity-less sessions).
+ *   - TUTOR_PROMPT_SECTION_ORDER + TUTOR_TURN_CONTEXT_SECTIONS + the
+ *     cache-breakpoint key — the section LAYOUT of the assembled prompt.
+ *     Reordering sections is model-visible (what the tutor reads first changes)
+ *     even though no section's text does, so a layout change must group as a
+ *     new prompt version (TRA-185).
  *   - Any enabled tutor-prompt add-ons, including their deployment-env gates,
  *     tool schemas, and tool-result guidance.
  *
@@ -25,7 +34,7 @@
  *   - The runtime "Current date and time: …" line: it changes every render, so
  *     it is excluded from the hash. As of the prompt-cache work it no longer
  *     lives inside buildBasePrompt at all — it moved to buildClockLine, emitted
- *     as the first PER-TURN dynamic section (see buildSystemPromptParts), which
+ *     in per-turn message context (see buildSystemPromptParts), which
  *     buildVersionMaterial does not render, so it's naturally excluded. The
  *     normalizeBasePrompt() call below is retained as a defensive no-op: if a
  *     clock line ever reappears inside the base prompt it is normalized to a
@@ -51,7 +60,12 @@ import {
   buildBasePrompt,
   buildSoulSection,
   buildNonHumanIntroSection,
+  buildOpeningTurnSection,
+  buildOpenExplorationWrapUpSection,
   buildToolsSection,
+  FIRST_DYNAMIC_TUTOR_SECTION,
+  TUTOR_PROMPT_SECTION_ORDER,
+  TUTOR_TURN_CONTEXT_SECTIONS,
 } from "../prompts";
 import {
   buildChatPracticeSection,
@@ -80,7 +94,7 @@ const REF_SCHOLAR_NAME = "Reference Scholar";
 
 /** Defensive normalizer for a runtime clock line. As of the prompt-cache work
  *  buildBasePrompt no longer emits "Current date and time: …" (it moved to the
- *  per-turn dynamic tail via buildClockLine, which the hash material doesn't
+ *  per-turn message context via buildClockLine, which the hash material doesn't
  *  render), so this is a no-op today. Retained so that if a clock line ever
  *  reappears in the base prompt its volatile value is neutralized (label kept)
  *  instead of flaking the hash. */
@@ -96,17 +110,28 @@ function normalizeBasePrompt(prompt: string): string {
  * so tests can assert on WHAT is hashed — per `rabbithole-test-strategy.md`,
  * "export the pure material-builder + a thin hasher".
  */
+/** Arbitrary fixed epoch-ms anchor for the opening-turn hash material. */
+const REF_LAST_SESSION_AT = 1_700_000_000_000;
+
 export function buildVersionMaterial(): string {
   const chatPracticeOn = chatPracticeEnabled();
   const teachBackOn = teachBackEnabled();
   const parts: (string | null)[] = [
-    normalizeBasePrompt(buildBasePrompt(REF_SCHOLAR_NAME, false)),
-    normalizeBasePrompt(buildBasePrompt(REF_SCHOLAR_NAME, true)),
+    normalizeBasePrompt(buildBasePrompt(REF_SCHOLAR_NAME)),
+    // Fixed synthetic timestamps (non-zero: a falsy lastSessionAt means "no
+    // prior session" and yields null): 2h gap vs. same-sitting, so all three
+    // opening-turn variants are covered without any wall-clock input.
+    buildOpeningTurnSection(true, true, null, null),
+    buildOpeningTurnSection(true, false, REF_LAST_SESSION_AT, REF_LAST_SESSION_AT + 2 * 60 * 60_000),
+    buildOpeningTurnSection(true, false, REF_LAST_SESSION_AT, REF_LAST_SESSION_AT + 5 * 60_000),
     // Reads RABBITHOLE_SOUL_DOC at call time, so the hash tracks the live soul
     // doc (and returns null when it's switched off).
     buildSoulSection(),
     buildNonHumanIntroSection(true),
     buildToolsSection(),
+    buildOpenExplorationWrapUpSection(),
+    // Section layout + where the prompt-cache breakpoint falls.
+    `layout: ${TUTOR_PROMPT_SECTION_ORDER.join(",")} | turn-context: ${TUTOR_TURN_CONTEXT_SECTIONS.join(",")} | breakpoint: ${FIRST_DYNAMIC_TUTOR_SECTION}`,
     chatPracticeOn
       ? buildChatPracticeSection({
           fluentLabels: ["Reference fluent skill"],

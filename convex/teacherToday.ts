@@ -12,7 +12,7 @@ import { teacherQuery } from "./lib/customFunctions";
 import {
   resolveInstitutionLens,
   scholarIdsInLens,
-  institutionIdInLens,
+  scholarInstitutionReadableInLens,
 } from "./lib/institutionLens";
 import { todaysBirthdayEntries } from "./birthdays";
 import {
@@ -40,7 +40,9 @@ import {
   dayKeyForTimezone,
   dayStartForTimezone,
   instantForLocalMinutes,
+  shiftDayKey,
   shiftDayStartForTimezone,
+  weekdayForDayKey,
   weekdayForTimezone,
 } from "../shared/institutionDay";
 import { STRUGGLING_TITLE_LABEL } from "../shared/masteryLexicon";
@@ -401,8 +403,15 @@ async function waitingOnYouRows(
   recentDigests.sort(
     (a, b) => (b.generatedAt ?? 0) - (a.generatedAt ?? 0),
   );
+  // ONE digest row per assignment. An assignment carries a cohort digest AND a
+  // digest per activity, so a teacher who generated both got two near-identical
+  // "A class digest is ready for <unit>" rows pointing at the same work. Sorted
+  // newest-first above, so the row we keep is the freshest read of that
+  // assignment.
+  const digestedAssignments = new Set<string>();
   for (const digest of recentDigests) {
     if (digest.scope === "activity" && !digest.activityId) continue;
+    if (digestedAssignments.has(String(digest.assignmentId))) continue;
     const assignment = await assignmentFor(digest.assignmentId);
     if (
       !assignment ||
@@ -412,11 +421,13 @@ async function waitingOnYouRows(
       continue;
     }
     // Suppress a ready digest whose source watermark trails current source: a
-    // later analysis / message has landed since it was generated, so its
-    // headline may already be contradicted (the "cut off" beside "resolved"
-    // case). Better to drop it than surface a stale claim; it returns once
+    // later analysis / message / completion has landed since it was generated,
+    // so its headline may already be contradicted (the "cut off" beside
+    // "resolved" case, and the digest written just before someone finished).
+    // Better to drop it than surface a stale claim; it returns once
     // regenerated. Legacy digests (no watermark) are unaffected.
     if (await digestWatermarkTrails(ctx, digest)) continue;
+    digestedAssignments.add(String(digest.assignmentId));
     const label =
       digest.headline ??
       `A class digest is ready for ${await assignmentLabel(assignment)}.`;
@@ -581,19 +592,60 @@ export function overnightTitleForGap(gapDays: number, sawHoliday: boolean): stri
   return gapDays <= 1 ? "Overnight" : "Over the weekend";
 }
 
+const WEEKDAY_NAMES = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+];
+
+/**
+ * The title for a span that starts on the class's previous school day and runs
+ * to now — "Since yesterday", "Since Friday". Derived from the day the rows are
+ * actually about (the homework's due day), never from a clock.
+ */
+export function sinceDayTitle(prevDayKey: string, todayKey: string): string {
+  if (prevDayKey === shiftDayKey(todayKey, -1)) return "Since yesterday";
+  const name = WEEKDAY_NAMES[weekdayForDayKey(prevDayKey)];
+  return name ? `Since ${name}` : "Since we were last in";
+}
+
+/**
+ * The lane title has to cover the OLDEST row the lane actually shows. The
+ * window title is honest for rows inside its own window, but homework outcomes
+ * reach back to the previous school day, so after first bell a lane carrying
+ * them was titled "So far today" over a row about last night. When the window
+ * doesn't already reach back, the look-back title (which spans both) wins.
+ */
+export function overnightLaneTitle(
+  windowTitle: string,
+  windowCoversLookBack: boolean,
+  lookBackTitle: string | null,
+): string {
+  if (windowCoversLookBack || !lookBackTitle) return windowTitle;
+  return lookBackTitle;
+}
+
 /**
  * The rail's window start + honest lane title, derived from the school's own
  * rhythm rather than a fixed clock. Before today's first bell it reaches back to
  * the previous meeting day's dismissal (walking over weekends + closures); during
  * or after the day the window is simply "so far today." Stateless: a pure
  * function of `now` plus the schedule/closures already in the DB — no write.
+ *
+ * `coversLookBack` says whether the window (and so its title) already reaches
+ * back past today — the input `overnightLaneTitle` needs to decide whether a
+ * look-back row in the lane contradicts the heading.
  */
 async function overnightAnchor(
   ctx: QueryCtx,
   institutionId: Id<"institutions"> | undefined,
   now: number,
   timeZone: string,
-): Promise<{ since: number; title: string }> {
+): Promise<{ since: number; title: string; coversLookBack: boolean }> {
   const todayStart = hstDayStart(now, timeZone);
   const todayKey = dayKeyForTimezone(todayStart, timeZone);
   const firstBell = instantForLocalMinutes(
@@ -604,7 +656,7 @@ async function overnightAnchor(
 
   // During or after the school day: the window is just "so far today."
   if (now >= firstBell) {
-    return { since: todayStart, title: "So far today" };
+    return { since: todayStart, title: "So far today", coversLookBack: false };
   }
 
   // Early morning: walk back to the last day the class actually met — a weekday
@@ -636,7 +688,11 @@ async function overnightAnchor(
   // Nothing met in the last week (e.g. a long break): fall back to the legacy
   // rolling window rather than reaching arbitrarily far back.
   if (!found) {
-    return { since: now - OVERNIGHT_MS, title: "While you were out" };
+    return {
+      since: now - OVERNIGHT_MS,
+      title: "While you were out",
+      coversLookBack: true,
+    };
   }
 
   const since = instantForLocalMinutes(
@@ -644,7 +700,11 @@ async function overnightAnchor(
     DISMISSAL_LOCAL_MINUTES,
     timeZone,
   );
-  return { since, title: overnightTitleForGap(gapDays, sawHoliday) };
+  return {
+    since,
+    title: overnightTitleForGap(gapDays, sawHoliday),
+    coversLookBack: true,
+  };
 }
 
 async function overnightRows(
@@ -655,6 +715,7 @@ async function overnightRows(
   timeZone: string,
 ): Promise<{
   title: string;
+  coversLookBack: boolean;
   rows: Array<{
     kind: "practice" | "frontier" | "misconceptions";
     label: string;
@@ -662,7 +723,7 @@ async function overnightRows(
     verb: string;
   }>;
 }> {
-  const { since, title } = await overnightAnchor(
+  const { since, title, coversLookBack } = await overnightAnchor(
     ctx,
     institutionId,
     now,
@@ -681,19 +742,19 @@ async function overnightRows(
   const practiceScholarIds = new Set<string>();
   let practiceLatestAt = 0;
   for (const scholar of scholars) {
-    const attempts = await ctx.db
+    // Only the newest attempt in the window matters. Collecting the scholar's
+    // whole append-only attempt log here pushed this query past Convex's
+    // bytes-read limit once a class had a few weeks of practice (TRA-467).
+    const latest = await ctx.db
       .query("practiceAttempts")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", scholar._id))
-      .collect();
-    let scholarHas = false;
-    for (const attempt of attempts) {
-      const at = attempt.createdAt ?? attempt._creationTime;
-      if (at >= since) {
-        scholarHas = true;
-        practiceLatestAt = Math.max(practiceLatestAt, at);
-      }
-    }
-    if (scholarHas) practiceScholarIds.add(String(scholar._id));
+      .withIndex("by_scholar_createdAt", (q) =>
+        q.eq("scholarId", scholar._id).gte("createdAt", since),
+      )
+      .order("desc")
+      .first();
+    if (latest?.createdAt === undefined) continue;
+    practiceScholarIds.add(String(scholar._id));
+    practiceLatestAt = Math.max(practiceLatestAt, latest.createdAt);
   }
   if (practiceScholarIds.size > 0) {
     rows.push({
@@ -787,7 +848,7 @@ async function overnightRows(
     });
   }
 
-  return { title, rows };
+  return { title, coversLookBack, rows };
 }
 
 /** "Koa", "Koa and Lani", or "Koa, Lani, and Sam" — a natural name list. */
@@ -805,6 +866,10 @@ function joinNames(names: string[]): string {
  * per homework activity across the scope, naming who didn't finish (T10 — never
  * a bare count). The claim stays narrow (T7): "due yesterday," not a
  * reconstruction of last night's exact tonight list.
+ *
+ * Returns the span title for the day these rows are about alongside them, so
+ * the lane they join can be titled by its oldest content rather than by the
+ * clock (`overnightLaneTitle`).
  */
 async function homeworkOutcomeRows(
   ctx: QueryCtx,
@@ -812,10 +877,12 @@ async function homeworkOutcomeRows(
   scholars: ScopedScholar[],
   now: number,
   timeZone: string,
-): Promise<
-  Array<{ kind: "homework"; label: string; href: string; verb: string }>
-> {
-  if (!institutionId) return [];
+): Promise<{
+  rows: Array<{ kind: "homework"; label: string; href: string; verb: string }>;
+  lookBackTitle: string | null;
+}> {
+  const empty = { rows: [], lookBackTitle: null };
+  if (!institutionId) return empty;
   const todayKey = dayKeyForTimezone(now, timeZone);
   const prevKey = await prevOpenSchoolDayKey(
     ctx,
@@ -823,7 +890,7 @@ async function homeworkOutcomeRows(
     todayKey,
     timeZone,
   );
-  if (!prevKey) return [];
+  if (!prevKey) return empty;
 
   const byActivity = new Map<
     string,
@@ -891,7 +958,10 @@ async function homeworkOutcomeRows(
       verb: "Open",
     });
   }
-  return rows;
+  return {
+    rows,
+    lookBackTitle: rows.length > 0 ? sinceDayTitle(prevKey, todayKey) : null,
+  };
 }
 
 /**
@@ -919,7 +989,7 @@ async function prepWindowGroups(
 > {
   const lens = await resolveInstitutionLens(ctx, user, institutionScope ?? "");
   const groups = (await ctx.db.query("scholarGroups").collect()).filter((g) =>
-    institutionIdInLens(lens, g.institutionId),
+    scholarInstitutionReadableInLens(lens, g.institutionId),
   );
   const out: Array<{
     groupId: Id<"scholarGroups">;
@@ -1006,8 +1076,14 @@ export const todayForTeacher = teacherQuery({
       todaysPlan,
       // Homework outcomes lead the overnight lane — the most concrete "what
       // happened with the assigned work" read (T7/T10, named).
-      overnight: [...homeworkOutcome, ...overnight.rows],
-      overnightTitle: overnight.title,
+      overnight: [...homeworkOutcome.rows, ...overnight.rows],
+      // Title the lane by what it actually holds: a lane carrying last night's
+      // homework can't be headed "So far today" (T7 — the heading is a claim).
+      overnightTitle: overnightLaneTitle(
+        overnight.title,
+        overnight.coversLookBack,
+        homeworkOutcome.lookBackTitle,
+      ),
       closure,
       birthdays,
       // The prep-window link row. Move 5: the group entry decides which pods run

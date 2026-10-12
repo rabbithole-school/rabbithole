@@ -290,6 +290,63 @@ export const units: SeedUnit[] = [
               ],
             },
           },
+          {
+            // The seed's only PHOTO deliverable, and the reason it exists: the
+            // photo submission path (an artifact-LESS deliverables row, a
+            // camera surface, a multimodal check) had no fixture at all, so it
+            // could not be exercised by hand on a seeded dev deployment. A
+            // deliverable kind that ships but cannot be reached in dev is a
+            // kind whose bugs are found by scholars — which is how the panel
+            // came to hide a real photo behind "No photo yet".
+            //
+            // It lives HERE rather than in Fraction Sense deliberately.
+            // `computeUnitMaturity` requires EVERY online activity in a unit to
+            // have a passing rehearsal variant, and Fraction Sense is the
+            // seed's one intentionally debriefed exemplar — adding a third,
+            // un-rehearsed online activity there silently dropped it from
+            // debriefed to assigned (2 of 3 rehearsed). A Feel for Chance makes
+            // no maturity claim, so it can carry this without rewriting a
+            // fixture's story.
+            key: "a.probability.photo",
+            lessonKey: "l.probability.fractions",
+            title: "Photograph your sample space",
+            order: 1,
+            kind: "online",
+            durationMinutes: 20,
+            defaultMode: "homework",
+            description:
+              "Scholars lay out every outcome of a real chance setup — a die's six faces, a coin's two sides, two dice paired up — photograph it, then defend in conversation why that layout is the COMPLETE set of possibilities. The photo is the deliverable; the tutor cannot see it, so the argument has to come from the scholar.",
+            scholarDescription:
+              "Lay out every possible outcome of a die, a coin, or two dice together — then photograph your layout. Tell Rabbithole what you laid out and how you know you didn't miss any.",
+            systemPrompt:
+              "The scholar submits a PHOTO of a physical sample space they laid out. You cannot see their photo, so never claim to have looked at it — ask them to describe it. Press on completeness: how do they KNOW no outcome is missing, and are the outcomes they laid out equally likely? Counting the layout out loud is the move. A layout that misses outcomes is a good conversation, not a failure.",
+            deliverable: {
+              kind: "photo",
+              prompt:
+                "Photograph every possible outcome of a die, a coin, or two dice laid out, then explain how you know your layout is complete.",
+              mode: "manual",
+              criteria: [
+                {
+                  id: "photo-shows-outcomes",
+                  label: "The outcomes are visible in the photo",
+                  description:
+                    "The photo actually shows the laid-out outcomes, not just the dice or coin.",
+                },
+                {
+                  id: "argues-completeness",
+                  label: "Argues the set is complete",
+                  description:
+                    "Gives a reason no outcome is missing — counting, pairing, a system — beyond 'it looks right'.",
+                },
+                {
+                  id: "notes-equal-likelihood",
+                  label: "Says whether the outcomes are equally likely",
+                  description:
+                    "The scholar addresses whether each outcome has the same chance, which is what makes favorable-over-total work.",
+                },
+              ],
+            },
+          },
         ],
       },
     ],
@@ -878,6 +935,68 @@ export const units: SeedUnit[] = [
               "List the living things in a tide pool, sketch one 'who eats whom' connection, and explain how the changing tide shapes life in the pool.",
             systemPrompt:
               "Ask the scholar to name several tide-pool organisms, then trace ONE 'who eats whom' connection. Follow with: what does low tide change for these animals? Press for reasoning about dependence, not just a list.",
+          },
+        ],
+      },
+    ],
+  },
+  {
+    // The one seeded unit stamped to the dev school. Program scheduling
+    // (`ensureProgramAssignment`) only accepts units explicitly stamped to the
+    // program group's school, so without this the Robotics group can place
+    // Handouts but never existing curriculum on a dev deployment.
+    key: "u.robotics",
+    teacherKey: "t.lehua",
+    stampDevSchool: true,
+    title: "Robot Builders",
+    slug: "robot-builders",
+    emoji: "🤖",
+    subject: "Robotics",
+    gradeLevel: "Grades K-5",
+    bigIdea:
+      "Engineers improve a robot by testing one change at a time and noticing what the test shows.",
+    description:
+      "The Robotics program's build-and-test unit: teams build a drive base, then run small tests that change one thing at a time.",
+    lessons: [
+      {
+        key: "l.robotics.drivebase",
+        unitKey: "u.robotics",
+        title: "Drive base",
+        order: 0,
+        strand: "core",
+        durationMinutes: 60,
+        activities: [
+          {
+            key: "a.robotics.motortest",
+            lessonKey: "l.robotics.drivebase",
+            title: "Motor speed test",
+            order: 0,
+            kind: "offline",
+            durationMinutes: 30,
+            defaultMode: "classFocus",
+            description:
+              "Teams run the drive base at three motor speeds on the same course and record which speed stays on the line.",
+            scholarDescription:
+              "Run your robot at three different motor speeds on the same course. Write down which speed stayed on the line best, and one reason why.",
+            materials: [
+              {
+                title: "SPIKE Prime motor guide",
+                url: "https://spike.legoeducation.com/prime/help/lls-help-python",
+              },
+            ],
+          },
+          {
+            key: "a.robotics.sketch",
+            lessonKey: "l.robotics.drivebase",
+            title: "Sketch your next change",
+            order: 1,
+            kind: "offline",
+            durationMinutes: 15,
+            defaultMode: "homework",
+            description:
+              "Each builder sketches one change to try at the next session and predicts what the test will show.",
+            scholarDescription:
+              "Sketch one change you want to try on the robot next time, and predict what will happen when you test it.",
           },
         ],
       },

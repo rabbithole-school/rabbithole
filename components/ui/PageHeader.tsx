@@ -38,8 +38,10 @@ export function PageHeader({
   rightSlot,
 }: PageHeaderProps) {
   return (
-    <Flex justify="space-between" align="flex-start" gap={4} userSelect="none">
-      <HStack gap={3} align="flex-start" flex={1} minW={0}>
+    // Wraps: on a narrow screen the title keeps a full row and the right
+    // slot drops below it, so a long right slot never crushes the title.
+    <Flex justify="space-between" align="flex-start" gap={4} rowGap={3} wrap="wrap" userSelect="none">
+      <HStack gap={3} align="flex-start" flex="1 1 16rem" minW={0}>
         {leading && (
           <Box flexShrink={0} fontSize="2xl" lineHeight="1">
             {leading}
@@ -66,7 +68,11 @@ export function PageHeader({
             ))}
         </Stack>
       </HStack>
-      {rightSlot && <Box flexShrink={0}>{rightSlot}</Box>}
+      {rightSlot && (
+        <Box flexShrink={0} maxW="full">
+          {rightSlot}
+        </Box>
+      )}
     </Flex>
   );
 }

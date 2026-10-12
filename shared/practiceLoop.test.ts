@@ -1,7 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
 import {
   advanceStep,
   applyKey,
@@ -38,27 +35,21 @@ import {
   STREAK_PULSE_EVERY,
   summarize,
   challengeFrontierMove,
-  CHALLENGE_OFFER_TITLE,
-  CHALLENGE_OFFER_ACCEPT,
-  CHALLENGE_OFFER_DECLINE,
-  challengeOfferBody,
+  CHECK_IN_SITTING_PROBE_BUDGET,
   STRETCH_TILE_HEADLINE,
   STRETCH_TILE_SUBTITLE,
   STRETCH_TILE_ARIA_LABEL,
-  SPIRAL_COACH_LABEL,
   SPIRAL_COACH_BODY,
   SPIRAL_COACH_COMPLETE_BODY,
-  SPIRAL_HANDOFF_OPENER,
   SPIRAL_FRESH_BODY,
-  SPIRAL_OFFER_SECONDARY,
   SPIRAL_REPAIR_BODY,
   SPIRAL_REPAIR_NO_STEP_BODY,
   SPIRAL_RECOVERY_WON_CLOSE,
   SPIRAL_WARM_CLOSE,
+  breakerEpisodeAppliesToRun,
   advanceBreakerFlow,
   breakerBody,
   breakerCloseLine,
-  breakerControlLabel,
   breakerEasySubmitArgs,
   breakerFreshSubmitArgs,
   breakerShouldAutoOpenCoach,
@@ -400,6 +391,45 @@ describe("placement feedback", () => {
   });
 });
 
+describe("placementFeedback — unified verdict stamp", () => {
+  it("labels a correct probe with the stamp text practice already uses", () => {
+    const feedback = placementFeedback("correct");
+    expect(feedback.tone).toBe("correct");
+    expect(feedback.stampLabel).toBe("Correct");
+    expect(feedback.body).toBe("Let's keep going.");
+    expect(feedback.srAnnouncement.length).toBeGreaterThan(0);
+  });
+
+  it("labels a wrong guess 'Not quite' — matching the drill's miss stamp", () => {
+    const feedback = placementFeedback("incorrect", "14");
+    expect(feedback.tone).toBe("miss");
+    expect(feedback.stampLabel).toBe("Not quite");
+    expect(feedback.body).toContain("The answer was 14.");
+  });
+
+  it("labels an honest don't-know 'Noted' — NOT 'Not quite' (honesty isn't a wrong guess)", () => {
+    const feedback = placementFeedback("unknown", "14");
+    expect(feedback.tone).toBe("miss");
+    expect(feedback.stampLabel).toBe("Noted");
+    expect(feedback.stampLabel).not.toBe("Not quite");
+    expect(feedback.body).toContain("haven't learned yet");
+  });
+
+  it("never renders a bare reveal when no correct answer is available (e.g. a manipulative probe)", () => {
+    const feedback = placementFeedback("incorrect");
+    expect(feedback.body).not.toContain("The answer was");
+    expect(feedback.body.trim().length).toBeGreaterThan(0);
+    expect(feedback.body).not.toContain("work through one step");
+  });
+
+  it("gives every outcome a non-empty screen-reader announcement carrying the retired title copy", () => {
+    for (const outcome of ["correct", "incorrect", "unknown"] as const) {
+      const feedback = placementFeedback(outcome, "14");
+      expect(feedback.srAnnouncement.length).toBeGreaterThan(0);
+    }
+  });
+});
+
 describe("computeTiming", () => {
   it("measures elapsed + first-key latency on the first attempt", () => {
     expect(
@@ -493,7 +523,7 @@ describe("progress + summary", () => {
   });
 
   it("shows bounded progress for an adaptive placement", () => {
-    expect(placementQuestionCap(2)).toBe(10);
+    expect(placementQuestionCap(2)).toBe(12);
     expect(placementQuestionCap(20)).toBe(25);
     expect(placementQuestionCap([5, 4])).toBe(9);
     expect(placementProgress(3, 10)).toEqual({
@@ -503,6 +533,36 @@ describe("progress + summary", () => {
       maxQuestions: 10,
     });
     expect(placementProgress(3, 10, true).questionNumber).toBe(3);
+  });
+
+  describe("check-in per-sitting budget — shared surface", () => {
+    it("exposes a sane, named per-sitting probe budget", () => {
+      expect(CHECK_IN_SITTING_PROBE_BUDGET).toBe(30);
+      expect(CHECK_IN_SITTING_PROBE_BUDGET).toBeGreaterThan(10);
+      expect(CHECK_IN_SITTING_PROBE_BUDGET).toBeLessThan(60);
+    });
+
+    it("appends ' today' to the ceiling copy only when perSitting", () => {
+      expect(placementProgress(3, 10).label).toBe("Question 4 of up to 10");
+      expect(
+        placementProgress(
+          3,
+          CHECK_IN_SITTING_PROBE_BUDGET,
+          false,
+          true,
+        ).label,
+      ).toBe("Question 4 of up to 30 today");
+      const progress = placementProgress(3, 30, false, true);
+      expect(progress.questionNumber).toBe(4);
+      expect(progress.maxQuestions).toBe(30);
+      expect(progress.percent).toBe(10);
+    });
+
+    it("still clamps the shown question number to the sitting ceiling", () => {
+      const progress = placementProgress(40, 30, false, true);
+      expect(progress.questionNumber).toBe(30);
+      expect(progress.label).toBe("Question 30 of up to 30 today");
+    });
   });
 
   it("summarizes count, correct total, and distinct skills in first-seen order", () => {
@@ -601,125 +661,6 @@ describe("challengeFrontierMove — loosened above-band clear trigger", () => {
     expect(res.moved).toBe(true);
     // "Long division" was honestly flagged — attempted = 3, cleared = 3 (dedup 2)
     expect(res.skills).toEqual(["Powers of ten", "Exponent laws"]);
-  });
-});
-
-describe("challenge invitation copy (shared web/native)", () => {
-  it("uses the calm, no-penalty invitation title", () => {
-    expect(CHALLENGE_OFFER_TITLE).toBe("Want a challenge?");
-  });
-
-  it("phrases the body one-vs-few by stretch count, with a stated no-penalty out", () => {
-    expect(challengeOfferBody(1)).toContain("one that's");
-    expect(challengeOfferBody(2)).toContain("a few that are");
-    // Never gamified: no score/streak/timer language; the decline is penalty-free.
-    for (const n of [1, 2, 3]) {
-      const body = challengeOfferBody(n);
-      expect(body.toLowerCase()).not.toMatch(/streak|timer|points|score you|beat/);
-      expect(body).toContain("No score");
-      expect(body).toContain("stopping is always fine");
-    }
-  });
-
-  it("labels the decline as a soft out, not skip/quit", () => {
-    expect(CHALLENGE_OFFER_DECLINE).toBe("Not now");
-    expect(CHALLENGE_OFFER_ACCEPT).toBe("Try it");
-  });
-});
-
-describe("three-miss breaker copy (shared web/native)", () => {
-  it("pushes a concrete half-step instead of the old binary ask", () => {
-    // The binary "Crack one together / Easy one, then stop" offer is gone: every
-    // observed scholar answered it by leaving. The repair card names the size of
-    // the ask — the SMALLEST missing piece — not an open-ended conversation.
-    expect(SPIRAL_REPAIR_BODY).toBe(
-      "Those were some tricky ones. Let\u2019s find the smallest missing piece.",
-    );
-    expect(SPIRAL_REPAIR_NO_STEP_BODY).toContain("take one apart together");
-    expect(SPIRAL_FRESH_BODY).toBe("Here’s a fresh one on this.");
-    expect(SPIRAL_COACH_LABEL).toBe("Still stuck? Crack it with the tutor");
-    expect(SPIRAL_OFFER_SECONDARY).toBe("Easy one, then stop");
-  });
-
-  it("makes no time promise and never speaks in scores", () => {
-    for (const copy of [
-      SPIRAL_REPAIR_BODY,
-      SPIRAL_REPAIR_NO_STEP_BODY,
-      SPIRAL_FRESH_BODY,
-      SPIRAL_COACH_LABEL,
-      SPIRAL_OFFER_SECONDARY,
-      breakerControlLabel("checkStep"),
-    ]) {
-      expect(copy.toLowerCase()).not.toMatch(/minute|min\b|second|sec\b|\d/);
-      expect(copy.toLowerCase()).not.toMatch(
-        /streak|timer|points|score|badge|grit|remediat/,
-      );
-    }
-  });
-
-  it("keeps the one exit dignified and jargon-free (never the naughty choice)", () => {
-    expect(SPIRAL_OFFER_SECONDARY.toLowerCase()).not.toMatch(
-      /wrong|fail|give up|quit|stuck|trouble|can't|behind/,
-    );
-  });
-
-  it("uses sentence case (no title-case buttons)", () => {
-    // Only the first word capitalized (no genuine proper nouns in these strings).
-    for (const copy of [
-      SPIRAL_OFFER_SECONDARY,
-      breakerControlLabel("checkStep"),
-    ]) {
-      const words = copy.split(/\s+/);
-      expect(words.slice(1).every((w) => w[0] === w[0].toLowerCase())).toBe(true);
-    }
-  });
-
-  it("opens the coach on the ONE problem already on the table", () => {
-    // The repair rung put a specific item up, so there is nothing left to pick.
-    expect(SPIRAL_HANDOFF_OPENER).not.toContain("Pick the one");
-    expect(SPIRAL_HANDOFF_OPENER).toContain("this one");
-  });
-
-  it("is read from the shared module by BOTH frontends, not hardcoded", () => {
-    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-    const web = readFileSync(resolve(repoRoot, "components/practice/PracticeSession.tsx"), "utf8");
-    const webHost = readFileSync(resolve(repoRoot, "hooks/usePracticeMachine.ts"), "utf8");
-    const machine = readFileSync(resolve(repoRoot, "shared/practiceMachine.ts"), "utf8");
-    const native = readFileSync(resolve(repoRoot, "native/src/app/practice.tsx"), "utf8");
-    const nativeHost = readFileSync(resolve(repoRoot, "native/src/hooks/usePracticeMachine.ts"), "utf8");
-    const vendor = readFileSync(resolve(repoRoot, "native/vendor/shared/practiceLoop.ts"), "utf8");
-    const shared = readFileSync(resolve(repoRoot, "shared/practiceLoop.ts"), "utf8");
-
-    for (const src of [web, native]) {
-      expect(src).toContain("breakerControls");
-      expect(src).toContain("breakerControlLabel");
-      // The retired binary offer must not linger as a literal on either surface.
-      expect(src).not.toContain("Crack one together");
-      expect(src).not.toContain("SPIRAL_OFFER_PRIMARY");
-      expect(src).not.toContain("Talk it out together");
-      expect(src).not.toContain("One more, then done");
-      // The fresh same-node item comes from the server-issued recovery session,
-      // never from a client-assembled playlist serve.
-      // Recovery recognition stays behind the shared evidence gate on BOTH
-      // surfaces — no reward, icon or closure line ships ahead of the evidence.
-      expect(src).toContain("RECOVERY_CLOSURE_ENABLED");
-      // The plan's rejected sketch line must not exist anywhere.
-      expect(src).not.toContain("The fresh try held");
-    }
-    // Both screens consume the shared command machine; their platform hooks own
-    // every mutation boundary.
-    expect(native).toContain("usePracticeMachine");
-    expect(native).not.toContain("advanceBreakerFlow");
-    expect(native).toContain("breakerFreshSubmitArgs");
-    expect(web).toContain("usePracticeMachine");
-    expect(web).not.toContain("advanceBreakerFlow");
-    expect(machine).toContain("advanceBreakerFlow");
-    expect(webHost).toContain("api.practiceSkills.breakerRecoverySession");
-    expect(webHost).toContain("recordBreakerRecoveryLifecycle");
-    expect(nativeHost).toContain("api.practiceSkills.breakerRecoverySession");
-    expect(nativeHost).toContain("api.practiceSkills.recordBreakerRecoveryLifecycle");
-    // Native reads the vendored copy — it must be byte-identical to the source.
-    expect(vendor).toBe(shared);
   });
 });
 
@@ -1321,5 +1262,81 @@ describe("recovery recognition uses the server evidence floor", () => {
     expect(RECOVERY_CLOSURE_ENABLED).toBe(true);
     expect(breakerCloseLine(won)).toBe(SPIRAL_WARM_CLOSE);
     expect(breakerControls(won)).toEqual({ primary: null, peers: [] });
+  });
+});
+
+// A live breaker episode is scholar-wide (the miss streak is counted across
+// lanes and domains), but it also OUTRANKS loading a run — so without this
+// predicate an episode opened in one domain froze practice in every other
+// domain for the whole 30-minute window. Observed in class 2026-09-17.
+describe("breakerEpisodeAppliesToRun", () => {
+  const EP = "fraction-arithmetic";
+
+  it("applies to its own single domain", () => {
+    expect(
+      breakerEpisodeAppliesToRun({ episodeDomain: EP, domain: EP }),
+    ).toBe(true);
+  });
+
+  it("does NOT apply to a different domain — the reported freeze", () => {
+    for (const domain of [
+      "probability",
+      "geometry-measurement",
+      "ratio-proportion-percent",
+      "integers-coordinates",
+      "early-algebra",
+      "whole-number-arithmetic",
+    ]) {
+      expect(
+        breakerEpisodeAppliesToRun({ episodeDomain: EP, domain }),
+      ).toBe(false);
+    }
+  });
+
+  it("applies to a mixed run that blends its domain, and not to one that doesn't", () => {
+    expect(
+      breakerEpisodeAppliesToRun({
+        episodeDomain: EP,
+        mixedDomains: ["whole-number-arithmetic", EP],
+      }),
+    ).toBe(true);
+    expect(
+      breakerEpisodeAppliesToRun({
+        episodeDomain: EP,
+        mixedDomains: ["whole-number-arithmetic", "probability"],
+      }),
+    ).toBe(false);
+  });
+
+  it("never applies to a Fast-math round, which has its own scope sentinel", () => {
+    expect(
+      breakerEpisodeAppliesToRun({ episodeDomain: EP, quickFacts: true }),
+    ).toBe(false);
+    // Quick Facts resolves no client-side domain, so the quickFacts flag — not
+    // the absent domain — has to be what answers.
+    expect(
+      breakerEpisodeAppliesToRun({
+        episodeDomain: EP,
+        domain: undefined,
+        quickFacts: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("assumes the ambient default entry, whose domain the SERVER resolves", () => {
+    expect(
+      breakerEpisodeAppliesToRun({ episodeDomain: EP, domain: null }),
+    ).toBe(true);
+    expect(breakerEpisodeAppliesToRun({ episodeDomain: EP })).toBe(true);
+  });
+
+  it("prefers the mixed set over a stray single domain (the run requests `domains`)", () => {
+    expect(
+      breakerEpisodeAppliesToRun({
+        episodeDomain: EP,
+        domain: EP,
+        mixedDomains: ["probability", "geometry-measurement"],
+      }),
+    ).toBe(false);
   });
 });

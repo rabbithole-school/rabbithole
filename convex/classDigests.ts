@@ -35,11 +35,18 @@ import {
 
 const AUTO_DEBOUNCE_MS = 5 * 60_000; // don't auto-regenerate within 5 min
 
+// A pending digest older than this is treated as stuck, not in-flight, and
+// becomes eligible for regeneration (auto path + cron sweep). Anchored to
+// Convex's hard action runtime cap — a "use node" action times out at 10
+// minutes, so nothing legitimate can still be running past that; a shorter
+// bound would race a slow-but-healthy generation.
+const PENDING_STALE_MS = 10 * 60_000;
+
 export type DigestScope = "activity" | "cohort";
 
 // ── Content resolution (shared with shareBack's approach) ──────────────
 
-async function resolveDeliverableContent(
+export async function resolveDeliverableContent(
   ctx: QueryCtx,
   d: Doc<"deliverables">,
 ): Promise<{ content: string | null; kind: string }> {
@@ -131,19 +138,28 @@ async function countsFor(
 }
 
 /**
- * Source watermark for a digest: the newest observer-analysis time and the
- * newest message time across the sessions this digest collates (same session
- * set as the count helpers above — non-offline, activity-filtered for the
- * activity scope). Stamped into `sourceSnapshot` at generation time so a
- * later analysis / message can stale + regenerate a digest whose completion /
- * deliverable counts never move.
+ * Source watermark for a digest: the newest observer-analysis time, the newest
+ * message time, and the newest activity-completion time across the source this
+ * digest collates (same session / completion set as the count helpers above —
+ * non-offline, activity-filtered for the activity scope). Stamped into
+ * `sourceSnapshot` at generation time so a later analysis / message / completion
+ * can stale + regenerate a digest that was written before it.
+ *
+ * The completion leg is why a digest can no longer outlive the moment a scholar
+ * finished: `digestWatermarkTrails` (the Today suppression) is watermark-only by
+ * design, so before this a completion could never suppress or nudge a digest
+ * that had already been written.
  */
 export async function sourceWatermark(
   ctx: QueryCtx,
   scope: DigestScope,
   assignmentId: Id<"assignments">,
   activityId: Id<"activities"> | undefined,
-): Promise<{ latestAnalysisAt: number; latestMessageAt: number }> {
+): Promise<{
+  latestAnalysisAt: number;
+  latestMessageAt: number;
+  latestCompletionAt: number;
+}> {
   const sessions = (
     await ctx.db
       .query("sessions")
@@ -170,7 +186,23 @@ export async function sourceWatermark(
       }
     }
   }
-  return { latestAnalysisAt, latestMessageAt };
+  // Completions are read straight from the canonical record (the same rows the
+  // Run page counts), not inferred from sessions — an offline / take-home
+  // completion has no session to move a message or analysis watermark.
+  const completions = (
+    await ctx.db
+      .query("activityCompletions")
+      .withIndex("by_assignment", (q) => q.eq("assignmentId", assignmentId))
+      .collect()
+  ).filter((c) =>
+    scope === "activity" && activityId ? c.activityId === activityId : true,
+  );
+  let latestCompletionAt = 0;
+  for (const c of completions) {
+    const at = Math.max(c.completedAt, c._creationTime);
+    if (at > latestCompletionAt) latestCompletionAt = at;
+  }
+  return { latestAnalysisAt, latestMessageAt, latestCompletionAt };
 }
 
 function hasMaterial(counts: {
@@ -223,6 +255,7 @@ async function scheduleGeneration(
   const patch = {
     status: "pending" as const,
     error: undefined,
+    pendingSince: Date.now(),
     sourceSnapshot: { ...counts, ...watermark },
   };
   if (existing) {
@@ -299,6 +332,7 @@ export const collateActivity = internalQuery({
         return {
           scholarId: sid,
           name: s?.name ?? s?.username ?? "(unknown)",
+          pronouns: s?.pronouns ?? null,
           started: !!session,
           completed: doneSet.has(String(sid)),
           sessionId: session?._id ?? null,
@@ -368,6 +402,7 @@ export const collateCohort = internalQuery({
         return {
           scholarId: sid,
           name: s?.name ?? s?.username ?? "(unknown)",
+          pronouns: s?.pronouns ?? null,
           sessionId: session?._id ?? null,
           currentActivityTitle: activity?.title ?? null,
           analysisSummary: session?.analysisSummary ?? null,
@@ -396,42 +431,78 @@ function withStaleness(
     startedCount: number;
     deliverableCount: number;
   },
-  watermark: { latestAnalysisAt: number; latestMessageAt: number },
+  watermark: {
+    latestAnalysisAt: number;
+    latestMessageAt: number;
+    latestCompletionAt: number;
+  },
 ) {
-  const { stale, newSince } = digestStaleness(digest.sourceSnapshot, {
-    ...current,
-    ...watermark,
-  });
-  return { ...digest, stale, newSince, currentCounts: current };
+  const { stale, newSince, completionsSince } = digestStaleness(
+    digest.sourceSnapshot,
+    { ...current, ...watermark },
+  );
+  return {
+    ...digest,
+    stale,
+    newSince,
+    completionsSince,
+    currentCounts: current,
+  };
 }
 
 /**
  * Whether a ready digest's source watermark trails current source — i.e. a
- * later analysis / message has landed since it was generated, so its headline
- * may be contradicted (the Leilani "cut off" vs. "resolved" case). Used by
+ * later analysis / message / completion has landed since it was generated, so
+ * its headline may be contradicted (the "cut off" vs. "resolved" case, and the
+ * "no one has finished" digest written just before someone did). Used by
  * teacherToday to SUPPRESS such a digest rather than surface a stale claim.
  *
- * Watermark-only by design: a digest with no watermark snapshot (generated
- * before this field existed) returns false and is left exactly as today.
+ * Watermark-first, with one count-based fallback for rows that predate the
+ * completion leg (see below). A digest with no snapshot at all returns false
+ * and is left exactly as today.
  */
 export async function digestWatermarkTrails(
   ctx: QueryCtx,
   digest: Doc<"classDigests">,
 ): Promise<boolean> {
   const snap = digest.sourceSnapshot;
+  if (!snap) return false;
+  // Stored rows still carry a `scope` union that includes the retired "class"
+  // literal (schema unchanged; prod has zero such rows). A legacy class row
+  // keys its watermark off its representative assignment — the same generic
+  // path "cohort" takes — so map it there.
+  const scope = digest.scope === "activity" ? "activity" : "cohort";
+
+  // Rows generated before the completion leg existed carry no completion
+  // watermark, and `watermarkAdvanced` deliberately SKIPS an absent leg. On
+  // every other caller that is harmless, because `digestStaleness` also
+  // compares COUNTS — but this surface is watermark-only, so a completion
+  // landing after deploy would slip past and leave a contradicted digest
+  // standing in Today (the exact case this PR exists to close, reintroduced
+  // for one generation of rows). Fall back to the evidence such a row does
+  // carry: growth in the completion count it snapshotted. This never trails on
+  // absence alone — it needs a real completion since generation — so a quiet
+  // legacy digest is untouched. A row with no snapshot at all has no count to
+  // compare either, and returned false above.
+  if (snap.latestCompletionAt === undefined) {
+    const counts = await countsFor(
+      ctx,
+      scope,
+      digest.assignmentId,
+      digest.activityId,
+    );
+    if (counts.completedCount > snap.completedCount) return true;
+  }
+
   if (
-    !snap ||
-    (snap.latestAnalysisAt === undefined && snap.latestMessageAt === undefined)
+    snap.latestAnalysisAt === undefined &&
+    snap.latestMessageAt === undefined
   ) {
     return false;
   }
   const current = await sourceWatermark(
     ctx,
-    // Stored rows still carry a `scope` union that includes the retired
-    // "class" literal (schema unchanged; prod has zero such rows). A legacy
-    // class row keys its watermark off its representative assignment — the
-    // same generic path "cohort" takes — so map it there.
-    digest.scope === "activity" ? "activity" : "cohort",
+    scope,
     digest.assignmentId,
     digest.activityId,
   );
@@ -707,7 +778,10 @@ export const createDebriefFromDigest = teacherMutation({
  * call it freely without looping or spamming Claude:
  *   - no row yet     → generate once there's material to synthesize.
  *   - ready + stale  → regenerate, but not within AUTO_DEBOUNCE_MS.
- *   - pending        → skip (already running).
+ *   - pending        → skip (already running) — UNLESS it's older than
+ *                      PENDING_STALE_MS, in which case its generate action
+ *                      can only have been killed (deploy/timeout/crash), so
+ *                      it's re-driven instead of spinning forever.
  *   - error          → retry after the debounce window.
  */
 export const maybeAutoGenerate = internalMutation({
@@ -753,17 +827,27 @@ export const maybeAutoGenerate = internalMutation({
       args.activityId,
     );
     if (existing) {
-      if (existing.status === "pending") return { scheduled: false };
-      const age = Date.now() - (existing.generatedAt ?? 0);
-      if (age < AUTO_DEBOUNCE_MS) return { scheduled: false };
-      // Regenerate on completion/deliverable growth OR a source-watermark
-      // advance (a later analysis / message), so a resolved session doesn't
-      // linger behind a mid-session digest with unchanged counts.
-      const grew =
-        !existing.sourceSnapshot ||
-        digestStaleness(existing.sourceSnapshot, { ...counts, ...watermark })
-          .stale;
-      if (existing.status === "ready" && !grew) return { scheduled: false };
+      if (existing.status === "pending") {
+        // A fresh in-flight generation stays untouched; one stuck past
+        // PENDING_STALE_MS (its action was killed — deploy, timeout, crash
+        // — before it could reach setReady/setError) is eligible to be
+        // re-driven instead of spinning forever. Fall back to _creationTime
+        // for rows written before `pendingSince` existed.
+        const pendingAge =
+          Date.now() - (existing.pendingSince ?? existing._creationTime);
+        if (pendingAge < PENDING_STALE_MS) return { scheduled: false };
+      } else {
+        const age = Date.now() - (existing.generatedAt ?? 0);
+        if (age < AUTO_DEBOUNCE_MS) return { scheduled: false };
+        // Regenerate on completion/deliverable growth OR a source-watermark
+        // advance (a later analysis / message), so a resolved session
+        // doesn't linger behind a mid-session digest with unchanged counts.
+        const grew =
+          !existing.sourceSnapshot ||
+          digestStaleness(existing.sourceSnapshot, { ...counts, ...watermark })
+            .stale;
+        if (existing.status === "ready" && !grew) return { scheduled: false };
+      }
     }
 
     await scheduleGeneration(

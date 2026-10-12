@@ -4,6 +4,7 @@ import Foundation
 public class DevClientSafetyModule: Module {
   private let recentAppsKey = "expo.devlauncher.recentlyopenedapps"
   private let resumeLastBundleKey = "EXDevLauncherTryToLaunchLastBundle"
+  // Deployment configuration — see DEPLOYMENT.md (Dev-client bundle namespace).
   private let guardedServerKey = "org.rabbithole.app.devClientSafety.guardedServer"
   private let guardedAtKey = "org.rabbithole.app.devClientSafety.guardedAt"
 

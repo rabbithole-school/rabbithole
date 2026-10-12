@@ -44,7 +44,7 @@ function devUsernameSlug(raw: string): string {
  * account is an account-claim coupon. Gating to non-prod removes the landmine
  * where a `db:seed:prod` would spray claimable usernames onto live accounts.
  * (Prod onboarding — `seed/enrolledFamilies`, `ensureStaffAccount` — therefore
- * deliberately sets no username; see TODO.html "Rationalize how scholars/parents
+ * deliberately sets no username; see the retired TODO.html "Rationalize how scholars/parents
  * claim accounts on prod".)
  */
 async function reconcileDevUsernames(ctx: MutationCtx): Promise<void> {
@@ -161,7 +161,7 @@ export const seedAll = internalMutation({
     // existing data/history survive and re-enabling is trivial, but NO seeded
     // unit wires a persona anymore (the unit insert no longer copies personaId)
     // and the tutor never injects one. Personas are also hidden from active
-    // teacher/scholar surfaces. See TODO.html ("Reimagine personas").
+    // teacher/scholar surfaces. See the retired TODO.html ("Reimagine personas").
 
     const personas = [
       {
@@ -965,7 +965,7 @@ The document is plain text only. The document title becomes the story title.`,
         // DEPRECATED (anti-parasocial): seeded units no longer wire a persona —
         // the tutor must not act as a character. Persona rows are still seeded
         // (below) so existing data + history survive and this is reversible, but
-        // nothing references them. See TODO.html ("Reimagine personas").
+        // nothing references them. See the retired TODO.html ("Reimagine personas").
         ...("perspectiveId" in u && u.perspectiveId ? { perspectiveId: u.perspectiveId } : {}),
         // processId is patched after processes are seeded (see below)
         isActive: true,

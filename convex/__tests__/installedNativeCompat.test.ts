@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -32,15 +32,27 @@ const modules = (
  * silently lost its recovery path.
  */
 
-async function seedScholar(t: ReturnType<typeof convexTest>) {
+let sharedT: TestConvex<typeof schema>;
+let scholarCounter = 0;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function seedScholar(t: TestConvex<typeof schema>) {
   return seedScholarInInstitution(t, {
     institutionId: await seedTestInstitution(t),
     name: "Legacy Client Scholar",
-    username: "legacyclient",
+    username: `legacyclient_${++scholarCounter}`,
   });
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -56,8 +68,7 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
 
 describe("installed-native compatibility", () => {
   test("submitAnswer works with the minimal old-client argument set", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const as = await asUser(t, scholar);
     const session = await as.query(api.practiceSkills.practiceSession, {
@@ -81,8 +92,7 @@ describe("installed-native compatibility", () => {
   });
 
   test("an old client that ignores scopeKey/dayKey still gets a usable run", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const as = await asUser(t, scholar);
     const session = await as.query(api.practiceSkills.practiceSession, {
@@ -102,8 +112,7 @@ describe("installed-native compatibility", () => {
     // `backOff.recoverySkillKey`/`recoveryDomain` to pick their own easier item.
     // Newer clients ignore both in favour of breakerEasyFinishSession, but
     // dropping them would strand an installed iPad with no recovery at all.
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const as = await asUser(t, scholar);
 
@@ -138,8 +147,7 @@ describe("installed-native compatibility", () => {
   });
 
   test("recordBreakerOutcome still accepts the pre-v2 legacy payload", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const as = await asUser(t, scholar);
     const session = await as.query(api.practiceSkills.practiceSession, {
@@ -167,8 +175,7 @@ describe("installed-native compatibility", () => {
   test("practiceSession still accepts the inert allowOutsideFocus argument", async () => {
     // Retained purely so an installed build that still sends it doesn't fail
     // argument validation. It intentionally does nothing.
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t);
     const as = await asUser(t, scholar);
     const session = await as.query(api.practiceSkills.practiceSession, {

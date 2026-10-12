@@ -35,8 +35,19 @@ describe("the staff nav strip", () => {
       "math-skills",
       "school",
     ]);
-    expect(teacherNavKeysForRole("staff")).toEqual([
-      "apps",
+    // A base staffer with NO grants gets School and nothing else. Apps is
+    // deliberately absent: its query is a `scholarAdminQuery`, so the tab
+    // would throw on mount (the bug that stranded a health-only staffer on
+    // an error page).
+    expect(teacherNavKeysForRole("staff")).toEqual(["school"]);
+    // health:manage opens nothing under /teacher — it is not an input to this
+    // function at all — so a health staffer sees the grantless strip.
+    expect(teacherNavKeysForRole("staff", false, false, false)).toEqual([
+      "school",
+    ]);
+    // curriculum:edit alone: Units, still no Apps.
+    expect(teacherNavKeysForRole("staff", true, false, false)).toEqual([
+      "curriculum",
       "school",
     ]);
     expect(teacherNavKeysForRole("staff", false, false, true)).toEqual([
@@ -66,6 +77,20 @@ describe("the staff nav strip", () => {
       "school",
       "messages",
     ]);
+    // A mentor grant opens Messages beside whatever else the staffer has…
+    expect(
+      teacherNavKeysForRole("staff", true, false, false, {
+        mentor: true,
+        mentorOnly: false,
+      }),
+    ).toEqual(["curriculum", "school", "messages"]);
+    // …and a mentor with nothing else gets Messages alone.
+    expect(
+      teacherNavKeysForRole("staff", false, false, false, {
+        mentor: true,
+        mentorOnly: true,
+      }),
+    ).toEqual(["messages"]);
     expect(teacherNavKeysForRole("teacher")).toEqual([
       "schedule",
       "scholars",

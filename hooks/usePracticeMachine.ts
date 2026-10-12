@@ -65,6 +65,7 @@ import {
   type PracticeCommand,
   type PracticeEvent,
   type PracticeState,
+  breakerFreshItemOnScreen,
 } from "@/shared/practiceMachine";
 
 /** What the host must supply that the machine cannot know: the served-item
@@ -110,6 +111,13 @@ export type PracticeHostBindings = {
   onDispatchCompleted: (receipts: unknown) => void;
   /** Rehearsal's injected client grader. Present only in rehearse mode. */
   gradeLocally?: (entry: OutboxAnswer) => Promise<unknown>;
+  /** The render payload for a provisional fact verdict, installed through
+   *  `onGrade` before the server's own grade replaces it. */
+  provisionalGrade: (entry: OutboxAnswer, correct: boolean) => unknown;
+  /** Run the Next / Try again held while that verdict was confirming. */
+  onHeld: (action: "advance" | "retry") => void;
+  /** That verdict's answer was lost; drop what was rendered and logged. */
+  onProvisionalRetracted: (clientEventId: string) => void;
 };
 
 export type PracticeMachineHandle = {
@@ -195,6 +203,12 @@ export function usePracticeMachine(
 
   const boundRef = host;
   const state = hostState.machine;
+  // The latest committed machine state, for an executor that has awaited a
+  // server call and must decide against the state as it is NOW (TRA-376).
+  const machineRef = useRef(state);
+  useEffect(() => {
+    machineRef.current = state;
+  }, [state]);
   const coordinator = useMemo(
     () => (scholarId ? acquirePracticeCoordinator(String(scholarId)) : null),
     [scholarId],
@@ -553,7 +567,11 @@ export function usePracticeMachine(
               dispatch({ type: "server:breakerFreshUnavailable", id: command.id });
               return;
             }
-            host.onBreakerItem(item, "fresh");
+            // A re-issued serve of the item already on screen must not
+            // reinstall it: that would wipe an in-flight answer (TRA-376).
+            if (!breakerFreshItemOnScreen(machineRef.current, item.itemId)) {
+              host.onBreakerItem(item, "fresh");
+            }
             dispatch({
               type: "server:breakerFreshServed",
               id: command.id,
@@ -670,6 +688,34 @@ export function usePracticeMachine(
           return;
         }
 
+        case "gradeProvisionally": {
+          // Synchronous on purpose: the verdict is the fact's own arithmetic,
+          // so it lands in the same tick the scholar pressed enter. The
+          // machine then emits the real `submitAnswer`, whose result
+          // re-installs the server's grade over this one.
+          host.onGrade(
+            host.provisionalGrade(command.entry, command.correct),
+            command.entry,
+          );
+          dispatch({
+            type: "local:provisionalGraded",
+            id: command.id,
+            correct: command.correct,
+            entry: command.entry,
+          });
+          return;
+        }
+
+        case "releaseHeld":
+          host.onHeld(command.action);
+          return;
+
+        case "retractProvisional":
+
+          host.onProvisionalRetracted(command.clientEventId);
+
+          return;
+
         default:
           return;
       }
@@ -724,7 +770,8 @@ export function usePracticeMachine(
             isDurableCommand(command) ||
             command.kind === "loadRun" ||
             command.kind === "openHandoff" ||
-            command.kind === "gradeLocally";
+            command.kind === "gradeLocally" ||
+            command.kind === "gradeProvisionally";
           if (!replayForCurrentMount) {
             dispatch({ type: "server:commandFailed", id });
             continue;

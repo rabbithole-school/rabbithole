@@ -3,9 +3,11 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
-import type { Doc, Id } from "@/convex/_generated/dataModel";
+import type { Id } from "@/convex/_generated/dataModel";
 import {
   Box,
+  Button,
+  Checkbox,
   Flex,
   HStack,
   Input,
@@ -14,6 +16,7 @@ import {
   Text,
   Textarea,
 } from "@chakra-ui/react";
+import { formatDistanceToNow } from "date-fns";
 import { WarningCircle } from "@phosphor-icons/react";
 import { ScholarAngleIcon } from "@/lib/scholarAngle";
 import { ActivityModeIcon } from "@/lib/activityMode";
@@ -33,12 +36,17 @@ import {
 } from "./shared";
 import { SlidesSection } from "./SlidesFields";
 import { WebActivityFields } from "./WebActivityFields";
+import { VibecodeContractFields } from "./VibecodeContractFields";
 import { GameActivityFields } from "./GameActivityFields";
 import { SimulatorSpecEditor } from "@/components/simulatorTeacher/SimulatorSpecEditor";
 import { ShareBackSection } from "./ShareBackSection";
 import { NodeEditorSkeleton } from "./NodeEditorSkeleton";
 import { ResourcesSection } from "./ResourcesSection";
 import { NodeActionsMenu } from "@/components/NodeActionsMenu";
+import { FieldSelect } from "@/components/ui/FieldSelect";
+import { MODELS, modelLabel } from "@/convex/lib/models";
+import { TUTOR_DEFAULT_MODEL } from "@/convex/lib/tutorModel";
+import { toaster } from "@/lib/toaster";
 
 export function ActivityFields({
   activityId,
@@ -51,13 +59,17 @@ export function ActivityFields({
   onAfterDuplicate?: (activityId: Id<"activities">) => void;
   askAi?: (prompt: string) => void;
 }) {
-  const activity = useQuery(api.activities.get, { id: activityId }) as
-    | (Doc<"activities"> | null)
-    | undefined;
+  const activity = useQuery(api.activities.get, { id: activityId });
   const update = useMutation(api.activities.update);
   const remove = useMutation(api.activities.remove);
   const setArchived = useMutation(api.activities.setArchived);
   const duplicateActivity = useMutation(api.activities.duplicate);
+  const clearVibecodeStarter = useMutation(
+    api.activities.clearVibecodeStarter,
+  );
+  const setScholarsStartFrom = useMutation(
+    api.activities.setScholarsStartFrom,
+  );
   // Rehearse (sims) + Rehearse manually now live in the unit surface's
   // Rehearse tab (review/curriculum-rehearse-and-maturity.md), not on the
   // activity editor header — so the editor stays focused on editing.
@@ -68,6 +80,7 @@ export function ActivityFields({
   const [webUrl, setWebUrl] = useState("");
   const [webHosts, setWebHosts] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [clearingStarter, setClearingStarter] = useState(false);
 
   useEffect(() => {
     // Reset local draft when remote activity value changes (e.g., switching activities).
@@ -117,6 +130,28 @@ export function ActivityFields({
     onAfterDuplicate?.(copyId);
   };
 
+  const handleClearStarter = async () => {
+    if (clearingStarter) return;
+    setClearingStarter(true);
+    try {
+      await clearVibecodeStarter({ activityId });
+    } catch (err) {
+      console.error(err);
+      toaster.error({ title: "Couldn't remove activity starter" });
+    } finally {
+      setClearingStarter(false);
+    }
+  };
+
+  const handleScholarsStartFrom = async (value: "blank" | "starter") => {
+    try {
+      await setScholarsStartFrom({ activityId, value });
+    } catch (err) {
+      console.error(err);
+      toaster.error({ title: "Couldn't change how scholars start" });
+    }
+  };
+
   const isArchived = !!activity.archivedAt;
   const handleArchive = async () => {
     await setArchived({ id: activityId, archived: true });
@@ -129,6 +164,7 @@ export function ActivityFields({
   const isShareBack = activity.kind === "shareBack";
   const isWeb = activity.kind === "web";
   const isGame = activity.kind === "game";
+  const starterApp = activity.starterAppId ? activity.starterApp : null;
   const isSimulator = activity.kind === "simulator";
   const isVibecode = activity.kind === "vibecode";
 
@@ -227,9 +263,10 @@ export function ActivityFields({
       {/* Per-scholar angles only makes sense for online activities —
           it relies on the AI tutor's kickoff phase, which doesn't
           exist on teacher-facing offline / shareBack activities. */}
-      {isOnline && (
+      {(isOnline || activity.kind === "offline") && (
         <Field label="Options">
           <Stack gap={2.5}>
+            {isOnline && (
             <Box>
               <Switch.Root
                 checked={!!activity.hasScholarAngles}
@@ -257,6 +294,35 @@ export function ActivityFields({
               <Text fontSize="2xs" color="charcoal.400" pl={6} mt={0.5}>
                 Each scholar picks their own angle. The tutor runs a
                 quick kickoff to capture it before diving in.
+              </Text>
+            </Box>
+            )}
+            <Box>
+              <Checkbox.Root
+                checked={!!activity.assessesWritingMechanics}
+                onCheckedChange={(d) =>
+                  update({
+                    id: activityId,
+                    assessesWritingMechanics: d.checked === true,
+                  })
+                }
+                colorPalette="violet"
+                size="sm"
+              >
+                <Checkbox.HiddenInput />
+                <Checkbox.Control />
+                <Checkbox.Label
+                  fontFamily="heading"
+                  fontSize="sm"
+                  color="charcoal.600"
+                >
+                  Assesses spelling and typing
+                </Checkbox.Label>
+              </Checkbox.Root>
+              <Text fontSize="2xs" color="charcoal.400" pl={6} mt={0.5}>
+                Leave this off unless the activity is about spelling or
+                typing. Scholars can dictate their writing, and dictated
+                work earns full credit.
               </Text>
             </Box>
           </Stack>
@@ -423,6 +489,114 @@ export function ActivityFields({
               onChange={(next) => update({ id: activityId, processId: next })}
             />
           </Field>
+          {isVibecode && (
+            <Field label="Tutor model">
+              <FieldSelect
+                value={activity.tutorModel === "fable" ? "fable" : ""}
+                onChange={(value) =>
+                  update({
+                    id: activityId,
+                    tutorModel: value === "fable" ? "fable" : null,
+                  })
+                }
+                maxW="240px"
+              >
+                <option value="">
+                  Default ({modelLabel(TUTOR_DEFAULT_MODEL).replace(/^Claude /, "")})
+                </option>
+                <option value="fable">
+                  {modelLabel(MODELS.FABLE).replace(/^Claude /, "")}
+                </option>
+              </FieldSelect>
+            </Field>
+          )}
+          {isVibecode && (
+            <Field
+              label="Scholars start from"
+              hint={
+                starterApp
+                  ? "Saving or replacing a starter does not switch scholars to it; choose Saved app here."
+                  : "Save an app from manual rehearsal first. Saving it will not switch scholars automatically."
+              }
+            >
+              <FieldSelect
+                value={
+                  activity.scholarsStartFrom === "starter" &&
+                  starterApp
+                    ? "starter"
+                    : "blank"
+                }
+                onChange={(value) =>
+                  void handleScholarsStartFrom(
+                    value === "starter" ? "starter" : "blank",
+                  )
+                }
+                maxW="240px"
+                fieldProps={{ "aria-label": "Scholars start from" }}
+              >
+                <option value="blank">Blank slate</option>
+                <option value="starter" disabled={!starterApp}>
+                  Saved app
+                </option>
+              </FieldSelect>
+            </Field>
+          )}
+          {isVibecode && (
+            <Field
+              label="Scholars can edit the app"
+              hint={
+                activity.editAccess === "never"
+                  ? "Play only — the Edit | Play control is not shown."
+                  : activity.editAccess === "afterCompletion"
+                    ? "Play first; Edit unlocks when the scholar finishes the activity."
+                    : "Both Edit and Play — building the app is the point."
+              }
+            >
+              <FieldSelect
+                value={activity.editAccess ?? "always"}
+                onChange={(value) =>
+                  void update({
+                    id: activityId,
+                    editAccess: value as "always" | "afterCompletion" | "never",
+                  })
+                }
+                maxW="240px"
+                fieldProps={{ "aria-label": "Scholars can edit the app" }}
+              >
+                <option value="always">Always</option>
+                <option value="afterCompletion">After they finish</option>
+                <option value="never">Never</option>
+              </FieldSelect>
+            </Field>
+          )}
+          {isVibecode && starterApp && (
+            <Flex align="baseline" gap={2} flexWrap="wrap">
+              <Text fontSize="xs" color="fg.muted">
+                Starter app: {starterApp.name}
+                {starterApp.updatedAt !== undefined && (
+                  <>
+                    {" "}
+                    · saved{" "}
+                    {formatDistanceToNow(starterApp.updatedAt, {
+                      addSuffix: true,
+                    })}
+                  </>
+                )}
+              </Text>
+              <Button
+                size="xs"
+                variant="plain"
+                h="auto"
+                minH="auto"
+                px={0}
+                colorPalette="violet"
+                loading={clearingStarter}
+                onClick={handleClearStarter}
+              >
+                Remove
+              </Button>
+            </Flex>
+          )}
           <Field
             label={isVibecode ? "Build brief" : "Activity system prompt"}
             hint={
@@ -448,6 +622,14 @@ export function ActivityFields({
               placeholder="Instructions for the AI tutor during this activity..."
             />
           </Field>
+          {isVibecode && (
+            <VibecodeContractFields
+              activityId={activityId}
+              buildContract={activity.buildContract}
+              allowSilence={activity.allowSilence}
+              update={update}
+            />
+          )}
 
           {/* Vibecode has no deliverable capture — the built app is the
               artifact — so the deliverable block stays online-only. */}

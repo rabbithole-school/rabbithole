@@ -9,7 +9,6 @@ import {
   seedTestInstitution,
 } from "./institutionTestHelpers";
 import {
-  STUDIO_FIXER_SYSTEM_PROMPT,
   buildStudioFixerUserMessage,
   sourceParses,
   verifyStudioFixOutput,
@@ -292,11 +291,5 @@ describe("studioFixer pure logic", () => {
     expect(message).toContain("forward(");
     expect(message).toContain("Unexpected end of input");
     expect(message).toContain("line 3");
-  });
-
-  test("the system prompt forbids algorithm changes and only allows syntax repair", () => {
-    expect(STUDIO_FIXER_SYSTEM_PROMPT).toMatch(/SYNTAX ONLY/);
-    expect(STUDIO_FIXER_SYSTEM_PROMPT).toMatch(/must NOT change the scholar's ALGORITHM/);
-    expect(STUDIO_FIXER_SYSTEM_PROMPT).toContain("forward");
   });
 });

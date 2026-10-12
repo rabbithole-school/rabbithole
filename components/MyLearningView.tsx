@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { useQuery, useMutation } from "convex/react";
+import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
@@ -33,13 +32,15 @@ import {
   TrendUp,
 } from "@phosphor-icons/react";
 import { Avatar } from "@/components/Avatar";
+import { BadgeArt } from "@/components/BadgeArt";
 import { BadgeDetailDialog } from "@/components/BadgeDetailDialog";
+import { isLicenseCardBadge } from "@/shared/calculatorLicense";
 import MyGoalsCard from "@/components/MyGoalsCard";
 import MyWeeklyGoalsCard from "@/components/MyWeeklyGoalsCard";
-import { toaster } from "@/lib/toaster";
 import { formatRelative } from "@/lib/relativeTime";
 import { strongestSignalHeadline } from "@/convex/lib/practice/calibration";
 import { sessionSignalMeta } from "@/shared/learningSignals";
+import { useExploreSeed } from "@/hooks/useExploreSeed";
 
 type EarnedBadge = NonNullable<
   ReturnType<typeof useQuery<typeof api.scholarUnitBadges.myEarnedBadges>>
@@ -567,21 +568,7 @@ type SeedDoc = NonNullable<
 >[number];
 
 function SeedMap({ seeds }: { seeds: SeedDoc[] }) {
-  const router = useRouter();
-  const createFromSeed = useMutation(api.sessions.createFromSeed);
-  const [exploringId, setExploringId] = useState<string | null>(null);
-
-  const handleExplore = async (seedId: Id<"seeds">) => {
-    setExploringId(seedId);
-    try {
-      const result = await createFromSeed({ seedId });
-      if (result) router.push(`/scholar/${result.id}`);
-    } catch (err) {
-      console.error("Error creating session from seed:", err);
-      toaster.error({ title: "Couldn't start that exploration", description: "Please try again." });
-      setExploringId(null);
-    }
-  };
+  const { exploreSeed, exploringSeedId, exploreSeedDialog } = useExploreSeed();
 
   // Group by domain so the list reads as a map of territories, not a queue.
   const groups = new Map<string, SeedDoc[]>();
@@ -612,8 +599,8 @@ function SeedMap({ seeds }: { seeds: SeedDoc[] }) {
           )}
           <VStack align="stretch" gap={2}>
             {list.map((seed) => {
-              const isExploring = exploringId === seed._id;
-              const disabled = exploringId !== null && !isExploring;
+              const isExploring = exploringSeedId === seed._id;
+              const disabled = exploringSeedId !== null && !isExploring;
               return (
                 <Flex
                   key={seed._id}
@@ -654,7 +641,14 @@ function SeedMap({ seeds }: { seeds: SeedDoc[] }) {
                     _hover={{ bg: "violet.50" }}
                     flexShrink={0}
                     disabled={disabled || isExploring}
-                    onClick={() => handleExplore(seed._id)}
+                    onClick={() =>
+                      exploreSeed(
+                        seed._id,
+                        seed.unitId || seed.origin === "story"
+                          ? { skipMenu: true }
+                          : undefined,
+                      )
+                    }
                   >
                     {isExploring ? "Starting…" : "Start exploring"}
                     {!isExploring && <ArrowRight style={{ marginLeft: 4 }} />}
@@ -665,6 +659,7 @@ function SeedMap({ seeds }: { seeds: SeedDoc[] }) {
           </VStack>
         </Box>
       ))}
+      {exploreSeedDialog}
     </VStack>
   );
 }
@@ -824,7 +819,20 @@ function BadgeCard({
       _hover={{ borderColor: "violet.400", shadow: "sm", transform: "translateY(-2px)" }}
       _focusVisible={{ outline: "2px solid", outlineColor: "violet.400", outlineOffset: "2px" }}
     >
-      {imageUrl ? (
+      {isLicenseCardBadge(badge.kind) ? (
+        // The license card at its own aspect, like the ID it is.
+        <Box py={1}>
+          <BadgeArt
+            imageUrl={imageUrl}
+            emoji={icon}
+            status={artStatus}
+            size="128px"
+            alt={`${title} card`}
+            showGeneratingOverlay={false}
+            kind={badge.kind}
+          />
+        </Box>
+      ) : imageUrl ? (
         <Image
           src={imageUrl}
           alt={`${unitTitle} badge`}

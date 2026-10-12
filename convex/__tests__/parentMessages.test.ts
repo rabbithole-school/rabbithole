@@ -1,5 +1,5 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test, beforeAll, afterAll } from "vitest";
+import { describe, expect, test, beforeAll, afterAll, vi } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -114,6 +114,23 @@ async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
     subject: `${userId}|${sessionId}`,
     issuer: "https://convex.dev",
   });
+}
+
+/**
+ * Upload a blob the way the composer does: reserve an upload URL as the user,
+ * then store the file. Registration requires both halves.
+ */
+async function uploadAs(
+  t: ReturnType<typeof convexTest>,
+  userId: Id<"users">,
+  blob: Blob,
+) {
+  const { reservationId } = await (await withUser(t, userId)).mutation(
+    api.parentMessages.generateAttachmentUploadUrl,
+    { sizeBytes: blob.size },
+  );
+  const storageId = await t.run((ctx) => ctx.storage.store(blob));
+  return { storageId, reservationId };
 }
 
 describe("parentMessages — send + thread creation", () => {
@@ -605,6 +622,8 @@ describe("parentMessages — send + thread creation", () => {
       "teacher",
       "parent",
     ]);
+    // Writing as a parent doesn't make it hers as staff.
+    expect(await asSloane.query(api.parentMessages.listMyThreads, {})).toEqual([]);
   });
 
   test("a non-guardian passed via parentIds is NOT resolved as a recipient", async () => {
@@ -1025,16 +1044,16 @@ describe("parentMessages — attachments", () => {
       scholarIds: [kai],
     });
 
-    const storageId = await t.run((ctx) =>
-      ctx.storage.store(
-        new Blob(["photo"], { type: "image/jpeg" }),
-      ),
+    const upload = await uploadAs(
+      t,
+      teacher,
+      new Blob(["photo"], { type: "image/jpeg" }),
     );
     const asTeacher = await withUser(t, teacher);
     const { attachmentId } = await asTeacher.mutation(
       api.parentMessages.registerAttachmentUpload,
       {
-        storageId,
+        ...upload,
         fileName: "tide-pool.jpg",
         mimeType: "image/jpeg",
         sizeBytes: 5,
@@ -1179,13 +1198,11 @@ describe("parentMessages — attachments", () => {
     const asParent = await withUser(t, parent);
 
     const register = async (name: string, type: string) => {
-      const storageId = await t.run((ctx) =>
-        ctx.storage.store(new Blob([name], { type })),
-      );
+      const upload = await uploadAs(t, parent, new Blob([name], { type }));
       return await asParent.mutation(
         api.parentMessages.registerAttachmentUpload,
         {
-          storageId,
+          ...upload,
           fileName: name,
           mimeType: type,
           sizeBytes: name.length,
@@ -1257,14 +1274,16 @@ describe("parentMessages — attachments", () => {
       scholarIds: [kai, lani],
     });
 
-    const storageId = await t.run((ctx) =>
-      ctx.storage.store(new Blob(["notes"], { type: "application/pdf" })),
+    const upload = await uploadAs(
+      t,
+      teacher,
+      new Blob(["notes"], { type: "application/pdf" }),
     );
     const asTeacher = await withUser(t, teacher);
     const { attachmentId } = await asTeacher.mutation(
       api.parentMessages.registerAttachmentUpload,
       {
-        storageId,
+        ...upload,
         fileName: "field-notes.pdf",
         mimeType: "application/pdf",
         sizeBytes: 5,
@@ -1295,7 +1314,7 @@ describe("parentMessages — attachments", () => {
     );
     expect(rows).toHaveLength(2);
     expect(new Set(rows.map((row) => row.storageId))).toEqual(
-      new Set([storageId]),
+      new Set([upload.storageId]),
     );
     expect(new Set(rows.map((row) => row.messageId)).size).toBe(2);
   });
@@ -1350,6 +1369,326 @@ describe("parentMessages — attachments", () => {
         as: "staff",
       }),
     ).rejects.toThrow(/forbidden/i);
+  });
+});
+
+describe("parentMessages — attachment upload ownership", () => {
+  // `_storage` is shared with portfolio scans and health documents. A storage
+  // id someone merely learned must never be staged as their own upload — the
+  // discard and abandoned-upload paths would then delete another record's blob.
+  async function seedPortfolioBlob(
+    t: ReturnType<typeof convexTest>,
+    scholarId: Id<"users">,
+  ) {
+    return await t.run(async (ctx) => {
+      const storageId = await ctx.storage.store(
+        new Blob(["portfolio scan"], { type: "application/pdf" }),
+      );
+      await ctx.db.insert("portfolioItems", {
+        scholarId,
+        title: "field-notes.pdf",
+        source: "manual",
+        fileStorageId: storageId,
+        fileMimeType: "application/pdf",
+        matchStatus: "confirmed",
+        assignmentStatus: "none",
+        processingStatus: "ready",
+      });
+      return storageId;
+    });
+  }
+
+  const blobExists = (
+    t: ReturnType<typeof convexTest>,
+    storageId: Id<"_storage">,
+  ) => t.run(async (ctx) => (await ctx.db.system.get("_storage", storageId)) !== null);
+
+  test("refuses to register a blob that predates the caller's reservation", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "own-teacher");
+    const kai = await seedUser(t, "scholar", "own-kai");
+    const portfolioStorageId = await seedPortfolioBlob(t, kai);
+    const asTeacher = await withUser(t, teacher);
+    // Same size as the portfolio scan, so only the time check can refuse it.
+    const { reservationId } = await asTeacher.mutation(
+      api.parentMessages.generateAttachmentUploadUrl,
+      { sizeBytes: 14 },
+    );
+
+    await expect(
+      asTeacher.mutation(api.parentMessages.registerAttachmentUpload, {
+        reservationId,
+        storageId: portfolioStorageId,
+        fileName: "field-notes.pdf",
+      }),
+    ).rejects.toThrow(/not available/i);
+    expect(
+      await t.run((ctx) => ctx.db.query("parentMessageAttachments").collect()),
+    ).toEqual([]);
+    expect(await blobExists(t, portfolioStorageId)).toBe(true);
+  });
+
+  test("a reservation belongs to one user and claims one blob", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "one-teacher");
+    const kai = await seedUser(t, "scholar", "one-kai");
+    const parent = await seedUser(t, "parent", "one-parent");
+    await link(t, parent, kai);
+    const asTeacher = await withUser(t, teacher);
+    const { reservationId: parentReservation } = await (
+      await withUser(t, parent)
+    ).mutation(api.parentMessages.generateAttachmentUploadUrl, {
+      sizeBytes: 5,
+    });
+    const stored = await t.run((ctx) =>
+      ctx.storage.store(new Blob(["photo"], { type: "image/jpeg" })),
+    );
+    await expect(
+      asTeacher.mutation(api.parentMessages.registerAttachmentUpload, {
+        reservationId: parentReservation,
+        storageId: stored,
+        fileName: "photo.jpg",
+      }),
+    ).rejects.toThrow(/expired/i);
+
+    const first = await uploadAs(
+      t,
+      teacher,
+      new Blob(["first"], { type: "image/jpeg" }),
+    );
+    const { attachmentId } = await asTeacher.mutation(
+      api.parentMessages.registerAttachmentUpload,
+      { ...first, fileName: "first.jpg" },
+    );
+    // Retrying the same registration is idempotent.
+    expect(
+      (
+        await asTeacher.mutation(api.parentMessages.registerAttachmentUpload, {
+          ...first,
+          fileName: "first.jpg",
+        })
+      ).attachmentId,
+    ).toBe(attachmentId);
+    const second = await t.run((ctx) =>
+      ctx.storage.store(new Blob(["second"], { type: "image/jpeg" })),
+    );
+    await expect(
+      asTeacher.mutation(api.parentMessages.registerAttachmentUpload, {
+        reservationId: first.reservationId,
+        storageId: second,
+        fileName: "second.jpg",
+      }),
+    ).rejects.toThrow(/expired/i);
+
+    // The caller's own proven upload is still theirs to discard.
+    await asTeacher.mutation(api.parentMessages.discardAttachmentUpload, {
+      attachmentId,
+    });
+    expect(await blobExists(t, first.storageId)).toBe(false);
+  });
+
+  test("a reservation expires with its upload URL", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = convexTest(schema, modules);
+      const teacher = await seedUser(t, "teacher", "ttl-teacher");
+      const upload = await uploadAs(
+        t,
+        teacher,
+        new Blob(["photo"], { type: "image/jpeg" }),
+      );
+      vi.advanceTimersByTime(60 * 60 * 1000 + 1);
+      await expect(
+        (await withUser(t, teacher)).mutation(
+          api.parentMessages.registerAttachmentUpload,
+          { ...upload, fileName: "late.jpg" },
+        ),
+      ).rejects.toThrow(/expired/i);
+      await t.finishAllScheduledFunctions(vi.runAllTimers);
+      expect(
+        await t.run((ctx) =>
+          ctx.db.query("parentMessageUploadReservations").collect(),
+        ),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a reservation claims only a blob of the size it declared", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "size-teacher");
+    const asTeacher = await withUser(t, teacher);
+    const { reservationId } = await asTeacher.mutation(
+      api.parentMessages.generateAttachmentUploadUrl,
+      { sizeBytes: 5 },
+    );
+    // Someone else's file stored after the reservation: newer, but the
+    // reservation could not have known its size in advance.
+    const foreign = await t.run((ctx) =>
+      ctx.storage.store(new Blob(["health form"], { type: "application/pdf" })),
+    );
+    await expect(
+      asTeacher.mutation(api.parentMessages.registerAttachmentUpload, {
+        reservationId,
+        storageId: foreign,
+        fileName: "form.pdf",
+      }),
+    ).rejects.toThrow(/not available/i);
+    expect(await blobExists(t, foreign)).toBe(true);
+
+    await expect(
+      asTeacher.mutation(api.parentMessages.generateAttachmentUploadUrl, {
+        sizeBytes: 26 * 1024 * 1024,
+      }),
+    ).rejects.toThrow(/25 MB/);
+    for (let i = 1; i < 20; i++) {
+      await asTeacher.mutation(api.parentMessages.generateAttachmentUploadUrl, {
+        sizeBytes: i,
+      });
+    }
+    await expect(
+      asTeacher.mutation(api.parentMessages.generateAttachmentUploadUrl, {
+        sizeBytes: 20,
+      }),
+    ).rejects.toThrow(/too many uploads/i);
+  });
+
+  test("cleanup never deletes a blob another table owns", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "guard-teacher");
+    const kai = await seedUser(t, "scholar", "guard-kai");
+    const asTeacher = await withUser(t, teacher);
+
+    // Proven provenance is not enough on its own: a portfolio scan stored
+    // inside the reservation window still belongs to the portfolio.
+    const discarded = await uploadAs(
+      t,
+      teacher,
+      new Blob(["scan"], { type: "application/pdf" }),
+    );
+    const abandoned = await uploadAs(
+      t,
+      teacher,
+      new Blob(["scan"], { type: "application/pdf" }),
+    );
+    const ids = [];
+    for (const upload of [discarded, abandoned]) {
+      await t.run((ctx) =>
+        ctx.db.insert("portfolioItems", {
+          scholarId: kai,
+          title: "scan.pdf",
+          source: "manual",
+          fileStorageId: upload.storageId,
+          matchStatus: "confirmed",
+          assignmentStatus: "none",
+          processingStatus: "ready",
+        }),
+      );
+      ids.push(
+        (
+          await asTeacher.mutation(
+            api.parentMessages.registerAttachmentUpload,
+            { ...upload, fileName: "scan.pdf" },
+          )
+        ).attachmentId,
+      );
+    }
+    await asTeacher.mutation(api.parentMessages.discardAttachmentUpload, {
+      attachmentId: ids[0],
+    });
+    await t.mutation(internal.parentMessages.deleteAbandonedAttachment, {
+      attachmentId: ids[1],
+    });
+    expect(await blobExists(t, discarded.storageId)).toBe(true);
+    expect(await blobExists(t, abandoned.storageId)).toBe(true);
+  });
+
+  test("an upload staged before reservations existed never deletes an older blob", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = convexTest(schema, modules);
+      const teacher = await seedUser(t, "teacher", "legacy-teacher");
+      const kai = await seedUser(t, "scholar", "legacy-kai");
+      // The old registration path accepted any unclaimed storage id, so a row
+      // with no reservation may already point at someone else's file. An
+      // honest legacy row is at most ~25h younger than its blob.
+      const stolen = await t.run((ctx) =>
+        ctx.storage.store(
+          new Blob(["health form"], { type: "application/pdf" }),
+        ),
+      );
+      const portfolioStorageId = await seedPortfolioBlob(t, kai);
+      vi.advanceTimersByTime(26 * 60 * 60 * 1000);
+      const [unindexedRow, portfolioRow] = await t.run(async (ctx) =>
+        Promise.all(
+          [stolen, portfolioStorageId].map((storageId) =>
+            ctx.db.insert("parentMessageAttachments", {
+              storageId,
+              uploaderId: teacher,
+              fileName: "form.pdf",
+              mimeType: "application/pdf",
+              sizeBytes: 11,
+              source: "upload",
+            }),
+          ),
+        ),
+      );
+      await (await withUser(t, teacher)).mutation(
+        api.parentMessages.discardAttachmentUpload,
+        { attachmentId: unindexedRow },
+      );
+      await t.mutation(internal.parentMessages.deleteAbandonedAttachment, {
+        attachmentId: portfolioRow,
+      });
+      expect(await blobExists(t, stolen)).toBe(true);
+      expect(await blobExists(t, portfolioStorageId)).toBe(true);
+      expect(
+        await t.run((ctx) =>
+          ctx.db.query("parentMessageAttachments").collect(),
+        ),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a copy made at send time keeps the upload's proof", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "copy-teacher");
+    const kai = await seedUser(t, "scholar", "copy-kai");
+    const lani = await seedUser(t, "scholar", "copy-lani");
+    for (const [name, scholar] of [
+      ["copy-parent-a", kai],
+      ["copy-parent-b", lani],
+    ] as const) {
+      await link(t, await seedUser(t, "parent", name), scholar);
+    }
+    await grantStaffAccessToScholars(t, {
+      staffUserId: teacher,
+      scholarIds: [kai, lani],
+    });
+    const upload = await uploadAs(
+      t,
+      teacher,
+      new Blob(["notes"], { type: "application/pdf" }),
+    );
+    const asTeacher = await withUser(t, teacher);
+    const { attachmentId } = await asTeacher.mutation(
+      api.parentMessages.registerAttachmentUpload,
+      { ...upload, fileName: "notes.pdf" },
+    );
+    await asTeacher.mutation(api.parentMessages.sendMessage, {
+      body: "Notes",
+      scholarIds: [kai, lani],
+      attachmentIds: [attachmentId],
+    });
+    const rows = await t.run((ctx) =>
+      ctx.db.query("parentMessageAttachments").collect(),
+    );
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((row) => row.uploadReservedAt)).size).toBe(1);
+    expect(rows[0].uploadReservedAt).toBeDefined();
   });
 });
 
@@ -1585,9 +1924,10 @@ describe("parentMessages — reply, start, read, scoping", () => {
     expect(full!.messages.map((m) => m.authorType)).toEqual(["teacher", "parent"]);
   });
 
-  test("a parent-initiated thread has no teacher and surfaces in the staff scope=all view; a teacher reply claims it", async () => {
+  test("a parent-initiated thread has no teacher and sits in every staffer's Mine until a staff reply claims it", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher", "t");
+    const colleague = await seedUser(t, "teacher", "colleague");
     const kai = await seedUser(t, "scholar", "kai");
     const pat = await seedUser(t, "parent", "pat");
     await link(t, pat, kai);
@@ -1602,10 +1942,13 @@ describe("parentMessages — reply, start, read, scoping", () => {
     expect(created!.scholarId).toBe(kai);
 
     const asTeacher = await withUser(t, teacher);
-    // Not in "mine" (teacher authored none) but present in roster-wide "all".
-    expect((await asTeacher.query(api.parentMessages.listMyThreads, {})).length).toBe(0);
-    const all = await asTeacher.query(api.parentMessages.listMyThreads, { scope: "all" });
-    expect(all.length).toBe(1);
+    const asColleague = await withUser(t, colleague);
+    const mineIds = async (as: typeof asTeacher) =>
+      (await as.query(api.parentMessages.listMyThreads, {})).map((row) => row._id);
+    // Unclaimed: no one on staff has it yet, so it is in everyone's Mine (the
+    // inbox's default view) rather than only behind "All".
+    expect(await mineIds(asTeacher)).toEqual([threadId]);
+    expect(await mineIds(asColleague)).toEqual([threadId]);
 
     await asTeacher.mutation(api.parentMessages.replyInThread, {
       threadId,
@@ -1613,6 +1956,24 @@ describe("parentMessages — reply, start, read, scoping", () => {
     });
     const claimed = await t.run(async (ctx) => ctx.db.get(threadId));
     expect(claimed!.teacherId).toBe(teacher);
+    // Claimed: the teacher's, out of the colleague's Mine, still in All.
+    expect(await mineIds(asTeacher)).toEqual([threadId]);
+    expect(await mineIds(asColleague)).toEqual([]);
+    const all = await asColleague.query(api.parentMessages.listMyThreads, {
+      scope: "all",
+    });
+    expect(all.map((row) => row._id)).toEqual([threadId]);
+
+    // Writing in it as staff makes it the colleague's too, and puts them on
+    // the thread's staff list after its owner.
+    await asColleague.mutation(api.parentMessages.replyInThread, {
+      threadId,
+      body: "Adding a note from the office.",
+    });
+    const [row] = await asColleague.query(api.parentMessages.listMyThreads, {});
+    expect(row?._id).toBe(threadId);
+    if (row?.viewer !== "teacher") throw new Error("expected a staff row");
+    expect(row.staff.map((person) => person._id)).toEqual([teacher, colleague]);
   });
 
   test("a scholar gets [] from listMyThreads (no throw)", async () => {
@@ -1620,6 +1981,147 @@ describe("parentMessages — reply, start, read, scoping", () => {
     const kai = await seedUser(t, "scholar", "kai");
     const asKai = await withUser(t, kai);
     expect(await asKai.query(api.parentMessages.listMyThreads, {})).toEqual([]);
+  });
+
+  test("rows and bubbles name another staffer or co-guardian; only the viewer's own words are 'You'", async () => {
+    const t = convexTest(schema, modules);
+    const amber = await seedUser(t, "teacher", "amber", "Amber Teacher");
+    const other = await seedUser(t, "teacher", "other", "Other Teacher");
+    const kai = await seedUser(t, "scholar", "kai", "Kai");
+    const pat = await seedUser(t, "parent", "pat", "Pat Parent");
+    const alex = await seedUser(t, "parent", "alex", "Alex Parent");
+    await link(t, pat, kai);
+    await link(t, alex, kai);
+
+    const asAmber = await withUser(t, amber);
+    const { threadIds } = await asAmber.mutation(api.parentMessages.sendMessage, {
+      body: "Dear Families, museum day is Friday.",
+      scholarId: kai,
+    });
+    const threadId = threadIds[0]!;
+
+    // Another staffer browsing All is told who wrote it, not "You".
+    const asOther = await withUser(t, other);
+    const [otherRow] = await asOther.query(api.parentMessages.listMyThreads, {
+      scope: "all",
+    });
+    expect(otherRow?.lastMessageAuthorName).toBe("Amber Teacher");
+    if (otherRow?.viewer !== "teacher") throw new Error("expected a staff row");
+    expect(otherRow.staff.map((person) => person._id)).toEqual([amber]);
+    const otherView = await asOther.query(api.parentMessages.getThread, {
+      threadId,
+      as: "staff",
+    });
+    expect(otherView!.messages.map((m) => [m.authorName, m.mine])).toEqual([
+      ["Amber Teacher", false],
+    ]);
+
+    // The author reads her own words as "You".
+    const [amberRow] = await asAmber.query(api.parentMessages.listMyThreads, {});
+    expect(amberRow?.lastMessageAuthorName).toBe("You");
+    const amberView = await asAmber.query(api.parentMessages.getThread, {
+      threadId,
+      as: "staff",
+    });
+    expect(amberView!.messages.map((m) => m.mine)).toEqual([true]);
+
+    // Guardians share one side too: a co-guardian's reply is named.
+    const asPat = await withUser(t, pat);
+    await asPat.mutation(api.parentMessages.replyInThread, {
+      threadId,
+      body: "We'll send photos!",
+      as: "parent",
+    });
+    const [patRow] = await asPat.query(api.parentMessages.listMyGuardianThreads, {});
+    expect(patRow?.lastMessageAuthorName).toBe("You");
+    const asAlex = await withUser(t, alex);
+    const [alexRow] = await asAlex.query(
+      api.parentMessages.listMyGuardianThreads,
+      {},
+    );
+    expect(alexRow?.lastMessageAuthorName).toBe("Pat Parent");
+    // Staff ids never reach a guardian.
+    expect(alexRow).not.toHaveProperty("staff");
+    const alexView = await asAlex.query(api.parentMessages.getThread, {
+      threadId,
+      as: "parent",
+    });
+    expect(alexView!.messages.map((m) => [m.authorName, m.mine])).toEqual([
+      ["Amber Teacher", false],
+      ["Pat Parent", false],
+    ]);
+    expect(alexView).not.toHaveProperty("staff");
+  });
+
+  test("a thread whose teacher has left is unclaimed again until a current staffer writes in it", async () => {
+    const t = convexTest(schema, modules);
+    const departed = await seedUser(t, "teacher", "departed", "Departed Teacher");
+    const colleague = await seedUser(t, "teacher", "colleague");
+    const other = await seedUser(t, "teacher", "other");
+    const kai = await seedUser(t, "scholar", "kai", "Kai");
+    const pat = await seedUser(t, "parent", "pat");
+    await link(t, pat, kai);
+
+    const { threadIds } = await (await withUser(t, departed)).mutation(
+      api.parentMessages.sendMessage,
+      { body: "Welcome to the class!", scholarId: kai },
+    );
+    const threadId = threadIds[0]!;
+    const asColleague = await withUser(t, colleague);
+    const asOther = await withUser(t, other);
+    const mineIds = async (as: typeof asColleague) =>
+      (await as.query(api.parentMessages.listMyThreads, {})).map((row) => row._id);
+    expect(await mineIds(asColleague)).toEqual([]);
+
+    // The teacher leaves the school: no one on staff answers for it now.
+    await t.run(async (ctx) => {
+      const rows = await ctx.db
+        .query("memberships")
+        .withIndex("by_user", (q) => q.eq("userId", departed))
+        .collect();
+      for (const row of rows) await ctx.db.delete(row._id);
+    });
+    expect(await mineIds(asColleague)).toEqual([threadId]);
+    expect(await mineIds(asOther)).toEqual([threadId]);
+    // They leave the facepile; their message keeps their name.
+    const [row] = await asColleague.query(api.parentMessages.listMyThreads, {});
+    if (row?.viewer !== "teacher") throw new Error("expected a staff row");
+    expect(row.staff).toEqual([]);
+    expect(row.lastMessageAuthorName).toBe("Departed Teacher");
+
+    // A current staffer answering takes it out of everyone else's Mine.
+    await asColleague.mutation(api.parentMessages.replyInThread, {
+      threadId,
+      body: "I'll pick this up.",
+    });
+    expect(await mineIds(asColleague)).toEqual([threadId]);
+    expect(await mineIds(asOther)).toEqual([]);
+  });
+
+  test("a staffer who is also a guardian doesn't get their own school-team note in their staff Mine", async () => {
+    const t = convexTest(schema, modules);
+    const teacher = await seedUser(t, "teacher", "t");
+    const kai = await seedUser(t, "scholar", "kai", "Kai");
+    const sloane = await seedUser(t, "staff", "sloane", "Sloane");
+    await link(t, sloane, kai);
+
+    const asSloane = await withUser(t, sloane);
+    const { threadId } = await asSloane.mutation(api.parentMessages.startThread, {
+      body: "Kai will be late on Friday.",
+      scholarId: kai,
+      as: "parent",
+    });
+    // She can reach it as staff (under All); it just isn't hers to answer.
+    const all = await asSloane.query(api.parentMessages.listMyThreads, {
+      scope: "all",
+    });
+    expect(all.map((row) => row._id)).toEqual([threadId]);
+    expect(await asSloane.query(api.parentMessages.listMyThreads, {})).toEqual([]);
+    const teacherMine = await (await withUser(t, teacher)).query(
+      api.parentMessages.listMyThreads,
+      {},
+    );
+    expect(teacherMine.map((row) => row._id)).toEqual([threadId]);
   });
 });
 
@@ -1766,16 +2268,16 @@ describe("parentMessages — email channel (P2)", () => {
         "pat@home.com",
       );
       await link(t, pat, kai);
-      const storageId = await t.run((ctx) =>
-        ctx.storage.store(
-          new Blob(["photo"], { type: "image/jpeg" }),
-        ),
+      const upload = await uploadAs(
+        t,
+        teacher,
+        new Blob(["photo"], { type: "image/jpeg" }),
       );
       const asTeacher = await withUser(t, teacher);
       const { attachmentId } = await asTeacher.mutation(
         api.parentMessages.registerAttachmentUpload,
         {
-          storageId,
+          ...upload,
           fileName: "class-photo.jpg",
           mimeType: "image/jpeg",
           sizeBytes: 5,
@@ -2011,10 +2513,15 @@ describe("parentMessages — Slack teacher transport", () => {
 
     const { threadId, firstParentMessageId } = await t.run(async (ctx) => {
       const now = Date.now();
+      // The Slack mirror is first-party only (TRA-402): the thread belongs to
+      // the live PRIMARY school.
+      const institutionId = (await ctx.db.get(kai))!.institutionId!;
+      await ctx.db.patch(institutionId, { isPrimary: true });
       const parentThreadId = await ctx.db.insert("parentThreads", {
         parentUserId: pat,
         teacherId: teacher,
         scholarId: kai,
+        institutionId,
         lastMessageAt: now,
       });
       const parentMessageId = await ctx.db.insert("parentMessages", {
@@ -2745,5 +3252,120 @@ describe("parentMessages — security", () => {
     } finally {
       delete process.env.PARENT_INBOUND_SECRET;
     }
+  });
+});
+
+// Regressions from the message-access matrix (TRA-388): the Slack bridge and
+// the attachment read obey the same rule as the app.
+describe("family access regressions (TRA-401 / TRA-402 / TRA-403)", () => {
+  async function seedSchools(t: ReturnType<typeof makeTestConvex>) {
+    return await t.run(async (ctx) => {
+      const primary = await ctx.db.insert("institutions", {
+        name: "Primary", slug: "reg-primary", kind: "school", isPrimary: true,
+      });
+      const second = await ctx.db.insert("institutions", {
+        name: "Second", slug: "reg-second", kind: "school",
+      });
+      const teacherAt = async (username: string, institutionId: Id<"institutions">) => {
+        const id = await ctx.db.insert("users", {
+          username, name: username, role: "teacher", slackUserId: `U_${username}`,
+        });
+        await ctx.db.insert("memberships", { userId: id, role: "teacher", institutionId });
+        return id;
+      };
+      const here = await teacherAt("reg_here", primary);
+      const there = await teacherAt("reg_there", second);
+      const parent = await ctx.db.insert("users", { username: "reg_parent", name: "P", role: "parent" });
+      const scholar = await ctx.db.insert("users", {
+        username: "reg_scholar", name: "S", role: "scholar", institutionId: primary,
+      });
+      await ctx.db.insert("guardianships", { parentUserId: parent, scholarUserId: scholar, createdBy: parent });
+      const thread = async (opts: { institutionId: Id<"institutions">; scholarId?: Id<"users"> }, ts: string) => {
+        const threadId = await ctx.db.insert("parentThreads", {
+          parentUserId: parent, lastMessageAt: 1, ...opts,
+        });
+        await ctx.db.insert("parentThreadParticipants", { threadId, parentUserId: parent });
+        await ctx.db.insert("parentSlackThreads", {
+          parentThreadId: threadId, channelId: "C_REG", threadTs: ts, lastNotifiedAt: 1,
+        });
+        return threadId;
+      };
+      return {
+        primary, second, here, there, parent, scholar,
+        // A guardian of several children who picked none: no subject scholar.
+        scholarless: await thread({ institutionId: primary }, "1.0"),
+        // The scholar has since moved to the second school.
+        transferred: await thread({ institutionId: primary, scholarId: scholar }, "2.0"),
+        atSecond: await thread({ institutionId: second }, "3.0"),
+      };
+    });
+  }
+
+  const slackReply = (t: ReturnType<typeof makeTestConvex>, threadTs: string, who: string) =>
+    t.mutation(internal.parentMessages.ingestInboundSlackReply, {
+      channelId: "C_REG", threadTs, slackUserId: `U_${who}`, body: "hello", eventId: `ev-${threadTs}-${who}`,
+    });
+
+  test("TRA-401: a Slack reply needs school:operations at the thread's OWN school", async () => {
+    const t = makeTestConvex();
+    const w = await seedSchools(t);
+    // No subject scholar used to mean no check at all.
+    expect(await slackReply(t, "1.0", "reg_there")).toMatchObject({ ok: false, reason: "unlinked" });
+    expect(await slackReply(t, "1.0", "reg_here")).toMatchObject({ ok: true });
+    // A transferred scholar's old thread: the NEW school's staff don't reach it.
+    await t.run((ctx) => ctx.db.patch(w.scholar, { institutionId: w.second }));
+    expect(await slackReply(t, "2.0", "reg_there")).toMatchObject({ ok: false, reason: "unlinked" });
+    const written = await t.run(async (ctx) =>
+      (await ctx.db.query("parentMessages").collect()).map((m) => m.authorUserId),
+    );
+    expect(written).toEqual([w.here]);
+  });
+
+  test("TRA-402: only the live primary school's family threads are mirrored to Slack", async () => {
+    const t = makeTestConvex();
+    const w = await seedSchools(t);
+    const context = async (threadId: Id<"parentThreads">) => {
+      const messageId = await t.run(async (ctx) => {
+        if (!(await ctx.db.query("parentMessageChannel").first())) {
+          await ctx.db.insert("parentMessageChannel", { slackChannelId: "C_REG", linkedBy: w.here, linkedAt: 1 });
+        }
+        return await ctx.db.insert("parentMessages", {
+          threadId, authorType: "parent", authorUserId: w.parent, body: "Pickup at 3?",
+        });
+      });
+      return await t.query(internal.parentMessages.getSlackNotificationContext, { messageId });
+    };
+    expect(await context(w.scholarless)).not.toBeNull();
+    expect(await context(w.atSecond)).toBeNull();
+    await t.run((ctx) => ctx.db.patch(w.primary, { disabledAt: 1 }));
+    expect(await context(w.scholarless)).toBeNull();
+  });
+
+  test("TRA-403: a guardian never receives an attachment of a withdrawn message", async () => {
+    const t = makeTestConvex();
+    const w = await seedSchools(t);
+    const attachmentId = await t.run(async (ctx) => {
+      const messageId = await ctx.db.insert("parentMessages", {
+        threadId: w.scholarless, authorType: "parent", authorUserId: w.parent, body: "x", retracted: true,
+      });
+      return await ctx.db.insert("parentMessageAttachments", {
+        messageId, threadId: w.scholarless, storageId: await ctx.storage.store(new Blob(["x"])),
+        uploaderId: w.parent, fileName: "x.png", mimeType: "image/png", sizeBytes: 1,
+      });
+    });
+    const as = async (userId: Id<"users">) => {
+      const sessionId = await t.run((ctx) =>
+        ctx.db.insert("authSessions", { userId, expirationTime: Date.now() + 86_400_000 }),
+      );
+      return t.withIdentity({ subject: `${userId}|${sessionId}`, issuer: "https://convex.dev" });
+    };
+    const guardian = await (await as(w.parent)).query(api.parentMessages.getThreadAttachments, {
+      threadId: w.scholarless, as: "parent",
+    });
+    expect(guardian).toEqual([]);
+    const staff = await (await as(w.here)).query(api.parentMessages.getThreadAttachments, {
+      threadId: w.scholarless, as: "staff",
+    });
+    expect(staff).toMatchObject([{ _id: attachmentId, withdrawn: true }]);
   });
 });

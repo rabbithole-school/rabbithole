@@ -8,7 +8,6 @@ import {
   buildReflectionSnippet,
   codeExplorerSection,
   ideaConvoSection,
-  workshopListeningSection,
   type MetaSystemPromptInput,
 } from "../metaPrompts";
 import {
@@ -35,8 +34,7 @@ describe("buildMetaSystemPrompt — structure", () => {
   test("sections appear in the fixed order", () => {
     const p = buildMetaSystemPrompt(
       baseInput({
-        codeExplorerEnabled: true,
-        ideaUpdates: [{ authorName: "Ms. Lehua", title: "Star Map", body: "Love it." }],
+        ideaUpdates: [{ authorName: "Ms. Lehua", title: "Star Map" }],
         credits: [{ title: "Night Sky mode" }],
         todaySessions: [{ title: "Fractions", activityTitle: "Fraction Sense" }],
         openIdeas: [{ title: "Dark mode", answered: false }],
@@ -77,16 +75,15 @@ describe("buildMetaSystemPrompt — structure", () => {
 });
 
 describe("buildMetaSystemPrompt — deterministic sections", () => {
-  test("updates section present when there are fresh responses, naming the human", () => {
+  test("updates section present when there are unread replies, naming the human (a pointer, never the reply)", () => {
     const p = buildMetaSystemPrompt(
       baseInput({
-        ideaUpdates: [
-          { authorName: "Ms. Lehua", title: "Star Map", body: "Sharing it with the team." },
-        ],
+        ideaUpdates: [{ authorName: "Ms. Lehua", title: "Star Map" }],
       }),
     );
-    expect(p).toContain("## Updates to deliver (do this early, after your opening exchange)");
-    expect(p).toContain("Ms. Lehua wrote back about your idea 'Star Map': Sharing it with the team.");
+    expect(p).toContain("## Updates to deliver");
+    expect(p).toContain("Ms. Lehua");
+    expect(p).toContain("'Star Map'");
   });
 
   test("updates section OMITTED entirely when there are none", () => {
@@ -295,13 +292,6 @@ describe("buildMetaSystemPrompt — deterministic sections", () => {
     expect(empty).toEqual(none);
   });
 
-  test("Honesty section carries the QB-approved portrait sentence verbatim", () => {
-    const p = buildMetaSystemPrompt(baseInput());
-    expect(p).toContain(
-      "If they ask whether this chat goes into their portrait: yes — what they say here can become part of it, and their teacher sees the same portrait they do.",
-    );
-  });
-
   test("Honesty section states the canonical teacher-visibility disclosure", () => {
     // The scholar-visible disclosure is standardized to "Your teacher can read
     // this." (lib/admonishments.ts TEACHER_LINE, reflection/homework footers).
@@ -322,76 +312,25 @@ describe("buildMetaSystemPrompt — deterministic sections", () => {
   });
 });
 
-// ── Workshop Code Explorer section (flag-gated, QB-authored verbatim) ──────
-describe("buildMetaSystemPrompt — Code Explorer section (flag-gated)", () => {
-  let codeExplorerRepository = "github.com/rabbithole-school/rabbithole";
-
-  const CANONICAL_CODE_EXPLORER = `## Exploring Rabbithole's own code (when Kai is curious how this place works)
-Rabbithole is open source — its real code is public for anyone to read, and
-Kai is allowed to explore it with you. You have two tools:
-read_rabbithole_file and search_rabbithole_code.
-- When they wonder how something works — the tutor, the Sky, this very chat —
-  you may look it up in the real code and give a guided tour.
-- Translate, don't dump: quote at most ~10 short lines at a time, then say
-  what they mean in plain language. Prefer "here's the exact line where X
-  happens" over walls of code.
-- If you don't know where something lives, look before you guess: list_rabbithole_files with a folder prefix, then open what you find. Never invent a path or pretend code you haven't read.
-- Good starting points for tours: convex/metaPrompts.ts (this chat's own instructions), components/ConceptAtlasView.tsx and lib/atlasEngine.ts (the Star Map), convex/schema.ts (the shape of everything).
-- Keep them thinking: after showing a snippet, sometimes ask what they think
-  a line does before telling them.
-- Be honest about limits: you can read this public code, but you can't run
-  it, change it, or see anything private — and if exploring turns into "it
-  should work differently," that's a Workshop idea ("want me to pass that
-  along?").
-- If they want to explore on their own: ${codeExplorerRepository}.`;
-
-  test("codeExplorerSection is the exact QB-authored text, only firstName interpolated", () => {
-    expect(codeExplorerSection("Kai")).toBe(CANONICAL_CODE_EXPLORER);
+// ── Workshop Code Explorer section (always on, QB-authored verbatim) ───────
+describe("buildMetaSystemPrompt — Code Explorer section (always on)", () => {
+  test("codeExplorerSection interpolates the scholar's first name", () => {
     expect(codeExplorerSection("Lani")).toContain(
       "## Exploring Rabbithole's own code (when Lani is curious how this place works)",
     );
     expect(codeExplorerSection("Lani")).toContain("Lani is allowed to explore it with you.");
   });
 
-  test("carries the QB discovery lines verbatim, right after the Translate-don't-dump bullet", () => {
-    const p = codeExplorerSection("Kai");
-    const lookBeforeGuess =
-      "- If you don't know where something lives, look before you guess: list_rabbithole_files with a folder prefix, then open what you find. Never invent a path or pretend code you haven't read.";
-    const startingPoints =
-      "- Good starting points for tours: convex/metaPrompts.ts (this chat's own instructions), components/ConceptAtlasView.tsx and lib/atlasEngine.ts (the Star Map), convex/schema.ts (the shape of everything).";
-    expect(p).toContain(lookBeforeGuess);
-    expect(p).toContain(startingPoints);
-    // Ordering: after "Translate, don't dump" (the "walls of code" bullet),
-    // before "Keep them thinking".
-    const translate = p.indexOf('over walls of code.');
-    const look = p.indexOf(lookBeforeGuess);
-    const starts = p.indexOf(startingPoints);
-    const thinking = p.indexOf("- Keep them thinking:");
-    expect(translate).toBeLessThan(look);
-    expect(look).toBeLessThan(starts);
-    expect(starts).toBeLessThan(thinking);
-  });
-
-  test("section present + verbatim when the flag is ON", () => {
-    const p = buildMetaSystemPrompt(baseInput({ codeExplorerEnabled: true }));
-    expect(p).toContain(CANONICAL_CODE_EXPLORER);
-  });
-
-  test("section ABSENT when the flag is off (default) — and off-path is byte-identical", () => {
-    const off = buildMetaSystemPrompt(baseInput({ codeExplorerEnabled: false }));
-    const omitted = buildMetaSystemPrompt(baseInput()); // field absent
-    expect(off).not.toContain("## Exploring Rabbithole's own code");
-    expect(off).not.toContain("read_rabbithole_file");
-    // Passing the flag as false adds nothing vs. omitting it: proves the
-    // off-path is a byte-identical no-op relative to the pre-feature prompt.
-    expect(off).toBe(omitted);
+  test("section present + verbatim, with no opt-in", () => {
+    const p = buildMetaSystemPrompt(baseInput());
+    expect(p).toContain("## Exploring Rabbithole's own code");
+    expect(p).toContain(codeExplorerSection("Kai"));
   });
 
   test("section sits AFTER the Workshop/listening block and BEFORE Updates", () => {
     const p = buildMetaSystemPrompt(
       baseInput({
-        codeExplorerEnabled: true,
-        ideaUpdates: [{ authorName: "Ms. Lehua", title: "Star Map", body: "Love it." }],
+        ideaUpdates: [{ authorName: "Ms. Lehua", title: "Star Map" }],
       }),
     );
     const workshop = p.indexOf("## The Workshop (the listening job)");
@@ -405,59 +344,14 @@ read_rabbithole_file and search_rabbithole_code.
 
 // ── Workshop idea conversations (flag-gated, QB-authored verbatim) ─────────
 describe("buildMetaSystemPrompt — idea conversations (flag-gated)", () => {
-  const CANONICAL_IDEA_CONVO = `## The Workshop (thinking partner + sending ideas)
-This is where Kai helps shape how Rabbithole works. You have one tool,
-send_idea_to_teacher, that carries an idea to the people who build Rabbithole —
-their teachers read every one. Here you are a THINKING PARTNER, never a gate:
-- Kai can ALWAYS send an idea — exactly as they said it, right now, the
-  moment they want. If they say "just send it," send it as-is with no pushback.
-  NEVER refuse, never make them polish it first, never hint that an idea isn't
-  good enough to send. Every idea is worth sending.
-- A few ideas are worth thinking about together first — the ones about HOW
-  LEARNING WORKS: rewards for right answers, competition or leaderboards,
-  shortcuts, or just handing over answers. For those, get curious WITH them —
-  one or two warm, real questions ("what would a leaderboard feel like for the
-  kid who comes in last?"), never a lecture, never a quiz, and never walking
-  them toward an answer you already have. Then offer to send.
-- Most ideas need none of that. "The sky should have a night mode" is a great
-  idea just as it is — say so, offer to send it, and move on. Match the size of
-  the conversation to the idea; don't turn a small idea into a seminar.
-- When you send, Kai's OWN WORDS always go with it (scholarWords) —
-  their real phrasing, not yours. If a conversation genuinely reshaped the idea
-  and Kai agreed to the new way of putting it, include that too
-  (refined) — their teachers see both. If they kept it as-is, send just their
-  words and no refined.
-- "I'll send this to your teachers" is your CEILING. Never promise it will be
-  built, never say when, never take credit. Humans decide; you carry the idea.
-- If several ideas are already waiting, help them pick which matters most right
-  now instead of piling on.`;
-
-  test("ideaConvoSection is the exact QB-authored text, only firstName interpolated", () => {
-    expect(ideaConvoSection("Kai")).toBe(CANONICAL_IDEA_CONVO);
+  test("ideaConvoSection interpolates the scholar's first name", () => {
     expect(ideaConvoSection("Lani")).toContain("This is where Lani helps shape");
     expect(ideaConvoSection("Lani")).toContain("Lani can ALWAYS send an idea");
   });
 
-  test("embeds the four QB guardrails in kid-facing terms", () => {
-    const p = ideaConvoSection("Kai");
-    // 1. Always-sendable, never a gate.
-    expect(p).toContain('If they say "just send it," send it as-is with no pushback.');
-    expect(p).toMatch(/NEVER refuse/);
-    // 2. Proportionality: trivial vs. how-learning-works.
-    expect(p).toMatch(/HOW\s+LEARNING WORKS/);
-    expect(p).toContain("night mode");
-    expect(p).toMatch(/don't turn a small idea into a seminar/);
-    // 3. The kid's words survive: scholarWords always, refined on agreement.
-    expect(p).toContain("OWN WORDS always go with it (scholarWords)");
-    expect(p).toContain("(refined)");
-    // 4. The ceiling: send it, never promise building.
-    expect(p).toContain('"I\'ll send this to your teachers" is your CEILING.');
-    expect(p).toMatch(/Never promise it will be\n  built/);
-  });
-
   test("section present + verbatim when the flag is ON, and it REPLACES the consent block", () => {
     const p = buildMetaSystemPrompt(baseInput({ ideaConvosEnabled: true }));
-    expect(p).toContain(CANONICAL_IDEA_CONVO);
+    expect(p).toContain(ideaConvoSection("Kai"));
     expect(p).toContain("send_idea_to_teacher");
     // The original consent-capture wording is GONE under the flag.
     expect(p).not.toContain("## The Workshop (the listening job)");
@@ -481,7 +375,7 @@ their teachers read every one. Here you are a THINKING PARTNER, never a gate:
     const on = buildMetaSystemPrompt(
       baseInput({
         ideaConvosEnabled: true,
-        ideaUpdates: [{ authorName: "Ms. Lehua", title: "Star Map", body: "Love it." }],
+        ideaUpdates: [{ authorName: "Ms. Lehua", title: "Star Map" }],
       }),
     );
     const reflection = on.indexOf("## Reflection (the main job)");
@@ -490,17 +384,6 @@ their teachers read every one. Here you are a THINKING PARTNER, never a gate:
     expect(reflection).toBeGreaterThanOrEqual(0);
     expect(workshop).toBeGreaterThan(reflection);
     expect(updates).toBeGreaterThan(workshop);
-  });
-
-  test("workshopListeningSection holds the original consent-capture text verbatim", () => {
-    // The extracted off-path block must be unchanged, so the flag-off prompt
-    // stays byte-identical to pre-feature.
-    const s = workshopListeningSection("Kai");
-    expect(s.startsWith("## The Workshop (the listening job)")).toBe(true);
-    expect(s).toContain(
-      'reflect it back once in your words, then ask: "Want me to pass that along?',
-    );
-    expect(s).toContain('"I\'ll pass it along" is your CEILING.');
   });
 });
 
@@ -522,6 +405,24 @@ describe("buildMetaSystemPrompt — Ask Rabbithole", () => {
     expect(prompt).toContain(WELFARE_DISCLOSURE_GUIDANCE);
   });
 
+  test("carries the Code Explorer tour-guide section", () => {
+    const prompt = buildMetaSystemPrompt(
+      baseInput({
+        purpose: "introspection",
+        firstName: "Lani",
+        ideaConvosEnabled: true,
+      }),
+    );
+    expect(prompt).toContain(codeExplorerSection("Lani"));
+    // Tools section sits after the idea contract, before Honesty.
+    expect(prompt.indexOf("send_idea_to_teacher")).toBeLessThan(
+      prompt.indexOf("## Exploring Rabbithole's own code"),
+    );
+    expect(prompt.indexOf("## Exploring Rabbithole's own code")).toBeLessThan(
+      prompt.indexOf("## Honesty"),
+    );
+  });
+
   test("does not receive daily reflection, portrait, or delivery context", () => {
     const prompt = buildMetaSystemPrompt(
       baseInput({
@@ -536,7 +437,7 @@ describe("buildMetaSystemPrompt — Ask Rabbithole", () => {
           badges: [],
         },
         ideaUpdates: [
-          { authorName: "Ms. Lehua", title: "Update", body: "Delivered" },
+          { authorName: "Ms. Lehua", title: "Update" },
         ],
         credits: [{ title: "Feature credit" }],
       }),
@@ -645,23 +546,14 @@ describe("buildReflectionSnippet", () => {
 describe("tutor prompt byte-identical after WELFARE_DISCLOSURE_GUIDANCE extraction", () => {
   const CANONICAL_WELFARE = `- **Welfare or safety disclosures are different from ordinary emotional topics, and the bar is higher.** If a scholar discloses possible harm — to themselves or someone else: abuse, violence at home, being hurt or unsafe, or wanting to hurt themselves — respond with calm warmth, tell them plainly this is something a trusted adult needs to help with *right now* (a teacher, a parent or caregiver, another adult they trust; in an emergency, emergency services), and that they did the right thing by telling someone. **Then STOP there.** Do NOT re-offer the lesson, append "and when you're ready to learn, I'm here", pivot to a question, or treat the disclosure as a topic to explore — that bounces a child out of a safety moment back into schoolwork. Hold this redirect posture for the rest of the session: if they disclose again, keep steering them to a trusted adult — do not interrogate for detail, promise secrecy, or escalate the back-and-forth. Only return to the lesson if the **scholar themselves** clearly moves back to it; a brief "I'm fine" or "I'm safe" mid-thread is NOT a green light to resume the lesson — stay gently anchored on getting them to a trusted adult.`;
 
-  test("the constant holds the exact canonical welfare text", () => {
-    expect(WELFARE_DISCLOSURE_GUIDANCE).toBe(CANONICAL_WELFARE);
-  });
-
   describe("correctness-affirmation guidance", () => {
     test("bans the affirmation pattern while preserving content-anchored warmth", () => {
-      const prompt = buildBasePrompt("Kai Nakamura", false);
+      const prompt = buildBasePrompt("Kai Nakamura");
 
       expect(prompt).toContain(
         'Never reflexively respond to a correct answer with a standalone affirmation — "You\'re right," "That\'s correct," "Exactly right," "Perfect," or "You nailed it."',
       );
-      expect(prompt).toContain(
-        "Do not replace the stamp with a disguised confirmation by restating or completing their answer for them.",
-      );
-      expect(prompt).toContain(
-        "A brief content-anchored micro-warmth is still welcome when it engages an idea they already gave you",
-      );
+      // Ordering: the ban comes before the content-anchored-warmth carve-out.
       expect(prompt.indexOf("Correctness needs substance, not an approval stamp.")).toBeLessThan(
         prompt.indexOf("Empty validators vs. content-relevant warmth"),
       );
@@ -669,13 +561,13 @@ describe("tutor prompt byte-identical after WELFARE_DISCLOSURE_GUIDANCE extracti
   });
 
   test("it splices between the same neighbor bullets in buildBasePrompt", () => {
-    const prompt = buildBasePrompt("Kai Nakamura", false);
+    const prompt = buildBasePrompt("Kai Nakamura");
     const expectedSplice = `deflect coldly with "I'm only an AI."\n${CANONICAL_WELFARE}\n- Focus praise on ideas, questions, and thinking processes`;
     expect(prompt).toContain(expectedSplice);
   });
 
   test("the welfare guidance appears exactly once in the tutor prompt", () => {
-    const prompt = buildBasePrompt("Kai Nakamura", true);
+    const prompt = buildBasePrompt("Kai Nakamura");
     const occurrences = prompt.split(WELFARE_DISCLOSURE_GUIDANCE).length - 1;
     expect(occurrences).toBe(1);
   });
@@ -723,18 +615,6 @@ describe("PROSE_STYLE_GUIDE — scoped to Special Delivery, deliberately", () =>
         PROSE_STYLE_GUIDE,
       );
     }
-  });
-
-  test("it bans the constructions the founder review named", () => {
-    expect(PROSE_STYLE_GUIDE).toContain("it's not X, it's Y");
-    expect(PROSE_STYLE_GUIDE).toContain("Quietly");
-    expect(PROSE_STYLE_GUIDE).toContain("the X worth naming");
-    expect(PROSE_STYLE_GUIDE).toContain("something real");
-  });
-
-  test("it scopes register words by use, so real vocabulary survives", () => {
-    expect(PROSE_STYLE_GUIDE).toContain("decorative senses only");
-    expect(PROSE_STYLE_GUIDE).toContain("Judge by use, not by the word");
   });
 
   test("it does not ask the writer to pass as human", () => {

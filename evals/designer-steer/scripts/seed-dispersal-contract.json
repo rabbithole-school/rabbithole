@@ -1,0 +1,13 @@
+{
+  "invariants": [
+    "Where a seed lands depends on its shape feature and the conditions (wind, animals), never on chance alone",
+    "Seeds that land close to the parent plant grow less often than seeds that land far away, because they compete with the parent for light and water"
+  ],
+  "freedoms": [
+    "Which plant, its name and look",
+    "The setting, characters, story and art style",
+    "Which controls the app has and what they are called",
+    "Side quests and extras once the seed model works"
+  ],
+  "gate": "The seed drop exists with NO special feature (seeds fall straight down) and has been run once, so the scholar has seen where plain seeds land"
+}

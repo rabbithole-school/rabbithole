@@ -2,8 +2,12 @@ import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
-import type { Doc, Id } from "../_generated/dataModel";
-import { seedScholarInInstitution, seedStaffWithMembership, seedTestInstitution } from "./institutionTestHelpers";
+import {
+  makeActivity,
+  makeLesson,
+  makeUnit,
+  makeWorld,
+} from "./factories/world";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -11,63 +15,43 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
-  const sessionId = await t.run(async (ctx) => {
-    const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
-      userId,
-      expirationTime: Date.now() + 1000 * 60 * 60,
-    };
-    return ctx.db.insert("authSessions", session);
-  });
-  return t.withIdentity({
-    subject: `${userId}|${sessionId}`,
-    issuer: "https://convex.dev",
-  });
-}
-
 describe("structured destinations (offer stars)", () => {
   test("opting into a structured star starts the unit's first online activity", async () => {
     const t = convexTest(schema, modules);
-    const { scholar, unit, activity, seed } = await t.run(async (ctx) => {
-      const teacher = await ctx.db.insert("users", {
-        name: "T",
-        username: "t",
-        role: "teacher",
-      });
-      const scholar = await ctx.db.insert("users", {
-        name: "S",
-        username: "s",
-        role: "scholar",
-      });
-      const unit = await ctx.db.insert("units", {
-        teacherId: teacher,
-        title: "Volcanoes",
-        isActive: true,
-      });
-      const lesson = await ctx.db.insert("lessons", {
-        unitId: unit,
-        title: "L1",
-        order: 0,
-      });
-      const activity = await ctx.db.insert("activities", {
-        lessonId: lesson,
-        title: "Kickoff",
-        order: 0,
-        kind: "online",
-      });
-      const seed = await ctx.db.insert("seeds", {
-        scholarId: scholar,
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const school = world.schools[0];
+    const scholar = school.scholars[0];
+    const unit = await makeUnit(t, school.teacher, school, {
+      title: "Volcanoes",
+      isActive: true,
+    });
+    const lesson = await makeLesson(t, unit, {
+      title: "L1",
+      order: 0,
+    });
+    const activity = await makeActivity(t, lesson, {
+      title: "Kickoff",
+      order: 0,
+      kind: "online",
+    });
+    const seed = await t.run((ctx) =>
+      ctx.db.insert("seeds", {
+        scholarId: scholar.id,
         origin: "teacher",
         status: "active",
         topic: "Volcanoes",
         suggestionType: "teacher_suggestion",
         rationale: "offered",
         unitId: unit,
-      });
-      return { scholar, unit, activity, seed };
-    });
+      }),
+    );
 
-    const asScholar = await asUser(t, scholar);
+    const asScholar = await world.as.scholar(scholar);
     const { id } = await asScholar.mutation(api.sessions.createFromSeed, {
       seedId: seed,
     });
@@ -80,24 +64,25 @@ describe("structured destinations (offer stars)", () => {
 
   test("opting into a bare proto-activity star stays anchorless", async () => {
     const t = convexTest(schema, modules);
-    const { scholar, seed } = await t.run(async (ctx) => {
-      const scholar = await ctx.db.insert("users", {
-        name: "S",
-        username: "s",
-        role: "scholar",
-      });
-      const seed = await ctx.db.insert("seeds", {
-        scholarId: scholar,
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const scholar = world.schools[0].scholars[0];
+    const seed = await t.run((ctx) =>
+      ctx.db.insert("seeds", {
+        scholarId: scholar.id,
         origin: "ai",
         status: "active",
         topic: "Why is the sky blue?",
         suggestionType: "frontier",
         rationale: "curious",
-      });
-      return { scholar, seed };
-    });
+      }),
+    );
 
-    const asScholar = await asUser(t, scholar);
+    const asScholar = await world.as.scholar(scholar);
     const { id } = await asScholar.mutation(api.sessions.createFromSeed, {
       seedId: seed,
     });
@@ -109,20 +94,21 @@ describe("structured destinations (offer stars)", () => {
 
   test("teacher offer drops a star and is not double-surfaced as a card", async () => {
     const t = convexTest(schema, modules);
-    const institutionId = await seedTestInstitution(t);
-    const teacher = await seedStaffWithMembership(t, { institutionId, name: "T", username: "t" });
-    const scholar = await seedScholarInInstitution(t, { institutionId, name: "S", username: "s" });
-    await t.run(async () => {
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
     });
-
-    const asTeacher = await asUser(t, teacher);
+    const school = world.schools[0];
+    const asTeacher = await world.as.staffOf(school);
     const { unitId } = await asTeacher.mutation(
       api.units.createAndOfferQuestForScholar,
-      { scholarId: scholar, title: "Comics" },
+      { scholarId: school.scholars[0].id, title: "Comics" },
     );
 
     // An offer star now points at that unit on the scholar's sky.
-    const asScholar = await asUser(t, scholar);
+    const asScholar = await world.as.scholar(school.scholars[0]);
     const sky = await asScholar.query(api.seeds.skyForSelf, {});
     const star = sky.seeds.find((s) => s.topic === "Comics");
     expect(star).toBeDefined();
@@ -135,10 +121,13 @@ describe("structured destinations (offer stars)", () => {
 
   test("a scholar's own (un-offered) IS unit still shows as a card", async () => {
     const t = convexTest(schema, modules);
-    const scholar = await t.run(async (ctx) =>
-      ctx.db.insert("users", { name: "S", username: "s", role: "scholar" }),
-    );
-    const asScholar = await asUser(t, scholar);
+    const world = await makeWorld(t, {
+      schools: 1,
+      scholarsPerSchool: 1,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const asScholar = await world.as.scholar(world.schools[0].scholars[0]);
     const { unitId } = await asScholar.mutation(
       api.units.createQuest,
       { title: "My Own Quest" },

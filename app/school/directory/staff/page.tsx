@@ -58,6 +58,15 @@ type StaffRow = {
   institutionName: string | null;
 };
 
+type AdmissionsTier = "none" | "scheduling" | "full";
+
+const ADMISSIONS_TIER_HINT: Record<AdmissionsTier, string> = {
+  none: "No access to Admissions.",
+  scheduling:
+    "Families, candidates and scheduling. No committee notes or decisions.",
+  full: "Everything in Admissions, including committee notes and decisions.",
+};
+
 type StaffCapabilityEditor = {
   canEditCurriculum: boolean;
   curriculumAccessIncludedInRole: boolean;
@@ -65,6 +74,11 @@ type StaffCapabilityEditor = {
   schoolOperationsIncludedInRole: boolean;
   canManageHealthRecords: boolean;
   healthAccessIncludedInRole: boolean;
+  /** An active institution-wide `scholars:mentor` grant. */
+  canMentorScholars?: boolean;
+  /** "full" for a platform admin by role; otherwise the explicit grant. */
+  admissionsTier: AdmissionsTier;
+  admissionsIncludedInRole: boolean;
   programGroups: Array<{
     groupId: Id<"scholarGroups">;
     name: string;
@@ -104,6 +118,7 @@ export default function SchoolStaffPage() {
     activeInstitution?.institutionId,
   );
   const canManage = canManageStaff(user?.role);
+  const isPlatformAdmin = isPlatformAdminRole(user?.role as Role | undefined);
   const authorization = useAuthorizationGuard({
     isLoading: isLoading || activeInstitution === undefined,
     hasUser: !!user,
@@ -219,8 +234,11 @@ export default function SchoolStaffPage() {
                   const isSelf = staffer.id === user._id;
                   const grantable = isGrantableStaffRole(staffer.role);
                   const removable = !isSelf && !isProtectedStaffRole(staffer.role) && grantable;
+                  // A platform admin may open a school admin's row, for admissions only.
                   const accessManageable =
-                    !isSelf && grantable && !!activeInstitution?.institutionId;
+                    !isSelf &&
+                    (grantable || (isPlatformAdmin && staffer.role === "school_admin")) &&
+                    !!activeInstitution?.institutionId;
                   return (
                     <Table.Row key={staffer.id}>
                       <Table.Cell fontFamily="body">
@@ -303,6 +321,7 @@ export default function SchoolStaffPage() {
       <ManageStaffAccessDialog
         staffer={accessTarget}
         institutionId={activeInstitution?.institutionId ?? null}
+        canSetAdmissions={isPlatformAdmin}
         onClose={() => setAccessTarget(null)}
       />
 
@@ -423,10 +442,12 @@ export default function SchoolStaffPage() {
 function ManageStaffAccessDialog({
   staffer,
   institutionId,
+  canSetAdmissions,
   onClose,
 }: {
   staffer: StaffRow | null;
   institutionId: Id<"institutions"> | null;
+  canSetAdmissions: boolean;
   onClose: () => void;
 }) {
   const editor = useQuery(
@@ -473,6 +494,7 @@ function ManageStaffAccessDialog({
                 staffName={staffName}
                 institutionId={institutionId}
                 editor={editor}
+                canSetAdmissions={canSetAdmissions}
                 onClose={onClose}
               />
             )}
@@ -488,12 +510,15 @@ function StaffAccessEditor({
   staffName,
   institutionId,
   editor,
+  canSetAdmissions,
   onClose,
 }: {
   staffer: StaffRow;
   staffName: string;
   institutionId: Id<"institutions">;
   editor: StaffCapabilityEditor;
+  // Only a platform admin may change admissions access (updateForStaff).
+  canSetAdmissions: boolean;
   onClose: () => void;
 }) {
   const updateAccess = useMutation(api.staffCapabilities.updateForStaff);
@@ -508,6 +533,12 @@ function StaffAccessEditor({
   const [canManageHealthRecords, setCanManageHealthRecords] = useState(
     editor.canManageHealthRecords,
   );
+  // The mentor grant is for base `staff` users only: teachers and admins
+  // already message their scholars, and other roles never land on Messages.
+  const offersMentorGrant = staffer.role === "staff";
+  const [canMentorScholars, setCanMentorScholars] = useState(
+    editor.canMentorScholars ?? false,
+  );
   const [programGroupAccess, setProgramGroupAccess] = useState(() =>
     Object.fromEntries(
       editor.programGroups.map((group) => [
@@ -519,6 +550,14 @@ function StaffAccessEditor({
       ]),
     ) as Record<string, { canPublish: boolean; canReviewCaptures: boolean }>,
   );
+  const [admissionsTier, setAdmissionsTier] = useState<AdmissionsTier>(
+    editor.admissionsTier,
+  );
+  // A platform admin holds full admissions by role; there is no grant to edit.
+  const admissionsByRole = editor.admissionsIncludedInRole;
+  // A school admin's other access comes with the role, so their dialog shows
+  // admissions only; the hidden fields save back unchanged.
+  const admissionsOnly = canSetAdmissions && staffer.role === "school_admin";
   const [isSaving, setIsSaving] = useState(false);
 
   const updateGroup = (
@@ -570,12 +609,21 @@ function StaffAccessEditor({
   const save = async () => {
     setIsSaving(true);
     try {
+      // `canMentorScholars` is the institution-wide `scholars:mentor` grant
+      // (enrolled scholars only; the backend owns that rule).
       await updateAccess({
         userId: staffer.id,
         institutionId,
         canEditCurriculum,
         canManageSchoolOperations,
         canManageHealthRecords,
+        ...(offersMentorGrant ? { canMentorScholars } : {}),
+        // Omitted unless changed, so saving other toggles never touches it.
+        ...(canSetAdmissions &&
+        !admissionsByRole &&
+        admissionsTier !== editor.admissionsTier
+          ? { admissionsTier }
+          : {}),
         programGroupAccess: editor.programGroups.map((group) => ({
           groupId: group.groupId,
           canPublish: programGroupAccess[group.groupId]?.canPublish ?? false,
@@ -609,6 +657,7 @@ function StaffAccessEditor({
             </Text>
           </Box>
 
+          {!admissionsOnly && (
           <Box>
             <Text fontFamily="heading" fontWeight="600" color="navy.500">
               School-wide access
@@ -681,9 +730,56 @@ function StaffAccessEditor({
                     : schoolOperationsDescription}
                 </Text>
               </Box>
+              {offersMentorGrant && (
+                <Box>
+                  <Checkbox.Root
+                    checked={canMentorScholars}
+                    onCheckedChange={(details) =>
+                      setCanMentorScholars(details.checked === true)
+                    }
+                  >
+                    <Checkbox.HiddenInput />
+                    <Checkbox.Control />
+                    <Checkbox.Label fontFamily="heading" fontWeight="600">
+                      Mentor (message scholars)
+                    </Checkbox.Label>
+                  </Checkbox.Root>
+                  <Text mt={1} ml={6} fontSize="sm" color="charcoal.400">
+                    Start and reply to conversations with enrolled scholars. Their teachers can read every conversation. No access to learning records, families, or health data.
+                  </Text>
+                </Box>
+              )}
             </VStack>
           </Box>
+          )}
 
+          {canSetAdmissions && (
+            <Box>
+              <Text fontFamily="heading" fontWeight="600" color="navy.500">
+                Admissions
+              </Text>
+              <Box mt={3}>
+                <FieldSelect
+                  value={admissionsTier}
+                  onChange={(v) => setAdmissionsTier(v as AdmissionsTier)}
+                  disabled={admissionsByRole || isSaving}
+                  w="full"
+                  fieldProps={{ "aria-label": "Admissions access" }}
+                >
+                  <option value="none">No access</option>
+                  <option value="scheduling">Scheduling</option>
+                  <option value="full">Full</option>
+                </FieldSelect>
+              </Box>
+              <Text mt={1} fontSize="sm" color="charcoal.400">
+                {admissionsByRole
+                  ? "Included in their base role."
+                  : ADMISSIONS_TIER_HINT[admissionsTier]}
+              </Text>
+            </Box>
+          )}
+
+          {!admissionsOnly && (
           <Box>
             <Text fontFamily="heading" fontWeight="600" color="navy.500">
               Extended education programs
@@ -751,6 +847,7 @@ function StaffAccessEditor({
               </Text>
             )}
           </Box>
+          )}
         </VStack>
       </Dialog.Body>
       <Dialog.Footer px={{ base: 4, md: 6 }} pb={5} pt={2} gap={3}>

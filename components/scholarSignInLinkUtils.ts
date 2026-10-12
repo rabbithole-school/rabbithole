@@ -13,11 +13,14 @@
 // (components/AuthForm.tsx, native/src/components/SignIn.tsx) already say
 // "Password", so this naming keeps the whole ceremony on one noun.
 
+// Not an error: "Add scholar" leaves the username optional because a school
+// iPad signs in through device setup. A password is the one thing that needs it.
 export const NO_USERNAME_GUIDANCE =
-  "This scholar needs a username first. Set one on their profile, then try again.";
+  "A password needs a username first. Add one in their Account details, then create the password there. School iPads sign in without one.";
 
-export const ISSUE_FAILED_GUIDANCE =
-  "Couldn't create the link. If this scholar has no username yet, set one on their profile, then try again.";
+// A missing username is caught before a link is requested, so a failure here
+// is something else — prod redacts the server's reason, so just offer a retry.
+export const ISSUE_FAILED_GUIDANCE = "Couldn't create the link. Try again.";
 
 /**
  * The single name for this affordance: "Create password" when the scholar has

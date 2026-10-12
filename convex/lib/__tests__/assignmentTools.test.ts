@@ -22,6 +22,7 @@ const caller = "u_caller" as Id<"users">;
 
 const ASSIGNMENT_TOOLS = [
   "assign_unit",
+  "publish_unit",
   "assign_activity_now",
   "list_assignments",
   "get_schedule",
@@ -35,6 +36,7 @@ const ASSIGNMENT_TOOLS = [
   "set_assignment_scholars",
   "add_assignment_scholars",
   "archive_assignment",
+  "add_activity_resource",
 ];
 
 const build = async (

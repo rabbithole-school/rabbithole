@@ -101,6 +101,7 @@ describe("session transcript rendering", () => {
   test.each([
     ["typed", "Typed input"],
     ["spoken", "Spoken input"],
+    ["app", "App input"],
   ] as const)("renders the %s staff transcript cue", (modality, label) => {
     const html = renderToStaticMarkup(
       // eslint-disable-next-line react/no-children-prop -- Chakra's createElement type requires children in the props object
@@ -130,5 +131,6 @@ describe("session transcript rendering", () => {
 
     expect(html).not.toContain("Typed input");
     expect(html).not.toContain("Spoken input");
+    expect(html).not.toContain("App input");
   });
 });

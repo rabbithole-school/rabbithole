@@ -210,20 +210,6 @@ describe("isGradableManipulative — placeValue gate", () => {
   });
 });
 
-/**
- * Finding 2 — Done must be DISABLED at mount: the renderer must not emit runtime
- * state before a real interaction, or the frame (which enables Done as soon as
- * `state !== null`) would let a scholar commit an immediate, recordable miss
- * without touching the material. Native already waited (it emits only from its
- * interaction handlers); the web renderer used to emit in a mount `useEffect`.
- *
- * There is no DOM/React test harness in this repo (no jsdom / RTL /
- * react-test-renderer), and the task forbids adding one. This pins the exact
- * regression at the source level instead: BOTH renderers must have NO mount
- * emission (no `useEffect`) and route `onStateChange` through a single
- * interaction seam (the shared `commit` handler) — the same "emit only on
- * interaction" contract the wave-2 function-machine fix established.
- */
 describe("placeValue renderers — no state emission at mount (Done disabled until interaction)", () => {
   const web = readFileSync("components/manipulative/kinds/PlaceValueManipulative.tsx", "utf8");
   const native = readFileSync("native/src/components/manipulatives/PlaceValue.native.tsx", "utf8");

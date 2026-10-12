@@ -5,11 +5,13 @@ import { api } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { QueryCtx } from "../_generated/server";
 import {
+  curatableInstitutionIds,
   evaluateInstitutionSuspension,
   isBlockedBySuspension,
 } from "../lib/access";
 import { hasSurvivingMembership } from "../lib/cascade";
 import { INSTITUTION_SUSPENDED_MESSAGE } from "../lib/access";
+import { makeWorld } from "./factories/world";
 
 // Why this file: institution suspension (temporary disable/enable) is the
 // REVERSIBLE sibling of cascade-delete. These tests pin the whole model: the
@@ -28,87 +30,32 @@ const modules = (
 
 type T = ReturnType<typeof convexTest>;
 
-async function withUser(t: T, userId: Id<"users">) {
-  const sessionId = await t.run(async (ctx) => {
-    const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
-      userId,
-      expirationTime: Date.now() + 1000 * 60 * 60,
-    };
-    return await ctx.db.insert("authSessions", session);
-  });
-  return t.withIdentity({
-    subject: `${userId}|${sessionId}`,
-    issuer: "https://convex.dev",
-  });
-}
-
 /** moli (primary) + kona (non-primary) + an admin + one scholar per school +
  *  a teacher with memberships at BOTH schools. */
 async function seedWorld(t: T) {
-  return await t.run(async (ctx) => {
-    const moli = await ctx.db.insert("institutions", {
-      name: "Moli School",
-      slug: "moli",
-      kind: "school",
-      isPrimary: true,
-    });
-    const kona = await ctx.db.insert("institutions", {
-      name: "Kona Tutoring",
-      slug: "kona-tutoring",
-      kind: "school",
-    });
-
-    const admin = await ctx.db.insert("users", {
-      name: "Avery Admin",
-      username: "avery",
-      role: "platform_admin",
-    });
-    await ctx.db.insert("memberships", { userId: admin, role: "platform_admin" });
-
-    const konaScholar = await ctx.db.insert("users", {
-      name: "Noe",
-      username: "noe_tutoring",
-      role: "scholar",
-      institutionId: kona,
-    });
-    await ctx.db.insert("memberships", {
-      userId: konaScholar,
-      role: "scholar",
-      institutionId: kona,
-    });
-
-    const moliScholar = await ctx.db.insert("users", {
-      name: "Leilani",
-      username: "leilani",
-      role: "scholar",
-      institutionId: moli,
-    });
-    await ctx.db.insert("memberships", {
-      userId: moliScholar,
-      role: "scholar",
-      institutionId: moli,
-    });
-
-    // Teacher at BOTH Moli and Kona (the multi-institution edge). Home = Moli.
-    const dualTeacher = await ctx.db.insert("users", {
-      name: "Lehua",
-      username: "lehua",
-      role: "teacher",
-      institutionId: moli,
-    });
-    await ctx.db.insert("memberships", {
-      userId: dualTeacher,
-      role: "teacher",
-      institutionId: moli,
-    });
-    await ctx.db.insert("memberships", {
-      userId: dualTeacher,
-      role: "teacher",
-      institutionId: kona,
-    });
-
-    return { moli, kona, admin, konaScholar, moliScholar, dualTeacher };
+  const world = await makeWorld(t, {
+    schools: 2,
+    scholarsPerSchool: 1,
+    parentsPerSchool: 0,
   });
+  const [moli, kona] = world.schools;
+  await t.run((ctx) =>
+    ctx.db.insert("memberships", {
+      userId: moli.teacher.id,
+      role: "teacher",
+      institutionId: kona.id,
+    }),
+  );
+
+  return {
+    world,
+    moli,
+    kona,
+    admin: world.platformAdmin!,
+    konaScholar: kona.scholars[0],
+    moliScholar: moli.scholars[0],
+    dualTeacher: moli.teacher,
+  };
 }
 
 async function isDisabled(t: T, institutionId: Id<"institutions">) {
@@ -121,32 +68,32 @@ async function isDisabled(t: T, institutionId: Id<"institutions">) {
 describe("institution suspension — disable/enable", () => {
   test("the PRIMARY institution can never be suspended", async () => {
     const t = convexTest(schema, modules);
-    const { moli, admin } = await seedWorld(t);
-    const asAdmin = await withUser(t, admin);
+    const { world, moli } = await seedWorld(t);
+    const asAdmin = await world.as.platformAdmin();
     await expect(
       asAdmin.mutation(api.institutionLifecycle.disableInstitution, {
-        institutionId: moli,
+        institutionId: moli.id,
       }),
     ).rejects.toThrow(/primary institution cannot be disabled/i);
-    expect(await isDisabled(t, moli)).toBe(false);
+    expect(await isDisabled(t, moli.id)).toBe(false);
   });
 
   test("only a platform admin may suspend (a teacher is refused)", async () => {
     const t = convexTest(schema, modules);
-    const { kona, dualTeacher } = await seedWorld(t);
-    const asTeacher = await withUser(t, dualTeacher);
+    const { world, kona } = await seedWorld(t);
+    const asTeacher = await world.as.staffOf(world.schools[0]);
     await expect(
       asTeacher.mutation(api.institutionLifecycle.disableInstitution, {
-        institutionId: kona,
+        institutionId: kona.id,
       }),
     ).rejects.toThrow(/platform-admin/i);
-    expect(await isDisabled(t, kona)).toBe(false);
+    expect(await isDisabled(t, kona.id)).toBe(false);
   });
 
   test("disabling blocks a member's authed reads AND writes", async () => {
     const t = convexTest(schema, modules);
-    const { kona, admin, konaScholar } = await seedWorld(t);
-    const asScholar = await withUser(t, konaScholar);
+    const { world, kona, konaScholar } = await seedWorld(t);
+    const asScholar = await world.as.scholar(konaScholar);
 
     // Before: the Kona scholar can read + write their own prefs.
     await expect(
@@ -154,12 +101,12 @@ describe("institution suspension — disable/enable", () => {
     ).resolves.toBeDefined();
 
     // Suspend Kona as the platform admin.
-    const asAdmin = await withUser(t, admin);
+    const asAdmin = await world.as.platformAdmin();
     await asAdmin.mutation(api.institutionLifecycle.disableInstitution, {
-      institutionId: kona,
+      institutionId: kona.id,
       reason: "billing paused",
     });
-    expect(await isDisabled(t, kona)).toBe(true);
+    expect(await isDisabled(t, kona.id)).toBe(true);
 
     // After: every authed read AND write is refused with the paused message.
     await expect(
@@ -174,10 +121,10 @@ describe("institution suspension — disable/enable", () => {
 
   test("a platform admin still gets through while a school is suspended", async () => {
     const t = convexTest(schema, modules);
-    const { kona, admin } = await seedWorld(t);
-    const asAdmin = await withUser(t, admin);
+    const { world, kona } = await seedWorld(t);
+    const asAdmin = await world.as.platformAdmin();
     await asAdmin.mutation(api.institutionLifecycle.disableInstitution, {
-      institutionId: kona,
+      institutionId: kona.id,
     });
     // The admin's own authed reads keep working — they must inspect + re-enable.
     await expect(
@@ -187,13 +134,13 @@ describe("institution suspension — disable/enable", () => {
 
   test("a member of a suspended AND an active school keeps full access to the active one", async () => {
     const t = convexTest(schema, modules);
-    const { kona, admin, dualTeacher } = await seedWorld(t);
-    const asAdmin = await withUser(t, admin);
+    const { world, kona } = await seedWorld(t);
+    const asAdmin = await world.as.platformAdmin();
     await asAdmin.mutation(api.institutionLifecycle.disableInstitution, {
-      institutionId: kona,
+      institutionId: kona.id,
     });
     // Lehua teaches at both Moli (active) and Kona (suspended) → not blocked.
-    const asTeacher = await withUser(t, dualTeacher);
+    const asTeacher = await world.as.staffOf(world.schools[0]);
     await expect(
       asTeacher.query(api.notifications.getMyPrefs, {}),
     ).resolves.toBeDefined();
@@ -206,12 +153,12 @@ describe("institution suspension — disable/enable", () => {
 
   test("a member of a DIFFERENT active school is unaffected", async () => {
     const t = convexTest(schema, modules);
-    const { kona, admin, moliScholar } = await seedWorld(t);
-    const asAdmin = await withUser(t, admin);
+    const { world, kona, moliScholar } = await seedWorld(t);
+    const asAdmin = await world.as.platformAdmin();
     await asAdmin.mutation(api.institutionLifecycle.disableInstitution, {
-      institutionId: kona,
+      institutionId: kona.id,
     });
-    const asMoli = await withUser(t, moliScholar);
+    const asMoli = await world.as.scholar(moliScholar);
     await expect(
       asMoli.query(api.notifications.getMyPrefs, {}),
     ).resolves.toBeDefined();
@@ -219,21 +166,21 @@ describe("institution suspension — disable/enable", () => {
 
   test("re-enabling fully restores access", async () => {
     const t = convexTest(schema, modules);
-    const { kona, admin, konaScholar } = await seedWorld(t);
-    const asAdmin = await withUser(t, admin);
-    const asScholar = await withUser(t, konaScholar);
+    const { world, kona, konaScholar } = await seedWorld(t);
+    const asAdmin = await world.as.platformAdmin();
+    const asScholar = await world.as.scholar(konaScholar);
 
     await asAdmin.mutation(api.institutionLifecycle.disableInstitution, {
-      institutionId: kona,
+      institutionId: kona.id,
     });
     await expect(
       asScholar.query(api.notifications.getMyPrefs, {}),
     ).rejects.toThrow(INSTITUTION_SUSPENDED_MESSAGE);
 
     await asAdmin.mutation(api.institutionLifecycle.enableInstitution, {
-      institutionId: kona,
+      institutionId: kona.id,
     });
-    expect(await isDisabled(t, kona)).toBe(false);
+    expect(await isDisabled(t, kona.id)).toBe(false);
 
     // Access returns for reads AND writes.
     await expect(
@@ -248,8 +195,8 @@ describe("institution suspension — disable/enable", () => {
 
   test("neither disable nor enable deletes any data", async () => {
     const t = convexTest(schema, modules);
-    const { kona, admin } = await seedWorld(t);
-    const asAdmin = await withUser(t, admin);
+    const { world, kona } = await seedWorld(t);
+    const asAdmin = await world.as.platformAdmin();
 
     const count = async () =>
       await t.run(async (ctx) => ({
@@ -260,10 +207,10 @@ describe("institution suspension — disable/enable", () => {
 
     const before = await count();
     await asAdmin.mutation(api.institutionLifecycle.disableInstitution, {
-      institutionId: kona,
+      institutionId: kona.id,
     });
     await asAdmin.mutation(api.institutionLifecycle.enableInstitution, {
-      institutionId: kona,
+      institutionId: kona.id,
     });
     const after = await count();
     expect(after).toEqual(before);
@@ -271,17 +218,17 @@ describe("institution suspension — disable/enable", () => {
 
   test("disable + enable are idempotent", async () => {
     const t = convexTest(schema, modules);
-    const { kona, admin } = await seedWorld(t);
-    const asAdmin = await withUser(t, admin);
+    const { world, kona } = await seedWorld(t);
+    const asAdmin = await world.as.platformAdmin();
 
     const first = await asAdmin.mutation(
       api.institutionLifecycle.disableInstitution,
-      { institutionId: kona },
+      { institutionId: kona.id },
     );
     expect(first.alreadyDisabled).toBe(false);
     const second = await asAdmin.mutation(
       api.institutionLifecycle.disableInstitution,
-      { institutionId: kona },
+      { institutionId: kona.id },
     );
     expect(second.alreadyDisabled).toBe(true);
     // The marker timestamp did not move on the second (no-op) call.
@@ -289,25 +236,25 @@ describe("institution suspension — disable/enable", () => {
 
     const en1 = await asAdmin.mutation(
       api.institutionLifecycle.enableInstitution,
-      { institutionId: kona },
+      { institutionId: kona.id },
     );
     expect(en1.alreadyEnabled).toBe(false);
     const en2 = await asAdmin.mutation(
       api.institutionLifecycle.enableInstitution,
-      { institutionId: kona },
+      { institutionId: kona.id },
     );
     expect(en2.alreadyEnabled).toBe(true);
   });
 
   test("suspension is audited into the global auditLog", async () => {
     const t = convexTest(schema, modules);
-    const { kona, admin } = await seedWorld(t);
-    const asAdmin = await withUser(t, admin);
+    const { world, kona } = await seedWorld(t);
+    const asAdmin = await world.as.platformAdmin();
     await asAdmin.mutation(api.institutionLifecycle.disableInstitution, {
-      institutionId: kona,
+      institutionId: kona.id,
     });
     await asAdmin.mutation(api.institutionLifecycle.enableInstitution, {
-      institutionId: kona,
+      institutionId: kona.id,
     });
     const actions = await t.run(async (ctx) =>
       (await ctx.db.query("auditLog").collect()).map((r) => r.action),
@@ -494,5 +441,120 @@ describe("evaluateInstitutionSuspension fast paths", () => {
     });
     expect(query).toHaveBeenCalledWith("institutions");
     expect(query).toHaveBeenCalledWith("memberships");
+  });
+});
+
+describe("institution curation scope", () => {
+  async function curationScope(t: T, userId: Id<"users">) {
+    return await t.run(async (ctx) => {
+      const user = (await ctx.db.get(userId))!;
+      const scope = await curatableInstitutionIds(ctx, user);
+      return scope === "all" ? scope : Array.from(scope).sort();
+    });
+  }
+
+  test("a teacher at an active AND a suspended school curates only the active one", async () => {
+    const t = convexTest(schema, modules);
+    const { world, moli, kona, dualTeacher } = await seedWorld(t);
+    expect(await curationScope(t, dualTeacher.id)).toEqual(
+      [moli.id, kona.id].sort(),
+    );
+
+    const asAdmin = await world.as.platformAdmin();
+    await asAdmin.mutation(api.institutionLifecycle.disableInstitution, {
+      institutionId: kona.id,
+    });
+    // Still a working user (Moli is active) — but no longer a curator of the
+    // paused school's spaces, equipment, or app audiences.
+    expect(await curationScope(t, dualTeacher.id)).toEqual([moli.id]);
+
+    await asAdmin.mutation(api.institutionLifecycle.enableInstitution, {
+      institutionId: kona.id,
+    });
+    expect(await curationScope(t, dualTeacher.id)).toEqual(
+      [moli.id, kona.id].sort(),
+    );
+  });
+
+  test("an unscoped lifelong_learner membership does not make a teacher a curator of every school", async () => {
+    const t = convexTest(schema, modules);
+    const { kona } = await seedWorld(t);
+    await t.run((ctx) =>
+      ctx.db.insert("memberships", {
+        userId: kona.teacher.id,
+        role: "lifelong_learner",
+      }),
+    );
+    expect(await curationScope(t, kona.teacher.id)).toEqual([kona.id]);
+  });
+});
+
+describe("unit visibility when a staffer's only school is suspended", () => {
+  test("an empty lens from suspension is not a membership-less fallback to the primary school", async () => {
+    const t = convexTest(schema, modules);
+    const { world, moli, kona } = await seedWorld(t);
+    // Kona's teacher also holds an institution-less parent membership, which
+    // keeps them past the suspension block (a usable context).
+    await t.run(async (ctx) => {
+      await ctx.db.insert("memberships", { userId: kona.teacher.id, role: "parent" });
+      await ctx.db.insert("units", {
+        teacherId: moli.teacher.id,
+        institutionId: moli.id,
+        title: "Primary school unit",
+        isActive: true,
+      });
+    });
+    const asAdmin = await world.as.platformAdmin();
+    await asAdmin.mutation(api.institutionLifecycle.disableInstitution, {
+      institutionId: kona.id,
+    });
+    const asKonaTeacher = await world.as.staffOf(kona);
+    const units = await asKonaTeacher.query(api.units.list, {});
+    expect(units.map((u: { title: string }) => u.title)).not.toContain(
+      "Primary school unit",
+    );
+  });
+
+  test("a teacher whose only standing is a staff grant at the suspended school gets no fallback either", async () => {
+    const t = convexTest(schema, modules);
+    const { world, moli, kona } = await seedWorld(t);
+    // Kona's teacher keeps users.role teacher, but their Kona membership is a
+    // plain `staff` one backed by a curriculum:edit grant. Grants are filtered
+    // to live schools, so after the suspension the grant alone no longer
+    // shows standing there.
+    await t.run(async (ctx) => {
+      const konaMemberships = await ctx.db
+        .query("memberships")
+        .withIndex("by_user", (q) => q.eq("userId", kona.teacher.id))
+        .collect();
+      for (const membership of konaMemberships) {
+        if (membership.institutionId === kona.id) {
+          await ctx.db.patch(membership._id, { role: "staff" });
+        }
+      }
+      await ctx.db.insert("staffCapabilityGrants", {
+        granteeUserId: kona.teacher.id,
+        institutionId: kona.id,
+        capability: "curriculum:edit",
+        grantedBy: kona.teacher.id,
+        grantedAt: Date.now(),
+      });
+      await ctx.db.insert("memberships", { userId: kona.teacher.id, role: "parent" });
+      await ctx.db.insert("units", {
+        teacherId: moli.teacher.id,
+        institutionId: moli.id,
+        title: "Primary school unit",
+        isActive: true,
+      });
+    });
+    const asAdmin = await world.as.platformAdmin();
+    await asAdmin.mutation(api.institutionLifecycle.disableInstitution, {
+      institutionId: kona.id,
+    });
+    const asKonaTeacher = await world.as.staffOf(kona);
+    const units = await asKonaTeacher.query(api.units.list, {});
+    expect(units.map((u: { title: string }) => u.title)).not.toContain(
+      "Primary school unit",
+    );
   });
 });

@@ -44,6 +44,7 @@ import { RulerNative } from "./Ruler.native";
 import { ClockNative } from "./Clock.native";
 import { LiquidNative } from "./Liquid.native";
 import { MoneyNative } from "./Money.native";
+import { MoleculeNative } from "./Molecule.native";
 
 // Re-exported here so a host can import the renderer + its routing table from
 // one place; the table itself lives in the React-free `nativeManipulativeKinds`
@@ -101,6 +102,8 @@ export function NativeManipulative({ spec, onSolvedChange, onStateChange }: Nati
       return <LiquidNative spec={spec} onSolvedChange={onSolvedChange} onStateChange={onStateChange} />;
     case "money":
       return <MoneyNative spec={spec} onSolvedChange={onSolvedChange} onStateChange={onStateChange} />;
+    case "molecule":
+      return <MoleculeNative spec={spec} onSolvedChange={onSolvedChange} onStateChange={onStateChange} />;
     case "geoLocate":
       // WEBVIEW-ONLY kind (no @rnmapbox native renderer yet): a host routes it
       // to the /embed WebView before ever reaching this switch (see

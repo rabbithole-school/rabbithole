@@ -24,10 +24,11 @@ import {
   authedQuery,
 } from "./lib/customFunctions";
 import {
-  schoolOperationsInstitutionIds,
+  liveSchoolOperationsInstitutionIds,
   hasSchoolOperationsAccessAtInstitution,
 } from "./lib/staffCapabilities";
 import { effectiveInstitutionTimeZone } from "./lib/institutionTime";
+import { snapshotForInstitutionSerial } from "./lib/simpleMdmSnapshots";
 import { extendedEducationTag } from "./lib/scholarParticipationTooling";
 import {
   dayKeyForTimezone,
@@ -35,6 +36,7 @@ import {
   shiftDayKey,
 } from "../shared/institutionDay";
 import { siteUrl, withBase } from "./lib/channels";
+import { writeAuditLog } from "./lib/auditLog";
 
 export type RabbitholeLockState = "armed" | "disarmed";
 export type RabbitholeLockDisarmMode =
@@ -82,7 +84,12 @@ type LockCommand = {
   disarmMinutes?: number;
 };
 
-type LockTransitionSource = "web" | "slack" | "midnight" | "timed" | "device";
+type LockTransitionSource = "web" | "slack" | "mcp" | "midnight" | "timed" | "device";
+
+/** The agent transports that share listForAgent/setFromAgent. Required, not
+ *  defaulted: the value lands verbatim in the audit line, so a new caller
+ *  must say which surface it is rather than inheriting "slack". */
+const agentSourceValidator = v.union(v.literal("slack"), v.literal("mcp"));
 
 function desiredState(row: Doc<"pairedDevices">): RabbitholeLockState {
   return row.rabbitholeLockDesiredState ?? "armed";
@@ -140,7 +147,8 @@ async function auditTransition(
   source: LockTransitionSource,
   minutes?: number,
 ): Promise<void> {
-  await ctx.db.insert("auditLog", {
+  await writeAuditLog(ctx, {
+    institutionId: row.institutionId,
     actorUserId,
     action:
       state === "armed"
@@ -154,7 +162,7 @@ async function auditTransition(
 
 // Exported (like resolveManagedSerialsForRows below) so a test can exercise
 // the internal validation backstop directly — every real caller
-// (setRabbitholeLock, setFromSlack) already validates before reaching here.
+// (setRabbitholeLock, setFromAgent) already validates before reaching here.
 export async function applyCommandToRows(
   ctx: MutationCtx,
   rows: Doc<"pairedDevices">[],
@@ -169,7 +177,7 @@ export async function applyCommandToRows(
       : undefined;
   // applyCommandToRows owns the mode -> expiry mapping, so re-validate here
   // as a backstop even though every current caller (setRabbitholeLock,
-  // setFromSlack) already validates disarmMinutes before calling. Without
+  // setFromAgent) already validates disarmMinutes before calling. Without
   // this, a future caller that forgets validation would silently schedule an
   // immediate re-arm rather than failing loudly.
   const timedMinutes =
@@ -318,6 +326,11 @@ async function deviceSettingsPayload(
   ]);
   const institution = await ctx.db.get(row.institutionId);
   const timeZone = effectiveInstitutionTimeZone(institution?.timeZone);
+  // What SimpleMDM last said about this iPad (simpleMdmDeviceSnapshots), so
+  // the Lost Mode control can render without a live SimpleMDM read.
+  const snapshot = serial
+    ? await snapshotForInstitutionSerial(ctx, row.institutionId, serial)
+    : null;
   let hasLiveSession = false;
   if (row.authSessionId) {
     const session = await ctx.db.get(row.authSessionId);
@@ -350,6 +363,15 @@ async function deviceSettingsPayload(
     inSingleAppMode: row.rabbitholeLockInSingleAppMode ?? null,
     institutionTimeZone: timeZone,
     settingsPath: settingsPath(row._id),
+    simpleMdm:
+      snapshot && snapshot.inventoryAt !== undefined && snapshot.foundInSimpleMdm !== undefined
+        ? {
+          checkedAt: snapshot.inventoryAt,
+          foundInSimpleMdm: snapshot.foundInSimpleMdm,
+          isSupervised: snapshot.isSupervised ?? null,
+          lostModeEnabled: snapshot.lostModeEnabled ?? null,
+        }
+        : null,
     // Annotate, never filter: a paired-device inventory is factual, so an
     // Extended Education (program-guest) scholar's row is tagged instead of
     // hidden (lib/scholarParticipationTooling.ts).
@@ -568,7 +590,14 @@ export const rearmTimed = internalMutation({
   },
 });
 
-export const listForSlack = internalQuery({
+/**
+ * The read half of the agent read-before-write contract, shared by every
+ * agent transport (Slack bot, MCP connector) through
+ * `lib/deviceOpsTools.ts`. Institution-scoped to the caller's
+ * `school:operations` grants, so a fuzzy search can only ever surface iPads
+ * the caller may already command.
+ */
+export const listForAgent = internalQuery({
   args: {
     callerUserId: v.id("users"),
     search: v.optional(v.string()),
@@ -578,17 +607,14 @@ export const listForSlack = internalQuery({
     if (!caller) {
       return { ok: false as const, message: "Forbidden: school staff role required" };
     }
-    const institutionIds = await schoolOperationsInstitutionIds(ctx, caller);
-    if (institutionIds !== "all" && institutionIds.size === 0) {
+    const eligibleInstitutionIds = await liveSchoolOperationsInstitutionIds(
+      ctx,
+      caller,
+    );
+    if (!eligibleInstitutionIds) {
       return { ok: false as const, message: "Forbidden: school operations access required" };
     }
     const rows: Doc<"pairedDevices">[] = [];
-    const eligibleInstitutionIds =
-      institutionIds === "all"
-        ? (await ctx.db.query("institutions").collect()).map(
-            (institution) => institution._id,
-          )
-        : institutionIds;
     for (const institutionId of eligibleInstitutionIds) {
       rows.push(
         ...(await ctx.db
@@ -651,9 +677,18 @@ export const listForSlack = internalQuery({
   },
 });
 
-export const setFromSlack = internalMutation({
+/**
+ * The write half. Every id must resolve inside the caller's school-operations
+ * institutions or the WHOLE batch is refused before a single row changes — a
+ * fuzzy scholar-name match upstream can therefore never write to a device the
+ * agent merely guessed at. Prompt confirmation is a UX obligation on the tool
+ * layer, never the authorization boundary; that lives here.
+ */
+export const setFromAgent = internalMutation({
   args: {
     callerUserId: v.id("users"),
+    /** Which agent transport is writing — recorded in the audit line. */
+    source: agentSourceValidator,
     pairedDeviceIds: v.array(v.id("pairedDevices")),
     state: lockStateValidator,
     disarmMode: v.optional(disarmModeValidator),
@@ -673,8 +708,8 @@ export const setFromSlack = internalMutation({
       return { ok: false as const, message: "Choose no more than 50 iPads at once." };
     }
 
-    const institutionIds = await schoolOperationsInstitutionIds(ctx, caller);
-    if (institutionIds !== "all" && institutionIds.size === 0) {
+    const institutionIds = await liveSchoolOperationsInstitutionIds(ctx, caller);
+    if (!institutionIds) {
       return {
         ok: false as const,
         message: "Forbidden: school operations access required",
@@ -683,10 +718,8 @@ export const setFromSlack = internalMutation({
     const rows: Doc<"pairedDevices">[] = [];
     for (const id of ids) {
       const row = await ctx.db.get(id);
-      if (
-        !row ||
-        (institutionIds !== "all" && !institutionIds.has(row.institutionId))
-      ) {
+      // No "all" escape hatch: every row faces the same live-institution set.
+      if (!row || !institutionIds.has(row.institutionId)) {
         return {
           ok: false as const,
           message: "One or more iPads are unavailable in your school context.",
@@ -705,7 +738,7 @@ export const setFromSlack = internalMutation({
       rows,
       caller._id,
       { state: args.state, disarmMode: mode, disarmMinutes: args.disarmMinutes },
-      "slack",
+      args.source,
     );
     const description = commandDescription(args.state, mode, args.disarmMinutes);
     return {

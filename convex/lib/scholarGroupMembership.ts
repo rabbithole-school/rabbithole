@@ -18,10 +18,17 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { QueryCtx } from "../_generated/server";
 
-export async function groupIdsForScholar(
+/**
+ * The groups that are even ELIGIBLE to hold this scholar — the scoped +
+ * legacy scan above, without the membership filter. A caller that decides
+ * membership by something other than `scholarIds` (the family course view
+ * also admits a frozen assignment audience) reuses this so the legacy-group
+ * rule stays in one place.
+ */
+export async function candidateGroupsForScholar(
   ctx: QueryCtx,
   scholar: Doc<"users">,
-): Promise<Id<"scholarGroups">[]> {
+): Promise<Doc<"scholarGroups">[]> {
   const scoped = scholar.institutionId
     ? await ctx.db
         .query("scholarGroups")
@@ -39,7 +46,14 @@ export async function groupIdsForScholar(
         .withIndex("by_institution", (q) => q.eq("institutionId", undefined))
         .collect()
     : [];
-  return [...scoped, ...legacy]
+  return [...scoped, ...legacy];
+}
+
+export async function groupIdsForScholar(
+  ctx: QueryCtx,
+  scholar: Doc<"users">,
+): Promise<Id<"scholarGroups">[]> {
+  return (await candidateGroupsForScholar(ctx, scholar))
     .filter((g) => g.scholarIds.includes(scholar._id))
     .map((g) => g._id);
 }

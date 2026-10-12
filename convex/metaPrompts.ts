@@ -7,9 +7,10 @@
 // guidance is the SAME shared constant the live tutor uses
 // (prompts.ts → WELFARE_DISCLOSURE_GUIDANCE) so the two never drift.
 //
-// TOOL-LESS by design: all context (reading level, today's sessions + the
-// day's actual practice/completion record, recent growth, open ideas, fresh
-// staff responses) is injected here; the chat wires no aide tools.
+// All CONTEXT (reading level, today's sessions + the day's actual practice/
+// completion record, recent growth, open ideas, fresh staff responses) is
+// injected here deterministically. The only tools are the Code Explorer's
+// read-only public-repo readers (always on) and, when enabled, the idea tool.
 //
 // This module also builds `buildReflectionSnippet` — the homescreen "Today's
 // reflection" subtitle — from the SAME today's-sessions shape, so the card and
@@ -59,10 +60,16 @@ export interface MetaOpenIdea {
 }
 
 /** A fresh staff response the scholar hasn't been shown yet. */
+/**
+ * A human wrote back on one of the scholar's Workshop ideas and the scholar
+ * hasn't read it yet. A POINTER only: the reply itself lives in the scholar's
+ * Messages, a human-only surface the AI never reads or summarizes.
+ */
 export interface MetaIdeaUpdate {
   authorName: string;
   title: string;
-  body: string;
+  /** A Workshop card is either an idea or a bug report the scholar filed. */
+  about?: "idea" | "bug_report";
 }
 
 /** A shipped feature this scholar's idea led to, whose credit moment hasn't
@@ -119,14 +126,6 @@ export interface MetaSystemPromptInput {
    */
   weeklyGrowth?: MetaWeeklyGrowth;
   /**
-   * Workshop Code Explorer (CODE_EXPLORER_SPEC.md) — when true, splice the
-   * flag-gated code-exploration section in (after the Workshop/listening
-   * section, before Updates). The caller passes isCodeExplorerEnabled(); the
-   * SAME flag gates the tools wiring in http.ts, so prompt and tools never
-   * drift. Absent/false → the section is omitted and the prompt is byte-
-   * identical to before this feature. */
-  codeExplorerEnabled?: boolean;
-  /**
    * Workshop idea conversations (IDEA_CONVOS_SPEC.md) — when true, the
    * Workshop/listening section is REPLACED with the thinking-partner contract
    * (the send_idea_to_teacher tool: always-sendable, proportional, the kid's
@@ -139,20 +138,23 @@ export interface MetaSystemPromptInput {
 
 /**
  * `{codeExplorerSection}` — QB-AUTHORED, implemented VERBATIM (only `{firstName}`
- * is interpolated). Describes the three scholar-facing repo tools
- * (list_rabbithole_files / read_rabbithole_file / search_rabbithole_code) and
+ * is interpolated). Always present. Describes the scholar-facing repo tools
+ * (list_rabbithole_files / read_rabbithole_file, plus search where it is
+ * credentialed) and
  * the tour-guide stance: translate don't dump, ≤10-line quotes, look before you
  * guess, thinking questions, honest limits, and route "it should work
  * differently" into a consent-gated Workshop idea. Exported so a test can assert
- * it appears verbatim only when the flag is on.
+ * it appears verbatim.
  */
-let codeExplorerRepositoryUrl = "github.com/rabbithole-school/rabbithole";
+// The public Foundation mirror — the repo the explorer tools read (the working
+// repo is private; see lib/scholarCodeTools.ts "WHICH REPO").
+const codeExplorerRepositoryUrl = "github.com/rabbithole-school/rabbithole";
 
 export function codeExplorerSection(firstName: string): string {
   return `## Exploring Rabbithole's own code (when ${firstName} is curious how this place works)
 Rabbithole is open source — its real code is public for anyone to read, and
-${firstName} is allowed to explore it with you. You have two tools:
-read_rabbithole_file and search_rabbithole_code.
+${firstName} is allowed to explore it with you. Your tools read that real
+code: list the files in a folder, and open any file you find.
 - When they wonder how something works — the tutor, the Sky, this very chat —
   you may look it up in the real code and give a guided tour.
 - Translate, don't dump: quote at most ~10 short lines at a time, then say
@@ -359,13 +361,18 @@ function openIdeasSection(openIdeas: MetaOpenIdea[]): string | null {
   );
 }
 
-/** `{ideaUpdatesSection}` — fresh staff responses, always naming the human
- * author. Returns null (whole section omitted) when there are none. */
+/** `{ideaUpdatesSection}` — unread staff replies, always naming the human
+ * author, as a one-line pointer to Messages (never the reply's words).
+ * Returns null (whole section omitted) when there are none. */
 function ideaUpdatesSection(ideaUpdates: MetaIdeaUpdate[]): string | null {
   if (ideaUpdates.length === 0) return null;
-  return ideaUpdates
-    .map((u) => `- ${u.authorName} wrote back about your idea '${u.title}': ${u.body}`)
-    .join("\n");
+  return [
+    ...ideaUpdates.map(
+      (u) =>
+        `- ${u.authorName} wrote back about ${u.about === "bug_report" ? "the bug you reported" : "your idea"} '${u.title}'. It's waiting in their Messages.`,
+    ),
+    "Just point them there in one line — you can't see what the reply says, so never guess at it or summarize it.",
+  ].join("\n");
 }
 
 /** `{creditsSection}` — a credit moment to deliver: a shipped feature that
@@ -441,7 +448,6 @@ export function buildMetaSystemPrompt(input: MetaSystemPromptInput): string {
     ideaUpdates,
     credits,
     weeklyGrowth,
-    codeExplorerEnabled,
     ideaConvosEnabled,
   } = input;
 
@@ -468,9 +474,7 @@ be a friend. Warm, direct, and transparent, like a good editor.${readingLevelSuf
     if (ideaConvosEnabled) {
       parts.push(ideaConvoSection(firstName));
     }
-    if (codeExplorerEnabled) {
-      parts.push(codeExplorerSection(firstName));
-    }
+    parts.push(codeExplorerSection(firstName));
     const openIdeasBlock = openIdeasSection(openIdeas);
     if (openIdeasBlock) {
       parts.push(openIdeasBlock);
@@ -549,12 +553,10 @@ be a friend. Warm and direct, like a good editor.${readingLevelSuffix}`,
       : workshopListeningSection(firstName),
   );
 
-  // {codeExplorerSection} — flag-gated (WORKSHOP_CODE_EXPLORER_ENABLED), after
-  // the Workshop/listening section and before Updates (spec §3). Omitted whole
-  // when off, so the off-path prompt is byte-identical to pre-feature.
-  if (codeExplorerEnabled) {
-    parts.push(codeExplorerSection(firstName));
-  }
+  // {codeExplorerSection} — always on, after the Workshop/listening section
+  // and before Updates (spec §3). The matching tools are wired unconditionally
+  // in http.ts /meta-stream.
+  parts.push(codeExplorerSection(firstName));
 
   if (updates) {
     parts.push(

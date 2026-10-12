@@ -5,7 +5,7 @@
  * institution's SimpleMDM tenant. Other institutions get a legible refusal
  * until they have a real tenant and contract of their own.
  */
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import {
   action,
   internalAction,
@@ -19,15 +19,16 @@ import {
 import { api, internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
-  assertNotImpersonating,
+  assertCanWrite,
   requireUser,
+  assertWritableAction,
 } from "./lib/auth";
 import { primaryInstitutionId } from "./institutions";
 import {
   auditManagedClaim,
   stageClaimReplacementForSimpleMdm,
 } from "./managedDeviceClaims";
-import { ROLES } from "./lib/roles";
+import { ROLES, isPlatformAdminRole } from "./lib/roles";
 import { extendedEducationTag } from "./lib/scholarParticipationTooling";
 import { sha256Hex } from "./lib/oauthCrypto";
 import { effectiveInstitutionTimeZone } from "./lib/institutionTime";
@@ -44,8 +45,27 @@ import {
   hasAnySchoolOperationsAccess,
   hasSchoolOperationsAccessAtInstitution,
 } from "./lib/staffCapabilities";
+import {
+  SimpleMdmApiError,
+  fetchInstalledAppBundleIds,
+  fetchSimpleMdmDevice,
+  findSimpleMdmDeviceBySerial,
+  isEnrolledSimpleMdmStatus,
+  isSimpleMdmNotFound,
+  listSimpleMdmDevices,
+  normalizeSerial,
+  simpleMdmErrorMessage,
+  simpleMdmJson,
+  simpleMdmRequest,
+  type SimpleMdmDeviceDetails,
+} from "./lib/simpleMdmClient";
+import {
+  snapshotForInstitutionSerial,
+  upsertSimpleMdmSnapshot,
+  type SimpleMdmSnapshotPatch,
+} from "./lib/simpleMdmSnapshots";
+import { writeAuditLog } from "./lib/auditLog";
 
-const SIMPLEMDM_API_BASE = "https://a.simplemdm.com/api/v1";
 const CLAIM_ATTRIBUTE = "rabbithole_claim_token";
 const SIMPLEMDM_NOT_CONFIGURED_FOR_SCHOOL =
   "SimpleMDM provisioning isn't configured for your school";
@@ -79,6 +99,15 @@ export type LostModeState = {
 };
 
 export type SetLostModeResult = {
+  queued: boolean;
+  message: string;
+};
+
+/**
+ * `queued` is SimpleMDM's 202 — the command is accepted but delivered on the
+ * iPad's next MDM check-in, so the console must never phrase it as "rebooted".
+ */
+export type RestartDeviceResult = {
   queued: boolean;
   message: string;
 };
@@ -154,6 +183,25 @@ async function requireSimpleMdmAccess(
   return { user, institutionId };
 }
 
+/**
+ * The school a SimpleMDM push for this claim row is scoped to, or null to
+ * refuse. Ordinarily the row must belong to the primary school, which owns
+ * the SimpleMDM tenant. A platform admin may also push a primary-school iPad
+ * that has been lent to a guest school for an event (TRA-465): the row then
+ * carries the guest school, but the iPad is still enrolled in the primary's
+ * SimpleMDM, so the push is real. Scoping to the ROW's school keeps the push
+ * snapshot where that school's devices page reads it. A serial SimpleMDM
+ * doesn't know simply comes back "device not found".
+ */
+function simpleMdmPushScope(
+  user: Pick<Doc<"users">, "role">,
+  primaryInstitutionId: Id<"institutions">,
+  row: Pick<Doc<"managedDeviceClaims">, "institutionId">,
+): Id<"institutions"> | null {
+  if (row.institutionId === primaryInstitutionId) return row.institutionId;
+  return isPlatformAdminRole(user.role) ? row.institutionId : null;
+}
+
 function simpleMdmApiKeyOrNull(): string | null {
   return process.env.SIMPLEMDM_API_KEY?.trim() || null;
 }
@@ -195,251 +243,179 @@ export const integrationStatus = query({
   },
 });
 
-function authorizationHeader(apiKey: string): string {
-  return `Basic ${btoa(`${apiKey}:`)}`;
-}
+// ── SimpleMDM device lookup, with memory ─────────────────────────────────
+//
+// All HTTP goes through convex/lib/simpleMdmClient.ts (deadline, backoff,
+// legible ConvexErrors). This section adds the one thing the client cannot:
+// the per-serial cache of SimpleMDM's device id in `simpleMdmDeviceSnapshots`,
+// so a per-device action costs ONE request (the real one) instead of a roster
+// walk followed by the real one.
 
-type SimpleMdmDevice = {
-  id: string | number;
-  attributes?: {
-    serial_number?: unknown;
-    name?: unknown;
-    battery_level?: unknown;
-    last_seen_at?: unknown;
-    is_supervised?: unknown;
-    lost_mode_enabled?: unknown;
-  };
-};
+export const snapshotForSerial = internalQuery({
+  args: { institutionId: v.id("institutions"), serial: v.string() },
+  handler: async (ctx, args): Promise<Doc<"simpleMdmDeviceSnapshots"> | null> => {
+    return await snapshotForInstitutionSerial(ctx, args.institutionId, args.serial);
+  },
+});
 
-type SimpleMdmDeviceDetails = {
-  id: string;
-  name: string | null;
-  batteryLevel: number | null;
-  lastSeenAt: number | null;
-  isSupervised: boolean | null;
-  lostModeEnabled: boolean | null;
-};
-
-type SimpleMdmListResponse = {
-  data?: unknown;
-  has_more?: unknown;
-  next?: unknown;
-};
-
-class SimpleMdmApiError extends Error {}
-
-/**
- * Page through the SimpleMDM device roster, invoking `onPage` for each page.
- * The callback can stop the walk early by returning `true`.
- *
- * `include_awaiting_enrollment=true` is load-bearing, not an optimization.
- * SimpleMDM's device list omits ADE-assigned devices that have not completed
- * Setup Assistant unless it is passed, and a still-boxed fleet iPad is exactly
- * the device whose claim we most want staged: SimpleMDM already holds a device
- * record for it (custom attribute values are readable and writable), so writing
- * the claim now is what makes the scholar's first unbox zero-touch. Without the
- * parameter every unopened iPad reported "not enrolled in SimpleMDM yet" — which
- * inverted the feature, since the claim can only be pre-staged before enrollment.
- *
- * Callers that need many serials (verification and bulk pushes) share ONE walk
- * of the roster.
- */
-async function walkSimpleMdmDevicePages(
-  apiKey: string,
-  onPage: (devices: SimpleMdmDevice[]) => boolean,
-): Promise<void> {
-  let startingAfter: string | null = null;
-  const seenCursors = new Set<string>();
-
-  for (let page = 0; page < 500; page += 1) {
-    const url = new URL(`${SIMPLEMDM_API_BASE}/devices`);
-    url.searchParams.set("limit", "100");
-    url.searchParams.set("include_awaiting_enrollment", "true");
-    if (startingAfter) url.searchParams.set("starting_after", startingAfter);
-
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        headers: { Authorization: authorizationHeader(apiKey) },
-      });
-    } catch (error) {
-      throw new SimpleMdmApiError(
-        `Could not reach SimpleMDM: ${
-          error instanceof Error ? error.message : "Network request failed."
-        }`,
-      );
-    }
-    if (!response.ok) {
-      throw new SimpleMdmApiError(
-        `SimpleMDM returned HTTP ${response.status} while listing devices.`,
-      );
-    }
-
-    let payload: SimpleMdmListResponse;
-    try {
-      payload = (await response.json()) as SimpleMdmListResponse;
-    } catch {
-      throw new SimpleMdmApiError(
-        "SimpleMDM returned an unreadable device list.",
-      );
-    }
-    if (!Array.isArray(payload.data)) {
-      throw new SimpleMdmApiError(
-        "SimpleMDM returned an invalid device list.",
-      );
-    }
-
-    const devices = payload.data as SimpleMdmDevice[];
-    if (onPage(devices)) return;
-    if (payload.has_more !== true) return;
-
-    const lastId = devices.at(-1)?.id;
-    const next =
-      typeof payload.next === "string" || typeof payload.next === "number"
-        ? String(payload.next)
-        : lastId === undefined
-          ? null
-          : String(lastId);
-    if (!next || seenCursors.has(next)) {
-      throw new SimpleMdmApiError(
-        "SimpleMDM device pagination stopped before the roster was complete.",
-      );
-    }
-    seenCursors.add(next);
-    startingAfter = next;
+/** The inventory fields of a snapshot, derived from one device record. */
+function inventoryPatch(
+  details: SimpleMdmDeviceDetails | null,
+  at: number,
+): SimpleMdmSnapshotPatch {
+  if (!details) {
+    return {
+      foundInSimpleMdm: false,
+      simpleMdmDeviceId: undefined,
+      name: undefined,
+      batteryLevel: undefined,
+      lastSeenAt: undefined,
+      isSupervised: undefined,
+      lostModeEnabled: undefined,
+      simpleMdmStatus: undefined,
+      inventoryAt: at,
+    };
   }
-
-  throw new SimpleMdmApiError(
-    "SimpleMDM device pagination exceeded the safety limit.",
-  );
+  return {
+    foundInSimpleMdm: true,
+    simpleMdmDeviceId: details.id,
+    name: details.name ?? undefined,
+    batteryLevel: details.batteryLevel ?? undefined,
+    lastSeenAt: details.lastSeenAt ?? undefined,
+    isSupervised: details.isSupervised ?? undefined,
+    lostModeEnabled: details.lostModeEnabled ?? undefined,
+    simpleMdmStatus: details.status ?? undefined,
+    inventoryAt: at,
+  };
 }
 
-async function listSimpleMdmDevices(
-  apiKey: string,
-): Promise<Map<string, SimpleMdmDeviceDetails>> {
-  const bySerial = new Map<string, SimpleMdmDeviceDetails>();
-  await walkSimpleMdmDevicePages(apiKey, (devices) => {
-    for (const device of devices) {
-      const serial = device.attributes?.serial_number;
-      if (typeof serial === "string") {
-        const key = serial.trim().toUpperCase();
-        // First record wins if a serial somehow appears twice.
-        if (key && !bySerial.has(key)) {
-          const batteryMatch =
-            typeof device.attributes?.battery_level === "string"
-              ? device.attributes.battery_level.trim().match(/^(\d{1,3})%$/)
-              : null;
-          const batteryLevel = batteryMatch ? Number(batteryMatch[1]) : null;
-          const parsedLastSeen =
-            typeof device.attributes?.last_seen_at === "string"
-              ? Date.parse(device.attributes.last_seen_at)
-              : Number.NaN;
-          const name =
-            typeof device.attributes?.name === "string"
-              ? device.attributes.name.trim() || null
-              : null;
-          bySerial.set(key, {
-            id: String(device.id),
-            name,
-            batteryLevel:
-              batteryLevel !== null && batteryLevel <= 100 ? batteryLevel : null,
-            lastSeenAt: Number.isFinite(parsedLastSeen) ? parsedLastSeen : null,
-            isSupervised:
-              typeof device.attributes?.is_supervised === "boolean"
-                ? device.attributes.is_supervised
-                : null,
-            lostModeEnabled:
-              typeof device.attributes?.lost_mode_enabled === "boolean"
-                ? device.attributes.lost_mode_enabled
-                : null,
-          });
-        }
-      }
+export const recordDeviceInventory = internalMutation({
+  args: {
+    institutionId: v.id("institutions"),
+    serial: v.string(),
+    device: v.union(
+      v.null(),
+      v.object({
+        id: v.string(),
+        serial: v.string(),
+        name: v.union(v.string(), v.null()),
+        batteryLevel: v.union(v.number(), v.null()),
+        lastSeenAt: v.union(v.number(), v.null()),
+        isSupervised: v.union(v.boolean(), v.null()),
+        lostModeEnabled: v.union(v.boolean(), v.null()),
+        status: v.union(v.string(), v.null()),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    await upsertSimpleMdmSnapshot(
+      ctx,
+      args.institutionId,
+      args.serial,
+      inventoryPatch(args.device, Date.now()),
+    );
+  },
+});
+
+export const forgetCachedDeviceId = internalMutation({
+  args: { institutionId: v.id("institutions"), serial: v.string() },
+  handler: async (ctx, args) => {
+    const existing = await snapshotForInstitutionSerial(
+      ctx,
+      args.institutionId,
+      args.serial,
+    );
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        simpleMdmDeviceId: undefined,
+        updatedAt: Date.now(),
+      });
     }
-    return false;
-  });
-  return bySerial;
-}
+  },
+});
 
 /**
- * Find one device by serial, stopping the paginated roster walk as soon as it
- * is found. Bulk callers should use `listSimpleMdmDevices` instead.
+ * Resolve a serial to its SimpleMDM device id: the cached id when we have one,
+ * otherwise one `?search=` request whose answer is cached for next time.
+ * Returns `null` when SimpleMDM has no record of the serial.
  */
 async function resolveSimpleMdmDeviceId(
+  ctx: ActionCtx,
   apiKey: string,
+  institutionId: Id<"institutions">,
   serial: string,
 ): Promise<string | null> {
-  const targetSerial = serial.trim().toUpperCase();
-  let foundDeviceId: string | null = null;
-  await walkSimpleMdmDevicePages(apiKey, (devices) => {
-    const found = devices.find(
-      (device) =>
-        typeof device.attributes?.serial_number === "string" &&
-        device.attributes.serial_number.trim().toUpperCase() === targetSerial,
-    );
-    if (!found) return false;
-    foundDeviceId = String(found.id);
-    return true;
+  const snapshot = await ctx.runQuery(internal.simplemdm.snapshotForSerial, {
+    institutionId,
+    serial,
   });
-  return foundDeviceId;
+  if (snapshot?.simpleMdmDeviceId) return snapshot.simpleMdmDeviceId;
+  const found = await findSimpleMdmDeviceBySerial(apiKey, serial);
+  await ctx.runMutation(internal.simplemdm.recordDeviceInventory, {
+    institutionId,
+    serial,
+    device: found,
+  });
+  return found?.id ?? null;
 }
 
-type SimpleMdmDeviceDetailResponse = {
-  data?: {
-    attributes?: {
-      is_supervised?: unknown;
-      lost_mode_enabled?: unknown;
-    };
-  };
-};
+/**
+ * Run one per-device SimpleMDM call against the cached id. If SimpleMDM
+ * answers 404 — the device was re-enrolled or deleted and re-added, so its id
+ * moved — forget the cache, re-look-up by serial, and retry exactly once.
+ * `fn` receives `null` when the serial is not in SimpleMDM at all.
+ */
+async function withSimpleMdmDeviceId<T>(
+  ctx: ActionCtx,
+  apiKey: string,
+  institutionId: Id<"institutions">,
+  serial: string,
+  fn: (simpleMdmDeviceId: string | null) => Promise<T>,
+): Promise<T> {
+  const cached =
+    (
+      await ctx.runQuery(internal.simplemdm.snapshotForSerial, {
+        institutionId,
+        serial,
+      })
+    )?.simpleMdmDeviceId ?? null;
+  const first = cached ?? (await resolveSimpleMdmDeviceId(ctx, apiKey, institutionId, serial));
+  try {
+    return await fn(first);
+  } catch (error) {
+    if (!cached || !isSimpleMdmNotFound(error)) throw error;
+  }
+  await ctx.runMutation(internal.simplemdm.forgetCachedDeviceId, {
+    institutionId,
+    serial,
+  });
+  const fresh = await resolveSimpleMdmDeviceId(ctx, apiKey, institutionId, serial);
+  return await fn(fresh);
+}
 
 /**
  * `GET /devices/{id}` — read-only, ground-truth for `is_supervised` (Managed
  * Lost Mode only works on a supervised device) and `lost_mode_enabled` (is a
  * previously-sent enable/disable command actually reflected by SimpleMDM
  * yet). Missing/non-boolean attributes resolve to `null` — "not reported" —
- * rather than fabricating a state.
+ * rather than fabricating a state. Throws `not-found` when the id is stale so
+ * `withSimpleMdmDeviceId` can re-resolve it.
  */
 async function fetchDeviceAttributes(
   apiKey: string,
   simpleMdmDeviceId: string,
-): Promise<{ isSupervised: boolean | null; lostModeEnabled: boolean | null }> {
-  const url = `${SIMPLEMDM_API_BASE}/devices/${encodeURIComponent(simpleMdmDeviceId)}`;
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      headers: { Authorization: authorizationHeader(apiKey) },
+  serial: string,
+): Promise<SimpleMdmDeviceDetails> {
+  const details = await fetchSimpleMdmDevice(apiKey, simpleMdmDeviceId, serial);
+  if (!details) {
+    throw new SimpleMdmApiError({
+      code: "not-found",
+      status: 404,
+      what: "reading the device",
+      message: "SimpleMDM no longer has a device with that id.",
     });
-  } catch (error) {
-    throw new SimpleMdmApiError(
-      `Could not reach SimpleMDM: ${
-        error instanceof Error ? error.message : "Network request failed."
-      }`,
-    );
   }
-  if (!response.ok) {
-    throw new SimpleMdmApiError(
-      `SimpleMDM returned HTTP ${response.status} while reading the device.`,
-    );
-  }
-
-  let payload: SimpleMdmDeviceDetailResponse;
-  try {
-    payload = (await response.json()) as SimpleMdmDeviceDetailResponse;
-  } catch {
-    throw new SimpleMdmApiError("SimpleMDM returned an unreadable device response.");
-  }
-  const attributes = payload.data?.attributes;
-  return {
-    isSupervised:
-      typeof attributes?.is_supervised === "boolean"
-        ? attributes.is_supervised
-        : null,
-    lostModeEnabled:
-      typeof attributes?.lost_mode_enabled === "boolean"
-        ? attributes.lost_mode_enabled
-        : null,
-  };
+  return details;
 }
 
 /**
@@ -455,29 +431,16 @@ async function enableLostModeOnSimpleMdmDevice(
   simpleMdmDeviceId: string,
   message: string,
 ): Promise<{ queued: boolean }> {
-  const url = `${SIMPLEMDM_API_BASE}/devices/${encodeURIComponent(simpleMdmDeviceId)}/lost_mode`;
-  let response: Response;
-  try {
-    response = await fetch(url, {
+  const response = await simpleMdmRequest(
+    apiKey,
+    `devices/${encodeURIComponent(simpleMdmDeviceId)}/lost_mode`,
+    {
       method: "POST",
-      headers: {
-        Authorization: authorizationHeader(apiKey),
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message }),
-    });
-  } catch (error) {
-    throw new SimpleMdmApiError(
-      `Could not reach SimpleMDM: ${
-        error instanceof Error ? error.message : "Network request failed."
-      }`,
-    );
-  }
-  if (!response.ok) {
-    throw new SimpleMdmApiError(
-      `SimpleMDM returned HTTP ${response.status} while enabling Lost Mode.`,
-    );
-  }
+    },
+    { what: "enabling Lost Mode" },
+  );
   return { queued: response.status === 202 };
 }
 
@@ -490,25 +453,48 @@ async function disableLostModeOnSimpleMdmDevice(
   apiKey: string,
   simpleMdmDeviceId: string,
 ): Promise<{ queued: boolean }> {
-  const url = `${SIMPLEMDM_API_BASE}/devices/${encodeURIComponent(simpleMdmDeviceId)}/lost_mode`;
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "DELETE",
-      headers: { Authorization: authorizationHeader(apiKey) },
-    });
-  } catch (error) {
-    throw new SimpleMdmApiError(
-      `Could not reach SimpleMDM: ${
-        error instanceof Error ? error.message : "Network request failed."
-      }`,
-    );
-  }
-  if (!response.ok) {
-    throw new SimpleMdmApiError(
-      `SimpleMDM returned HTTP ${response.status} while disabling Lost Mode.`,
-    );
-  }
+  const response = await simpleMdmRequest(
+    apiKey,
+    `devices/${encodeURIComponent(simpleMdmDeviceId)}/lost_mode`,
+    { method: "DELETE" },
+    { what: "disabling Lost Mode" },
+  );
+  return { queued: response.status === 202 };
+}
+
+/**
+ * `POST /devices/{id}/restart` — Apple's RestartDevice command, the escape
+ * hatch for an iPad whose app has wedged. Like Lost Mode it answers 202 and
+ * is delivered on the device's next MDM check-in, so the caller reports
+ * queued-vs-accepted from the status rather than claiming it rebooted.
+ *
+ * Deliberately sends NO body: SimpleMDM's `notify_user` and
+ * `rebuild_kernel_cache` parameters are macOS-only, and this fleet is iPads.
+ *
+ * Apple lists RestartDevice as iOS/iPadOS *(Supervised)*, so callers must
+ * check supervision first — see `restartDevice`.
+ */
+async function restartSimpleMdmDevice(
+  apiKey: string,
+  simpleMdmDeviceId: string,
+): Promise<{ queued: boolean }> {
+  const response = await simpleMdmRequest(
+    apiKey,
+    `devices/${encodeURIComponent(simpleMdmDeviceId)}/restart`,
+    { method: "POST" },
+    {
+      what: "restarting the iPad",
+      // This POST is NOT idempotent — each accepted call queues a reboot — and
+      // the caller's authorization is revalidated only before the first
+      // attempt. So narrow the shared client's default retry set to the one
+      // status that PROVES SimpleMDM did not act on the request: 429. A lost
+      // response or a 502/503/504 is ambiguous, and re-sending it can queue a
+      // second reboot (under authority checked for the first attempt only),
+      // which is worse than reporting the failure and letting staff retry.
+      retryStatuses: new Set([429]),
+      retryOnTransportError: false,
+    },
+  );
   return { queued: response.status === 202 };
 }
 
@@ -527,41 +513,19 @@ async function fetchClaimAttributeValue(
   apiKey: string,
   simpleMdmDeviceId: string,
 ): Promise<string | null> {
-  const url =
-    `${SIMPLEMDM_API_BASE}/devices/${encodeURIComponent(simpleMdmDeviceId)}` +
-    `/custom_attribute_values`;
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      headers: { Authorization: authorizationHeader(apiKey) },
-    });
-  } catch (error) {
-    throw new SimpleMdmApiError(
-      `Could not reach SimpleMDM: ${
-        error instanceof Error ? error.message : "Network request failed."
-      }`,
-    );
-  }
-  if (!response.ok) {
-    throw new SimpleMdmApiError(
-      `SimpleMDM returned HTTP ${response.status} while reading the device claim.`,
-    );
-  }
-
-  let payload: SimpleMdmListResponse;
-  try {
-    payload = (await response.json()) as SimpleMdmListResponse;
-  } catch {
-    throw new SimpleMdmApiError(
-      "SimpleMDM returned an unreadable custom-attribute list.",
-    );
-  }
+  const what = "reading the device claim";
+  const payload = (await simpleMdmJson(
+    apiKey,
+    `devices/${encodeURIComponent(simpleMdmDeviceId)}/custom_attribute_values`,
+    { what },
+  )) as { data?: unknown };
   if (!Array.isArray(payload.data)) {
-    throw new SimpleMdmApiError(
-      "SimpleMDM returned an invalid custom-attribute list.",
-    );
+    throw new SimpleMdmApiError({
+      code: "unreadable",
+      what,
+      message: "SimpleMDM returned an invalid custom-attribute list.",
+    });
   }
-
   const entry = (payload.data as SimpleMdmCustomAttributeValue[]).find(
     (item) => item.id === CLAIM_ATTRIBUTE,
   );
@@ -574,32 +538,18 @@ async function writeClaimAttribute(
   simpleMdmDeviceId: string,
   claimToken: string,
 ): Promise<void> {
-  const url =
-    `${SIMPLEMDM_API_BASE}/devices/${encodeURIComponent(simpleMdmDeviceId)}` +
-    `/custom_attribute_values/${CLAIM_ATTRIBUTE}`;
-  let response: Response;
-  try {
-    response = await fetch(url, {
+  // simpleMdmRequest never includes a response body in its error: an error
+  // page could echo the claim token.
+  await simpleMdmRequest(
+    apiKey,
+    `devices/${encodeURIComponent(simpleMdmDeviceId)}/custom_attribute_values/${CLAIM_ATTRIBUTE}`,
+    {
       method: "PUT",
-      headers: {
-        Authorization: authorizationHeader(apiKey),
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ value: claimToken }),
-    });
-  } catch (error) {
-    throw new SimpleMdmApiError(
-      `Could not reach SimpleMDM: ${
-        error instanceof Error ? error.message : "Network request failed."
-      }`,
-    );
-  }
-  if (!response.ok) {
-    // Do not include the response body: an error page could echo the claim token.
-    throw new SimpleMdmApiError(
-      `SimpleMDM returned HTTP ${response.status} while updating the claim.`,
-    );
-  }
+    },
+    { what: "updating the claim" },
+  );
 }
 
 async function renameSimpleMdmDevice(
@@ -607,43 +557,24 @@ async function renameSimpleMdmDevice(
   simpleMdmDeviceId: string,
   name: string,
 ): Promise<string> {
-  const url = `${SIMPLEMDM_API_BASE}/devices/${encodeURIComponent(simpleMdmDeviceId)}`;
-  let response: Response;
-  try {
-    response = await fetch(url, {
+  const what = "renaming the device";
+  const payload = (await simpleMdmJson(
+    apiKey,
+    `devices/${encodeURIComponent(simpleMdmDeviceId)}`,
+    { what },
+    {
       method: "PATCH",
-      headers: {
-        Authorization: authorizationHeader(apiKey),
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ name }).toString(),
-    });
-  } catch (error) {
-    throw new SimpleMdmApiError(
-      `Could not reach SimpleMDM: ${
-        error instanceof Error ? error.message : "Network request failed."
-      }`,
-    );
-  }
-  if (!response.ok) {
-    throw new SimpleMdmApiError(
-      `SimpleMDM returned HTTP ${response.status} while renaming the device.`,
-    );
-  }
-
-  let payload: { data?: { attributes?: { name?: unknown } } };
-  try {
-    payload = (await response.json()) as typeof payload;
-  } catch {
-    throw new SimpleMdmApiError(
-      "SimpleMDM renamed the device but returned an unreadable response.",
-    );
-  }
+    },
+  )) as { data?: { attributes?: { name?: unknown } } };
   const savedName = payload.data?.attributes?.name;
   if (typeof savedName !== "string" || !savedName.trim()) {
-    throw new SimpleMdmApiError(
-      "SimpleMDM renamed the device but did not return its saved name.",
-    );
+    throw new SimpleMdmApiError({
+      code: "unreadable",
+      what,
+      message: "SimpleMDM renamed the device but did not return its saved name.",
+    });
   }
   return savedName.trim();
 }
@@ -651,9 +582,10 @@ async function renameSimpleMdmDevice(
 export const managedDeviceForPush = internalQuery({
   args: { managedDeviceId: v.id("managedDeviceClaims") },
   handler: async (ctx, args) => {
-    const { institutionId } = await requireSimpleMdmAccess(ctx);
+    const { user, institutionId: primaryId } = await requireSimpleMdmAccess(ctx);
     const row = await ctx.db.get(args.managedDeviceId);
-    if (!row || row.institutionId !== institutionId) {
+    const institutionId = row ? simpleMdmPushScope(user, primaryId, row) : null;
+    if (!row || !institutionId) {
       throw new Error("That device is not available for SimpleMDM provisioning.");
     }
     if (!row.scholarId) {
@@ -667,6 +599,7 @@ export const managedDeviceForPush = internalQuery({
     return {
       managedDeviceId: row._id,
       serial: row.serial,
+      institutionId,
     };
   },
 });
@@ -675,12 +608,12 @@ export const prepareSimpleMdmRename = internalMutation({
   args: { managedDeviceId: v.id("managedDeviceClaims") },
   handler: async (ctx, args) => {
     const { institutionId } = await requireSimpleMdmAccess(ctx);
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
     const row = await ctx.db.get(args.managedDeviceId);
     if (!row || row.institutionId !== institutionId) {
       throw new Error("That device is not available for SimpleMDM management.");
     }
-    return { serial: row.serial };
+    return { serial: row.serial, institutionId };
   },
 });
 
@@ -691,7 +624,7 @@ export const recordSimpleMdmRename = internalMutation({
   },
   handler: async (ctx, args): Promise<{ recorded: boolean }> => {
     const { user, institutionId } = await requireSimpleMdmAccess(ctx);
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
     const row = await ctx.db.get(args.managedDeviceId);
     if (!row || row.institutionId !== institutionId) {
       return { recorded: false };
@@ -702,6 +635,7 @@ export const recordSimpleMdmRename = internalMutation({
       "managed-device.simplemdm-rename",
       row.scholarId ?? user._id,
       `serial ${row.serial} renamed to ${args.name}`,
+      institutionId,
     );
     return { recorded: true };
   },
@@ -727,14 +661,14 @@ export const pendingManagedDevicesForPush = internalQuery({
     return assigned.map((row) => ({
       managedDeviceId: row._id,
       serial: row.serial,
+      institutionId,
     }));
   },
 });
 
 export const assignedManagedDevicesForVerify = internalQuery({
-  args: {},
-  handler: async (ctx) => {
-    const { institutionId } = await requireSimpleMdmAccess(ctx);
+  args: { institutionId: v.id("institutions") },
+  handler: async (ctx, { institutionId }) => {
     const rows = await ctx.db
       .query("managedDeviceClaims")
       .withIndex("by_institution", (q) => q.eq("institutionId", institutionId))
@@ -761,9 +695,8 @@ export const assignedManagedDevicesForVerify = internalQuery({
 });
 
 export const managedDevicesForInventory = internalQuery({
-  args: {},
-  handler: async (ctx) => {
-    const { institutionId } = await requireSimpleMdmAccess(ctx);
+  args: { institutionId: v.id("institutions") },
+  handler: async (ctx, { institutionId }) => {
     const rows = await ctx.db
       .query("managedDeviceClaims")
       .withIndex("by_institution", (q) => q.eq("institutionId", institutionId))
@@ -912,12 +845,13 @@ export const raiseLowBatteryAlert = internalMutation({
 export const stageManagedDeviceClaimForPush = internalMutation({
   args: { managedDeviceId: v.id("managedDeviceClaims") },
   handler: async (ctx, args) => {
-    const { user, institutionId } = await requireSimpleMdmAccess(ctx);
-    await assertNotImpersonating(ctx);
+    const { user, institutionId: primaryId } = await requireSimpleMdmAccess(ctx);
+    await assertCanWrite(ctx);
     const row = await ctx.db.get(args.managedDeviceId);
+    const institutionId = row ? simpleMdmPushScope(user, primaryId, row) : null;
     if (
       !row ||
-      row.institutionId !== institutionId ||
+      !institutionId ||
       !row.scholarId ||
       row.claimState === "revoked"
     ) {
@@ -943,10 +877,11 @@ export const recordSimpleMdmPush = internalMutation({
     pendingRotationCount: v.number(),
   },
   handler: async (ctx, args): Promise<{ recorded: boolean }> => {
-    const { user, institutionId } = await requireSimpleMdmAccess(ctx);
-    await assertNotImpersonating(ctx);
+    const { user, institutionId: primaryId } = await requireSimpleMdmAccess(ctx);
+    await assertCanWrite(ctx);
     const row = await ctx.db.get(args.managedDeviceId);
-    if (!row || row.institutionId !== institutionId || !row.scholarId) {
+    const institutionId = row ? simpleMdmPushScope(user, primaryId, row) : null;
+    if (!row || !institutionId || !row.scholarId) {
       return { recorded: false };
     }
 
@@ -982,6 +917,7 @@ export const recordSimpleMdmPush = internalMutation({
       "managed-claim.simplemdm-push",
       row.scholarId,
       `serial ${row.serial}${promotedWhilePushing ? " (claimed during push)" : ""}`,
+      institutionId,
     );
     return { recorded: true };
   },
@@ -997,36 +933,73 @@ async function pushPreparedDevice(
   device: {
     managedDeviceId: Id<"managedDeviceClaims">;
     serial: string;
+    institutionId: Id<"institutions">;
   },
   apiKey: string,
   mappedSimpleMdmDeviceId?: string | null,
 ): Promise<SimpleMdmPushResult> {
-  let simpleMdmDeviceId: string | null;
-  try {
-    simpleMdmDeviceId =
-      mappedSimpleMdmDeviceId === undefined
-        ? await resolveSimpleMdmDeviceId(apiKey, device.serial)
-        : mappedSimpleMdmDeviceId;
-  } catch (error) {
-    return {
-      ...device,
-      status: "api-error",
-      message:
-        error instanceof Error
-          ? error.message
-          : "SimpleMDM could not list enrolled devices.",
-    };
-  }
-  if (!simpleMdmDeviceId) {
-    return {
-      ...device,
-      status: "device-not-found-in-simplemdm",
-      message:
-        "SimpleMDM has no record of this serial. Check the serial, then confirm " +
-        "the iPad is assigned to SimpleMDM in Apple School Manager and the ADE " +
-        "sync has run.",
-    };
-  }
+  const result = await pushPreparedDeviceUnrecorded(
+    ctx,
+    device,
+    apiKey,
+    mappedSimpleMdmDeviceId,
+  );
+  // Remember the outcome so "Push failed" survives a page reload; the
+  // transient per-click result the console shows is the same data.
+  await ctx.runMutation(internal.simplemdm.recordPushOutcome, {
+    institutionId: device.institutionId,
+    serial: device.serial,
+    status: result.status,
+    message: result.message,
+  });
+  return { managedDeviceId: result.managedDeviceId, serial: result.serial, status: result.status, message: result.message };
+}
+
+export const recordPushOutcome = internalMutation({
+  args: {
+    institutionId: v.id("institutions"),
+    serial: v.string(),
+    status: v.union(
+      v.literal("pushed"),
+      v.literal("device-not-found-in-simplemdm"),
+      v.literal("api-error"),
+    ),
+    message: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await upsertSimpleMdmSnapshot(ctx, args.institutionId, args.serial, {
+      lastPushAt: Date.now(),
+      lastPushStatus: args.status,
+      lastPushMessage: args.message,
+      // A successful push replaces the claim SimpleMDM holds, so the previous
+      // read-back verdict no longer describes anything. Drop it (never
+      // fabricate "in-sync"); the next scheduled check will say.
+      ...(args.status === "pushed"
+        ? { claimVerifyStatus: undefined, claimVerifiedAt: undefined }
+        : {}),
+    });
+  },
+});
+
+async function pushPreparedDeviceUnrecorded(
+  ctx: ActionCtx,
+  device: {
+    managedDeviceId: Id<"managedDeviceClaims">;
+    serial: string;
+    institutionId: Id<"institutions">;
+  },
+  apiKey: string,
+  mappedSimpleMdmDeviceId?: string | null,
+): Promise<SimpleMdmPushResult> {
+  const publicDevice = { managedDeviceId: device.managedDeviceId, serial: device.serial };
+  const notFound = (): SimpleMdmPushResult => ({
+    ...publicDevice,
+    status: "device-not-found-in-simplemdm",
+    message:
+      "SimpleMDM has no record of this serial. Check the serial, then confirm " +
+      "the iPad is assigned to SimpleMDM in Apple School Manager and the ADE " +
+      "sync has run.",
+  });
 
   let minted: {
     claimToken: string;
@@ -1040,25 +1013,38 @@ async function pushPreparedDevice(
     );
   } catch {
     return {
-      ...device,
+      ...publicDevice,
       status: "api-error",
       message: "Rabbithole couldn't mint a fresh claim for this device.",
     };
   }
+
   try {
-    await writeClaimAttribute(
-      apiKey,
-      simpleMdmDeviceId,
-      minted.claimToken,
-    );
+    const write = async (simpleMdmDeviceId: string | null) => {
+      if (!simpleMdmDeviceId) return false;
+      await writeClaimAttribute(apiKey, simpleMdmDeviceId, minted.claimToken);
+      return true;
+    };
+    const wrote =
+      mappedSimpleMdmDeviceId === undefined
+        ? await withSimpleMdmDeviceId(
+            ctx,
+            apiKey,
+            device.institutionId,
+            device.serial,
+            write,
+          )
+        : await write(mappedSimpleMdmDeviceId);
+    if (!wrote) return notFound();
   } catch (error) {
+    if (isSimpleMdmNotFound(error)) return notFound();
     return {
-      ...device,
+      ...publicDevice,
       status: "api-error",
-      message:
-        error instanceof Error
-          ? error.message
-          : "SimpleMDM could not update the device claim.",
+      message: simpleMdmErrorMessage(
+        error,
+        "SimpleMDM could not update the device claim.",
+      ),
     };
   }
 
@@ -1074,7 +1060,7 @@ async function pushPreparedDevice(
     );
   } catch {
     return {
-      ...device,
+      ...publicDevice,
       status: "api-error",
       message:
         "The claim reached SimpleMDM, but Rabbithole couldn't record the push. Push it again.",
@@ -1082,7 +1068,7 @@ async function pushPreparedDevice(
   }
   if (!recorded.recorded) {
     return {
-      ...device,
+      ...publicDevice,
       status: "api-error",
       message:
         "The device assignment changed during the push. Push it again to send the current claim.",
@@ -1090,7 +1076,7 @@ async function pushPreparedDevice(
   }
 
   return {
-    ...device,
+    ...publicDevice,
     status: "pushed",
     message: "Claim pushed to SimpleMDM.",
   };
@@ -1099,6 +1085,7 @@ async function pushPreparedDevice(
 export const pushClaimToSimpleMdm = action({
   args: { managedDeviceId: v.id("managedDeviceClaims") },
   handler: async (ctx, args): Promise<SimpleMdmPushResult> => {
+    await assertWritableAction(ctx);
     const device = await ctx.runQuery(
       internal.simplemdm.managedDeviceForPush,
       args,
@@ -1113,9 +1100,11 @@ export const pushAllPendingClaims = action({
   handler: async (
     ctx,
   ): Promise<{ results: SimpleMdmPushResult[] }> => {
+    await assertWritableAction(ctx);
     const devices: Array<{
       managedDeviceId: Id<"managedDeviceClaims">;
       serial: string;
+      institutionId: Id<"institutions">;
     }> = await ctx.runQuery(
       internal.simplemdm.pendingManagedDevicesForPush,
       {},
@@ -1129,15 +1118,24 @@ export const pushAllPendingClaims = action({
     } catch (error) {
       return {
         results: devices.map((device) => ({
-          ...device,
+          managedDeviceId: device.managedDeviceId,
+          serial: device.serial,
           status: "api-error",
-          message:
-            error instanceof Error
-              ? error.message
-              : "SimpleMDM could not list enrolled devices.",
+          message: simpleMdmErrorMessage(
+            error,
+            "SimpleMDM could not list enrolled devices.",
+          ),
         })),
       };
     }
+    // The roster walk just told us every id — remember them.
+    await ctx.runMutation(internal.simplemdm.recordRosterInventory, {
+      institutionId: devices[0].institutionId,
+      devices: devices.map((device) => ({
+        serial: device.serial,
+        device: bySerial.get(normalizeSerial(device.serial)) ?? null,
+      })),
+    });
     const results: SimpleMdmPushResult[] = [];
     for (const device of devices) {
       results.push(
@@ -1171,20 +1169,25 @@ export const renameManagedDevice = action({
       { managedDeviceId: args.managedDeviceId },
     );
     const apiKey = simpleMdmApiKey();
-    const simpleMdmDeviceId = await resolveSimpleMdmDeviceId(
+    const simpleMdmName = await withSimpleMdmDeviceId(
+      ctx,
       apiKey,
+      device.institutionId,
       device.serial,
+      async (simpleMdmDeviceId) => {
+        if (!simpleMdmDeviceId) {
+          throw new Error(
+            "SimpleMDM has no record of this serial. Confirm the device is enrolled, then try again.",
+          );
+        }
+        return await renameSimpleMdmDevice(apiKey, simpleMdmDeviceId, name);
+      },
     );
-    if (!simpleMdmDeviceId) {
-      throw new Error(
-        "SimpleMDM has no record of this serial. Confirm the device is enrolled, then try again.",
-      );
-    }
-    const simpleMdmName = await renameSimpleMdmDevice(
-      apiKey,
-      simpleMdmDeviceId,
-      name,
-    );
+    await ctx.runMutation(internal.simplemdm.recordDeviceName, {
+      institutionId: device.institutionId,
+      serial: device.serial,
+      name: simpleMdmName,
+    });
     const recorded = await ctx.runMutation(
       internal.simplemdm.recordSimpleMdmRename,
       {
@@ -1201,19 +1204,431 @@ export const renameManagedDevice = action({
   },
 });
 
+export const recordRosterInventory = internalMutation({
+  args: {
+    institutionId: v.id("institutions"),
+    devices: v.array(
+      v.object({
+        serial: v.string(),
+        device: v.union(
+          v.null(),
+          v.object({
+            id: v.string(),
+            serial: v.string(),
+            name: v.union(v.string(), v.null()),
+            batteryLevel: v.union(v.number(), v.null()),
+            lastSeenAt: v.union(v.number(), v.null()),
+            isSupervised: v.union(v.boolean(), v.null()),
+            lostModeEnabled: v.union(v.boolean(), v.null()),
+            status: v.union(v.string(), v.null()),
+          }),
+        ),
+        // Device truth panel (TRA-241 step 1) — the `GET
+        // .../installed_apps` read-back, one call per device found in
+        // SimpleMDM. Absent (not just an empty array) means "not fetched
+        // this pass" (e.g. `device` was null); the mutation then leaves any
+        // previously-stored installed-apps fields untouched rather than
+        // wiping them.
+        installedBundleIds: v.optional(v.array(v.string())),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    for (const entry of args.devices) {
+      await upsertSimpleMdmSnapshot(ctx, args.institutionId, entry.serial, {
+        ...inventoryPatch(entry.device, now),
+        ...(entry.installedBundleIds !== undefined
+          ? { installedBundleIds: entry.installedBundleIds, installedAppsAt: now }
+          : {}),
+      });
+    }
+  },
+});
+
+export const recordDeviceName = internalMutation({
+  args: {
+    institutionId: v.id("institutions"),
+    serial: v.string(),
+    name: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await upsertSimpleMdmSnapshot(ctx, args.institutionId, args.serial, {
+      name: args.name,
+    });
+  },
+});
+
 /**
- * Reconcile every assigned, non-revoked device against SimpleMDM's ground truth
- * so the console can hide the "Push" button when the stored claim already
- * matches. The same roster response carries battery and last-seen inventory for
- * every managed device, including unassigned devices. Pages the roster ONCE,
- * then reads each assigned device's stored claim and compares its sha256 to the
- * hash Rabbithole holds. Any SimpleMDM API failure throws (the console surfaces
- * it) rather than fabricating a partial answer.
+ * Write down the SimpleMDM devices that have NO `managedDeviceClaims` row in
+ * this institution — the MDM → Rabbithole direction of reconciliation. Called
+ * only from `refreshSnapshotsForInstitution`, with the complete roster walk
+ * that pass already fetched; it makes no SimpleMDM requests of its own.
  *
- * The console fires this AUTOMATICALLY on mount, so "this deployment has no
- * SimpleMDM" must not be an error — it would raise on every page load for every
- * institution that never adopts SimpleMDM. Unconfigured returns
- * `{ configured: false, results: [], inventory: [] }` instead.
+ * Snapshot rows are written through the same `inventoryPatch` the rostered
+ * devices use, so the row is correctly shaped for the OTHER consumer: the
+ * moment somebody registers the serial, `listManagedDevices` starts reading
+ * this row through the new claim and must find real inventory there, not a
+ * counter's private bookkeeping. (`installedBundleIds` is left absent — the
+ * per-device installed-apps read is one HTTP call each and is reserved for
+ * rostered devices; absent already renders as "unknown".)
+ *
+ * Staleness is handled in the same pass, which is why the caller hands over
+ * the whole unrostered set rather than just the new ones: a claim-less
+ * snapshot row whose serial is no longer anywhere in SimpleMDM is dated and
+ * marked `foundInSimpleMdm: false`, so it stops being counted. A row that
+ * gained a claim row is left entirely alone — the roster-driven passes above
+ * own it from then on.
+ */
+export const reconcileUnrosteredDevices = internalMutation({
+  args: {
+    institutionId: v.id("institutions"),
+    devices: v.array(
+      v.object({
+        id: v.string(),
+        serial: v.string(),
+        name: v.union(v.string(), v.null()),
+        batteryLevel: v.union(v.number(), v.null()),
+        lastSeenAt: v.union(v.number(), v.null()),
+        isSupervised: v.union(v.boolean(), v.null()),
+        lostModeEnabled: v.union(v.boolean(), v.null()),
+        status: v.union(v.string(), v.null()),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const claimedSerials = await claimedSerialsForInstitution(
+      ctx,
+      args.institutionId,
+    );
+    const seen = new Set<string>();
+    for (const device of args.devices) {
+      const serial = normalizeSerial(device.serial);
+      seen.add(serial);
+      // Registered between the walk and this write: the roster-driven pass
+      // owns the row now, and re-writing it here would drop the claim fields.
+      if (claimedSerials.has(serial)) continue;
+      await upsertSimpleMdmSnapshot(
+        ctx,
+        args.institutionId,
+        serial,
+        inventoryPatch(device, now),
+      );
+    }
+    const rows = await ctx.db
+      .query("simpleMdmDeviceSnapshots")
+      .withIndex("by_institution", (q) =>
+        q.eq("institutionId", args.institutionId),
+      )
+      .collect();
+    for (const row of rows) {
+      if (row.foundInSimpleMdm !== true) continue;
+      if (seen.has(row.serial) || claimedSerials.has(row.serial)) continue;
+      await upsertSimpleMdmSnapshot(
+        ctx,
+        args.institutionId,
+        row.serial,
+        inventoryPatch(null, now),
+      );
+    }
+  },
+});
+
+async function claimedSerialsForInstitution(
+  ctx: QueryCtx | MutationCtx,
+  institutionId: Id<"institutions">,
+): Promise<Set<string>> {
+  const claims = await ctx.db
+    .query("managedDeviceClaims")
+    .withIndex("by_institution", (q) => q.eq("institutionId", institutionId))
+    .collect();
+  return new Set(claims.map((claim) => normalizeSerial(claim.serial)));
+}
+
+/**
+ * The serials SimpleMDM is actively managing that this roster has never heard
+ * of — the one signal the devices console had no way to show, so an enrolled,
+ * checking-in iPad could simply be absent with nothing saying so.
+ *
+ * Read entirely from STORED snapshots (the console never calls SimpleMDM on a
+ * page load), so the answer is as of the last check. The toolbar's existing
+ * freshness line already dates that check from the canonical source, so this
+ * query returns serials only and never re-derives a second clock.
+ *
+ * ENROLLED only. The roster walk asks for `include_awaiting_enrollment=true`,
+ * so a boxed or ADE-pending iPad is in it; reporting those would make this
+ * line loudest during an unboxing wave, which is exactly when it needs to be
+ * trustworthy. A retired ("unenrolled") device is excluded for the same
+ * reason. Rows written before `simpleMdmStatus` existed report no status and
+ * are therefore not counted until the next refresh dates them — under-report,
+ * never over-accuse.
+ *
+ * Same gate as every other SimpleMDM surface: one global tenant API key means
+ * school-operations access at the PRIMARY institution, and a refusal (never a
+ * silent fallback to the primary's fleet) for anyone else.
+ */
+export const unrosteredSimpleMdmDevices = query({
+  args: {},
+  handler: async (
+    ctx,
+  ): Promise<{ serials: string[] }> => {
+    const { institutionId } = await requireSimpleMdmAccess(ctx);
+    const claimedSerials = await claimedSerialsForInstitution(
+      ctx,
+      institutionId,
+    );
+    const rows = await ctx.db
+      .query("simpleMdmDeviceSnapshots")
+      .withIndex("by_institution", (q) => q.eq("institutionId", institutionId))
+      .collect();
+    const serials: string[] = [];
+    for (const row of rows) {
+      if (row.foundInSimpleMdm !== true) continue;
+      if (!isEnrolledSimpleMdmStatus(row.simpleMdmStatus)) continue;
+      if (claimedSerials.has(row.serial)) continue;
+      serials.push(row.serial);
+    }
+    serials.sort();
+    return { serials };
+  },
+});
+
+/**
+ * Persist verify verdicts — but only for claims that still ARE the claim the
+ * verdict was computed against. The refresh action reads the claim hashes,
+ * then spends seconds-to-minutes talking to SimpleMDM; a mint / rotate /
+ * unassign / revoke in that window clears the stored verdict and changes the
+ * hashes. Without this check the late write would put a stale "in-sync" back
+ * on a claim that no longer exists. Each verdict carries the hashes it
+ * compared; a row whose hashes moved is skipped, not overwritten.
+ */
+export const recordClaimVerification = internalMutation({
+  args: {
+    institutionId: v.id("institutions"),
+    results: v.array(
+      v.object({
+        managedDeviceId: v.id("managedDeviceClaims"),
+        serial: v.string(),
+        claimTokenHash: v.string(),
+        pendingClaimTokenHash: v.optional(v.string()),
+        status: v.union(
+          v.literal("in-sync"),
+          v.literal("stale"),
+          v.literal("not-in-simplemdm"),
+        ),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    for (const result of args.results) {
+      const claim = await ctx.db.get(result.managedDeviceId);
+      if (
+        !claim ||
+        claim.institutionId !== args.institutionId ||
+        claim.claimState === "revoked" ||
+        claim.claimTokenHash !== result.claimTokenHash ||
+        claim.pendingClaimTokenHash !== result.pendingClaimTokenHash
+      ) {
+        continue;
+      }
+      await upsertSimpleMdmSnapshot(ctx, args.institutionId, result.serial, {
+        claimVerifyStatus: result.status,
+        claimVerifiedAt: now,
+      });
+    }
+  },
+});
+
+/**
+ * Reconcile every managed device against SimpleMDM's ground truth and WRITE
+ * the answer to `simpleMdmDeviceSnapshots` — the one copy the console reads.
+ * Pages the roster ONCE (it carries name/battery/last-seen/supervision/Lost
+ * Mode for every serial, assigned or not), then reads each assigned device's
+ * stored claim and compares its sha256 to the hash Rabbithole holds. Any
+ * SimpleMDM API failure throws (callers surface it) rather than fabricating a
+ * partial answer; the previous snapshot stays put, dated, until a check
+ * succeeds.
+ *
+ * Runs from the hourly cron, from "Check now" in the console, and from
+ * nothing else — a page opening is not a reason to call SimpleMDM.
+ */
+async function refreshSnapshotsForInstitution(
+  ctx: ActionCtx,
+  apiKey: string,
+  institutionId: Id<"institutions">,
+): Promise<{
+  results: SimpleMdmVerifyResult[];
+  inventory: SimpleMdmInventoryResult[];
+}> {
+  const [devices, inventoryDevices] = await Promise.all([
+    ctx.runQuery(internal.simplemdm.assignedManagedDevicesForVerify, {
+      institutionId,
+    }),
+    ctx.runQuery(internal.simplemdm.managedDevicesForInventory, {
+      institutionId,
+    }),
+  ]);
+  const bySerial = await listSimpleMdmDevices(apiKey);
+  // Installed-apps read-back (device truth panel, TRA-241 step 1): one call
+  // per device found in SimpleMDM (`GET /devices/{id}/installed_apps`).
+  // Verdicts are flushed in the same small batches, and on the same
+  // stop-asking-when-SimpleMDM-says-so posture, as the claim-verify loop
+  // below — a rate limit or transport failure here aborts this refresh pass
+  // (the cron and "Check now" both already tolerate a failed pass and retry
+  // next tick) rather than silently skipping installed-apps for the rest of
+  // the roster.
+  const inventory: SimpleMdmInventoryResult[] = [];
+  let unflushedInventory: Array<{
+    serial: string;
+    device: SimpleMdmDeviceDetails | null;
+    installedBundleIds: string[] | undefined;
+  }> = [];
+  const flushInventory = async () => {
+    if (!unflushedInventory.length) return;
+    const batch = unflushedInventory;
+    unflushedInventory = [];
+    await ctx.runMutation(internal.simplemdm.recordRosterInventory, {
+      institutionId,
+      devices: batch,
+    });
+  };
+  try {
+    for (const device of inventoryDevices) {
+      const details = bySerial.get(normalizeSerial(device.serial));
+      const installedBundleIds = details
+        ? await fetchInstalledAppBundleIds(apiKey, details.id)
+        : undefined;
+      inventory.push({
+        managedDeviceId: device.managedDeviceId,
+        serial: device.serial,
+        foundInSimpleMdm: details !== undefined,
+        simpleMdmName: details?.name ?? null,
+        batteryLevel: details?.batteryLevel ?? null,
+        lastSeenAt: details?.lastSeenAt ?? null,
+        isSupervised: details?.isSupervised ?? null,
+        lostModeEnabled: details?.lostModeEnabled ?? null,
+      });
+      unflushedInventory.push({
+        serial: device.serial,
+        device: details ?? null,
+        installedBundleIds,
+      });
+      if (unflushedInventory.length >= VERIFY_FLUSH_EVERY) await flushInventory();
+    }
+  } finally {
+    await flushInventory();
+  }
+
+  // One read per assigned device. Verdicts are persisted in small batches as
+  // they arrive, so a run that dies partway (action limit, SimpleMDM going
+  // dark) still leaves every device it did reach freshly dated; and the
+  // moment SimpleMDM says "slow down" or stops answering we stop asking —
+  // hammering the rest of the roster would only lengthen the rate limit.
+  const results: SimpleMdmVerifyResult[] = [];
+  let unflushed: Array<
+    SimpleMdmVerifyResult & {
+      claimTokenHash: string;
+      pendingClaimTokenHash: string | undefined;
+    }
+  > = [];
+  const flush = async () => {
+    if (!unflushed.length) return;
+    const batch = unflushed;
+    unflushed = [];
+    await ctx.runMutation(internal.simplemdm.recordClaimVerification, {
+      institutionId,
+      results: batch,
+    });
+  };
+  const record = (
+    result: SimpleMdmVerifyResult,
+    device: (typeof devices)[number],
+  ) => {
+    results.push(result);
+    unflushed.push({
+      ...result,
+      claimTokenHash: device.claimTokenHash,
+      pendingClaimTokenHash: device.pendingClaimTokenHash,
+    });
+  };
+  try {
+    for (const device of devices) {
+      const simpleMdmDevice = bySerial.get(normalizeSerial(device.serial));
+      if (!simpleMdmDevice) {
+        record(
+          {
+            managedDeviceId: device.managedDeviceId,
+            serial: device.serial,
+            status: "not-in-simplemdm",
+          },
+          device,
+        );
+        continue;
+      }
+      const storedValue = await fetchClaimAttributeValue(
+        apiKey,
+        simpleMdmDevice.id,
+      );
+      const storedHash = storedValue ? await sha256Hex(storedValue) : null;
+      record(
+        {
+          managedDeviceId: device.managedDeviceId,
+          serial: device.serial,
+          status:
+            storedHash === device.claimTokenHash ||
+            storedHash === device.pendingClaimTokenHash
+              ? "in-sync"
+              : "stale",
+        },
+        device,
+      );
+      if (unflushed.length >= VERIFY_FLUSH_EVERY) await flush();
+    }
+  } finally {
+    await flush();
+  }
+
+  // MDM → Rabbithole reconciliation. `bySerial` above is the COMPLETE
+  // SimpleMDM roster this pass already paid for; every serial in it that has
+  // no `managedDeviceClaims` row is a device that is enrolled (or boxed) at
+  // SimpleMDM and invisible to this console. Writing them down here costs
+  // ZERO extra SimpleMDM requests — the walk already happened.
+  //
+  // Deliberately last: both loops above throw on a SimpleMDM failure, so a
+  // partial pass never reaches this point. "These serials are missing from
+  // your roster" is an accusation, and it may only be made from a walk that
+  // completed.
+  const rosteredSerials = new Set(
+    inventoryDevices.map((device) => normalizeSerial(device.serial)),
+  );
+  await ctx.runMutation(internal.simplemdm.reconcileUnrosteredDevices, {
+    institutionId,
+    devices: [...bySerial.values()].filter(
+      (device) => !rosteredSerials.has(device.serial),
+    ),
+  });
+
+  return { results, inventory };
+}
+
+/** Persist claim verdicts after this many devices so a partial run still counts. */
+const VERIFY_FLUSH_EVERY = 10;
+
+export const simpleMdmAccessContext = internalQuery({
+  args: {},
+  handler: async (ctx): Promise<{ institutionId: Id<"institutions"> }> => {
+    const { institutionId } = await requireSimpleMdmAccess(ctx);
+    return { institutionId };
+  },
+});
+
+/**
+ * "Check now": a staff member asks for a fresh SimpleMDM read-back. Persists
+ * the result (the console re-renders from the snapshot rows) and also returns
+ * it, for callers that want the answer inline. Unconfigured is an ordinary
+ * state, not an error — `{ configured: false }`.
  */
 export const verifySimpleMdmClaims = action({
   args: {},
@@ -1229,60 +1644,51 @@ export const verifySimpleMdmClaims = action({
       {},
     );
     if (!configured) return { configured: false, results: [], inventory: [] };
-    const devices = await ctx.runQuery(
-      internal.simplemdm.assignedManagedDevicesForVerify,
-      {},
-    );
-    const inventoryDevices: Array<{
-      managedDeviceId: Id<"managedDeviceClaims">;
-      serial: string;
-    }> = await ctx.runQuery(
-      internal.simplemdm.managedDevicesForInventory,
+    const { institutionId } = await ctx.runQuery(
+      internal.simplemdm.simpleMdmAccessContext,
       {},
     );
     const apiKey = simpleMdmApiKey();
-    const bySerial = await listSimpleMdmDevices(apiKey);
-    const inventory = inventoryDevices.map((device) => {
-      const details = bySerial.get(device.serial.trim().toUpperCase());
-      return {
-        managedDeviceId: device.managedDeviceId,
-        serial: device.serial,
-        foundInSimpleMdm: details !== undefined,
-        simpleMdmName: details?.name ?? null,
-        batteryLevel: details?.batteryLevel ?? null,
-        lastSeenAt: details?.lastSeenAt ?? null,
-        isSupervised: details?.isSupervised ?? null,
-        lostModeEnabled: details?.lostModeEnabled ?? null,
-      };
-    });
-
-    const results: SimpleMdmVerifyResult[] = [];
-    for (const device of devices) {
-      const simpleMdmDevice = bySerial.get(device.serial.trim().toUpperCase());
-      if (!simpleMdmDevice) {
-        results.push({
-          managedDeviceId: device.managedDeviceId,
-          serial: device.serial,
-          status: "not-in-simplemdm",
-        });
-        continue;
-      }
-      const storedValue = await fetchClaimAttributeValue(
-        apiKey,
-        simpleMdmDevice.id,
-      );
-      const storedHash = storedValue ? await sha256Hex(storedValue) : null;
-      results.push({
-        managedDeviceId: device.managedDeviceId,
-        serial: device.serial,
-        status:
-          storedHash === device.claimTokenHash ||
-          storedHash === device.pendingClaimTokenHash
-            ? "in-sync"
-            : "stale",
-      });
-    }
+    const { results, inventory } = await refreshSnapshotsForInstitution(
+      ctx,
+      apiKey,
+      institutionId,
+    );
     return { configured: true, results, inventory };
+  },
+});
+
+/**
+ * Scheduled twin of `verifySimpleMdmClaims` (crons.ts, hourly). The API key
+ * is one tenant's, so this refreshes the primary institution's fleet only.
+ * Unconfigured deployments return quietly; an API failure logs and leaves the
+ * last good snapshot in place.
+ */
+export const refreshSimpleMdmSnapshots = internalAction({
+  args: {},
+  handler: async (ctx): Promise<void> => {
+    const apiKey = simpleMdmApiKeyOrNull();
+    if (!apiKey) return;
+    const institutionId = await ctx.runQuery(
+      internal.simplemdm.primaryInstitutionForSnapshots,
+      {},
+    );
+    if (!institutionId) return;
+    try {
+      await refreshSnapshotsForInstitution(ctx, apiKey, institutionId);
+    } catch (error) {
+      console.error(
+        "refreshSimpleMdmSnapshots: SimpleMDM read-back failed:",
+        simpleMdmErrorMessage(error, "unknown error"),
+      );
+    }
+  },
+});
+
+export const primaryInstitutionForSnapshots = internalQuery({
+  args: {},
+  handler: async (ctx): Promise<Id<"institutions"> | null> => {
+    return await primaryInstitutionId(ctx);
   },
 });
 
@@ -1301,20 +1707,31 @@ export const verifySimpleMdmClaims = action({
 // (`lostModeStatus`) rather than tracking a second, possibly-stale copy.
 
 /**
- * Resolve a `pairedDeviceId` to the SimpleMDM-enrolled serial (if any) for
- * Lost Mode calls, after confirming the caller may administer that scholar.
- * Shared by both the read-back status action and the enable/disable action.
+ * Resolve a `pairedDeviceId` to the SimpleMDM-enrolled serial (if any) for a
+ * MUTATING device command, after confirming the caller may administer that
+ * scholar. Shared by every such command — Lost Mode enable/disable and
+ * `restartDevice` — so a new command inherits the tenant + scholar-access
+ * check rather than growing a third copy of it. (The read-back status action
+ * has its own twin, `pairedDeviceForLostModeStatus`, with a softer gate.)
  */
-export const pairedDeviceForLostMode = internalQuery({
+export const pairedDeviceForDeviceCommand = internalQuery({
   args: { pairedDeviceId: v.id("pairedDevices") },
   handler: async (
     ctx,
     args,
-  ): Promise<{ scholarId: Id<"users">; serial: string | null }> => {
+  ): Promise<{
+    scholarId: Id<"users">;
+    serial: string | null;
+    institutionId: Id<"institutions">;
+  }> => {
     const { institutionId } = await requireSimpleMdmAccess(ctx);
     const row = await ctx.db.get(args.pairedDeviceId);
     if (!row || row.institutionId !== institutionId) {
-      throw new Error("This iPad is not available for Lost Mode.");
+      // ConvexError so the reason survives to the console: remote commands are
+      // bound to the PRIMARY institution, so this is also what a device viewed
+      // under another institution's lens hits, and "Server Error" would be an
+      // unreadable answer to a legitimate question.
+      throw new ConvexError("This iPad isn't available for remote commands.");
     }
     const claims = await ctx.db
       .query("managedDeviceClaims")
@@ -1323,7 +1740,7 @@ export const pairedDeviceForLostMode = internalQuery({
     const claim =
       claims.find((candidate) => candidate.institutionId === institutionId) ??
       null;
-    return { scholarId: row.scholarId, serial: claim?.serial ?? null };
+    return { scholarId: row.scholarId, serial: claim?.serial ?? null, institutionId };
   },
 });
 
@@ -1332,7 +1749,11 @@ export const pairedDeviceForLostModeStatus = internalQuery({
   handler: async (
     ctx,
     args,
-  ): Promise<{ scholarId: Id<"users">; serial: string | null }> => {
+  ): Promise<{
+    scholarId: Id<"users">;
+    serial: string | null;
+    institutionId: Id<"institutions">;
+  }> => {
     const user = await requireUser(ctx);
     const row = await ctx.db.get(args.pairedDeviceId);
     if (!row) {
@@ -1357,22 +1778,27 @@ export const pairedDeviceForLostModeStatus = internalQuery({
     const claim =
       claims.find((candidate) => candidate.institutionId === row.institutionId) ??
       null;
-    return { scholarId: row.scholarId, serial: claim?.serial ?? null };
+    return {
+      scholarId: row.scholarId,
+      serial: claim?.serial ?? null,
+      institutionId: row.institutionId,
+    };
   },
 });
 
 /**
- * Read-only-while-impersonating gate for Lost Mode's mutating action. Must be
- * run — and awaited — BEFORE any real SimpleMDM request: `assertNotImpersonating`
- * only has DB access via a query/mutation, but `setLostMode` is an action, so
- * this is the query the action calls first. Checking it only inside the later
- * audit-log mutation (as the original cut did) would let an impersonating
- * admin's POST/DELETE reach a real device before the write is ever rejected.
+ * Read-only-while-impersonating gate for every mutating device command. Must
+ * be run — and awaited — BEFORE any real SimpleMDM request:
+ * `assertCanWrite` only has DB access via a query/mutation, but
+ * `setLostMode` and `restartDevice` are actions, so this is the mutation each
+ * one calls first. Checking it only inside the later audit-log mutation (as
+ * the original cut did) would let an impersonating admin's POST/DELETE reach
+ * a real device before the write is ever rejected.
  */
-export const assertLostModeCallerNotImpersonating = internalMutation({
+export const assertDeviceCommandCallerNotImpersonating = internalMutation({
   args: {},
   handler: async (ctx) => {
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
   },
 });
 
@@ -1383,13 +1809,13 @@ export const assertLostModeCallerNotImpersonating = internalMutation({
  * never after it. This closes two races, not one:
  *
  *   1. Impersonation: if a session starts impersonating between the early
- *      `assertLostModeCallerNotImpersonating` guard and this point, the real
+ *      `assertDeviceCommandCallerNotImpersonating` guard and this point, the real
  *      command could otherwise still reach SimpleMDM while the *only* audit
  *      write (previously done after the command) rejected — an unaudited
  *      device command.
  *   2. Authorization/mapping drift: the caller's role, tenant membership, or
  *      access to this scholar — and the paired device's SimpleMDM mapping —
- *      were all checked once, in `pairedDeviceForLostMode`, before the
+ *      were all checked once, in `pairedDeviceForDeviceCommand`, before the
  *      awaited SimpleMDM list/detail reads that follow it in `setLostMode`.
  *      If a membership is revoked, a role changed, or the device is
  *      reassigned to a different scholar/serial while those reads are in
@@ -1437,9 +1863,10 @@ export const recordLostModeCommandIntent = internalMutation({
       );
     }
 
-    await assertNotImpersonating(ctx);
+    await assertCanWrite(ctx);
 
-    await ctx.db.insert("auditLog", {
+    await writeAuditLog(ctx, {
+      institutionId: institutionId,
       actorUserId: user._id,
       action: args.enabled
         ? "device.lost-mode.enable.requested"
@@ -1457,11 +1884,41 @@ export const recordLostModeCommandIntent = internalMutation({
 });
 
 /**
- * Live read-back of an iPad's Lost Mode state — never stored, always
- * resolved fresh from SimpleMDM so a remote command is never mistaken for an
- * applied state. Mirrors `verifySimpleMdmClaims`'s "unconfigured is not an
- * error" posture: every non-actionable case (not configured, not enrolled,
- * not supervised) is a normal `LostModeState`, not a thrown error.
+ * Read one device's current attributes from SimpleMDM and record them in its
+ * snapshot row, so the console's dated copy is refreshed by every real read.
+ */
+async function readDeviceAttributes(
+  ctx: ActionCtx,
+  apiKey: string,
+  institutionId: Id<"institutions">,
+  serial: string,
+): Promise<SimpleMdmDeviceDetails | null> {
+  const details = await withSimpleMdmDeviceId(
+    ctx,
+    apiKey,
+    institutionId,
+    serial,
+    async (simpleMdmDeviceId) =>
+      simpleMdmDeviceId
+        ? await fetchDeviceAttributes(apiKey, simpleMdmDeviceId, serial)
+        : null,
+  );
+  await ctx.runMutation(internal.simplemdm.recordDeviceInventory, {
+    institutionId,
+    serial,
+    device: details,
+  });
+  return details;
+}
+
+/**
+ * Explicit read-back of an iPad's Lost Mode state, resolved fresh from
+ * SimpleMDM so a remote command is never mistaken for an applied state. The
+ * console calls this from its "Refresh" button — not on drawer open; the
+ * drawer renders the dated snapshot until staff ask. Mirrors
+ * `verifySimpleMdmClaims`'s "unconfigured is not an error" posture: every
+ * non-actionable case (not configured, not enrolled, not supervised) is a
+ * normal `LostModeState`, not a thrown error.
  */
 export const lostModeStatus = action({
   args: { pairedDeviceId: v.id("pairedDevices") },
@@ -1488,8 +1945,13 @@ export const lostModeStatus = action({
       };
     }
     const apiKey = simpleMdmApiKey();
-    const simpleMdmDeviceId = await resolveSimpleMdmDeviceId(apiKey, resolved.serial);
-    if (!simpleMdmDeviceId) {
+    const attributes = await readDeviceAttributes(
+      ctx,
+      apiKey,
+      resolved.institutionId,
+      resolved.serial,
+    );
+    if (!attributes) {
       return {
         configured: true,
         foundInSimpleMdm: false,
@@ -1497,8 +1959,12 @@ export const lostModeStatus = action({
         lostModeEnabled: null,
       };
     }
-    const attributes = await fetchDeviceAttributes(apiKey, simpleMdmDeviceId);
-    return { configured: true, foundInSimpleMdm: true, ...attributes };
+    return {
+      configured: true,
+      foundInSimpleMdm: true,
+      isSupervised: attributes.isSupervised,
+      lostModeEnabled: attributes.lostModeEnabled,
+    };
   },
 });
 
@@ -1540,20 +2006,25 @@ export const setLostMode = action({
   handler: async (ctx, args): Promise<SetLostModeResult> => {
     // Enforced BEFORE any request reaches SimpleMDM — an admin viewing-as
     // another user must never be able to command a real device.
-    await ctx.runMutation(internal.simplemdm.assertLostModeCallerNotImpersonating, {});
+    await ctx.runMutation(internal.simplemdm.assertDeviceCommandCallerNotImpersonating, {});
 
-    const resolved = await ctx.runQuery(internal.simplemdm.pairedDeviceForLostMode, {
+    const resolved = await ctx.runQuery(internal.simplemdm.pairedDeviceForDeviceCommand, {
       pairedDeviceId: args.pairedDeviceId,
     });
     if (!resolved.serial) {
       throw new Error("This iPad isn't enrolled in SimpleMDM yet.");
     }
     const apiKey = simpleMdmApiKey();
-    const simpleMdmDeviceId = await resolveSimpleMdmDeviceId(apiKey, resolved.serial);
-    if (!simpleMdmDeviceId) {
+    const attributes = await readDeviceAttributes(
+      ctx,
+      apiKey,
+      resolved.institutionId,
+      resolved.serial,
+    );
+    if (!attributes) {
       throw new Error("SimpleMDM has no enrolled record for this iPad's serial.");
     }
-    const attributes = await fetchDeviceAttributes(apiKey, simpleMdmDeviceId);
+    const simpleMdmDeviceId = attributes.id;
     if (attributes.isSupervised !== true) {
       throw new Error(
         "Lost Mode requires a supervised iPad, and SimpleMDM did not report this device as supervised.",
@@ -1593,6 +2064,149 @@ export const setLostMode = action({
     return {
       queued,
       message: `${commandDescription} ${readyWhen}`,
+    };
+  },
+});
+
+/**
+ * Rechecks the CURRENT caller's full authorization and durably records the
+ * staff member's INTENT to restart an iPad, immediately before the external
+ * SimpleMDM POST — never after it. Same discipline, and for the same two
+ * races, as `recordLostModeCommandIntent` above: the caller, tenant,
+ * paired-device row, assigned scholar and CURRENT managed-claim serial are all
+ * re-derived from live DB state rather than trusted from what `restartDevice`
+ * resolved before its awaited SimpleMDM reads, and impersonation is rechecked
+ * here too.
+ *
+ * It does NOT re-run `requireScholarsAccessible`, and does not need to:
+ * `requireSimpleMdmAccess` grants school operations at the institution, which
+ * covers every scholar in it. The explicit scholar comparison below buys
+ * accuracy, not authorization.
+ */
+export const recordDeviceRestartIntent = internalMutation({
+  args: {
+    pairedDeviceId: v.id("pairedDevices"),
+    expectedSerial: v.string(),
+    expectedScholarId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
+    const { user, institutionId } = await requireSimpleMdmAccess(ctx);
+    const row = await ctx.db.get(args.pairedDeviceId);
+    if (!row || row.institutionId !== institutionId) {
+      throw new ConvexError("This iPad isn't available for remote commands.");
+    }
+    // The serial check below cannot see a reassignment that KEEPS the serial:
+    // the same physical iPad handed to a different scholar. Authorization is
+    // unaffected (school operations covers every scholar at the institution),
+    // but the audit row would name a scholar staff never selected, and staff
+    // would be rebooting a device that is no longer the one they looked at.
+    if (row.scholarId !== args.expectedScholarId) {
+      throw new ConvexError(
+        "This iPad was reassigned to a different scholar while checking its status. Refresh and try again.",
+      );
+    }
+
+    const claims = await ctx.db
+      .query("managedDeviceClaims")
+      .withIndex("by_last_device_id", (q) => q.eq("lastDeviceId", row.deviceId))
+      .collect();
+    const claim =
+      claims.find((candidate) => candidate.institutionId === institutionId) ??
+      null;
+    const currentSerial = claim?.serial ?? null;
+    if (currentSerial !== args.expectedSerial) {
+      throw new ConvexError(
+        "This iPad's SimpleMDM enrollment changed while checking its status. Refresh and try again.",
+      );
+    }
+
+    await assertCanWrite(ctx);
+
+    await writeAuditLog(ctx, {
+      institutionId: institutionId,
+      actorUserId: user._id,
+      action: "device.restart.requested",
+      targetUserId: row.scholarId,
+      at: Date.now(),
+      // "Requested" — this runs BEFORE the SimpleMDM request is sent, so it
+      // records only that an authorized staff member asked for the restart,
+      // never that the iPad rebooted.
+      detail: `Requested a restart via SimpleMDM; serial ${args.expectedSerial}`,
+    });
+  },
+});
+
+/**
+ * Restart one iPad over SimpleMDM — the escape hatch for a wedged app.
+ *
+ * Why this exists next to "Force sign out": on a MANAGED device that action
+ * runs `decommissionManagedClaim`, which invalidates the enrollment key, so
+ * the iPad cannot sign itself back in until staff push a fresh one. Using it
+ * merely to unstick a frozen screen costs the scholar their session and a
+ * staff follow-up. A restart costs neither and needs no cooperation from the
+ * app, which is the whole point when the app is what's wedged.
+ *
+ * The guard sequence mirrors `setLostMode` exactly — impersonation before any
+ * SimpleMDM traffic, supervision checked against a live read, then full
+ * re-authorization + audit immediately before the write.
+ */
+export const restartDevice = action({
+  args: { pairedDeviceId: v.id("pairedDevices") },
+  handler: async (ctx, args): Promise<RestartDeviceResult> => {
+    // Enforced BEFORE any request reaches SimpleMDM — an admin viewing-as
+    // another user must never be able to reboot a real device.
+    await ctx.runMutation(
+      internal.simplemdm.assertDeviceCommandCallerNotImpersonating,
+      {},
+    );
+
+    const resolved = await ctx.runQuery(
+      internal.simplemdm.pairedDeviceForDeviceCommand,
+      { pairedDeviceId: args.pairedDeviceId },
+    );
+    // ConvexError, not Error, for all three refusals below: Convex replaces a
+    // plain Error's message with an opaque "Server Error" in prod (see
+    // `lib/simpleMdmClient.ts`). Lost Mode can afford plain throws because its
+    // UI only offers the button once the snapshot proves the device eligible;
+    // Restart is deliberately offered on an unknown snapshot, so a refusal IS
+    // the normal way staff learn why — it has to reach the toast intact.
+    if (!resolved.serial) {
+      throw new ConvexError("This iPad isn't enrolled in SimpleMDM yet.");
+    }
+    const apiKey = simpleMdmApiKey();
+    const attributes = await readDeviceAttributes(
+      ctx,
+      apiKey,
+      resolved.institutionId,
+      resolved.serial,
+    );
+    if (!attributes) {
+      throw new ConvexError(
+        "SimpleMDM has no enrolled record for this iPad's serial.",
+      );
+    }
+    // Apple lists RestartDevice as iOS/iPadOS (Supervised). An unreported
+    // (null) supervision state refuses too — the same posture Lost Mode
+    // takes, so an unverifiable device never receives a doomed command.
+    if (attributes.isSupervised !== true) {
+      throw new ConvexError(
+        "Restarting requires a supervised iPad, and SimpleMDM did not report this device as supervised.",
+      );
+    }
+
+    await ctx.runMutation(internal.simplemdm.recordDeviceRestartIntent, {
+      pairedDeviceId: args.pairedDeviceId,
+      expectedSerial: resolved.serial,
+      expectedScholarId: resolved.scholarId,
+    });
+
+    const { queued } = await restartSimpleMdmDevice(apiKey, attributes.id);
+
+    return {
+      queued,
+      message: queued
+        ? "Restart command sent to SimpleMDM. It's queued and will apply once the iPad is next online."
+        : "Restart command sent to SimpleMDM. SimpleMDM accepted it immediately.",
     };
   },
 });

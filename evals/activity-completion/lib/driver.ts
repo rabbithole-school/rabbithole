@@ -50,6 +50,13 @@ export async function runCompletionSession(
   const goalEvidencePatterns = testCase.goalEvidencePatterns?.map(
     (pattern) => new RegExp(pattern, "i"),
   );
+  // Evidence ACCUMULATES across the scholar's turns: a kid builds an
+  // explanation over the conversation ("not just the heat" in one message,
+  // "the gas expands when the pressure drops" in the next), and the activity
+  // asks them to explain it in their own words, not to restate the whole thing
+  // in one message. Requiring every pattern in a single message scored a tutor
+  // that closed exactly when the kid got there as "too soon" (TRA-415).
+  const goalEvidenceSeen = new Set<number>();
 
   // Tutor opens (the production <start> greeting). No scholar turn yet, so a
   // completion here would be caught by the guard; we still record an attempt.
@@ -95,9 +102,12 @@ export async function runCompletionSession(
       const reply = await generateScholarTurn(profile, activity, turns, offline);
       push({ role: "scholar", content: reply.text });
       scholarTurns++;
+      goalEvidencePatterns?.forEach((pattern, i) => {
+        if (pattern.test(reply.text)) goalEvidenceSeen.add(i);
+      });
       const hasGoalEvidence =
-        goalEvidencePatterns?.length &&
-        goalEvidencePatterns.every((pattern) => pattern.test(reply.text));
+        !!goalEvidencePatterns?.length &&
+        goalEvidenceSeen.size === goalEvidencePatterns.length;
       const scholarReachedGoal = reply.stop === "goal" || !!hasGoalEvidence;
       if (
         scholarReachedGoal &&

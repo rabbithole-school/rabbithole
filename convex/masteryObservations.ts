@@ -100,10 +100,12 @@ export const record = internalMutation({
     // Optional automaticity reading — set ONLY when the exchange genuinely
     // showed speed/ease. Stamped source "tutor-observed" + timestamped.
     fluencyLevel: v.optional(v.number()),
-    // When re-deriving mastery from historical sessions (masteryReDerive), stamp
-    // the observation with WHEN the learning happened (the session's time), not
-    // the re-run time — otherwise every rebuilt row collapses to a single
-    // timestamp and growth-story chronology is destroyed. Defaults to now().
+    // WHEN the learning happened, not when this row was written. masteryReDerive
+    // passes the historical session's time; the live observer passes the
+    // `_creationTime` of the scholar turn its excerpt quotes (TRA-101), because
+    // it re-reads the same window on every run and a now() stamp would restamp
+    // days-old evidence as new on each pass. Defaults to now() when the caller
+    // cannot date the evidence.
     observedAt: v.optional(v.number()),
     // Optional PCM dimension tag (assessment-and-goals §4), set by the observer
     // only where clear-cut.
@@ -197,7 +199,7 @@ export const record = internalMutation({
         ? {
             fluencyLevel: args.fluencyLevel,
             fluencySource: "tutor-observed",
-            fluencyObservedAt: Date.now(),
+            fluencyObservedAt: args.observedAt ?? Date.now(),
           }
         : {}),
     });
@@ -825,9 +827,10 @@ export const claimRecapRefresh = internalMutation({
 });
 
 /**
- * Refresh the observer-backed recap for the current scholar's own session.
- * The session-row claim makes refreshes atomic and bounded across clients;
- * this deliberately does not change activity completion state.
+ * The scholar's Wrap up: moves an open exploration to Finished, then refreshes
+ * the observer-backed recap for their own session. The session-row claim makes
+ * refreshes atomic and bounded across clients; activity completion state is
+ * never changed.
  */
 export const requestRecap = authedAction({
   args: { sessionId: v.id("sessions") },
@@ -843,6 +846,12 @@ export const requestRecap = authedAction({
     if (caller.role !== "scholar" || ownership.userId !== caller._id) {
       throw new Error("Forbidden");
     }
+
+    // Wrap up is the scholar's ending: an open exploration moves to Finished
+    // before (and regardless of) the observer refresh below.
+    await ctx.runMutation(internal.sessions.finishOpenExploration, {
+      sessionId: args.sessionId,
+    });
 
     const existing = await ctx.runQuery(
       api.masteryObservations.recapForSession,

@@ -38,7 +38,7 @@
 
 import * as Haptics from "expo-haptics";
 import * as manipAudio from "./kitAudio";
-import { createContext, useCallback, useContext, type RefObject } from "react";
+import { createContext, useCallback, useContext, useEffect, type RefObject } from "react";
 import {
   StyleSheet,
   View,
@@ -48,10 +48,14 @@ import {
 } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
+  cancelAnimation,
   Easing,
   runOnJS,
   useAnimatedStyle,
+  useReducedMotion,
   useSharedValue,
+  withDelay,
+  withRepeat,
   withSequence,
   withTiming,
   type SharedValue,
@@ -86,6 +90,23 @@ const KNOB_RING_WIDTH = 3;
  */
 export const ManipulativeScrollContext =
   createContext<RefObject<unknown> | null>(null);
+
+/**
+ * Whether the scholar has done ANYTHING yet on the card hosting this
+ * manipulative — touched the board, typed in the answer box, or tapped Done.
+ * `true` = still idle. The host card (NativeManipulativeItem) owns the value; a
+ * handle built with `idlePulse` reads it to know when to stop inviting a touch.
+ * Default `true` so a bare kind (tests, the standalone launcher) still pulses.
+ */
+export const ManipulativeIdleContext = createContext<boolean>(true);
+
+/** How long the card sits untouched before an `idlePulse` handle starts
+ *  breathing. Long enough that a scholar who is reading isn't nagged; short
+ *  enough that one who is stuck sees it before "I don't know" starts to look
+ *  like the only button. */
+const IDLE_PULSE_DELAY_MS = 2500;
+const IDLE_PULSE_SCALE = 1.22;
+const IDLE_PULSE_HALF_MS = 700;
 
 /**
  * Maps math coordinates to pixels for a fixed viewBox + pixel size (like Mafs's
@@ -286,6 +307,15 @@ export interface MovableHandleConfig {
   onChange?: (p: Vec2) => void;
   /** Settled position report on release (runOnJS). */
   onSettled?: (p: Vec2) => void;
+  /**
+   * Invite a touch: after the card has sat idle (`ManipulativeIdleContext`
+   * still `true`) for IDLE_PULSE_DELAY_MS the knob breathes gently until the
+   * scholar touches anything, then stops for good. For the ONE handle on a
+   * board whose single handle can be easy to miss, the subtle idle cue shows
+   * that it is draggable. Off by default; respects the system reduce-motion
+   * setting (no pulse at all).
+   */
+  idlePulse?: boolean;
 }
 
 export interface MovableHandle {
@@ -320,6 +350,7 @@ export function useMovableHandle(cfg: MovableHandleConfig): MovableHandle {
     onChange,
     onSettled,
     hitRadius = HIT_RADIUS,
+    idlePulse = false,
   } = cfg;
 
   // Flatten every plane value the worklets need into primitives — a worklet
@@ -343,6 +374,45 @@ export function useMovableHandle(cfg: MovableHandleConfig): MovableHandle {
   // the whole drag, then shrinks back on release (driven in the gesture worklets
   // below). Rest = 1.
   const grabScale = useSharedValue(1);
+  // The idle "come touch me" breath, multiplied into the same transform. Rest =
+  // 1. Runs only while `idlePulse` is on, the host says the card is still
+  // idle, and this handle has never been grabbed; any of those flipping cancels
+  // it permanently (the effect below never re-arms once `touched` is set).
+  const pulseScale = useSharedValue(1);
+  const touched = useSharedValue(false);
+  const cardIdle = useContext(ManipulativeIdleContext);
+  const reduceMotion = useReducedMotion();
+  const pulsing = idlePulse && cardIdle && !reduceMotion;
+  useEffect(() => {
+    if (!pulsing || touched.get()) {
+      cancelAnimation(pulseScale);
+      pulseScale.set(withTiming(1, { duration: 200 }));
+      return;
+    }
+    pulseScale.set(
+      withDelay(
+        IDLE_PULSE_DELAY_MS,
+        withRepeat(
+          withSequence(
+            withTiming(IDLE_PULSE_SCALE, {
+              duration: IDLE_PULSE_HALF_MS,
+              easing: Easing.inOut(Easing.sin),
+            }),
+            withTiming(1, {
+              duration: IDLE_PULSE_HALF_MS,
+              easing: Easing.inOut(Easing.sin),
+            }),
+          ),
+          -1,
+          false,
+        ),
+      ),
+    );
+    return () => {
+      cancelAnimation(pulseScale);
+      pulseScale.set(1);
+    };
+  }, [pulsing, pulseScale, touched]);
   // The discrete-snap selection haptic — a rate-limited (POP_MIN_GAP_MS) tick on
   // grab and on every discrete snap crossing. Haptics ONLY, no size change.
   const lastTickMs = useSharedValue(0);
@@ -363,6 +433,12 @@ export function useMovableHandle(cfg: MovableHandleConfig): MovableHandle {
     .onBegin(() => {
       startX.set(mx.get());
       startY.set(my.get());
+      // First grab ends the idle invitation for good.
+      if (!touched.get()) {
+        touched.set(true);
+        cancelAnimation(pulseScale);
+        pulseScale.set(withTiming(1, { duration: 120 }));
+      }
       // Re-seed the snap index to where the grab starts, so a crossing is
       // measured from here (not a stale index from the previous drag).
       if (snapIncrement && snapIncrement > 0) {
@@ -429,7 +505,7 @@ export function useMovableHandle(cfg: MovableHandleConfig): MovableHandle {
       transform: [
         { translateX: px - hitRadius },
         { translateY: py - hitRadius },
-        { scale: grabScale.get() },
+        { scale: grabScale.get() * pulseScale.get() },
       ],
     };
   });

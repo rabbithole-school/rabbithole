@@ -13,6 +13,8 @@ import {
   coordinatePlaneSolved,
   countFactorPairs,
   currentSequenceStep,
+  derivedQuestion,
+  derivedWorkedSteps,
   distributeSolved,
   distributorPerGroupMax,
   distributorRemainder,
@@ -39,6 +41,7 @@ import {
   riemannSolved,
   sequenceProgress,
   trueArea,
+  withTypedValue,
 } from "../logic";
 import type {
   AreaPerimeterSpec,
@@ -292,8 +295,97 @@ describe("distribute", () => {
     expect(distributeSolved(spec, { column: 5 })).toBe(true);
     expect(distributeSolved(spec, { column: 4 })).toBe(false);
   });
+  test("splitAt accepts the goal's parts on EITHER side (13 = 10 + 3 = 3 + 10)", () => {
+    const spec = dist({ width: 13, height: 6, goal: { type: "splitAt", column: 10 } });
+    expect(distributeSolved(spec, { column: 10 })).toBe(true);
+    expect(distributeSolved(spec, { column: 3 })).toBe(true); // the field bug: was "Not quite"
+    expect(distributeSolved(spec, { column: 4 })).toBe(false);
+    expect(distributeSolved(spec, { column: 9 })).toBe(false);
+  });
+  test("a typed product decides on its own — right passes with any split, wrong fails even with the right split", () => {
+    const spec = dist({ width: 13, height: 6, startColumn: 4, goal: { type: "splitAt", column: 10 } });
+    expect(distributeSolved(spec, { column: 4, value: 78 })).toBe(true); // untouched handle
+    expect(distributeSolved(spec, { column: 10, value: 77 })).toBe(false); // committed to a wrong number
+    expect(distributeSolved(spec, { column: 3, value: 77 })).toBe(false);
+    // Legacy `{column}` attempts (no `value`) still grade by the board.
+    expect(distributeSolved(spec, { column: 10 })).toBe(true);
+  });
   test("no goal never solved", () => {
     expect(distributeSolved(dist({}), { column: 5 })).toBe(false);
+    expect(distributeSolved(dist({}), { column: 5, value: 56 })).toBe(false);
+  });
+});
+
+describe("derivedQuestion — question first, strategy optional", () => {
+  test("distribute asks for the product and offers the split as the strategy", () => {
+    const q = derivedQuestion(dist({ width: 13, height: 6, goal: { type: "splitAt", column: 10 } }));
+    expect(q).toEqual({
+      question: "What is 6 × 13?",
+      strategy: "Use the area model to split the 13 into 10 and 3.",
+      value: 78,
+    });
+  });
+  test("distribute without a goal asks nothing (explorer)", () => {
+    expect(derivedQuestion(dist({}))).toBeNull();
+  });
+  test("distributor asks the quotient only when the division is exact", () => {
+    const exact = derivedQuestion(share({ total: 42, groups: 7, goal: { type: "shareEqually" } }));
+    expect(exact).toEqual({
+      question: "What is 42 ÷ 7?",
+      strategy: "Share the 42 counters equally onto the 7 plates.",
+      value: 6,
+    });
+    // 17 ÷ 5 = 3 r 2 is two numbers — the board stays the task.
+    expect(derivedQuestion(share({ total: 17, groups: 5, goal: { type: "shareEqually" } }))).toBeNull();
+    expect(derivedQuestion(share({ total: 42, groups: 7 }))).toBeNull();
+  });
+  test("kinds that name their target ask no question", () => {
+    expect(derivedQuestion(rack({ total: 13, goal: { type: "groupOf", value: 10 } }))).toBeNull();
+    expect(derivedQuestion(ap({ goal: { type: "maxArea" } }))).toBeNull();
+  });
+  test("derivedWorkedSteps walks the split to the product, last step asserting the answer", () => {
+    expect(derivedWorkedSteps(dist({ width: 13, height: 6, goal: { type: "splitAt", column: 10 } }))).toEqual([
+      { text: "6 × 10 = 60" },
+      { text: "6 × 3 = 18" },
+      { text: "60 + 18 = 78" },
+    ]);
+    expect(derivedWorkedSteps(share({ total: 42, groups: 7, goal: { type: "shareEqually" } }))).toBeNull();
+    expect(derivedWorkedSteps(dist({}))).toBeNull();
+  });
+  test("withTypedValue distinguishes a numeric answer, no answer, and invalid input", () => {
+    expect(withTypedValue({ column: 3 }, "78")).toEqual({ column: 3, value: 78 });
+    expect(withTypedValue({ column: 3 }, " 78 ")).toEqual({ column: 3, value: 78 });
+    expect(withTypedValue({ column: 3 }, "")).toEqual({ column: 3 });
+    expect(withTypedValue({ column: 3 }, "abc")).toEqual({ column: 3, value: null });
+    expect(withTypedValue({ column: 3 }, undefined)).toEqual({ column: 3 });
+    expect(withTypedValue(null, "78")).toEqual({ value: 78 });
+  });
+  test.each(["abc", "Infinity", "NaN", "1e999", "-"])(
+    "invalid input %s stays incorrect after JSON serialization even on a correct board",
+    (typed) => {
+      for (const [spec, state] of [
+        [dist({ width: 13, height: 6, goal: { type: "splitAt", column: 10 } }), { column: 3 }],
+        [share({ total: 28, groups: 4, goal: { type: "shareEqually" } }), { perGroup: 7 }],
+      ] as const) {
+        expect(gradeManipulativeSubmission(
+          JSON.stringify(spec),
+          JSON.stringify(withTypedValue(state, typed)),
+        ).correct).toBe(false);
+      }
+    },
+  );
+  test("the whole round trip grades through gradeManipulativeSubmission", () => {
+    const spec = dist({ width: 13, height: 6, startColumn: 4, goal: { type: "splitAt", column: 10 } });
+    const json = JSON.stringify(spec);
+    const grade = (state: unknown) => gradeManipulativeSubmission(json, JSON.stringify(state)).correct;
+    expect(grade(withTypedValue({ column: 4 }, "78"))).toBe(true);
+    expect(grade(withTypedValue({ column: 3 }, ""))).toBe(true);
+    expect(grade(withTypedValue({ column: 10 }, "80"))).toBe(false);
+    expect(grade({ column: 10 })).toBe(true); // a stored pre-change attempt
+    expect(grade({ column: 10, value: null })).toBe(false);
+    expect(grade({ column: "3" })).toBe(false);
+    expect(grade({ column: [3] })).toBe(false);
+    expect(grade({ column: 4, value: "78" })).toBe(false); // a forged string is not a number
   });
 });
 
@@ -393,6 +485,15 @@ describe("distributor", () => {
     const spec = share({ total: 12, groups: 4, goal: { type: "shareEqually" } });
     expect(distributorSolved(spec, { perGroup: 3 })).toBe(true);
     expect(distributorRemainder(spec, { perGroup: 3 })).toBe(0);
+  });
+  test("a typed quotient decides on its own for an exact division; ignored when there is a remainder", () => {
+    const exact = share({ total: 42, groups: 7, goal: { type: "shareEqually" } });
+    expect(distributorSolved(exact, { perGroup: 0, value: 6 })).toBe(true); // nothing dealt
+    expect(distributorSolved(exact, { perGroup: 6, value: 7 })).toBe(false); // wrong number, right deal
+    expect(distributorSolved(exact, { perGroup: 6 })).toBe(true);
+    const rem = share({ total: 13, groups: 4, goal: { type: "shareEqually" } });
+    expect(distributorSolved(rem, { perGroup: 3, value: 99 })).toBe(true); // no question asked → board rules
+    expect(distributorSolved(rem, { perGroup: 2, value: 3 })).toBe(false);
   });
   test("no goal never solved", () => {
     expect(distributorSolved(share({}), { perGroup: 3 })).toBe(false);

@@ -12,15 +12,71 @@ import { siteUrl, sessionPath, withBase } from "./lib/channels";
 import { escapeSlackText } from "./lib/slackApi";
 import {
   OBSERVER_TOOL,
-  OBSERVER_TRANSCRIPT_LIMIT,
+  alertEvidenceWatermark,
   buildObserverUserMessageBlocks,
+  groundAlertExcerpt,
   groundSessionSignalEvidence,
+  observerTranscriptWindow,
   parseObserverResponse,
+  resolveChatAlertRecency,
+  resolveChatAlerts,
+  resolveObservationEvidenceTime,
+  type ObserverHistoryMessage,
   type ParsedObserverResponse,
 } from "./lib/observerShared";
 import { imageUrlToContentPart, type ImageContentPart } from "./lib/imageBytes";
 import { recordAnthropicUsage } from "./usage";
 import { ROLES } from "./lib/roles";
+import { SESSION_SIGNAL_TYPES } from "../shared/learningSignals";
+import { resolveObserverOrigin } from "./lib/observerOrigin";
+
+const sessionSignalTypes = new Set<string>(SESSION_SIGNAL_TYPES);
+const observerInterestHows = new Set(["said", "picked", "menu"]);
+
+/**
+ * Shown under a quote that came from a DICTATED scholar turn. The words above
+ * it are what speech-to-text heard, which is routinely not what a child said —
+ * a teacher reading the alert must be able to tell a transcription artifact
+ * from their scholar being confused.
+ */
+const SPOKEN_EXCERPT_NOTE =
+  "(Heard through voice input — the line above is an automatic speech-to-text" +
+  " transcript, not necessarily the scholar's own words.)";
+
+/**
+ * The evidence lines of an alert body, or NOTHING.
+ *
+ * Every observer alert may carry an `excerpt` the prompt defines as "a short
+ * verbatim quote of the SCHOLAR's own words", with "no genuine quote → omit the
+ * whole signal". Enforce that here rather than trusting it: an excerpt that is
+ * not literally present in a real scholar turn is dropped, so a teacher can
+ * never be shown invented or tutor-authored words inside quote marks attributed
+ * to a child. A quote from a dictated turn is kept but labelled — see
+ * SPOKEN_EXCERPT_NOTE. Summary, severity and the session deep link are
+ * unaffected either way, so the alert still reaches a human with its substance.
+ */
+function alertExcerptLines(
+  kind: string,
+  // Alert objects are a pure passthrough on the parse boundary, so this is raw
+  // model output — typed loosely on purpose; the guard does the narrowing.
+  excerpt: unknown,
+  chatHistory: ObserverHistoryMessage[],
+): string[] {
+  const grounded = groundAlertExcerpt(excerpt, chatHistory);
+  if (!grounded) {
+    if (typeof excerpt === "string" && excerpt.trim() !== "") {
+      // Deliberately does not log the excerpt itself: it is unverified text
+      // about a real child, and prod logs are a durable surface.
+      console.error(
+        `[Observer] ⚠️ Dropping ${kind} excerpt — not found verbatim in any scholar message`,
+      );
+    }
+    return [];
+  }
+  const lines = [`> ${escapeSlackText(grounded.excerpt)}`];
+  if (grounded.inputModality === "spoken") lines.push(SPOKEN_EXCERPT_NOTE);
+  return lines;
+}
 
 // ─── Unified Observer Action ─────────────────────────────────────────
 
@@ -33,6 +89,19 @@ export const analyzeSession = internalAction({
   args: { sessionId: v.id("sessions") },
   handler: async (ctx, args) => {
     console.log(`[Observer] Starting analysis for project ${args.sessionId}`);
+
+    // 0. Release the debounce window (TRA-152) before anything can early-return
+    // below: the next assistant turn must open a fresh window whether or not
+    // this run produces output. Also cancels a still-pending queued run when
+    // this one was invoked directly (requestRecap). Non-fatal.
+    try {
+      await ctx.runMutation(internal.analysisHelpers.beginObserverRun, {
+        sessionId: args.sessionId,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[Observer] beginObserverRun failed (non-fatal): ${msg}`);
+    }
 
     // 1. Get project context
     const context = await ctx.runQuery(
@@ -49,6 +118,8 @@ export const analyzeSession = internalAction({
       console.log(`[Observer] Skipping — project is a test drive`);
       return null;
     }
+    const origin = resolveObserverOrigin(context);
+    const observerContext = { ...context, origin };
     const institutionId = await ctx.runQuery(
       internal.usage.resolveInstitution,
       { userId: context.scholarId, principal: "scholar" },
@@ -90,11 +161,15 @@ export const analyzeSession = internalAction({
     // tutor-generated illustration) become image blocks; tutor-generated
     // images stay described-as-text in the transcript. Any image that fails to
     // load simply falls back to text (buildObserverUserMessageBlocks handles it).
-    // Only resolve images for the messages the transcript builder will actually
-    // render (its last-OBSERVER_TRANSCRIPT_LIMIT window) — otherwise every
-    // per-turn observer run re-fetches + base64-encodes PNGs that have aged out.
     const scholarImages = new Map<string, ImageContentPart>();
-    const recentHistory = context.chatHistory.slice(-OBSERVER_TRANSCRIPT_LIMIT);
+    // THE window the observer model reads this run — the same tail slice
+    // `buildObserverTranscriptBlocks` renders (identical for a history shorter
+    // than the limit, where both keep everything). Declared once and reused by
+    // its three consumers — the image resolution just below (only fetch/base64
+    // PNGs for turns that will actually be rendered), the alert recency gate
+    // (§6.7a), and the watermark (§6.9) — so they can never drift onto
+    // different views of the transcript.
+    const recentHistory = observerTranscriptWindow(context.chatHistory);
     for (const m of recentHistory) {
       if (m.role !== "user" || m.generatedImage || !m.imageId) continue;
       if (scholarImages.has(m.imageId)) continue;
@@ -119,7 +194,7 @@ export const analyzeSession = internalAction({
       currentObservations,
       activeSeeds,
       recentSignals,
-      context,
+      observerContext,
       pendingSeeds,
     );
     const userTextChars = userBlocks.reduce(
@@ -215,7 +290,7 @@ export const analyzeSession = internalAction({
       );
       const body = [
         escapeSlackText(sa.summary),
-        sa.excerpt ? `> ${escapeSlackText(sa.excerpt)}` : null,
+        ...alertExcerptLines("welfare", sa.excerpt, context.chatHistory),
         sa.category ? `Category: ${escapeSlackText(sa.category)}` : null,
         `Session: "${escapeSlackText(context.title)}"`,
       ]
@@ -265,7 +340,7 @@ export const analyzeSession = internalAction({
       );
       const body = [
         escapeSlackText(ra.summary),
-        ra.excerpt ? `> ${escapeSlackText(ra.excerpt)}` : null,
+        ...alertExcerptLines("parasocial_reliance", ra.excerpt, context.chatHistory),
         `Session: "${escapeSlackText(context.title)}"`,
       ]
         .filter(Boolean)
@@ -300,10 +375,58 @@ export const analyzeSession = internalAction({
     // deduped per SCHOLAR + SESSION so one stuck session pings once, not every
     // exchange. Rides the same isTestDrive early-return, so a dry-run never fires.
     //
-    // Precedence: `overwhelmAlert` (6.8) wins. The prompt asks the model to emit
-    // at most one, but a model that emits both would otherwise ping a teacher
-    // twice about one moment, so the tie is also broken here in code.
-    if (result.stuckAlert && !result.overwhelmAlert) {
+    // Precedence: NONE. `overwhelmAlert` (6.8) used to win outright, which let
+    // one bad overwhelm delete an accurate stuck signal in prod. Both alerts now
+    // stand on their own evidence and neither suppresses the other — the
+    // reasoning, and the mandatory-quote rule that gates each of them, live in
+    // `resolveChatAlerts`.
+    // 6.7a Recency bound — the OTHER half of the same prod failure. A session
+    // runs for days while the observer re-reads a fixed transcript window on
+    // every run, so an old moment stays permanently re-readable and nothing in
+    // the payload dates it. On the session above, day 8 re-read the day-3
+    // moment and shipped a teacher a distress card about last week.
+    //
+    // The bound is "new since we last ALERTED", not "younger than N days":
+    // `alertEvidenceThrough` is the newest turn the last pass that actually
+    // raised a conversational alert on this session had read (§6.9), so there
+    // is no threshold to calibrate (T6). An alert is dropped ONLY when its
+    // quote resolves to scholar turns that were ALL already read by that
+    // alerting pass. No quote, an unmatched quote, an undateable turn, or no
+    // previously-alerted pass all keep the alert — the gate never suppresses
+    // on a guess. Scoped to these two conversational alerts alone: welfare and
+    // parasocial keep their full window (see `resolveChatAlertRecency`), and
+    // every non-alert observer output below is untouched.
+    //
+    // Classified against `recentHistory` — the window the model ACTUALLY read —
+    // not the full history. A quote can only come from what the model saw, so
+    // restricting the search cannot hide a real repeat; what it does prevent is
+    // an aged-out older turn the model never saw supplying the "already read"
+    // proof for a quote taken from a turn inside the window. That would
+    // suppress on evidence the pass never considered, which is the one
+    // direction this gate promises never to err in.
+    const alertRecency = resolveChatAlertRecency(
+      result,
+      recentHistory,
+      context.alertEvidenceThrough,
+    );
+    const chatAlerts = resolveChatAlerts(result);
+    const raiseStuck = chatAlerts.raiseStuck && alertRecency.stuck !== "stale";
+    const raiseOverwhelm =
+      chatAlerts.raiseOverwhelm && alertRecency.overwhelm !== "stale";
+    if (result.stuckAlert && !chatAlerts.raiseStuck) {
+      console.log(`[Observer] 🌀 Stuck note dropped — no scholar quote to substantiate it`);
+    } else if (result.stuckAlert && !raiseStuck) {
+      console.log(`[Observer] 🌀 Stuck note dropped — its quote is from a turn a previous run already read`);
+    }
+    if (result.overwhelmAlert && !chatAlerts.raiseOverwhelm) {
+      console.log(`[Observer] 😫 Overwhelm note dropped — no scholar quote to substantiate it`);
+    } else if (result.overwhelmAlert && !raiseOverwhelm) {
+      console.log(`[Observer] 😫 Overwhelm note dropped — its quote is from a turn a previous run already read`);
+    }
+    // Whether either conversational alert actually REACHED the alert fabric
+    // this pass — the condition the watermark (§6.9) records on.
+    let conversationalAlertFired = false;
+    if (result.stuckAlert && raiseStuck) {
       const st = result.stuckAlert;
       const deepLink = withBase(
         siteUrl(),
@@ -311,7 +434,7 @@ export const analyzeSession = internalAction({
       );
       const body = [
         escapeSlackText(st.summary),
-        st.excerpt ? `> ${escapeSlackText(st.excerpt)}` : null,
+        ...alertExcerptLines("chat_stuck", st.excerpt, context.chatHistory),
         `Session: "${escapeSlackText(context.title)}"`,
       ]
         .filter(Boolean)
@@ -329,6 +452,7 @@ export const analyzeSession = internalAction({
           deepLink,
           dedupKey: `chat_stuck:${context.scholarId}:${args.sessionId}`,
         });
+        conversationalAlertFired = true;
         console.log(`[Observer] 🌀 Stuck note raised (${st.severity}) for ${context.scholarName ?? context.scholarId}`);
       } catch (alertErr: unknown) {
         // Never let this low-urgency note break the analysis write path.
@@ -346,7 +470,7 @@ export const analyzeSession = internalAction({
     // it. Calm 😫 rather than a severity glyph: asking to stop is a feeling, not
     // a failure. Deduped per SCHOLAR + SESSION. Rides the same isTestDrive
     // early-return, so a dry-run never fires.
-    if (result.overwhelmAlert) {
+    if (result.overwhelmAlert && raiseOverwhelm) {
       const ov = result.overwhelmAlert;
       const deepLink = withBase(
         siteUrl(),
@@ -354,7 +478,7 @@ export const analyzeSession = internalAction({
       );
       const body = [
         escapeSlackText(ov.summary),
-        ov.excerpt ? `> ${escapeSlackText(ov.excerpt)}` : null,
+        ...alertExcerptLines("chat_overwhelm", ov.excerpt, context.chatHistory),
         `Session: "${escapeSlackText(context.title)}"`,
       ]
         .filter(Boolean)
@@ -374,15 +498,56 @@ export const analyzeSession = internalAction({
           // above): an early `info` must not shadow a later escalation to
           // `warning` for the same session within the dedup window — the
           // observer runs repeatedly across a session (see
-          // sessionHelpers.ts:1372-1375), and the escalation is exactly what
+          // sessionHelpers.finalizeStream), and the escalation is exactly what
           // should re-post.
           dedupKey: `chat_overwhelm:${context.scholarId}:${args.sessionId}:${ov.severity}`,
         });
+        conversationalAlertFired = true;
         console.log(`[Observer] 😫 Overwhelm note raised (${ov.severity}) for ${context.scholarName ?? context.scholarId}`);
       } catch (alertErr: unknown) {
         // Never let this low-urgency note break the analysis write path.
         const msg = alertErr instanceof Error ? alertErr.message : String(alertErr);
         console.error(`[Observer] Overwhelm note failed (non-fatal): ${msg}`);
+      }
+    }
+
+    // 6.9 Advance the alerting watermark — ONLY on a pass that actually raised
+    // a conversational alert. The gate's job is "don't re-alert on evidence
+    // that predates your last raised alert for this session", and marking on
+    // every pass would quietly convert "read" into "implicitly cleared": the
+    // observer runs after essentially every exchange, so an every-pass mark
+    // leaves only the newest turn or two ever counting as fresh, and a spiral
+    // that becomes legible in retrospect — where the model rightly quotes the
+    // earlier, most representative turn — would be suppressed even though no
+    // alert was ever raised about it. Under fire-only marking a session that
+    // never alerted has no watermark and the gate is inert (exactly the
+    // pre-gate behavior); the prod incident is still caught (the day-3 stuck
+    // alert set the mark, so the day-8 re-read is stale); and a severity
+    // escalation must cite new evidence to re-post, which is correct.
+    //
+    // "Fired" means the `alerts.raise` mutation succeeded — a raise that threw
+    // reached no teacher, and marking on it would suppress the retry. Monotonic
+    // and non-fatal: a failure here can only widen the next run's window.
+    //
+    // Taken from `recentHistory` for the same reason §6.7a classifies against
+    // it: the mark must describe what this pass CONSIDERED, and the pass
+    // considered the model's window. (Today the two agree — history is ordered
+    // ascending by `_creationTime`, so the newest turn is always inside the
+    // tail slice — but that is a property of the query, not of this call site,
+    // and a mark computed off a turn the pass never read would over-suppress
+    // every later run.)
+    const watermark = conversationalAlertFired
+      ? alertEvidenceWatermark(recentHistory)
+      : null;
+    if (watermark !== null) {
+      try {
+        await ctx.runMutation(internal.analysisHelpers.recordAlertEvidenceThrough, {
+          sessionId: args.sessionId,
+          through: watermark,
+        });
+      } catch (markErr: unknown) {
+        const msg = markErr instanceof Error ? markErr.message : String(markErr);
+        console.error(`[Observer] Alert watermark update failed (non-fatal): ${msg}`);
       }
     }
 
@@ -412,7 +577,14 @@ export const analyzeSession = internalAction({
       const newObservationIds: Id<"masteryObservations">[] = [];
       for (let i = 0; i < result.observations.length; i++) {
         const obs = result.observations[i];
-        console.log(`[Observer] Writing observation ${i + 1}/${result.observations.length}: ${obs.conceptLabel}`);
+        // Date the observation by the scholar turn that evidences it, not by
+        // this run (TRA-101): the same turn is re-derived on many runs across a
+        // multi-day session, and a `now()` stamp on each restamps week-old
+        // evidence as new. Falls back to now when nothing grounds — no
+        // threshold, no guess. Resolved against `recentHistory`, the window the
+        // model actually read.
+        const evidenceAt = resolveObservationEvidenceTime(obs, recentHistory);
+        console.log(`[Observer] Writing observation ${i + 1}/${result.observations.length}: ${obs.conceptLabel}${evidenceAt !== null ? ` (evidence ${new Date(evidenceAt).toISOString()})` : " (evidence undated → now)"}`);
         const obsId = await ctx.runMutation(internal.masteryObservations.record, {
           scholarId: context.scholarId,
           conceptLabel: obs.conceptLabel,
@@ -427,6 +599,7 @@ export const analyzeSession = internalAction({
           studentInitiated: obs.studentInitiated ?? false,
           standardNotations: obs.standardNotations ?? undefined,
           supersedesObservationId: obs.supersedesObservationId ?? undefined,
+          observedAt: evidenceAt ?? undefined,
           // Automaticity — only if the observer rated it (it omits for most);
           // a valid reading is 1–3, anything else is dropped.
           fluencyLevel:
@@ -441,6 +614,12 @@ export const analyzeSession = internalAction({
       // 9. Session signals
       let writtenSignals = 0;
       for (const signal of result.sessionSignals) {
+        if (!sessionSignalTypes.has(signal.signalType)) {
+          console.warn(
+            `[Observer] ⚠️ Skipping signal with unknown signalType "${signal.signalType}"`,
+          );
+          continue;
+        }
         const groundedEvidence = groundSessionSignalEvidence(
           signal,
           context.chatHistory,
@@ -496,6 +675,64 @@ export const analyzeSession = internalAction({
         });
       }
       console.log(`[Observer] ${result.seeds.length} seeds written`);
+
+      const incomingInterests = [];
+      for (const interest of result.interests) {
+        if (
+          typeof interest.label !== "string" ||
+          interest.label.trim() === "" ||
+          typeof interest.how !== "string" ||
+          !observerInterestHows.has(interest.how)
+        ) {
+          console.warn(
+            "[Observer] ⚠️ Skipping malformed interest row from model output",
+          );
+          continue;
+        }
+        const proposedWords = interest.words?.trim();
+        const groundedEvidence = groundSessionSignalEvidence(
+          {
+            sourceMessageId: interest.sourceMessageId,
+            transcriptExcerpt: proposedWords,
+          },
+          context.chatHistory,
+        );
+        if (!groundedEvidence) {
+          console.error(
+            `[Observer] ⚠️ Skipping interest "${interest.label}": sourceMessageId does not identify a non-empty scholar message`,
+          );
+          continue;
+        }
+        const words =
+          proposedWords &&
+          proposedWords.length <= 200 &&
+          groundedEvidence.transcriptExcerpt === proposedWords
+            ? proposedWords
+            : undefined;
+        // The Origin line is computed from the session doc and is
+        // authoritative: in an assigned session a "picked" row is the model
+        // talking itself into ownership, so it lands as "menu" (engagement).
+        const how =
+          interest.how === "picked" && origin.kind === "assigned"
+            ? ("menu" as const)
+            : (interest.how as "said" | "picked" | "menu");
+        incomingInterests.push({
+          label: interest.label.trim(),
+          how,
+          ...(words ? { words } : {}),
+        });
+      }
+      if (incomingInterests.length > 0) {
+        await ctx.runMutation(internal.dossier.mergeObserverInterests, {
+          scholarId: context.scholarId,
+          sessionId: args.sessionId,
+          at: Date.now(),
+          incoming: incomingInterests,
+        });
+      }
+      console.log(
+        `[Observer] ${incomingInterests.length}/${result.interests.length} interests written`,
+      );
 
       // 11.5 Granule attributions — evidence rows against the unit's
       // EQs/EUs. Keys are validated against the unit's actual granule

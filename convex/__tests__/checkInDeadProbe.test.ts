@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -22,13 +22,24 @@ const modules = (import.meta as ImportMeta & { glob: (p: string) => Record<strin
 
 const WHOLE = "whole-number-arithmetic";
 
-async function seedScholar(t: ReturnType<typeof convexTest>, username: string) {
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function seedScholar(t: TestConvex<typeof schema>, username: string) {
   return await t.run(async (ctx) =>
     ctx.db.insert("users", { name: "Dead-probe Scholar", username, role: "scholar" }),
   );
 }
 
-async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function asUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run(async (ctx) => {
     const session: Omit<Doc<"authSessions">, "_id" | "_creationTime"> = {
       userId,
@@ -39,7 +50,7 @@ async function asUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
   return t.withIdentity({ subject: `${userId}|${sessionId}`, issuer: "https://convex.dev" });
 }
 
-async function rowFor(t: ReturnType<typeof convexTest>, scholarId: Id<"users">, domain: string) {
+async function rowFor(t: TestConvex<typeof schema>, scholarId: Id<"users">, domain: string) {
   return await t.run(async (ctx) =>
     (await ctx.db.query("practicePlacements").collect()).find(
       (r) => r.scholarId === scholarId && r.domain === domain,
@@ -50,7 +61,7 @@ async function rowFor(t: ReturnType<typeof convexTest>, scholarId: Id<"users">, 
 /** Point the parked probe at a node the graph no longer contains — the shape a
  *  content reseed leaves behind on an in-flight run. */
 async function killServedProbe(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   scholarId: Id<"users">,
   domain: string,
 ) {
@@ -71,8 +82,7 @@ async function killServedProbe(
 
 describe("dead parked probe — the serving loops clear it and move on", () => {
   test("mixed check-in: resume reads needsStart, prime serves a FRESH probe", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "dead_probe_mixed");
     const asScholar = await asUser(t, scholar);
 
@@ -109,8 +119,7 @@ describe("dead parked probe — the serving loops clear it and move on", () => {
   });
 
   test("mixed check-in: a stale submit against a dead probe grades nothing and serves fresh", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "dead_probe_mixed_stale");
     const asScholar = await asUser(t, scholar);
 
@@ -139,8 +148,7 @@ describe("dead parked probe — the serving loops clear it and move on", () => {
   });
 
   test("mixed check-in: a submit MATCHING the dead probe's itemId grades nothing (no throw) and serves fresh", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "dead_probe_mixed_match");
     const asScholar = await asUser(t, scholar);
 
@@ -169,8 +177,7 @@ describe("dead parked probe — the serving loops clear it and move on", () => {
   });
 
   test("single-domain placement: prime falls through the dead probe to a fresh one", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "dead_probe_single");
     const asScholar = await asUser(t, scholar);
 
@@ -194,8 +201,7 @@ describe("dead parked probe — the serving loops clear it and move on", () => {
   });
 
   test("single-domain placement: a stale submit against a dead probe grades nothing and serves fresh", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "dead_probe_single_stale");
     const asScholar = await asUser(t, scholar);
 
@@ -223,8 +229,7 @@ describe("dead parked probe — the serving loops clear it and move on", () => {
   });
 
   test("single-domain placement: a submit MATCHING the dead probe's itemId grades nothing (no throw) and serves fresh", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholar = await seedScholar(t, "dead_probe_single_match");
     const asScholar = await asUser(t, scholar);
 

@@ -39,6 +39,11 @@ type StretchSeedItem = {
   rubricCriteria?: string[];
   /** Prior authored stems that should be renamed in place. */
   legacyStems?: string[];
+  /** Seed-only tag (not persisted): the wave-4 APPLICATION lane, authored to
+   *  review/applications-authoring-bar.html rather than the insight bar. Lets
+   *  tests assert that lane's coverage without confusing it with insight items
+   *  on the same nodes. */
+  lane?: "application";
 };
 
 export const STRETCH_SEED_ITEMS: StretchSeedItem[] = [
@@ -89,7 +94,7 @@ export const STRETCH_SEED_ITEMS: StretchSeedItem[] = [
     bloomLevel: 4,
   },
   {
-    skillKey: "prime_composite",
+    skillKey: "prime_or_composite",
     stem: "Exactly one prime number lives between 90 and 100. Which one?",
     answerType: "integer",
     answer: "97",
@@ -1950,6 +1955,7 @@ export const STRETCH_SEED_ITEMS: StretchSeedItem[] = [
     // whole point.
     technique: "sign_reversal",
     bloomLevel: 4,
+    lane: "application",
   },
   {
     skillKey: "lin_ineq_compound",
@@ -1960,6 +1966,7 @@ export const STRETCH_SEED_ITEMS: StretchSeedItem[] = [
     // 12 − 6 + 1 = 7. The whole solution set (both bounds) is load-bearing.
     technique: "structure",
     bloomLevel: 4,
+    lane: "application",
   },
   {
     skillKey: "lin_eq_model_context",
@@ -1971,6 +1978,7 @@ export const STRETCH_SEED_ITEMS: StretchSeedItem[] = [
     // the bare number 200/2.5 says neither.
     technique: "modeling",
     bloomLevel: 4,
+    lane: "application",
   },
 
   // ── linear-functions ──────────────────────────────────────────────────────
@@ -1986,6 +1994,7 @@ export const STRETCH_SEED_ITEMS: StretchSeedItem[] = [
     // matters — is exactly what makes a database key.
     technique: "structure",
     bloomLevel: 4,
+    lane: "application",
   },
   {
     skillKey: "slope_two_points",
@@ -1996,6 +2005,7 @@ export const STRETCH_SEED_ITEMS: StretchSeedItem[] = [
     // the final elevation instead of the CHANGE — the classic slope error.
     technique: "error_analysis",
     bloomLevel: 4,
+    lane: "application",
   },
   {
     skillKey: "lin_fn_from_two_points",
@@ -2007,6 +2017,7 @@ export const STRETCH_SEED_ITEMS: StretchSeedItem[] = [
     // points determine the whole line, then extrapolate.
     technique: "interpolate",
     bloomLevel: 4,
+    lane: "application",
   },
   {
     skillKey: "lin_fn_standard_form",
@@ -2019,6 +2030,7 @@ export const STRETCH_SEED_ITEMS: StretchSeedItem[] = [
     // line and its integer points is the standard-form skill.
     technique: "casework",
     bloomLevel: 4,
+    lane: "application",
   },
   {
     skillKey: "lin_fn_interpret_context",
@@ -2030,6 +2042,7 @@ export const STRETCH_SEED_ITEMS: StretchSeedItem[] = [
     // "forget the baseline" extrapolation error. Both parameters are load-bearing.
     technique: "error_analysis",
     bloomLevel: 4,
+    lane: "application",
   },
   {
     skillKey: "fn_compare_representations",
@@ -2041,6 +2054,1434 @@ export const STRETCH_SEED_ITEMS: StretchSeedItem[] = [
     // The table must be turned into an equation before the two can be compared.
     technique: "structure",
     bloomLevel: 5,
+    lane: "application",
+  },
+
+  // ── WAVE 5 — algebra-1 + discrete-math INSIGHT lane (TRA-96) ───────────
+  //
+  // Both domains were template-complete (55 + 48 nodes with deterministic
+  // drills) but had almost no depth axis: algebra-1 carried the 9 wave-4
+  // applications + 3 story-carried items; discrete-math had zero stretch
+  // items. This wave authors the classic Beast-Academy INSIGHT lane — same
+  // idea, one level deeper (an invariant, a symmetry, casework, an
+  // error-analysis, working backward) — never a costume. It is a DIFFERENT
+  // bar from wave 4: the wave-4 REJECT-ALL nodes were rejected for the
+  // application lane (no honest real-world user of, say, clearing fractions);
+  // an insight item on the same node is exactly what a fluent kid should meet
+  // next, so those nodes ARE covered here. Authored via a two-family
+  // tournament (Claude + GPT authors, each batch blind-solved by the other
+  // family; two wording ambiguities were rewritten from the solver flags; the
+  // one solver/author disagreement — the product of the roots of
+  // 2x² − 6x − 5 — was checked by hand: c/a = −2.5, author correct).
+  // Skipped on purpose: gt_path_vs_circuit (no single-number insight form).
+
+  // ── algebra-1 · linear-equations + systems (insight lane) ─────────────────
+  {
+    skillKey: "lin_eq_combine_terms",
+    stem: "For what value of k does 5x + 8 - 2x + k = 3x + 20 hold true for every value of x, not just one?",
+    answerType: "integer",
+    answer: "12",
+    // Combine like terms on the left: 3x + (8+k). This matches the right side 3x +
+    // 20 for every x exactly when 8+k = 20, i.e. k = 12. Checked: k=12 gives 3x+20
+    // = 3x+20 at x=0 (20=20) and x=100 (320=320); k=11 fails since 19≠20 at x=0.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lin_eq_distribute",
+    stem: "A student solves 5 − 2(x − 3) = 7 by distributing the −2 onto only the x, writing 5 − 2x − 6 = 7. What is the correct value of x?",
+    answerType: "integer",
+    answer: "2",
+    // Correct distribution: 5 - 2x + 6 = 7 -> 11 - 2x = 7 -> x = 2. Check
+    // original: 5 - 2(2-3) = 5 - 2(-1) = 5+2 = 7, correct. (The student's version
+    // gives 5-2x-6=7 -> -2x-1=7 -> x=-4, which fails the original equation:
+    // 5-2(-4-3)=5-2(-7)=19≠7.)
+    technique: "error_analysis",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lin_eq_clear_fractions",
+    stem: "The equation x/3 + x/4 = k gives a whole-number value of x only for special whole-number values of k. For the smallest positive whole number k that makes x come out whole, what is x?",
+    answerType: "integer",
+    answer: "12",
+    // Clearing fractions (multiply both sides by the LCD 12): 4x + 3x = 12k -> 7x
+    // = 12k -> x = 12k/7. Since gcd(7,12)=1, x is a whole number exactly when 7
+    // divides k. The smallest positive such k is 7, giving x = 12(7)/7 = 12
+    // (checked against k=1..14: only k=7 and k=14 give whole x in that range).
+    // Check: 12/3 + 12/4 = 4+3 = 7 = k.
+    technique: "structure",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "lin_eq_justify_steps",
+    stem: "To solve 5x + 3 = 5x - 4, a student subtracts 5x from both sides — a completely valid, equality-preserving move — and is left with 3 = -4. How many real values of x actually satisfy the original equation?",
+    answerType: "integer",
+    answer: "0",
+    // Subtracting 5x from both sides is a legitimate, equality-preserving step,
+    // and it leaves 3 = -4, which is false no matter what x is. A valid step
+    // producing a false numeric statement means the original equation is never
+    // true for any x, so there are 0 solutions.
+    technique: "invariant",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lin_eq_literal",
+    stem: "Solve ax + b = bx + a for x, given that a and b are different numbers. No matter what different values a and b take, x always comes out to the same number — what is it?",
+    answerType: "integer",
+    answer: "1",
+    // ax + b = bx + a -> ax - bx = a - b -> x(a-b) = (a-b). Since a ≠ b, divide
+    // both sides by (a-b): x = 1. Checked numerically: (a,b)=(5,3): 5(1)+3=8,
+    // 3(1)+5=8; (a,b)=(-2,9): -2(1)+9=7, 9(1)+(-2)=7; (a,b)=(100,1): 100(1)+1=101,
+    // 1(1)+100=101 — all match.
+    technique: "invariant",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "lin_eq_abs_value",
+    stem: "Solve |x - 3| = 2x + 1. Splitting into the usual two cases gives two candidate values for x, but only one of them actually checks out in the original equation. What is that value?",
+    answerType: "fraction",
+    answer: "2/3",
+    // Case 1 (x-3 = 2x+1): x = -4. Check: |-4-3| = 7 but 2(-4)+1 = -7 — doesn't
+    // match, so x=-4 is extraneous (the right side came out negative, which |x-3|
+    // never can). Case 2 (x-3 = -(2x+1)): 3x = 2, x = 2/3. Check: |2/3-3| = 7/3
+    // and 2(2/3)+1 = 7/3 — matches exactly. Only x=2/3 is a genuine solution.
+    technique: "casework",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lin_ineq_multi_step",
+    stem: "For what value of k does the inequality kx + 7 > 19 have the exact solution set x < -6?",
+    answerType: "integer",
+    answer: "-2",
+    // kx + 7 > 19 -> kx > 12. A solution set of the form x < ... only appears when
+    // dividing by a negative k (which flips the inequality), so k must be
+    // negative. Setting 12/k = -6 gives k = -2, negative as required. Check:
+    // -2x+7>19 -> -2x>12 -> divide by -2 and flip -> x<-6, matching exactly (x=-7
+    // satisfies, x=-6 and x=-5 do not).
+    technique: "working_backward",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lin_ineq_compound",
+    stem: "Consider the compound inequality '2x + 1 > 9 AND x < k,' where x and k are whole numbers. What is the greatest value of k for which this compound inequality has no solution at all?",
+    answerType: "integer",
+    answer: "5",
+    // 2x+1>9 means x>4, so the smallest whole number satisfying that half is x=5.
+    // Combined with x<k, a solution exists exactly when k≥6 (then x=5 satisfies
+    // both parts). Checked k=1 through 5: no whole number is simultaneously
+    // greater than 4 and less than k. At k=6, x=5 works. So the greatest k with no
+    // solution is 5.
+    technique: "extremal",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "lin_eq_model_context",
+    stem: "A phone plan charges a flat $20 plus $0.10 per text, so the total cost is C = 20 + 0.10t. A customer paid $34.50 and figures she must have sent 34.50 ÷ 0.10 = 345 texts. According to the model, how many texts did she actually send?",
+    answerType: "integer",
+    answer: "145",
+    // 20 + 0.10t = 34.50 -> 0.10t = 14.50 -> t = 145. Check: 20 + 0.10(145) =
+    // 20+14.50 = 34.50, correct. The customer's 345 came from dividing the whole
+    // $34.50 by the rate without first removing the $20 flat fee.
+    technique: "error_analysis",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "sys_solution_meaning",
+    stem: "A student claims (3, 2) is the solution of the system 2x - y = 4 and x + 2y = 9, because it satisfies the first equation. How many of the two equations does (3, 2) actually satisfy?",
+    answerType: "integer",
+    answer: "1",
+    // Equation 1: 2(3)-2 = 4, true. Equation 2: 3+2(2) = 7, but it needs to equal
+    // 9 — false. So (3,2) satisfies only 1 of the 2 equations; it is not the
+    // system's actual solution (which works out to (17/5, 14/5)) even though it
+    // checks out on one line.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "sys_solve_graphing",
+    stem: "Line A is y = 2x + 3. Line B is Line A reflected across the y-axis, so wherever Line A passes through a point (x, y), Line B passes through (-x, y). At what y-value do Line A and Line B cross?",
+    answerType: "integer",
+    answer: "3",
+    // Reflecting y=2x+3 across the y-axis gives y=-2x+3 (only the x-coefficient's
+    // sign flips; the intercept stays put). Setting 2x+3 = -2x+3 gives 4x=0, x=0,
+    // y=3. Checked: A(0)=3 and B(0)=3; A(2)=7 matches B(-2)=7, confirming the
+    // reflection is set up correctly. A non-horizontal line and its y-axis
+    // reflection can only meet where x=0 — its own y-intercept.
+    technique: "symmetry",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "sys_substitution",
+    stem: "The system y = 3x - 4 and y = kx + 8 has solution x = 6. Using substitution, what is the value of k?",
+    answerType: "integer",
+    answer: "1",
+    // At x=6, the first equation gives y = 3(6)-4 = 14. Substituting into the
+    // second equation: 14 = 6k+8 -> 6k=6 -> k=1. Check: 1(6)+8 = 14 = y, correct.
+    technique: "working_backward",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "sys_elimination",
+    stem: "Given 4x + y = 15 and x + 4y = 10, what is the value of x + y?",
+    answerType: "integer",
+    answer: "5",
+    // Adding the two equations directly: (4x+y)+(x+4y) = 15+10 -> 5x+5y = 25 ->
+    // x+y = 5. (Individually, x=10/3 and y=5/3 satisfy both original equations and
+    // do sum to 5 — but finding x+y this way needed none of that messier work.)
+    technique: "structure",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "sys_special_cases",
+    stem: "For how many whole numbers k from 1 to 10 does the system 3x + 5y = 15 and 6x + 10y = k have no solution?",
+    answerType: "integer",
+    answer: "10",
+    // 6x+10y is exactly 2 times (3x+5y), so the two lines are always parallel.
+    // They coincide (infinitely many solutions) only when k = 2(15) = 30, and are
+    // otherwise parallel and distinct (no solution) for every other k. None of
+    // k=1,...,10 equals 30, so all 10 of those values give no solution.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "sys_model_context",
+    stem: "A bakery sells cookies for $2 each and muffins for $3 each. Monday's sales of c cookies and m muffins totaled $54, so 2c + 3m = 54. Tuesday it sold half as many cookies but the same number of muffins, totaling $39, so c + 3m = 39. How many cookies did the bakery sell on Monday?",
+    answerType: "integer",
+    answer: "15",
+    // Subtracting Tuesday's equation from Monday's: (2c+3m) - (c+3m) = 54-39 -> c
+    // = 15, with the 3m terms canceling immediately. Check: m = (39-15)/3 = 8;
+    // Monday: 2(15)+3(8)=54, correct; Tuesday: 15+3(8)=39, correct.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "sys_linear_inequalities",
+    stem: "A region consists of every point (x, y) with x ≥ 0, y ≥ 0, x + y ≤ 6, and 2x + y ≤ 10. What is the greatest value that x + 2y can equal for a point somewhere in this region?",
+    answerType: "integer",
+    answer: "12",
+    // The region's corners are (0,0), (5,0), (4,2), and (0,6) — found from where
+    // the boundary lines meet (e.g. x+y=6 and 2x+y=10 cross at (4,2); (6,0) is
+    // excluded since it fails 2x+y≤10). Evaluating x+2y at each corner gives 0, 5,
+    // 8, and 12 respectively (confirmed by a fine grid search over the region);
+    // since the max of a linear expression over a convex region occurs at a
+    // corner, the greatest value is 12, at (0,6).
+    technique: "extremal",
+    bloomLevel: 5,
+  },
+
+  // ── algebra-1 · functions, slope, exponents, radicals, exponential (insight lane) ──
+  {
+    skillKey: "fn_identify_function",
+    stem: "For each relation, an arrow means “is paired with”: A has 1 → 4 and 1 → 5. B has 1 → 4, 2 → 4, and 3 → 5. C has 1 → 4, 2 → 5, and 3 → 5. How many of A, B, and C are functions?",
+    answerType: "integer",
+    answer: "2",
+    // A is not a function because input 1 has outputs 4 and 5. B is a function:
+    // inputs 1, 2, 3 each have one output; two inputs may share output 4. C is
+    // also a function: inputs 1, 2, 3 each have one output. Thus B and C work, for
+    // 2.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "fn_notation_evaluate",
+    stem: "A function is defined by f(x) = 3x − 2. First the function takes 4 as its input, then it takes that output as a new input. What is f(f(4))?",
+    answerType: "integer",
+    answer: "28",
+    // f(4) = 3×4 − 2 = 10. Then f(f(4)) = f(10) = 3×10 − 2 = 28.
+    technique: "substitution",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "slope_two_points",
+    stem: "The points (1, 2), (4, 11), and (k, 20) lie on one straight line. What is k?",
+    answerType: "integer",
+    answer: "7",
+    // From (1,2) to (4,11), slope = (11−2)/(4−1) = 9/3 = 3. To rise from 11 to 20
+    // is 9, so x must increase by 9/3 = 3 from 4. Thus k = 7. Check: (20−2)/(7−1)
+    // = 18/6 = 3.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "slope_from_graph",
+    stem: "On a graph, each horizontal grid square represents 2 units and each vertical grid square represents 6 units. A line goes down 2 grid squares while moving right 3 grid squares. What is its slope?",
+    answerType: "integer",
+    answer: "-2",
+    // The actual rise is down 2×6 = −12 units. The actual run is right 3×2 = 6
+    // units. Slope = −12/6 = −2.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "slope_intercept_form",
+    stem: "The graph of y = −3x + 12 and the coordinate axes enclose a triangle in the first quadrant. What is the area of that triangle in square units?",
+    answerType: "integer",
+    answer: "24",
+    // The y-intercept is 12. For the x-intercept, 0 = −3x + 12, so x = 4. The
+    // right triangle has area (4×12)/2 = 24.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lin_fn_from_two_points",
+    stem: "A line passes through (2, 7) and (6, 19). Three measurements are reported as points on that line: (8, 25), (9, 29), and (10, 31). Exactly one measurement is not on the line. What is its x-coordinate?",
+    answerType: "integer",
+    answer: "9",
+    // Slope through (2,7) and (6,19) is (19−7)/(6−2) = 12/4 = 3, so y = 3x+1. At
+    // x=8, y=25, so (8,25) is on it. At x=9, y=28, not 29, so (9,29) is off it. At
+    // x=10, y=31, so (10,31) is on it. The requested x-coordinate is 9.
+    technique: "error_analysis",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lin_fn_point_slope",
+    stem: "A line has slope 3 and passes through (4, −1). A student writes y + 1 = 3(x + 4). What is the actual y-intercept of the line?",
+    answerType: "integer",
+    answer: "-13",
+    // Point-slope form uses y − (−1) = 3[x − 4], so y + 1 = 3(x − 4). At x = 0, y
+    // + 1 = −12, hence y = −13. The student used +4 instead of subtracting the
+    // point’s x-coordinate.
+    technique: "error_analysis",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lin_fn_standard_form",
+    stem: "The line 4x + 5y = 20 meets both coordinate axes. The axes and the line enclose a triangle. What is its area in square units?",
+    answerType: "integer",
+    answer: "10",
+    // At y = 0, 4x = 20 so x = 5. At x = 0, 5y = 20 so y = 4. The triangle’s area
+    // is (5×4)/2 = 10.
+    technique: "symmetry",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lin_fn_interpret_context",
+    stem: "A game scoreboard tracks a player’s point balance by B = −45 + 12t, where t is whole-number turns played. A negative balance means the player still owes points; a balance of 0 means the debt is gone. What is the first whole-number turn when the player no longer owes points?",
+    answerType: "integer",
+    answer: "4",
+    // At t=3, B = −45 + 12×3 = −9, so the player still owes points. At t=4, B =
+    // −45 + 12×4 = 3, so the player no longer owes points. Therefore the first
+    // whole-number turn is 4.
+    technique: "modeling",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lin_fn_parallel_perpendicular",
+    stem: "Line p has slope 3/5. Line q is perpendicular to p, and line r is parallel to q. If x increases by −9 along line r, how much does y change?",
+    answerType: "integer",
+    answer: "15",
+    // A perpendicular slope to 3/5 is −5/3. Since r is parallel to q, its slope is
+    // also −5/3. Thus change in y = (−5/3)×(−9) = 15.
+    technique: "sign_reversal",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "fn_compare_representations",
+    stem: "Function f has values f(2) = 11 and f(6) = 23 and changes at a steady rate. Function g is given by g(x) = 4x − 1. How many whole-number inputs from 0 through 8 make f(x) greater than g(x)?",
+    answerType: "integer",
+    answer: "6",
+    // f has slope (23−11)/(6−2) = 12/4 = 3, so f(x)=3x+5 because 11=3×2+5.
+    // Compare: 3x+5 > 4x−1 means 6 > x. Among 0,1,2,3,4,5,6,7,8, the six inputs 0
+    // through 5 work.
+    technique: "structure",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "exp_product_quotient",
+    stem: "Without calculating the full number, 4⁵ × 8² is 2 to what exponent?",
+    answerType: "integer",
+    answer: "16",
+    // 4 = 2², so 4⁵ = (2²)⁵ = 2¹⁰. Also 8 = 2³, so 8² = (2³)² = 2⁶. Thus 4⁵×8² =
+    // 2¹⁰×2⁶ = 2¹⁶.
+    technique: "substitution",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "exp_power_rule",
+    stem: "(2³)ⁿ = 4¹². What is n?",
+    answerType: "integer",
+    answer: "8",
+    // (2³)ⁿ = 2^(3n). Also 4¹² = (2²)¹² = 2²⁴. Equal powers of 2 have equal
+    // exponents, so 3n = 24 and n = 8.
+    technique: "substitution",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "exp_zero_negative",
+    stem: "2⁻³ + 2⁻³ + 2⁻³ + 2⁻³ + 2⁻³ + 2⁻³ + 2⁻³ + 2⁻³ equals 2 to what exponent?",
+    answerType: "integer",
+    answer: "0",
+    // 2⁻³ = 1/8. There are eight copies, so their sum is 8×(1/8) = 1. Since 1 =
+    // 2⁰, the exponent is 0.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "roots_square_cube",
+    stem: "A whole number x satisfies x³ = −125. What is x²?",
+    answerType: "integer",
+    answer: "25",
+    // The cube root of −125 is −5 because (−5)³ = −125. Then x² = (−5)² = 25.
+    technique: "working_backward",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "roots_simplify_radicals",
+    stem: "√8 + √18 = √n for a whole number n. What is n?",
+    answerType: "integer",
+    answer: "50",
+    // √8 = √(4×2) = 2√2 and √18 = √(9×2) = 3√2. Their sum is 5√2. Since 5√2 =
+    // √(25×2) = √50, n = 50.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "sci_notation_convert",
+    stem: "How many times larger is 2 × 10⁹ than 8 × 10⁶?",
+    answerType: "integer",
+    answer: "250",
+    // (2×10⁹)/(8×10⁶) = (2/8)×10³ = (1/4)×1000 = 250. Thus 2×10⁹ is 250 times
+    // larger.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "sci_notation_operations",
+    stem: "Compute (6 × 10⁸) × (5 × 10⁻³) ÷ (3 × 10⁴). What is the exponent when the result is written in scientific notation?",
+    answerType: "integer",
+    answer: "2",
+    // Coefficients: (6×5)/3 = 10. Exponents: 8 + (−3) − 4 = 1, giving 10×10¹ =
+    // 1×10². The scientific-notation exponent is 2.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "exp_fn_evaluate",
+    stem: "For f(x) = 7 × 2ˣ, find f(10) − f(9) without separately multiplying out both huge values.",
+    answerType: "integer",
+    answer: "3584",
+    // f(10)−f(9) = 7×2¹⁰ − 7×2⁹ = 7×2⁹(2−1) = 7×512 = 3584.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "exp_growth_decay",
+    stem: "A battery’s charge is modeled by C = 500(0.8)ᵗ, where C is charge units after t hours. A student says it loses 80% of its charge each hour. How many charge units does it actually lose during the first hour?",
+    answerType: "integer",
+    answer: "100",
+    // At t=0, C=500(0.8)⁰=500. At t=1, C=500(0.8)=400. Loss = 500−400=100. The
+    // factor 0.8 means 80% remains, so 20% is lost.
+    technique: "error_analysis",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lin_vs_exp",
+    stem: "Sequence A starts at 5 and adds 3 each step. Sequence B starts at 1 and doubles each step. At step 0 their values are 5 and 1. What is the first whole-number step when B is greater than A?",
+    answerType: "integer",
+    answer: "5",
+    // A values use 5+3n; B values use 2ⁿ. At n=0,1,2,3,4: B is 1,2,4,8,16 while A
+    // is 5,8,11,14,17, so B is not greater. At n=5, B=32 and A=20, so the first
+    // step is 5.
+    technique: "casework",
+    bloomLevel: 4,
+  },
+
+  // ── algebra-1 · polynomials, factoring, quadratics ────────────────────────
+  {
+    skillKey: "poly_classify",
+    stem: "When (x³ − 2)(2x² + x − 1) − 2x⁵ is fully simplified and written as a single polynomial, what is its degree?",
+    answerType: "integer",
+    answer: "4",
+    // Coefficients of (x³−2)(2x²+x−1) by degree (0..5): [2,−2,−4,−1,1,2] — the
+    // degree-5 term is 2x⁵ (from x³·2x²), matching what gets subtracted.
+    // Subtracting 2x⁵ zeroes the degree-5 slot, leaving degree-4 coefficient 1
+    // (nonzero) as the new highest term. So the simplified polynomial has degree
+    // 4.
+    technique: "structure",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "poly_add_subtract",
+    stem: "(x³ + ax² − 2x + 1) + (2x³ − x² + bx − 4) simplifies to 3x³ − 4x + c, with no x² term. What is a + b + c?",
+    answerType: "integer",
+    answer: "-4",
+    // Matching coefficients: x³: 1+2=3 (checks out). x²: a + (−1) = 0 (no x² term
+    // given) → a = 1. x: −2 + b = −4 → b = −2. constant: 1 + (−4) = c → c = −3.
+    // a+b+c = 1 − 2 − 3 = −4.
+    technique: "working_backward",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "poly_multiply_monomial",
+    stem: "When 3x²(2x³ − 5x + 4) is expanded and written as a polynomial, what is the sum of all its coefficients?",
+    answerType: "integer",
+    answer: "3",
+    // Expanded: 6x⁵ − 15x³ + 12x², coefficients 6, −15, 12, sum = 3. Shortcut
+    // check: a polynomial's coefficient sum equals its value at x=1:
+    // 3(1)²(2(1)³−5(1)+4) = 3(1)(1) = 3.
+    technique: "substitution",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "poly_multiply_binomials",
+    stem: "(2x − 3)(x + k) expands to 2x² + 5x − 12. What is k?",
+    answerType: "integer",
+    answer: "4",
+    // (2x−3)(x+k) = 2x² + (2k−3)x − 3k. Matching constants: −3k = −12 → k = 4.
+    // Check middle term: 2(4)−3 = 5, matches the given 5x.
+    technique: "working_backward",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "poly_special_products",
+    stem: "(a + b)² = 121 and (a − b)² = 25. What is a × b?",
+    answerType: "integer",
+    answer: "24",
+    // (a+b)² − (a−b)² = (a²+2ab+b²) − (a²−2ab+b²) = 4ab, so 121 − 25 = 96 = 4ab →
+    // ab = 24. Check with a=8, b=3: (11)²=121 ✓, (5)²=25 ✓, ab=24 ✓.
+    technique: "structure",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "factor_gcf",
+    stem: "The greatest common factor of 6x³y² + 9x²y³ − 12x²y is A·xᵐ·yⁿ. What is A + m + n?",
+    answerType: "integer",
+    answer: "6",
+    // Coefficient GCF: gcd(6,9,12)=3. Exponent of x across all three terms:
+    // min(3,2,2)=2. Exponent of y: min(2,3,1)=1. So the GCF is 3x²y, giving A=3,
+    // m=2, n=1, sum=6.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "factor_trinomial_simple",
+    stem: "x² + bx + 36 factors as (x + m)(x + n), where m and n are positive integers with m − n = 5. What is b?",
+    answerType: "integer",
+    answer: "13",
+    // Factor pairs of 36, checking which pair differs by 5: 1×36 (diff 35), 2×18
+    // (diff 16), 3×12 (diff 9), 4×9 (diff 5) ✓, 6×6 (diff 0). Only 4 and 9 work,
+    // so m=9, n=4, b = m+n = 13.
+    technique: "casework",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "factor_trinomial_general",
+    stem: "6x² + bx − 20 can be written as (2x + m)(3x + n), where m and n are integers and n is positive. What is the greatest possible value of b?",
+    answerType: "integer",
+    answer: "37",
+    // mn = −20 with n>0 forces m<0. Checking each positive divisor pair (n,
+    // m=−20/n): (1,−20)→b=2(1)+3(−20)=−58; (2,−10)→b=−26; (4,−5)→b=−7;
+    // (5,−4)→b=−2; (10,−2)→b=14; (20,−1)→b=37. The greatest is b=37, from
+    // (2x−1)(3x+20) = 6x²+37x−20 (confirmed by expanding).
+    technique: "extremal",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "factor_special_forms",
+    stem: "x⁴ − 16 factors completely into linear and quadratic factors over the integers. How many of those factors are linear?",
+    answerType: "integer",
+    answer: "2",
+    // x⁴−16 = (x²−4)(x²+4) = (x−2)(x+2)(x²+4). x²+4 has no real roots, so it
+    // doesn't factor further over the integers. Linear factors: (x−2) and (x+2) →
+    // 2. Check by expanding: (x−2)(x+2)(x²+4) = (x²−4)(x²+4) = x⁴−16.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "quad_graph_features",
+    stem: "A parabola opens upward and crosses the x-axis at x = −3 and x = 7. What is the x-coordinate of its vertex?",
+    answerType: "integer",
+    answer: "2",
+    // The vertex's x-coordinate (the axis of symmetry) is always the midpoint of
+    // the two x-intercepts: (−3+7)/2 = 2.
+    technique: "symmetry",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "quad_solve_sqrt",
+    stem: "(x − 4)² = 25 has two solutions. What is their product?",
+    answerType: "integer",
+    answer: "-9",
+    // x − 4 = ±5, so x = 9 or x = −1. Product = 9 × (−1) = −9. Shortcut: since the
+    // roots are 4+5 and 4−5, their product is 4² − 5² = 16 − 25 = −9.
+    technique: "invariant",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "quad_zero_product",
+    stem: "(x − 6)²(x + 2) = 0. How many DIFFERENT values of x satisfy this equation?",
+    answerType: "integer",
+    answer: "2",
+    // Zero-product gives x−6=0 (appearing twice, from the squared factor) and
+    // x+2=0, i.e. x=6 (repeated) and x=−2. Distinct values: {6, −2} → 2.
+    technique: "structure",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "quad_solve_factoring",
+    stem: "A quadratic equation x² + bx + c = 0 has two integer solutions whose product is −24 and whose positive difference (larger minus smaller) is 10. The larger solution is greater than 5. What is b?",
+    answerType: "integer",
+    answer: "-2",
+    // Need integers r > s with r·s = −24 and r−s = 10. Since the product is
+    // negative, r>0>s, so r−s = r+|s| = 10 while r·|s| = 24 — the pair (r,|s|)
+    // with sum 10 and product 24 is (6,4): 6+4=10, 6×4=24 ✓, giving r=6, s=−4
+    // (r=6>5, satisfying the constraint). The only other sign assignment, r=4,
+    // s=−6, has larger root 4, which fails 'greater than 5'. So b = −(r+s) =
+    // −(6−4) = −2. Check: (x−6)(x+4) = x²−2x−24, matching b=−2.
+    technique: "working_backward",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "quad_complete_square",
+    stem: "Completing the square on x² − 8x − 3 = 0 gives (x − 4)² = q. Without solving for q, what is the sum of the equation's two solutions?",
+    answerType: "integer",
+    answer: "8",
+    // x²−8x−3=0 → x²−8x=3 → add 16 to both sides → x²−8x+16=19 → (x−4)²=19, so
+    // q=19. The two solutions are 4+√19 and 4−√19 (≈8.359 and −0.359); their sum
+    // is 4+√19 + 4−√19 = 8, regardless of what q turns out to be.
+    technique: "invariant",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "quad_formula",
+    stem: "2x² − 6x − 5 = 0 has two solutions found using the quadratic formula. What is their product?",
+    answerType: "decimal",
+    answer: "-2.5",
+    // Roots: x = (6 ± √(36+40))/4 = (6 ± √76)/4, approximately 3.679 and −0.679.
+    // Their product is c/a = −5/2 = −2.5, because (P+Q)(P−Q) = P² − Q² where
+    // P=6/4=1.5 and Q=√76/4: 1.5² − 76/16 = 2.25 − 4.75 = −2.5. Direct
+    // multiplication of the approximate roots also gives −2.5.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "quad_discriminant",
+    stem: "For what positive value of k does 4x² − 12x + k = 0 have exactly one real solution?",
+    answerType: "integer",
+    answer: "9",
+    // Exactly one real solution means the discriminant is 0: (−12)² − 4(4)(k) =
+    // 144 − 16k = 0 → k = 9.
+    technique: "working_backward",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "quad_vertex_form",
+    stem: "A parabola in vertex form is y = 2(x − 3)² − 8. What is the sum of its two x-intercepts?",
+    answerType: "integer",
+    answer: "6",
+    // Setting y=0: 2(x−3)²=8 → (x−3)²=4 → x−3=±2 → x=5 or x=1, sum=6. Shortcut:
+    // the two x-intercepts are symmetric about the vertex's x-coordinate (h=3), so
+    // their sum is always 2h = 6, no matter what the actual intercepts are.
+    technique: "symmetry",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "quad_model_context",
+    stem: "A soccer ball's height in feet, t seconds after being kicked, is h(t) = −16t² + 48t. The ball is at the same height at t = 0.5 seconds and at some other time T seconds (T ≠ 0.5). What is T?",
+    answerType: "decimal",
+    answer: "2.5",
+    // The vertex (max height) occurs at t = −48/(2×−16) = 1.5 seconds. By the
+    // parabola's symmetry, the time paired with t=0.5 is 2(1.5) − 0.5 = 2.5.
+    // Check: h(0.5) = −16(0.25)+48(0.5) = −4+24 = 20; h(2.5) = −16(6.25)+48(2.5) =
+    // −100+120 = 20. Both equal 20.
+    technique: "symmetry",
+    bloomLevel: 4,
+  },
+
+  // ── discrete-math · counting, pigeonhole, graph theory ────────────────────
+  {
+    skillKey: "count_list_outcomes",
+    stem: "A tiny robot starts at 0 and makes exactly two moves. Each move is either +1 or −1. How many different move lists are possible, even if two lists land the robot at the same place?",
+    answerType: "integer",
+    answer: "4",
+    // The two-move lists are (+1,+1), (+1,−1), (−1,+1), and (−1,−1): 4 lists. The
+    // middle two both land at 0 but are different lists.
+    technique: "casework",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "count_organized_count",
+    stem: "Make a two-symbol code with one letter from A, B, C and one number from 1, 2. The code B2 is not allowed. How many allowed codes are there?",
+    answerType: "integer",
+    answer: "5",
+    // List by letter: A1, A2; B1; C1, C2. There are 2 + 1 + 2 = 5 allowed codes.
+    technique: "casework",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "addition_principle",
+    stem: "How many whole numbers from 1 through 20 leave remainder 1 or remainder 3 when divided by 4?",
+    answerType: "integer",
+    answer: "10",
+    // Remainder 1 gives 1, 5, 9, 13, 17 (5 numbers). Remainder 3 gives 3, 7, 11,
+    // 15, 19 (5 numbers). A number cannot have both remainders, so 5 + 5 = 10.
+    technique: "casework",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "multiplication_principle",
+    stem: "A lock has three dials. The first dial has 4 symbols and the second has 5 symbols. If the lock has 120 possible codes and every choice can be paired with every choice on the other dials, how many symbols are on the third dial?",
+    answerType: "integer",
+    answer: "6",
+    // Each third-dial symbol pairs with 4 × 5 = 20 first-and-second-dial choices.
+    // Since 120 ÷ 20 = 6, the third dial has 6 symbols.
+    technique: "working_backward",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "factorial_arrangements",
+    stem: "Four different books A, B, C, and D are put in a row. Book B must be immediately to the right of book A. How many orders are possible?",
+    answerType: "integer",
+    answer: "6",
+    // Treat AB as one block. The three objects AB, C, D can be ordered in 3! = 3 ×
+    // 2 × 1 = 6 ways. B's required position inside its block is fixed.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "permutations_r_from_n",
+    stem: "Five runners A, B, C, D, and E race. How many possible ordered first-, second-, and third-place results do not have A in first place?",
+    answerType: "integer",
+    answer: "48",
+    // All ordered top threes: 5 × 4 × 3 = 60. Results with A first: choose second
+    // and third as 4 × 3 = 12. So 60 − 12 = 48.
+    technique: "complement",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "combinations_r_from_n",
+    stem: "A team of 3 is chosen from X, Y, A, B, C, and D. The team must contain exactly one of X and Y. How many teams are possible?",
+    answerType: "integer",
+    answer: "12",
+    // Choose which of X or Y is on the team: 2 ways. Then choose 2 of A, B, C, D:
+    // AB, AC, AD, BC, BD, CD, or 6 ways. Thus 2 × 6 = 12.
+    technique: "casework",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "permutation_vs_combination",
+    stem: "From 7 finalists, a committee chooses 4 people and a podium awards gold, silver, bronze, and fourth place to 4 people. How many more possible podium results are there than possible committees?",
+    answerType: "integer",
+    answer: "805",
+    // Committees ignore order: 7 choose 4 = 35. Podium results use order: 7 × 6 ×
+    // 5 × 4 = 840. The difference is 840 − 35 = 805.
+    technique: "modeling",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "count_with_restriction",
+    stem: "Arrange the five different letters A, B, C, D, and E in a row. How many arrangements have A and B not next to each other?",
+    answerType: "integer",
+    answer: "72",
+    // All arrangements: 5! = 120. If A and B are adjacent, treat them as one
+    // block; AB or BA gives 2 internal orders, and the block with C, D, E has 4! =
+    // 24 orders. Adjacent count = 2 × 24 = 48, so not adjacent = 120 − 48 = 72.
+    technique: "complement",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "count_complementary",
+    stem: "Arrange the digits 1, 2, 3, 4, 5, and 6 in a row. How many arrangements do not begin with 1 or 2?",
+    answerType: "integer",
+    answer: "480",
+    // All arrangements: 6! = 720. Beginning with 1 gives 5! = 120; beginning with
+    // 2 also gives 120. These cases cannot overlap, so allowed = 720 − 120 − 120 =
+    // 480.
+    technique: "complement",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "pigeonhole_basic",
+    stem: "The numbers 1 through 24 are grouped into the pairs (1,2), (3,4), and so on through (23,24). How many different numbers must you choose to guarantee that you chose both numbers from one pair?",
+    answerType: "integer",
+    answer: "13",
+    // There are 12 pairs. You can choose 12 numbers by taking one from each pair,
+    // so no pair is complete yet. A 13th chosen number must go into one of those
+    // 12 pairs and complete it.
+    technique: "pigeonhole",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "pigeonhole_generalized",
+    stem: "Twenty-five stickers are sorted into 6 colors. What is the largest number n for which you can be certain, without looking, that some color has at least n stickers?",
+    answerType: "integer",
+    answer: "5",
+    // If every color had at most 4 stickers there would be at most 6 × 4 = 24, but
+    // there are 25, so some color has at least 5. Five can fail to be beaten:
+    // 5,4,4,4,4,4 has no color at 6. So n = 5.
+    technique: "pigeonhole",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "gt_vertices_edges",
+    stem: "A graph has vertices A through F and edges AB, AC, BD, CE, and DE. How many vertices touch no edge?",
+    answerType: "integer",
+    answer: "1",
+    // The edge list mentions A, B, C, D, and E. Vertex F is the only listed vertex
+    // absent from every edge, so 1 vertex touches no edge.
+    technique: "structure",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "gt_vertex_degree",
+    stem: "A graph has vertices A through F and 9 edges. Every vertex except A has degree 3. What is the degree of A?",
+    answerType: "integer",
+    answer: "3",
+    // Nine edges contribute 2 × 9 = 18 to the total degree. The five vertices
+    // other than A contribute 5 × 3 = 15, so A contributes 18 − 15 = 3.
+    technique: "counting_two_ways",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "gt_degree_sequence",
+    stem: "A graph has vertices A through F and edges AB, AC, AD, BD, BE, CE, DE, DF, and EF. After you list all six degrees, what is the difference between the largest and smallest degree?",
+    answerType: "integer",
+    answer: "2",
+    // Degrees are A=3, B=3, C=2, D=4, E=4, F=2. The largest is 4 and the smallest
+    // is 2, so the difference is 2.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "gt_handshake_sum",
+    stem: "Someone proposes 3, 3, 3, 2, 2 as the degrees of five vertices in a graph. What is the smallest whole number they could add to the final 2 so that the new list can be a graph’s degree sequence?",
+    answerType: "integer",
+    answer: "1",
+    // The proposed sum is 3 + 3 + 3 + 2 + 2 = 13, but a degree sum must be even.
+    // Adding 1 gives 3,3,3,2,3, with sum 14. This is possible: edges AB, AC, AD,
+    // BC, BE, CD, and DE give degrees A=3, B=3, C=3, D=3, E=2. Thus 1 is the
+    // smallest addition.
+    technique: "parity",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "gt_connected",
+    stem: "A graph has vertices A through H and edges AB, BC, DE, FG, and GH. What is the fewest new edges that must be added to make the graph connected?",
+    answerType: "integer",
+    answer: "2",
+    // The existing components are {A,B,C}, {D,E}, and {F,G,H}: 3 separate pieces.
+    // One new edge can join only two pieces, leaving 2 pieces; a second can join
+    // the remaining piece. For example add CD and EF, so 2 is enough and
+    // necessary.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "gt_euler_path",
+    stem: "A connected graph has vertices A through F and edges AB, AC, AD, BE, BF, CD, DE, and EF. What is the fewest new edges you must add so that an Euler path exists?",
+    answerType: "integer",
+    answer: "1",
+    // The degrees are A=3, B=3, C=2, D=3, E=3, F=2, so A, B, D, E are the 4
+    // odd-degree vertices. Zero new edges cannot work because an Euler path needs
+    // 0 or 2 odd vertices. Add AE: A and E become degree 4, leaving only B and D
+    // odd, so 1 edge works.
+    technique: "parity",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "gt_complete_edges",
+    stem: "A complete graph has 8 vertices. One vertex and every edge touching it are removed. How many edges remain?",
+    answerType: "integer",
+    answer: "21",
+    // Removing one vertex leaves a complete graph on 7 vertices. Its edges are
+    // pairs: 6 + 5 + 4 + 3 + 2 + 1 = 21.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "gt_tree_definition",
+    stem: "A graph has vertices A through E and edges AB, BC, CD, DA, and CE. How many edges must be removed, at minimum, so the graph becomes a tree without disconnecting it?",
+    answerType: "integer",
+    answer: "1",
+    // AB, BC, CD, and DA form one circuit. Removing any one edge of that circuit
+    // leaves all vertices connected through the other three edges, and CE still
+    // attaches E. One removal is enough; zero leaves a circuit.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "gt_tree_edges",
+    stem: "One tree has 8 vertices and another tree has 5 vertices. One new edge joins a vertex of the first tree to a vertex of the second tree. How many edges does the resulting tree have?",
+    answerType: "integer",
+    answer: "12",
+    // The first tree has 8 − 1 = 7 edges and the second has 5 − 1 = 4 edges.
+    // Joining them adds one edge, so the result has 7 + 4 + 1 = 12 edges. It
+    // remains connected and has no circuit, so it is a tree.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "gt_bipartite",
+    stem: "A graph has vertices A through E and edges AB, BC, CA, CD, and DE. What is the fewest edges that must be removed so the remaining graph can be colored with two colors?",
+    answerType: "integer",
+    answer: "1",
+    // AB, BC, and CA form a triangle, which cannot use only two colors, so at
+    // least one edge must go. Remove AB: color C one color; A, B, D the other; and
+    // E the first color. Every remaining edge joins unlike colors, so 1 removal
+    // works.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "gt_coloring",
+    stem: "A graph has vertices A through E and edges AB, BC, CD, DE, EA, and AC. What is the least number of colors needed to color its vertices so connected vertices have different colors?",
+    answerType: "integer",
+    answer: "3",
+    // A, B, C form a triangle because AB, BC, and AC are edges, so at least 3
+    // colors are needed. Three suffice: A=1, B=2, C=3, D=1, E=2. Each listed edge
+    // has different colors at its ends. Therefore the least number is 3.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+
+  // ── discrete-math · number theory + logic ─────────────────────────────────
+  {
+    skillKey: "nt_parity_classify",
+    stem: "A sequence starts at 1, and each next number is 3 more than the last: 1, 4, 7, 10, 13, … all the way up through the 50th number in the list. How many of those 50 numbers are even?",
+    answerType: "integer",
+    answer: "25",
+    // Each step adds 3 (an odd number), so parity flips every single step: odd,
+    // even, odd, even, … The 50 terms alternate exactly evenly (starting odd),
+    // giving 25 odd and 25 even terms — confirmed by generating all 50 terms
+    // directly (evens = 25).
+    technique: "parity",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "nt_parity_argument",
+    stem: "A group of one or more whole numbers has a product that comes out odd, and a sum that comes out even. What is the smallest number of whole numbers the group could contain?",
+    answerType: "integer",
+    answer: "2",
+    // A product is odd only if every single factor is odd (one even factor makes
+    // the whole product even), so every number in the group must be odd. A sum of
+    // odd numbers is even exactly when there's an even count of them. A group of 1
+    // odd number sums to itself, which is odd — too small. A group of 2 odd
+    // numbers always sums to even (e.g. 1+3=4) and multiplies to odd (1×3=3), so 2
+    // works and is smallest.
+    technique: "invariant",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "nt_parity_proof",
+    stem: "Look at these four claims, where 'odd' and 'even' can stand for any whole number of that type: (1) (odd) × (odd) = 100. (2) (even) + (odd) = 47. (3) (odd)² − (odd)² = 15. (4) (even) × (even) = 36. A claim can be true for some actual whole numbers only if the parities on both sides match. How many of the four claims are actually possible?",
+    answerType: "integer",
+    answer: "2",
+    // (1) odd×odd is always odd, but 100 is even → impossible. (2) even+odd is
+    // always odd, and 47 is odd → possible (e.g. 46+1=47). (3) odd²−odd² = odd−odd
+    // = even always, but 15 is odd → impossible. (4) even×even is always even, and
+    // 36 is even → possible (e.g. 6×6=36). Possible claims: (2) and (4), so 2.
+    technique: "parity",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "nt_modular_clock",
+    stem: "A clock is numbered 0 up through (n − 1), for some whole number n bigger than 3. Right now it shows 2. After moving forward 17 hours, it shows 3. What is the smallest possible size n for this clock?",
+    answerType: "integer",
+    answer: "4",
+    // 2 + 17 = 19, and landing on 3 means 19 ≡ 3 (mod n), so n must divide 19 − 3
+    // = 16. Divisors of 16 greater than 3 are 4, 8, and 16. The smallest is 4
+    // (check: 19 mod 4 = 3 ✓).
+    technique: "working_backward",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "nt_mod_cycle",
+    stem: "What is the remainder when 2^100 + 2^101 + 2^102 is divided by 7?",
+    answerType: "integer",
+    answer: "0",
+    // 2^100 + 2^101 + 2^102 = 2^100 × (1 + 2 + 4) = 2^100 × 7, which is divisible
+    // by 7, so the remainder is 0. (Cross-checked with the mod-7 cycle of powers
+    // of 2, which repeats 2,4,1 with period 3: 100,101,102 mod 3 give remainders
+    // 2,4,1 whose sum is 7 ≡ 0.)
+    technique: "structure",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "nt_modular_arithmetic",
+    stem: "Working only with remainders 0 through 5 (arithmetic mod 6), start at the number 1. Multiply by 4 and keep only the remainder mod 6; repeat this a total of 50 times in a row. What remainder do you end on?",
+    answerType: "integer",
+    answer: "4",
+    // 1 × 4 = 4 (mod 6). From then on, 4 × 4 = 16 ≡ 4 (mod 6) forever — 4 is a
+    // fixed point of 'multiply by 4' mod 6. So after the very first step, the
+    // remainder is stuck at 4 for all 49 remaining multiplications (confirmed by
+    // iterating all 50 steps directly).
+    technique: "invariant",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "nt_last_digit",
+    stem: "What is the last digit of 3^7 + 7^7?",
+    answerType: "integer",
+    answer: "0",
+    // Units digits of powers of 3 cycle 3,9,7,1 (period 4); 7 mod 4 = 3, so 3^7
+    // ends in 7. Units digits of powers of 7 cycle 7,9,3,1 (period 4); 7 mod 4 =
+    // 3, so 7^7 ends in 3. 7 + 3 = 10, so the sum ends in 0. (Checked directly:
+    // 3^7 = 2187, 7^7 = 823543, sum = 825730.)
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "nt_divisibility_proof",
+    stem: "A number is written as fifty 7's in a row (7777…7, with 50 sevens total). What is the remainder when this number is divided by 9?",
+    answerType: "integer",
+    answer: "8",
+    // Every power of 10 is congruent to 1 (mod 9), so a number's value mod 9
+    // equals its digit sum mod 9. Digit sum = 50 × 7 = 350. 350 mod 9 = 350 − 342
+    // (38×9) = 8. (Confirmed against the exact 50-digit number using exact
+    // big-integer arithmetic.)
+    technique: "structure",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "nt_prime_test_deeper",
+    stem: "To test whether 199 is prime using trial division only up to its square root, what is the LARGEST prime number you would actually need to test as a divisor?",
+    answerType: "integer",
+    answer: "13",
+    // √199 ≈ 14.11, so trial division only needs divisors up to 14 — but 14 itself
+    // isn't prime (14 = 2×7), so it's never actually one of the divisors tested.
+    // The primes at or below 14 are 2, 3, 5, 7, 11, 13, and the largest is 13.
+    // (199 divided by each leaves a remainder, confirming 199 is prime.)
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "nt_twin_primes",
+    stem: "Every twin-prime pair other than (3, 5) can be written as (6k − 1, 6k + 1) for some whole number k. Using this fact, what is k for the twin-prime pair (101, 103)?",
+    answerType: "integer",
+    answer: "17",
+    // 101 and 103 are both prime. 6k − 1 = 101 → 6k = 102 → k = 17. Check: 6(17) +
+    // 1 = 103 ✓.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "nt_prime_gaps",
+    stem: "Every number from 20! + 2 up through 20! + 20 is composite, because 20! is divisible by each of 2 through 20. This guarantees that some two consecutive primes are at least how far apart?",
+    answerType: "integer",
+    answer: "20",
+    // The composites 20!+2 … 20!+20 are 19 numbers in a row. The prime before them
+    // is at most 20!+1 and the prime after is at least 20!+21, so the gap is at
+    // least 21 − 1 = 20. Nineteen composites in a row force a gap of 20, not 19.
+    technique: "structure",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "nt_gcd_euclid",
+    stem: "What is gcd(654321, 654323)?",
+    answerType: "integer",
+    answer: "1",
+    // The Euclidean algorithm's key step is gcd(a,b) = gcd(a, b−a). Here b−a =
+    // 654323−654321 = 2, so gcd(654321, 654323) = gcd(654321, 2). Since 654321 is
+    // odd, it shares no factor of 2 with 2, so the gcd is 1. (Confirmed by running
+    // the full Euclidean algorithm.)
+    technique: "invariant",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "nt_linear_congruence",
+    stem: "How many whole numbers x with 0 ≤ x < 12 satisfy 4x ≡ 8 (mod 12)?",
+    answerType: "integer",
+    answer: "4",
+    // Testing x = 0..11 directly: 4x mod 12 equals 8 exactly when x = 2, 5, 8, or
+    // 11 — four solutions. This matches the rule that since gcd(4,12) = 4 divides
+    // 8, there are exactly gcd(4,12) = 4 solutions mod 12, not one.
+    technique: "structure",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "lg_truth_value",
+    stem: "How many of these four statements are actually true? (1) 2 + 3 × 2 = 10. (2) 20 − 5 − 5 = 10. (3) Half of 18 is 8. (4) 100 is an even number.",
+    answerType: "integer",
+    answer: "2",
+    // (1) 2+3×2 = 2+6 = 8, not 10 → false. (2) 20−5−5 = 10 → true. (3) Half of 18
+    // is 9, not 8 → false. (4) 100 is even → true. True statements: (2) and (4),
+    // so 2.
+    technique: "error_analysis",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "lg_and",
+    stem: "How many of these four AND statements are true? (1) (14 is even) AND (14 is divisible by 3). (2) (21 is odd) AND (21 is divisible by 7). (3) (2 + 5 = 7) AND (7 is prime). (4) (9 is a perfect square) AND (9 is odd).",
+    answerType: "integer",
+    answer: "3",
+    // (1) 14 is even (true) but not divisible by 3 (false) → false. (2) 21 is odd
+    // (true) and divisible by 7 (true) → true. (3) 2+5=7 (true) and 7 is prime
+    // (true) → true. (4) 9 is a perfect square, 3² (true) and odd (true) → true.
+    // True count: (2),(3),(4) = 3.
+    technique: "structure",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "lg_or",
+    stem: "How many of these four OR statements are true? (1) (12 is odd) OR (12 is greater than 20). (2) (15 is prime) OR (15 is a multiple of 5). (3) (4 is negative) OR (4 equals 2 + 2). (4) (100 is odd) OR (100 is less than 50).",
+    answerType: "integer",
+    answer: "2",
+    // (1) 12 is not odd, and not greater than 20 → false. (2) 15 is not prime, but
+    // is a multiple of 5 → true. (3) 4 is not negative, but 4=2+2 → true. (4) 100
+    // is not odd and not less than 50 → false. True count: (2) and (3) = 2.
+    technique: "structure",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "lg_not",
+    stem: "How many of these four NOT statements are true? (1) NOT (7 is even). (2) NOT (3 + 4 = 7). (3) NOT (11 is composite). (4) NOT (2 × 3 = 5).",
+    answerType: "integer",
+    answer: "3",
+    // (1) '7 is even' is false, so NOT gives true. (2) '3+4=7' is true, so NOT
+    // gives false. (3) '11 is composite' is false (11 is prime), so NOT gives
+    // true. (4) '2×3=5' is false, so NOT gives true. True count: (1),(3),(4) = 3.
+    technique: "error_analysis",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "lg_compound_truth",
+    stem: "How many of these four compound statements are true? (1) NOT (9 is even) AND (20 < 5). (2) NOT (7 is prime) OR (3 + 3 = 6). (3) (5 > 10) OR NOT (14 is odd). (4) NOT (16 is a perfect square) AND (2 is prime).",
+    answerType: "integer",
+    answer: "2",
+    // (1) NOT(false)=true, AND (20<5 is false) → true AND false = false. (2)
+    // NOT(true)=false, OR (3+3=6, true) → false OR true = true. (3) (5>10 is
+    // false) OR NOT(14 is odd, false)=true → false OR true = true. (4) NOT(16 is a
+    // perfect square, true)=false, AND (2 is prime, true) → false AND true =
+    // false. True count: (2) and (3) = 2.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lg_negate",
+    stem: "A claim says: 'All the numbers in this bag are even.' How many of these four statements are CORRECT negations of that claim? (1) None of the numbers in the bag are even. (2) At least one number in the bag is odd. (3) Some of the numbers in the bag are even. (4) Not every number in the bag is even.",
+    answerType: "integer",
+    answer: "2",
+    // The correct negation of 'all are even' is 'some are not even' (at least one
+    // is odd). (1) 'None are even' is a stronger, different claim — not the
+    // negation. (2) matches exactly → correct. (3) is compatible with the original
+    // claim being true, so it isn't a negation at all. (4) is a direct paraphrase
+    // of the negation → correct. Correct count: (2) and (4) = 2.
+    technique: "error_analysis",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lg_if_then",
+    stem: "How many of these four if-then statements are true? (1) If 5 is even, then 5 + 1 = 10. (2) If 9 is odd, then 9 is prime. (3) If a square has 3 sides, then 2 + 2 = 5. (4) If 8 is prime, then 8 is even.",
+    answerType: "integer",
+    answer: "3",
+    // A conditional is false only when the hypothesis is true and the conclusion
+    // is false. (1) '5 is even' is false → vacuously true. (2) '9 is odd' is true,
+    // but '9 is prime' is false (9=3×3) → false. (3) 'a square has 3 sides' is
+    // false → vacuously true. (4) '8 is prime' is false → vacuously true. True
+    // count: (1),(3),(4) = 3.
+    technique: "error_analysis",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lg_converse",
+    stem: "Each of these four if-then statements is true. For how many of them is the CONVERSE also true? (1) If a number is a multiple of 10, then it is even. (2) If a number is divisible by 6, then it is divisible by 3. (3) If a whole number ends in 0, then it is divisible by 5. (4) If a number is negative, then it is less than 0.",
+    answerType: "integer",
+    answer: "1",
+    // (1) Converse 'even → multiple of 10' is false (4 is even, not a multiple of
+    // 10). (2) Converse 'divisible by 3 → divisible by 6' is false (9 is divisible
+    // by 3, not 6). (3) Converse 'divisible by 5 → ends in 0' is false (15 is
+    // divisible by 5, ends in 5). (4) Converse 'less than 0 → negative' is true,
+    // since 'negative' and 'less than 0' mean exactly the same thing.
+    // True-converse count: only (4), so 1.
+    technique: "error_analysis",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "lg_counterexample",
+    stem: "A claim says: 'Every whole number of the form 4k + 1 (with k a whole number 1 or more) is prime.' What is the smallest whole number of that form that disproves this claim?",
+    answerType: "integer",
+    answer: "9",
+    // k=1 gives 4(1)+1=5, which is prime — no counterexample yet. k=2 gives
+    // 4(2)+1=9=3×3, which is composite — the claim fails here. So 9 is the
+    // smallest counterexample.
+    technique: "casework",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "lg_knights_knaves",
+    stem: "Three islanders — Ana, Ben, and Cy — are each either a knight (always tells the truth) or a knave (always lies). Ana says: 'Ben is a knave.' Ben says: 'Cy and I are the same type.' Cy says: 'Ana is a knight.' How many of the three are knights?",
+    answerType: "integer",
+    answer: "2",
+    // Testing all 8 knight/knave combinations, the only consistent one is
+    // Ana=knight, Ben=knave, Cy=knight: Ana (knight) truthfully says Ben is a
+    // knave ✓; Ben (knave) falsely claims to match Cy — Cy is actually a knight,
+    // so they're NOT the same type, making Ben's claim false, as a knave's must be
+    // ✓; Cy (knight) truthfully says Ana is a knight ✓. No other combination is
+    // consistent, so exactly 2 are knights.
+    technique: "casework",
+    bloomLevel: 5,
+  },
+  {
+    skillKey: "lg_deduce_clues",
+    stem: "I'm thinking of a whole number between 40 and 70. It's a multiple of 6, and its digits add up to 9. What's the number?",
+    answerType: "integer",
+    answer: "54",
+    // Multiples of 6 between 40 and 70: 42, 48, 54, 60, 66. Their digit sums: 6,
+    // 12, 9, 6, 12. Only 54 has digit sum 9, so it's the unique answer.
+    technique: "casework",
+    bloomLevel: 4,
+  },
+  // ── probability (2026-09 fill) ──
+  {
+    skillKey: "complement_probability",
+    stem: "An event is twice as likely to happen as it is to not happen. What is the probability that it happens, as a fraction?",
+    answerType: "fraction",
+    answer: "2/3",
+    // P = 2(1 − P) → 3P = 2 → P = 2/3. (Likelihood split into 2 parts happen, 1 part not.)
+    technique: "working_backward",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "complement_probability",
+    stem: "The probability of an event happening is 0.4 greater than the probability of it not happening. What is the probability that it does NOT happen, as a decimal?",
+    answerType: "decimal",
+    answer: "0.3",
+    // Let P(not) = x, so P(happen) = x + 0.4; x + (x + 0.4) = 1 → x = 0.3.
+    technique: "complement",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "probability_as_fraction",
+    stem: "A fair six-sided die is rolled once. What is the probability the result is both even and greater than 3, as a fraction?",
+    answerType: "fraction",
+    answer: "1/3",
+    // Even AND >3: only 4 and 6 → 2 of 6 → 2/6 = 1/3.
+    technique: "casework",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "sample_space",
+    stem: "Two fair coins are flipped. What is the probability of getting exactly one head, as a fraction?",
+    answerType: "fraction",
+    answer: "1/2",
+    // Sample space {HH, HT, TH, TT}; exactly one head is HT or TH → 2/4 = 1/2 (HT and TH are distinct).
+    technique: "counting",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "expected_frequency",
+    stem: "A spinner lands on red 1/4 of the time. If you spin it 60 times, how many red landings would you expect?",
+    answerType: "integer",
+    answer: "15",
+    // Expected frequency = probability × trials = 1/4 × 60 = 15.
+    technique: "structure",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "law_of_large_numbers",
+    stem: "A friend flips a fair coin 10 times, gets 7 heads, and concludes the coin is biased. Explain why 7 heads in 10 flips is not strong evidence of bias, and what the law of large numbers predicts as the number of flips grows.",
+    answerType: "dialogue",
+    answer: "",
+    // Target: small samples swing a lot, so 7/10 is unremarkable; the head PROPORTION settles near 1/2 as flips grow.
+    technique: "error_analysis",
+    bloomLevel: 5,
+    rubricCriteria: [
+      "Explains that in only 10 flips a result like 7 heads is common by chance even for a fair coin, so a short run cannot show bias.",
+      "States that as the number of flips grows, the PROPORTION of heads tends toward 1/2 (the law of large numbers), even though it is rarely exactly half in a short run.",
+    ],
+  },
+  {
+    skillKey: "compound_two_dice",
+    stem: "Two fair six-sided dice are rolled and their numbers added. What is the probability the total is 10, as a fraction?",
+    answerType: "fraction",
+    answer: "1/12",
+    // Ways to make 10: (4,6),(5,5),(6,4) = 3 of 36 → 3/36 = 1/12.
+    technique: "casework",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "compound_two_dice",
+    stem: "Two fair six-sided dice are rolled. What is the probability the two numbers are the same (a double), as a fraction?",
+    answerType: "fraction",
+    answer: "1/6",
+    // Doubles: (1,1)…(6,6) = 6 of 36 → 6/36 = 1/6.
+    technique: "structure",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "read_scaled_picture_bar_graph",
+    stem: "In a picture graph each circle stands for 4 books. One shelf's row shows 3 and a half circles. How many books does that row represent?",
+    answerType: "integer",
+    answer: "14",
+    // Scaled key with a half symbol: 3.5 × 4 = 14.
+    technique: "structure",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "compare_graph_categories",
+    stem: "A bar graph shows 6 red counters, 9 blue counters, and 4 green counters. How many more counters does the tallest bar show than the shortest bar?",
+    answerType: "integer",
+    answer: "5",
+    // Tallest 9 (blue) minus shortest 4 (green) = 5.
+    technique: "structure",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "mean",
+    stem: "Four numbers have a mean of 10. Three of them are 8, 9, and 11. What is the fourth number?",
+    answerType: "integer",
+    answer: "12",
+    // Mean 10 over 4 → total 40; 8+9+11 = 28; fourth = 40 − 28 = 12.
+    technique: "working_backward",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "median",
+    stem: "The median of five different whole numbers is 7. What is the smallest the largest number could be?",
+    answerType: "integer",
+    answer: "9",
+    // Sorted, the 3rd value is 7; the two above must be distinct and >7 → smallest are 8 and 9, so the largest is 9.
+    technique: "extremal",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "estimate_population_from_sample",
+    stem: "A biologist tags 20 fish and releases them. Later she nets 50 fish and finds 4 are tagged. Estimate the total number of fish in the pond.",
+    answerType: "integer",
+    answer: "250",
+    // Mark-recapture: tagged fraction of catch = tagged fraction of pond → 4/50 = 20/N → N = 20×50/4 = 250.
+    technique: "modeling",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "estimate_population_from_sample",
+    stem: "In a random sample of 40 students, 6 walk to school. The school has 600 students. Estimate how many walk to school.",
+    answerType: "integer",
+    answer: "90",
+    // Scale the sample proportion: 6/40 × 600 = 0.15 × 600 = 90.
+    technique: "structure",
+    bloomLevel: 3,
+  },
+  // ── integers-coordinates (2026-09 fill) ──
+  {
+    skillKey: "compare_absolute_values",
+    stem: "How many of these four statements are true:  |-12| > |-5| ,  -12 > -5 ,  |-3| < |3| ,  -8 < |-8| ?",
+    answerType: "integer",
+    answer: "2",
+    // 12>5 T; -12>-5 F; 3<3 F; -8<8 T → 2 true (separates order from magnitude).
+    technique: "casework",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "absolute_value_distance_zero",
+    stem: "What is the sum of every integer x for which |x| = 7?",
+    answerType: "integer",
+    answer: "0",
+    // |x| = 7 → x = 7 or x = -7 (equal distances from 0); sum = 0.
+    technique: "symmetry",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "compare_integers",
+    stem: "What is the greatest integer that is still less than -4?",
+    answerType: "integer",
+    answer: "-5",
+    // On the number line "less than -4" means left of -4; the nearest such integer is -5.
+    technique: "structure",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "absolute_value_contexts",
+    stem: "A diver is 18 m below sea level and a platform is 7 m above sea level. How many meters apart are they vertically?",
+    answerType: "integer",
+    answer: "25",
+    // From -18 m to +7 m spans 18 m to sea level plus 7 m above it: 18 + 7 = 25.
+    technique: "structure",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "subtract_integers_add_opposite",
+    stem: "Subtracting which integer from -3 gives 7?",
+    answerType: "integer",
+    answer: "-10",
+    // Solve -3 - x = 7 → -x = 10 → x = -10; indeed -3 - (-10) = 7.
+    technique: "working_backward",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "multiply_integers",
+    stem: "A friend says (-3) × (-4) should be -12 'because there are minus signs.' Explain, using a pattern or a real situation, why a negative times a negative is actually positive, and give the correct value.",
+    answerType: "dialogue",
+    answer: "",
+    // Target: pattern (…, -3×1=-3, -3×0=0, -3×-1=3, stepping up by 3) or a reverse-a-reversal model; (-3)×(-4) = 12.
+    technique: "error_analysis",
+    bloomLevel: 5,
+    rubricCriteria: [
+      "Gives a coherent justification that a negative times a negative is positive — e.g. the pattern -3×2=-6, -3×1=-3, -3×0=0, -3×(-1)=3 rising by 3, or a model such as removing debts or reversing a reversal.",
+      "Concludes (-3) × (-4) = 12 and explains why the friend's 'more minus signs means more negative' reasoning fails.",
+    ],
+  },
+  {
+    skillKey: "integer_sign_rules",
+    stem: "How many of these four products are negative:  (-2)(3) ,  (-1)(-4) ,  (-2)(-1)(-3) ,  (5)(-2)(-1) ?",
+    answerType: "integer",
+    answer: "2",
+    // Sign depends on the count of negatives: neg, pos, neg (3 negatives), pos (2 negatives) → 2 negative.
+    technique: "parity",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "integer_expressions",
+    stem: "What is (-6) × (-4) ÷ (-8)?",
+    answerType: "integer",
+    answer: "-3",
+    // Left to right: (-6)(-4) = 24; 24 ÷ (-8) = -3.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "add_integers",
+    stem: "The sum of -15 and another integer is -4. What is the other integer?",
+    answerType: "integer",
+    answer: "11",
+    // Work backward: x = -4 - (-15) = -4 + 15 = 11.
+    technique: "working_backward",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "multiply_signed_rationals",
+    stem: "The product of -2/3 and another number is 3/2. What is the other number? Give your answer as a fraction.",
+    answerType: "fraction",
+    answer: "-9/4",
+    // Solve (-2/3)x = 3/2 → x = (3/2) ÷ (-2/3) = (3/2)(-3/2) = -9/4.
+    technique: "working_backward",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "compare_signed_rationals",
+    stem: "Which is greater, -3/4 or -5/8? Answer with the greater fraction.",
+    answerType: "fraction",
+    answer: "-5/8",
+    // Common denom: -3/4 = -6/8; -5/8 is to the right of -6/8, so -5/8 is greater.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "rational_between_numbers",
+    stem: "What number is exactly halfway between -1/2 and 1/4? Give it as a fraction.",
+    answerType: "fraction",
+    answer: "-1/8",
+    // Midpoint = (-1/2 + 1/4) ÷ 2 = (-1/4) ÷ 2 = -1/8.
+    technique: "structure",
+    bloomLevel: 4,
+  },
+  {
+    skillKey: "order_signed_rationals",
+    stem: "Of the numbers -0.5, -3/4, 0.2, and -1/8, which is the least? Answer as a decimal.",
+    answerType: "decimal",
+    answer: "-0.75",
+    // -3/4 = -0.75 sits farthest left; it is the least.
+    technique: "structure",
+    bloomLevel: 3,
+  },
+  {
+    skillKey: "absolute_value_rationals",
+    stem: "How many of these have an absolute value greater than 1:  -3/4 ,  -5/4 ,  0.9 ,  -1.2 ?",
+    answerType: "integer",
+    answer: "2",
+    // |-3/4|=0.75 no; |-5/4|=1.25 yes; |0.9|=0.9 no; |-1.2|=1.2 yes → 2.
+    technique: "casework",
+    bloomLevel: 4,
   },
 ];
 

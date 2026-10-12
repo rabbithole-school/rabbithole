@@ -14,6 +14,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { useScholarRoster } from "@/hooks/useScholarRoster";
 import { MeetingMode } from "@/components/wholeChild/MeetingMode";
 import { useSetAideScope } from "@/components/aide/AideDockProvider";
+import { useActiveInstitution } from "@/hooks/useActiveInstitution";
 
 export function ScholarWholeChildEditor({
   scholarId,
@@ -26,8 +27,9 @@ export function ScholarWholeChildEditor({
   // too (this ?wc=1 view renders MeetingMode directly, not through ReportShell,
   // so it must publish its own scope — otherwise the dock stays global). FIX 4.
   useSetAideScope({ kind: "scholar", scholarId });
-  const current = useQuery(api.reportingPeriods.current, {});
-  const periods = useQuery(api.reportingPeriods.list, {});
+  const { scopeParam, hrefWithActiveInstitution } = useActiveInstitution();
+  const current = useQuery(api.reportingPeriods.current, { scope: scopeParam });
+  const periods = useQuery(api.reportingPeriods.list, { scope: scopeParam });
   const { scholars, isLoading: rosterLoading } = useScholarRoster();
 
   const activePeriod = periods
@@ -35,7 +37,9 @@ export function ScholarWholeChildEditor({
     : (current ?? undefined);
   const scholar = scholars.find((s) => s.id === String(scholarId));
 
-  const backHref = `/teacher/report/${String(scholarId)}${activePeriod ? `?period=${String(activePeriod._id)}` : ""}`;
+  const backHref = hrefWithActiveInstitution(
+    `/teacher/report/${String(scholarId)}${activePeriod ? `?period=${String(activePeriod._id)}` : ""}`,
+  );
 
   if (periods === undefined || current === undefined || rosterLoading) {
     return (
@@ -71,7 +75,7 @@ export function ScholarWholeChildEditor({
       periodLabel={activePeriod.label}
       backHref={backHref}
       breadcrumb={[
-        { label: "All scholars", href: `/teacher/report?period=${String(activePeriod._id)}` },
+        { label: "All scholars", href: hrefWithActiveInstitution(`/teacher/report?period=${String(activePeriod._id)}`) },
         { label: scholar.name, href: backHref },
         { label: "Whole Child" },
       ]}

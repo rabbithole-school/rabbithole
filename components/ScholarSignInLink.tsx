@@ -14,6 +14,7 @@ import {
   VStack,
 } from "@chakra-ui/react";
 import { Copy, Check } from "@phosphor-icons/react";
+import Link from "next/link";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
@@ -73,16 +74,11 @@ export function ScholarSignInLinkPanel({
   const [copied, setCopied] = useState(false);
   const startedRef = useRef(false);
   const isReset = hasCredential === true;
+  const needsUsername = !canIssueSignInLink(username);
 
   useEffect(() => {
-    if (startedRef.current) return;
+    if (startedRef.current || needsUsername) return;
     startedRef.current = true;
-    if (!canIssueSignInLink(username)) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- report the synchronous request-validation failure in this one-shot link lifecycle.
-      setStatus("error");
-      setError(NO_USERNAME_GUIDANCE);
-      return;
-    }
     (async () => {
       try {
         const result = await issueLink({ userId: scholarId });
@@ -96,7 +92,7 @@ export function ScholarSignInLinkPanel({
         setError(ISSUE_FAILED_GUIDANCE);
       }
     })();
-  }, [issueLink, scholarId, username]);
+  }, [issueLink, scholarId, needsUsername]);
 
   const copy = async () => {
     try {
@@ -108,6 +104,29 @@ export function ScholarSignInLinkPanel({
       // selectable in the field.
     }
   };
+
+  if (needsUsername) {
+    return (
+      <VStack gap={3} align="stretch">
+        <Text fontSize="sm" fontFamily="body" color="charcoal.500">
+          {NO_USERNAME_GUIDANCE}
+        </Text>
+        <Button
+          asChild
+          size="sm"
+          variant="outline"
+          borderColor="gray.200"
+          fontFamily="heading"
+          alignSelf="flex-start"
+        >
+          {/* Id slug: a scholar with no username has no friendlier one. */}
+          <Link href={`/teacher/scholars/${scholarId}/settings`}>
+            Open {scholarName}&apos;s Account details
+          </Link>
+        </Button>
+      </VStack>
+    );
+  }
 
   if (status === "loading") {
     return (

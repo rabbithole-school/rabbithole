@@ -166,6 +166,63 @@ describe("ordinary submit", () => {
   });
 });
 
+describe("captured: a recorded first attempt that misses", () => {
+  it("records the same position the live app persisted: idx 0, hasRecorded true", () => {
+    const graded = answered(start(), false);
+    expect(graded.state.run.idx).toBe(0);
+    expect(graded.state.item.hasRecorded).toBe(true);
+    expect(resumeIdx(graded.state)).toBe(1);
+  });
+});
+
+describe("captured: the retry after a miss", () => {
+  it("mints a NEW receipt for a genuinely different answer", () => {
+    const first = entry();
+    const graded = answered(start(), false);
+    expect(graded.state.item.clientEventId).toBeNull();
+
+    const retried = practiceReduce(graded.state, { type: "ui:retry" });
+    const second = entry({
+      clientEventId: "evt-retry",
+      record: false,
+      answer: "200",
+    });
+    const resubmitted = practiceReduce(retried.state, {
+      type: "ui:submit",
+      answer: second.answer,
+      clientEventId: second.clientEventId,
+      entry: second,
+    });
+    const command = resubmitted.commands[0];
+    expect(command?.kind).toBe("submitAnswer");
+    expect(command?.id).toBe(submitCommandId(second.clientEventId));
+    expect(command?.id).not.toBe(submitCommandId(first.clientEventId));
+  });
+
+  it("does not double-count the run when a retry is graded", () => {
+    const graded = answered(start(), false);
+    const second = entry({ clientEventId: "evt-retry", record: false });
+    const regraded = practiceReduce(
+      practiceReduce(
+        practiceReduce(graded.state, { type: "ui:retry" }).state,
+        {
+          type: "ui:submit",
+          answer: second.answer,
+          clientEventId: second.clientEventId,
+          entry: second,
+        },
+      ).state,
+      {
+        type: "server:submitSucceeded",
+        id: submitCommandId(second.clientEventId),
+        result: { correct: false },
+      },
+    );
+    expect(regraded.state.run.answeredCount).toBe(1);
+    expect(regraded.state.run.idx).toBe(0);
+  });
+});
+
 describe("stale, late and duplicate results", () => {
   it("drops a success whose command id is not the one being awaited", () => {
     const e = entry();
@@ -537,6 +594,66 @@ describe("breaker", () => {
     });
     expect(served.state.lane).toBeNull();
     expect(served.state.breaker?.flow.stage).toBe("easy");
+  });
+
+  it("closes the coach chat with the breaker when the episode stops being reported", () => {
+    // An episode that expires while its coach chat is open (T11: the host's
+    // minute clock re-arms `activeBreakerEpisode`, which then reports null)
+    // must hand the screen back to the run. Keeping the lane stranded the
+    // scholar in the chat, whose easy escape is a no-op without a breaker.
+    const requested = practiceReduce(triggered().state, {
+      type: "ui:breakerCoach",
+    });
+    const opened = practiceReduce(requested.state, {
+      type: "server:coachOpened",
+      id: breakerCommandId("attempt-1", "coachEscalated"),
+    });
+    expect(opened.state.lane).toBe("handoff");
+
+    const cleared = practiceReduce(opened.state, {
+      type: "hydrate:noBreakerForRun",
+    });
+    expect(cleared.state.breaker).toBeNull();
+    expect(cleared.state.lane).toBeNull();
+    expect(cleared.commands).toEqual([]);
+    expect(cleared.state.run).toBe(opened.state.run);
+    expect(cleared.state.item).toBe(opened.state.item);
+  });
+
+  it("leaves a lane that is not the breaker's coach chat open when the breaker drops", () => {
+    // Only the breaker's own coach chat goes with it; a chat the scholar opened
+    // on the item (talk it through, the hint ladder's coach) stays.
+    const talking = practiceReduce(triggered().state, {
+      type: "lane:entered",
+      lane: "handoff",
+    }).state;
+    expect(talking.breaker?.flow.stage).toBe("repair");
+    const cleared = practiceReduce(talking, { type: "hydrate:noBreakerForRun" });
+    expect(cleared.state.breaker).toBeNull();
+    expect(cleared.state.lane).toBe("handoff");
+  });
+
+  it("ignores a coach reply that lands after the breaker and its chat are gone", () => {
+    // A reply in flight when the episode expired arrives after the chat has
+    // closed. By then the lane may belong to something else, and a stale
+    // `lane:coachEnded` must not close it.
+    const requested = practiceReduce(triggered().state, {
+      type: "ui:breakerCoach",
+    });
+    const opened = practiceReduce(requested.state, {
+      type: "server:coachOpened",
+      id: breakerCommandId("attempt-1", "coachEscalated"),
+    });
+    const cleared = practiceReduce(opened.state, {
+      type: "hydrate:noBreakerForRun",
+    }).state;
+    const talking = practiceReduce(cleared, {
+      type: "lane:entered",
+      lane: "handoff",
+    }).state;
+    const stale = practiceReduce(talking, { type: "lane:coachEnded" });
+    expect(stale.state).toBe(talking);
+    expect(stale.commands).toEqual([]);
   });
 
   it("keeps a failed easy request retryable without inventing unavailability", () => {
@@ -1899,6 +2016,68 @@ describe("review regressions", () => {
       },
     });
     expect(kinds(step.commands)).toContain("serveBreakerFresh");
+    // Cold mount: nothing on screen, so the served result installs the item.
+    const served = practiceReduce(step.state, {
+      type: "server:breakerFreshServed",
+      id: breakerCommandId("attempt-9", "fresh"),
+      itemId: "item-fresh",
+    });
+    expect(served.state.item.itemId).toBe("item-fresh");
+    expect(served.state.item.hasRecorded).toBe(false);
+  });
+
+  it("keeps an in-flight answer when a re-hydrate re-issues the on-screen fresh item (TRA-376)", () => {
+    const onScreen = practiceReduce(freshIssued().state, {
+      type: "server:breakerFreshServed",
+      id: breakerCommandId("attempt-1", "fresh"),
+      itemId: "item-fresh",
+    }).state;
+    const flow = onScreen.breaker!.flow;
+    // An in-place `?domain=` round trip: away, the load fails, back again.
+    const away = runPracticeEvents(onScreen, [
+      { type: "hydrate:noBreakerForRun" },
+      { type: "run:inputsChanged", inputKey: "B" },
+    ]);
+    const load = away.commands.find((c) => c.kind === "loadRun")!;
+    const failed = practiceReduce(away.state, { type: "run:loadFailed", id: load.id }).state;
+    const back = practiceReduce(failed, {
+      type: "hydrate:breaker",
+      episode: {
+        triggerAttemptId: "attempt-1",
+        triggerItemId: "item-1",
+        triggerNodeKey: onScreen.breaker!.triggerNodeKey,
+        domain: onScreen.breaker!.domain,
+        missStreak: onScreen.breaker!.missStreak,
+        flow,
+        repairStepIndex: 0,
+        freshItemId: "item-fresh",
+        easyItemId: null,
+        confirmedLifecycle: ["repairShown", "repairCompleted"],
+      },
+    });
+    expect(back.state.item.itemId).toBe("item-fresh");
+    expect(kinds(back.commands)).toContain("serveBreakerFresh");
+
+    // The scholar answers before the re-issue returns.
+    const answering = practiceReduce(back.state, {
+      type: "ui:submit",
+      answer: "7",
+      clientEventId: "evt-fresh",
+      entry: entry({ clientEventId: "evt-fresh", itemId: "item-fresh" }),
+    }).state;
+    const reserved = practiceReduce(answering, {
+      type: "server:breakerFreshServed",
+      id: breakerCommandId("attempt-1", "fresh"),
+      itemId: "item-fresh",
+    }).state;
+    expect(reserved.item.phase.kind).toBe("submitting");
+    const graded = practiceReduce(reserved, {
+      type: "server:submitSucceeded",
+      id: submitCommandId("evt-fresh"),
+      result: { correct: true, breakerRecoveryVerified: true },
+    }).state;
+    expect(graded.breaker?.flow.fresh?.correct).toBe(true);
+    expect(graded.item.hasRecorded).toBe(true);
   });
 
   it("ignores a duplicate fresh-served result rather than regrading the item", () => {
@@ -1935,6 +2114,196 @@ describe("review regressions", () => {
     });
     expect(duplicate.state.item.hasRecorded).toBe(true);
     expect(duplicate.state.breaker?.flow.fresh).toBeDefined();
+  });
+
+  // A correct fresh answer makes the episode terminal on the server, so the
+  // host stops receiving it and sends `hydrate:noBreakerForRun` — then the SAME
+  // run's `run:inputsChanged`. Dropping the breaker there yanked the recovery
+  // close card and the staff-facing outcome row it records.
+  describe("an episode this mount just won", () => {
+    function wonFresh() {
+      const issued = freshIssued();
+      const served = practiceReduce(issued.state, {
+        type: "server:breakerFreshServed",
+        id: breakerCommandId("attempt-1", "fresh"),
+        itemId: "item-fresh",
+      });
+      const withItem: PracticeState = {
+        ...served.state,
+        run: { ...served.state.run, inputKey: "inputs-a" },
+        item: { ...served.state.item, itemId: "item-fresh" },
+      };
+      return practiceReduce(
+        practiceReduce(withItem, {
+          type: "ui:submit",
+          answer: "7",
+          clientEventId: "evt-fresh",
+          entry: entry({ clientEventId: "evt-fresh", itemId: "item-fresh" }),
+        }).state,
+        {
+          type: "server:submitSucceeded",
+          id: submitCommandId("evt-fresh"),
+          result: { correct: true, breakerRecoveryVerified: true },
+        },
+      ).state;
+    }
+
+    function episodeStopsBeingReported(state: PracticeState) {
+      const cleared = practiceReduce(state, { type: "hydrate:noBreakerForRun" });
+      return practiceReduce(cleared.state, {
+        type: "run:inputsChanged",
+        inputKey: "inputs-a",
+      });
+    }
+
+    it("keeps the close card and records the outcome", () => {
+      const won = wonFresh();
+      expect(won.breaker?.flow.fresh?.correct).toBe(true);
+      const after = episodeStopsBeingReported(won);
+      expect(after.state.breaker).not.toBeNull();
+      expect(after.commands).toEqual([]);
+
+      const closed = practiceReduce(after.state, { type: "ui:breakerClose" });
+      expect(closed.state.breaker?.flow.stage).toBe("close");
+      expect(kinds(closed.commands)).toContain("recordBreakerOutcome");
+    });
+
+    it("records the outcome once, however often the host effect re-fires", () => {
+      const kept = episodeStopsBeingReported(wonFresh()).state;
+      const closed = practiceReduce(kept, { type: "ui:breakerClose" });
+      const again = episodeStopsBeingReported(closed.state);
+      expect(again.state.breaker?.flow.stage).toBe("close");
+      expect(kinds(again.commands)).not.toContain("recordBreakerOutcome");
+    });
+
+    it("still drops an episode that ended WITHOUT this mount's result", () => {
+      // A missed fresh answer is not settled: if the server stops reporting
+      // the episode (it expired), the old clear applies unchanged.
+      const won = wonFresh();
+      const missed: PracticeState = {
+        ...won,
+        breaker: {
+          ...won.breaker!,
+          flow: {
+            ...won.breaker!.flow,
+            fresh: { correct: false, assisted: false, verified: true },
+          },
+        },
+      };
+      expect(episodeStopsBeingReported(missed).state.breaker).toBeNull();
+    });
+
+    it("keeps a graded easy finish's close card too", () => {
+      const won = wonFresh();
+      const easyDone: PracticeState = {
+        ...won,
+        breaker: {
+          ...won.breaker!,
+          flow: { ...won.breaker!.flow, fresh: undefined, stage: "easy", easy: "missed" },
+        },
+      };
+      expect(episodeStopsBeingReported(easyDone).state.breaker).not.toBeNull();
+      const unavailable: PracticeState = {
+        ...easyDone,
+        breaker: {
+          ...easyDone.breaker!,
+          flow: { ...easyDone.breaker!.flow, stage: "close", easy: "unavailable" },
+        },
+      };
+      expect(episodeStopsBeingReported(unavailable).state.breaker).not.toBeNull();
+    });
+
+    it("keeps the card after a COLD-mount win, where no run ever loaded", () => {
+      // A reload mid-episode hydrates before any run: run.inputKey is null, so
+      // only the key the host passed on hydrate:breaker says which run owns it.
+      const flow = advanceBreakerFlow(
+        advanceBreakerFlow(
+          advanceBreakerFlow(newBreakerFlow(), { type: "repairOpened" }),
+          { type: "repairDone" },
+        ),
+        { type: "freshServed" },
+      );
+      const cold = practiceReduce(
+        newPracticeState({ scholarId: SCHOLAR, itemCount: 0, itemId: null }),
+        {
+          type: "hydrate:breaker",
+          inputKey: "inputs-a",
+          episode: {
+            triggerAttemptId: "attempt-1",
+            triggerItemId: "item-trigger",
+            triggerNodeKey: "node-1",
+            domain: "d",
+            missStreak: 3,
+            flow,
+            repairStepIndex: 0,
+            freshItemId: "item-fresh",
+            easyItemId: null,
+            confirmedLifecycle: ["repairShown", "repairCompleted"],
+          },
+        },
+      ).state;
+      expect(cold.run.inputKey).toBeNull();
+      const won: PracticeState = {
+        ...cold,
+        breaker: {
+          ...cold.breaker!,
+          flow: {
+            ...cold.breaker!.flow,
+            fresh: { correct: true, assisted: false, verified: true },
+          },
+        },
+      };
+      const after = episodeStopsBeingReported(won);
+      expect(after.state.breaker).not.toBeNull();
+      const closed = practiceReduce(after.state, { type: "ui:breakerClose" });
+      expect(kinds(closed.commands)).toContain("recordBreakerOutcome");
+    });
+
+    it("follows the run key when the same episode is re-hydrated under a new one", () => {
+      const won = wonFresh();
+      const b = won.breaker!;
+      const rekeyed = practiceReduce(won, {
+        type: "hydrate:breaker",
+        inputKey: "inputs-a2",
+        episode: {
+          triggerAttemptId: b.triggerAttemptId,
+          triggerItemId: b.triggerItemId,
+          triggerNodeKey: b.triggerNodeKey,
+          domain: b.domain,
+          missStreak: b.missStreak,
+          flow: b.flow,
+          repairStepIndex: b.repairStepIndex,
+          freshItemId: b.freshItemId,
+          easyItemId: b.easyItemId,
+          confirmedLifecycle: b.lifecycle.confirmed,
+        },
+      }).state;
+      expect(rekeyed.breaker?.runKey).toBe("inputs-a2");
+      const cleared = practiceReduce(rekeyed, { type: "hydrate:noBreakerForRun" });
+      const same = practiceReduce(cleared.state, {
+        type: "run:inputsChanged",
+        inputKey: "inputs-a2",
+      });
+      expect(same.state.breaker).not.toBeNull();
+    });
+
+    it("still lets a different run load past the settled card", () => {
+      const cleared = practiceReduce(wonFresh(), {
+        type: "hydrate:noBreakerForRun",
+      });
+      const switched = practiceReduce(cleared.state, {
+        type: "run:inputsChanged",
+        inputKey: "inputs-probability",
+      });
+      expect(switched.state.breaker).toBeNull();
+      expect(kinds(switched.commands)).toEqual(["loadRun"]);
+    });
+
+    it("still lets a reload through past the settled card", () => {
+      const reloaded = practiceReduce(wonFresh(), { type: "run:reloadRequested" });
+      expect(reloaded.state.breaker).toBeNull();
+      expect(kinds(reloaded.commands)).toEqual(["loadRun"]);
+    });
   });
 
   it("ignores a breaker result belonging to a different episode", () => {
@@ -2039,6 +2408,126 @@ describe("run:loaded", () => {
     expect(reloaded.run.itemCount).toBe(4);
     expect(reloaded.item.itemId).toBe("item-new-1");
     expect(reloaded.run.scopeKey).toBe("scope-b");
+  });
+
+  // The screen is keyed WITHOUT the domain on both surfaces, so a domain
+  // switch re-renders in place. Breaker state hydrated for the previous domain
+  // then outlived its usefulness and kept refusing every load — for longer
+  // than the episode itself lives, since an EXPIRED episode also stops being
+  // reported while the hydrated state stays. `hydrate:noBreakerForRun` is how
+  // the host hands that decision to the reducer. Observed in class 2026-09-17:
+  // seven domains, all showing the breaker's close card with no items.
+  describe("hydrate:noBreakerForRun", () => {
+    function hydratedAt(inputKey: string | null) {
+      let state = inputKey === null
+        ? newPracticeState({ scholarId: SCHOLAR, itemCount: 0, itemId: null })
+        : (() => {
+            const first = request(start(), inputKey);
+            return practiceReduce(first.requested.state, {
+              type: "run:loaded",
+              id: first.id,
+              itemCount: 6,
+              itemId: "item-1",
+              scopeKey: "scope-a",
+              dayKey: "2026-01-01",
+            }).state;
+          })();
+      state = practiceReduce(state, {
+        type: "hydrate:breaker",
+        episode: {
+          triggerAttemptId: "attempt-1",
+          triggerItemId: "item-1",
+          triggerNodeKey: "node-1",
+          domain: "fraction-arithmetic",
+          missStreak: 3,
+          flow: {
+            stage: "close",
+            repair: "done",
+            coachUsed: false,
+            fresh: { correct: false, assisted: false, verified: true },
+          },
+          repairStepIndex: null,
+          freshItemId: "fresh-1",
+          easyItemId: null,
+          confirmedLifecycle: ["repairShown", "repairCompleted"],
+        },
+      }).state;
+      expect(state.breaker).not.toBeNull();
+      return state;
+    }
+
+    it("releases the screen so another domain's run can load — after a loaded run", () => {
+      const cleared = practiceReduce(hydratedAt("inputs-a"), {
+        type: "hydrate:noBreakerForRun",
+      });
+      expect(cleared.state.breaker).toBeNull();
+      const switched = practiceReduce(cleared.state, {
+        type: "run:inputsChanged",
+        inputKey: "inputs-probability",
+      });
+      expect(kinds(switched.commands)).toEqual(["loadRun"]);
+    });
+
+    it("releases it on a COLD mount too, where there is no inputKey yet", () => {
+      // The case the first attempt at this fix missed: a relaunch mid-breaker
+      // hydrates with `inputKey === null`, so any guard keyed on "did the run
+      // identity change" cannot tell a switch from the initial load.
+      const cleared = practiceReduce(hydratedAt(null), {
+        type: "hydrate:noBreakerForRun",
+      });
+      expect(cleared.state.breaker).toBeNull();
+      const loaded = practiceReduce(cleared.state, {
+        type: "run:inputsChanged",
+        inputKey: "inputs-probability",
+      });
+      expect(kinds(loaded.commands)).toEqual(["loadRun"]);
+    });
+
+    it("unblocks a retry after the switched-to run fails to load", () => {
+      const cleared = practiceReduce(hydratedAt("inputs-a"), {
+        type: "hydrate:noBreakerForRun",
+      }).state;
+      const switched = practiceReduce(cleared, {
+        type: "run:inputsChanged",
+        inputKey: "inputs-probability",
+      });
+      const failed = practiceReduce(switched.state, {
+        type: "run:loadFailed",
+        id: switched.commands[0]!.id,
+      }).state;
+      expect(failed.run.failedInputKey).toBe("inputs-probability");
+      // Previously the lingering breaker rejected `run:reloadRequested`, so one
+      // transient failure restored the whole freeze.
+      expect(kinds(practiceReduce(failed, { type: "run:reloadRequested" }).commands))
+        .toEqual(["loadRun"]);
+    });
+
+    it("leaves the run underneath untouched and serves nothing itself", () => {
+      const hydrated = hydratedAt("inputs-a");
+      const cleared = practiceReduce(hydrated, { type: "hydrate:noBreakerForRun" });
+      expect(cleared.commands).toEqual([]);
+      expect(cleared.state.run.inputKey).toBe(hydrated.run.inputKey);
+      expect(cleared.state.run.idx).toBe(hydrated.run.idx);
+      expect(cleared.state.item.itemId).toBe(hydrated.item.itemId);
+    });
+
+    it("no-ops when nothing is hydrated", () => {
+      const plain = start();
+      const step = practiceReduce(plain, { type: "hydrate:noBreakerForRun" });
+      expect(step.state).toBe(plain);
+      expect(step.commands).toEqual([]);
+    });
+
+    it("still refuses a load while a breaker is hydrated and NOT cleared", () => {
+      // The invariant the clear event deliberately does not weaken: a resumed
+      // repair is never re-served over by the playlist underneath it.
+      const blocked = practiceReduce(hydratedAt("inputs-a"), {
+        type: "run:inputsChanged",
+        inputKey: "inputs-probability",
+      });
+      expect(blocked.commands).toEqual([]);
+      expect(blocked.state.breaker).not.toBeNull();
+    });
   });
 
   it("freezes an all-mapping ceremony against a mid-sit payload change", () => {
@@ -2209,5 +2698,262 @@ describe("local:graded (rehearse)", () => {
       correct: true,
     });
     expect(stale.state).toBe(submitted.state);
+  });
+});
+
+describe("provisional fact verdicts (Fast math)", () => {
+  const fastMath = () => start({ suppressBreaker: true });
+
+  /** Submit with a client verdict and let the host install it. */
+  function provisional(state: PracticeState, correct: boolean, over: Partial<OutboxAnswer> = {}) {
+    const e = entry(over);
+    const submitted = practiceReduce(state, {
+      type: "ui:submit",
+      answer: e.answer,
+      clientEventId: e.clientEventId,
+      entry: e,
+      provisionalCorrect: correct,
+    });
+    expect(kinds(submitted.commands)).toEqual(["gradeProvisionally"]);
+    expect(submitted.state.item.phase.kind).toBe("submitting");
+    return practiceReduce(submitted.state, {
+      type: "local:provisionalGraded",
+      id: submitted.commands[0]!.id,
+      correct,
+      entry: e,
+    });
+  }
+
+  it("shows the verdict before the server answers, then submits for real", () => {
+    const shown = provisional(fastMath(), true);
+    expect(shown.state.item.phase).toEqual({ kind: "feedback", correct: true });
+    expect(shown.state.run.correctCount).toBe(1);
+    expect(shown.state.run.answeredCount).toBe(1);
+    expect(kinds(shown.commands)).toEqual(["haptic", "submitAnswer"]);
+    expect(ids(shown.commands)[1]).toBe(submitCommandId("evt-1"));
+  });
+
+  it("holds advance, retry, and hints until the server confirms", () => {
+    const shown = provisional(fastMath(), false);
+    for (const event of [
+      { type: "ui:advance", nextItemId: "item-2" },
+      { type: "ui:retry" },
+      { type: "ui:hintPressed" },
+    ] as const) {
+      expect(practiceReduce(shown.state, event).state).toBe(shown.state);
+    }
+    const confirmed = practiceReduce(shown.state, {
+      type: "server:submitSucceeded",
+      id: submitCommandId("evt-1"),
+      result: { correct: false },
+    });
+    expect(confirmed.state.item.confirming).toBeNull();
+    expect(confirmed.state.item.missCount).toBe(1);
+    expect(kinds(confirmed.commands)).toEqual(["saveResume"]);
+    const advanced = practiceReduce(confirmed.state, { type: "ui:advance", nextItemId: "item-2" });
+    expect(advanced.state.item.itemId).toBe("item-2");
+  });
+
+  it("lets the server's verdict win a disagreement", () => {
+    const shown = provisional(fastMath(), true);
+    const overruled = practiceReduce(shown.state, {
+      type: "server:submitSucceeded",
+      id: submitCommandId("evt-1"),
+      result: { correct: false },
+    });
+    expect(overruled.state.item.phase).toEqual({ kind: "feedback", correct: false });
+    expect(overruled.state.run.correctCount).toBe(0);
+    expect(overruled.state.item.missCount).toBe(1);
+  });
+
+  it("keeps the verdict when the answer is durably queued offline", () => {
+    const shown = provisional(fastMath(), true);
+    const queued = practiceReduce(shown.state, {
+      type: "server:submitQueued",
+      id: submitCommandId("evt-1"),
+      queuedCount: 1,
+    });
+    expect(queued.state.item.phase).toEqual({ kind: "feedback", correct: true });
+    expect(queued.state.item.confirming).toBeNull();
+  });
+
+  it("unwinds the mark exactly when the answer was lost", () => {
+    const shown = provisional(fastMath(), false);
+    const lost = practiceReduce(shown.state, {
+      type: "server:submitFailed",
+      id: submitCommandId("evt-1"),
+      submissionReplay: true,
+    });
+    expect(lost.state.item.phase).toEqual({ kind: "answering" });
+    expect(lost.state.item.hasRecorded).toBe(false);
+    expect(lost.state.item.missCount).toBe(0);
+    expect(lost.state.run.answeredCount).toBe(0);
+    // The retry reuses the receipt, so the server's dedup stays exact.
+    expect(lost.state.item.clientEventId).toBe("evt-1");
+  });
+
+  it("is ignored wherever the breaker can open on the server's grade", () => {
+    const e = entry();
+    const submitted = practiceReduce(start(), {
+      type: "ui:submit",
+      answer: e.answer,
+      clientEventId: e.clientEventId,
+      entry: e,
+      provisionalCorrect: true,
+    });
+    expect(kinds(submitted.commands)).toEqual(["submitAnswer"]);
+  });
+});
+
+describe("provisional fact verdicts — a submit that throws", () => {
+  it("unwinds instead of waiting forever for a confirmation", () => {
+    const e = entry();
+    const submitted = practiceReduce(start({ suppressBreaker: true }), {
+      type: "ui:submit",
+      answer: e.answer,
+      clientEventId: e.clientEventId,
+      entry: e,
+      provisionalCorrect: true,
+    });
+    const shown = practiceReduce(submitted.state, {
+      type: "local:provisionalGraded",
+      id: submitted.commands[0]!.id,
+      correct: true,
+      entry: e,
+    });
+    const threw = practiceReduce(shown.state, {
+      type: "server:commandFailed",
+      id: submitCommandId("evt-1"),
+    });
+    expect(threw.state.item.phase).toEqual({ kind: "answering" });
+    expect(threw.state.item.confirming).toBeNull();
+    expect(threw.state.run.correctCount).toBe(0);
+  });
+});
+
+describe("provisional fact verdicts — taps held during confirmation", () => {
+  function shown(correct: boolean) {
+    const e = entry();
+    const submitted = practiceReduce(start({ suppressBreaker: true }), {
+      type: "ui:submit",
+      answer: e.answer,
+      clientEventId: e.clientEventId,
+      entry: e,
+      provisionalCorrect: correct,
+    });
+    return practiceReduce(submitted.state, {
+      type: "local:provisionalGraded",
+      id: submitted.commands[0]!.id,
+      correct,
+      entry: e,
+    }).state;
+  }
+  const confirm = (state: PracticeState, correct: boolean) =>
+    practiceReduce(state, {
+      type: "server:submitSucceeded",
+      id: submitCommandId("evt-1"),
+      result: { correct },
+    });
+
+  it("releases a held Next once the server confirms", () => {
+    const held = practiceReduce(shown(true), { type: "ui:hold", action: "advance" });
+    const confirmed = confirm(held.state, true);
+    expect(kinds(confirmed.commands)).toEqual(["saveResume", "releaseHeld"]);
+    expect(confirmed.commands[1]).toMatchObject({ action: "advance" });
+  });
+
+  it("drops a held Try again when the server overrules the miss", () => {
+    const held = practiceReduce(shown(false), { type: "ui:hold", action: "retry" });
+    expect(kinds(confirm(held.state, true).commands)).toEqual(["saveResume"]);
+    expect(kinds(confirm(held.state, false).commands)).toEqual(["saveResume", "releaseHeld"]);
+  });
+
+  it("drops the hold when the answer was lost", () => {
+    const held = practiceReduce(shown(true), { type: "ui:hold", action: "advance" });
+    const lost = practiceReduce(held.state, {
+      type: "server:submitFailed",
+      id: submitCommandId("evt-1"),
+      submissionReplay: false,
+    });
+    // The hold is dropped; only the host retraction is emitted.
+    expect(kinds(lost.commands)).toEqual(["retractProvisional"]);
+    expect(lost.state.item.phase).toEqual({ kind: "answering" });
+  });
+
+  it("ignores a hold when nothing is confirming", () => {
+    const state = start();
+    expect(practiceReduce(state, { type: "ui:hold", action: "advance" }).state).toBe(state);
+  });
+});
+
+describe("provisional fact verdicts — review findings (PR #4112)", () => {
+  function provisional(state: PracticeState, correct: boolean, clientEventId: string) {
+    const e = entry({ clientEventId });
+    const submitted = practiceReduce(state, {
+      type: "ui:submit",
+      answer: e.answer,
+      clientEventId,
+      entry: e,
+      provisionalCorrect: correct,
+    });
+    return practiceReduce(submitted.state, {
+      type: "local:provisionalGraded",
+      id: submitted.commands[0]!.id,
+      correct,
+      entry: e,
+    }).state;
+  }
+
+  // The blocker: a second provisional miss shows the stuck screen before the
+  // server answers; opening "Walk me through it" then must not swallow the
+  // confirmation and leave the item un-advanceable.
+  it("lets the confirmation through a lane opened mid-confirmation", () => {
+    let state = provisional(start({ suppressBreaker: true }), false, "e1");
+    state = practiceReduce(state, {
+      type: "server:submitSucceeded",
+      id: submitCommandId("e1"),
+      result: { correct: false },
+    }).state;
+    state = practiceReduce(state, { type: "ui:retry" }).state;
+    state = provisional(state, false, "e2");
+    expect(state.item.missCount).toBe(2);
+    state = practiceReduce(state, { type: "lane:entered", lane: "handoff" }).state;
+    state = practiceReduce(state, {
+      type: "server:submitSucceeded",
+      id: submitCommandId("e2"),
+      result: { correct: false },
+    }).state;
+    expect(state.item.confirming).toBeNull();
+    state = practiceReduce(state, {
+      type: "lane:handoffClosed",
+      outcome: "advance",
+      itemId: "item-2",
+    }).state;
+    const advanced = practiceReduce(state, { type: "ui:advance", nextItemId: "item-2" });
+    expect(advanced.state.run.idx).toBeGreaterThan(0);
+  });
+
+  it("tells the host to retract a lost provisional answer", () => {
+    const shown = provisional(start({ suppressBreaker: true }), true, "e1");
+    const lost = practiceReduce(shown, {
+      type: "server:submitFailed",
+      id: submitCommandId("e1"),
+      submissionReplay: false,
+    });
+    expect(lost.commands).toEqual([
+      expect.objectContaining({ kind: "retractProvisional", clientEventId: "e1" }),
+    ]);
+  });
+
+  it("does not release a held Next over an overturned verdict", () => {
+    let state = provisional(start({ suppressBreaker: true }), true, "e1");
+    state = practiceReduce(state, { type: "ui:hold", action: "advance" }).state;
+    const overturned = practiceReduce(state, {
+      type: "server:submitSucceeded",
+      id: submitCommandId("e1"),
+      result: { correct: false },
+    });
+    expect(kinds(overturned.commands)).toEqual(["saveResume"]);
+    expect(overturned.state.item.phase).toEqual({ kind: "feedback", correct: false });
   });
 });

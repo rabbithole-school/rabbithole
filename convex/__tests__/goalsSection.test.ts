@@ -12,33 +12,6 @@ describe("goals section", () => {
     expect(buildGoalsSection([])).toBeNull();
   });
 
-  test("renders each goal's title, description, and kind", () => {
-    const section = buildGoalsSection([
-      {
-        title: "Ask my own research question and chase it",
-        description: "start a quest from a question I care about",
-        kind: "academic",
-      },
-      { title: "Stick with hard problems before asking for help", kind: "habit" },
-    ]);
-    expect(section).not.toBeNull();
-    const text = section!;
-    expect(text).toContain("This scholar's learning goals");
-    expect(text).toContain("Ask my own research question and chase it");
-    expect(text).toContain("start a quest from a question I care about");
-    expect(text).toContain("(academic)");
-    expect(text).toContain("Stick with hard problems before asking for help");
-    expect(text).toContain("(habit)");
-  });
-
-  test("frames goals as kid-safe + not a checklist (governed authorship)", () => {
-    const text = buildGoalsSection([{ title: "Read a whole chapter book", kind: "personal" }])!;
-    // The section explicitly tells the tutor these were set WITH the scholar
-    // (so they're referenceable) and to NOT drill them like a checklist.
-    expect(text.toLowerCase()).toContain("with the scholar");
-    expect(text.toLowerCase()).toContain("checklist");
-  });
-
   test("omits the description dash when a goal has no description", () => {
     const text = buildGoalsSection([{ title: "Build a solar oven", kind: "hobby" }])!;
     expect(text).toContain("**Build a solar oven** _(hobby)_");

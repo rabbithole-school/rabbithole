@@ -38,6 +38,7 @@ import { institutionPromptProfileById } from "./lib/institutionPromptProfile";
 import {
   reconcileScholarEnrollment,
   scholarIdsForInstitution,
+  scholarInstitutionId,
 } from "./lib/scholarEnrollment";
 import {
   DEFAULT_TIMEZONE,
@@ -776,5 +777,39 @@ export const bulkSetScholarInstitution = platformAdminMutation({
       moved++;
     }
     return { moved };
+  },
+});
+
+/**
+ * Internal CLI twin (the fixRole pattern) of setScholarInstitution for
+ * operator corrections. Same chokepoint, so memberships, the legacy field,
+ * invite provenance and stale cross-institution groups reconcile identically.
+ * Usage: npx convex run institutions:fixScholarInstitution
+ *   '{"userId":"<id>","institutionSlug":"guests"}'
+ */
+export const fixScholarInstitution = internalMutation({
+  args: {
+    userId: v.id("users"),
+    institutionSlug: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const scholar = await ctx.db.get(args.userId);
+    if (!scholar || scholar.role !== ROLES.SCHOLAR) {
+      throw new Error("Scholar not found");
+    }
+    const inst = await ctx.db
+      .query("institutions")
+      .withIndex("by_slug", (q) => q.eq("slug", args.institutionSlug))
+      .unique();
+    if (!inst) {
+      throw new Error(`Institution not found for slug "${args.institutionSlug}"`);
+    }
+    const fromId = await scholarInstitutionId(ctx, args.userId);
+    const from = fromId ? ((await ctx.db.get(fromId))?.slug ?? null) : null;
+    await reconcileScholarEnrollment(ctx, {
+      scholarId: args.userId,
+      institutionId: inst._id,
+    });
+    return { scholarId: args.userId, from, to: inst.slug };
   },
 });

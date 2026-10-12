@@ -1,9 +1,11 @@
 import { convexTest } from "convex-test";
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import { parseStoredManipulativeArtifact } from "../../lib/manipulative/validate";
+import { moleculeFormula, parseMolfile } from "../../lib/manipulative/molecule";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -52,6 +54,13 @@ const rekenrekSpec = {
   total: 10,
 };
 
+const sucrose = parseMolfile(
+  readFileSync(
+    new URL("../../lib/manipulative/__tests__/fixtures/sucrose-2d.sdf", import.meta.url),
+    "utf8",
+  ),
+);
+
 describe("aiCreateManipulativeArtifact", () => {
   test("stores a manipulative row with the {v,spec} envelope + injected id", async () => {
     const t = convexTest(schema, modules);
@@ -96,6 +105,56 @@ describe("aiCreateManipulativeArtifact", () => {
     );
     expect("error" in result).toBe(true);
     expect(await countRows(t, sessionId)).toBe(0);
+  });
+
+  test("stores a fully hydrated molecule but rejects a query-only mutation payload", async () => {
+    const t = convexTest(schema, modules);
+    const sessionId = await seedSession(t);
+
+    const queryOnly = await t.mutation(
+      internal.artifacts.aiCreateManipulativeArtifact,
+      {
+        sessionId,
+        specJson: JSON.stringify({
+          kind: "molecule",
+          concept: "Glycosidic bonds",
+          prompt: "Find the oxygen bridge.",
+          query: "sucrose",
+        }),
+      },
+    );
+    expect(queryOnly).toMatchObject({ error: expect.stringMatching(/resolvedName/) });
+    expect(await countRows(t, sessionId)).toBe(0);
+
+    const hydrated = await t.mutation(
+      internal.artifacts.aiCreateManipulativeArtifact,
+      {
+        sessionId,
+        specJson: JSON.stringify({
+          kind: "molecule",
+          concept: "Glycosidic bonds",
+          prompt: "Find the oxygen bridge.",
+          query: "sucrose",
+          resolvedName: "Sucrose",
+          cid: 5988,
+          formula: moleculeFormula(sucrose),
+          atoms: sucrose.atoms,
+          bonds: sucrose.bonds,
+          highlight: { kind: "bridgingOxygen" },
+        }),
+      },
+    );
+    expect("artifactId" in hydrated).toBe(true);
+    const artifactId = (hydrated as { artifactId: Id<"artifacts"> }).artifactId;
+    const stored = parseStoredManipulativeArtifact(
+      (await readRow(t, artifactId))!.content,
+    );
+    expect(stored?.spec).toMatchObject({
+      kind: "molecule",
+      resolvedName: "Sucrose",
+      cid: 5988,
+      formula: "C12H22O11",
+    });
   });
 
   test("an answer-bearing spec is refused (typed answers belong to serve_practice_problem)", async () => {

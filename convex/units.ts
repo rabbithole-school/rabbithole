@@ -1,4 +1,8 @@
 import { v } from "convex/values";
+import { paginationOptsValidator } from "convex/server";
+import { stream } from "convex-helpers/server/stream";
+import schema from "./schema";
+import { subjectMatches, uniqueSubjects } from "../lib/subjects";
 import {
   authedMutation,
   authedQuery,
@@ -18,9 +22,14 @@ import {
   requireUnitEditAccessForUser,
 } from "./lib/auth";
 import {
+  assertInstitutionActive,
   requireActiveScholarAccess,
   requireScholarsAccessible,
 } from "./lib/access";
+import {
+  programSchedulableUnits,
+  requireProgramPublishAccess,
+} from "./lib/programGroupAccess";
 import {
   requireActiveLearnerInstitution,
   scholarInstitutionId as resolveScholarInstitutionId,
@@ -63,6 +72,10 @@ import {
   type CopiedActivity,
 } from "./lib/curriculumDuplication";
 import { isStalledQuest, questsForScholar } from "./lib/questLifecycle";
+import {
+  isUnitPublished,
+  scholarHoldsAssignmentForUnit,
+} from "./lib/unitPublication";
 import type { QuestState } from "./lib/questLifecycle";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
@@ -82,46 +95,58 @@ export function unitListNeedsScholarEnumeration({
   return !adminAll && !legacySingleTenant;
 }
 
-async function curriculumUnitsInLens(
-  ctx: QueryCtx & { user: Doc<"users"> },
-  all: Doc<"units">[],
+/**
+ * The curriculum tenancy lens as a per-unit predicate: catalog units follow
+ * their own `institutionId` stamp; Independent Study units
+ * (`authorScholarId`) follow their author scholar's institution. Resolved once
+ * per call, so the collect-then-filter callers (`curriculumUnitsInLens`) and
+ * the paginated Units browser (`listForBrowser`, which filters its stream
+ * BEFORE picking the page) apply the exact same boundary.
+ */
+async function curriculumUnitLensPredicate(
+  ctx: QueryCtx & { user?: Doc<"users"> },
   scope?: string,
-) {
-  const lens = await resolveInstitutionLens(ctx, ctx.user, scope);
+  explicitUser?: Doc<"users">,
+): Promise<(unit: Doc<"units">) => boolean> {
+  const user = explicitUser ?? ctx.user;
+  if (!user) throw new Error("Not authenticated");
+  const lens = await resolveInstitutionLens(ctx, user, scope);
   const adminAll = lens.isAdmin && scope === undefined;
   const staffPrimaryFallback =
     !lens.isAdmin &&
-    lens.allowedInstitutionIds.size === 0 &&
+    !lens.hasStaffMembership &&
     !!lens.primaryInstitution;
   const legacySingleTenant =
     !lens.primaryInstitution &&
     !lens.institution &&
     lens.allowedInstitutionIds.size === 0;
-  let visible: Doc<"units">[];
+  let visible: (unit: Doc<"units">) => boolean;
   if (
     !unitListNeedsScholarEnumeration({
       adminAll,
       legacySingleTenant,
     })
   ) {
-    visible = all;
+    visible = () => true;
   } else {
     const allowedScholarIds = await scholarIdsInLens(ctx, lens);
-    visible = all.filter((unit) =>
+    visible = (unit) =>
       unit.authorScholarId
         ? allowedScholarIds.has(unit.authorScholarId)
         : staffPrimaryFallback
           ? (unit.institutionId ?? lens.primaryInstitution?._id) ===
             lens.primaryInstitution?._id
-          : institutionIdInLens(lens, unit.institutionId),
-    );
+          : institutionIdInLens(lens, unit.institutionId);
   }
 
   const curriculumInstitutionIds = await curriculumAccessInstitutionIds(
     ctx,
-    ctx.user,
+    user,
   );
   if (curriculumInstitutionIds === "all") return visible;
+  // The spread keeps the caller's scholarReadInstitutionIds, so a
+  // scholar-authored unit is visible only where the caller may also read
+  // scholars — curriculum:edit alone never surfaces a scholar's work (TRA-374).
   const curriculumScholarIds = await scholarIdsInLens(ctx, {
     ...lens,
     scope: "all",
@@ -129,14 +154,58 @@ async function curriculumUnitsInLens(
     isAdmin: false,
     allowedInstitutionIds: curriculumInstitutionIds,
   });
-  return visible.filter((unit) => {
+  return (unit) => {
+    if (!visible(unit)) return false;
     if (unit.authorScholarId) {
       return curriculumScholarIds.has(unit.authorScholarId);
     }
     const institutionId =
       unit.institutionId ?? lens.primaryInstitution?._id;
     return !!institutionId && curriculumInstitutionIds.has(institutionId);
-  });
+  };
+}
+
+async function curriculumUnitsInLens(
+  ctx: QueryCtx & { user?: Doc<"users"> },
+  all: Doc<"units">[],
+  scope?: string,
+  explicitUser?: Doc<"users">,
+) {
+  return all.filter(
+    await curriculumUnitLensPredicate(ctx, scope, explicitUser),
+  );
+}
+
+/**
+ * The institution a non-scholar caller's unit list is scoped to: their oldest
+ * membership at an ACTIVE (non-suspended) institution, preferring one held in
+ * their own role. Only a caller with no institution-scoped membership at all
+ * gets the primary fallback — a member of a suspended school is scoped to
+ * nothing rather than to another school.
+ */
+async function membershipInstitutionId(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  primaryId: Id<"institutions"> | null | undefined,
+): Promise<Id<"institutions"> | undefined> {
+  const scoped = (
+    await ctx.db
+      .query("memberships")
+      .withIndex("by_user", (q) => q.eq("userId", user._id))
+      .collect()
+  ).filter((membership) => membership.institutionId);
+  if (scoped.length === 0) return primaryId ?? undefined;
+  const active = [];
+  for (const membership of scoped) {
+    const institution = await ctx.db.get(membership.institutionId!);
+    if (institution && !institution.disabledAt) active.push(membership);
+  }
+  active.sort(
+    (a, b) =>
+      Number(b.role === user.role) - Number(a.role === user.role) ||
+      a._creationTime - b._creationTime,
+  );
+  return active[0]?.institutionId;
 }
 
 export const list = authedQuery({
@@ -152,6 +221,11 @@ export const list = authedQuery({
     // the scholar surface. This explicit route context keeps the unit picker in
     // their learner institution instead of resolving through their home role.
     asLearner: v.optional(v.boolean()),
+    // Program-schedule picker: only the units this program group can schedule
+    // (its own school's active units the caller may edit), so the column never
+    // offers a unit `ensureProgramAssignment` would refuse. Takes precedence
+    // over `scope`.
+    programGroupId: v.optional(v.id("scholarGroups")),
   },
   handler: async (ctx, args) => {
     const learnerInstitutionId = args.asLearner
@@ -167,15 +241,28 @@ export const list = authedQuery({
     );
 
     let unitList;
-    if (canManageCurriculum) {
+    if (args.programGroupId) {
+      const group = await requireProgramPublishAccess(
+        ctx,
+        ctx.user,
+        await ctx.db.get(args.programGroupId),
+      );
+      unitList = (await programSchedulableUnits(ctx, ctx.user, group)).sort(
+        (a, b) => b._creationTime - a._creationTime,
+      );
+    } else if (canManageCurriculum) {
       // Catalog units follow their own institution stamp; Independent Study
       // units follow their author scholar through the same lens used by the
       // Quests board.
       const all = await ctx.db.query("units").order("desc").collect();
       unitList = await curriculumUnitsInLens(ctx, all, args.scope);
     } else {
-      // Scholar path: active non-IS units (visible to the whole
-      // class) + this scholar's own IS units. IS units authored by
+      // Scholar path: active, PUBLISHED non-IS units (visible to the
+      // whole class) + this scholar's own IS units. An unpublished unit
+      // (TRA-490) is teachers-only until a teacher publishes or assigns it;
+      // a scholar already holding an assignment to one (it was unpublished
+      // after assigning) still sees it, so their assigned session resolves
+      // its unit. IS units authored by
       // *other* scholars are private and must not leak into this
       // scholar's picker. Post-refactor (May 2026): the legacy
       // activities.scholarId narrowing is gone, so this filter is
@@ -186,12 +273,16 @@ export const list = authedQuery({
         .order("desc")
         .collect();
       const primaryId = await primaryInstitutionId(ctx);
+      // A non-scholar caller without curriculum access (e.g. operations or
+      // program staff) is scoped by their own active institution membership;
+      // only a caller with no institution membership at all falls back to the
+      // primary school. Falling straight to primary served another school's
+      // staff the primary school's whole active catalog.
       const scholarInstitutionId =
         learnerInstitutionId ??
         (await resolveScholarInstitutionId(ctx, ctx.user._id)) ??
-        primaryId ??
-        undefined;
-      unitList = all.filter(
+        (await membershipInstitutionId(ctx, ctx.user, primaryId));
+      const inLens = all.filter(
         (u) =>
           u.authorScholarId
             ? u.authorScholarId === ctx.user._id
@@ -201,6 +292,17 @@ export const list = authedQuery({
                 ? scholarInstitutionId === primaryId
                 : true,
       );
+      // Unpublished units are few (drafts in progress), so the per-unit
+      // assignment check stays cheap.
+      const visible = await Promise.all(
+        inLens.map(
+          async (u) =>
+            !!u.authorScholarId ||
+            isUnitPublished(u) ||
+            (await scholarHoldsAssignmentForUnit(ctx, ctx.user._id, u._id)),
+        ),
+      );
+      unitList = inLens.filter((_, i) => visible[i]);
       if (isProgramGuest(ctx.user)) {
         const assignedUnitIds = await assignedProgramUnitIdsForScholar(
           ctx,
@@ -237,6 +339,140 @@ export const list = authedQuery({
         };
       })
     );
+  },
+});
+
+/** Whether the caller may see the curriculum-design unit catalog at all —
+ *  the same test `units.list` uses to pick its curriculum path. */
+async function canBrowseCurriculum(ctx: QueryCtx, user: Doc<"users">) {
+  const ids = await curriculumAccessInstitutionIds(ctx, user);
+  return ids === "all" || ids.size > 0;
+}
+
+/** Guard against a filter that excludes almost everything making one page
+ *  read the whole table; a short page just reports `CanLoadMore` and the
+ *  browser asks again. */
+const BROWSER_MAX_ROWS_READ_PER_PAGE = 1000;
+
+/**
+ * The teacher Curriculum → Units column, one page at a time (TRA-468).
+ *
+ * Same unit set as `units.list`'s curriculum path — the identical tenancy
+ * predicate (`curriculumUnitLensPredicate`) — but the browser's Author /
+ * Subject / Archived filters run here, BEFORE the page is cut, so a page is
+ * never mostly empty after client filtering. Newest first, so a just-created
+ * unit lands at the top of page one.
+ *
+ * Index choice: an author filter reads `by_teacher` (one teacher's units are
+ * few); the default hides archived units through `by_active`; only "all
+ * authors + show archived" walks the whole table. The tenancy lens and the
+ * case-folded subject match are not index ranges (an Independent Study unit's
+ * tenant is its author scholar's institution, not a field on the row), so they
+ * run as a convex-helpers stream `filterWith` — applied before pagination,
+ * unlike a post-filter that would hand back short or empty pages.
+ *
+ * Rows are slim: only what `CurriculumUnitsBrowser` renders. `lessonCount` is
+ * a `by_unit` read per row, bounded by the page size.
+ */
+export const listForBrowser = authedQuery({
+  args: {
+    scope: v.optional(v.string()),
+    authorId: v.optional(v.id("users")),
+    subject: v.optional(v.string()),
+    showArchived: v.boolean(),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    if (!(await canBrowseCurriculum(ctx, ctx.user))) {
+      return { page: [], isDone: true, continueCursor: "" };
+    }
+    const inLens = await curriculumUnitLensPredicate(ctx, args.scope);
+    const units = stream(ctx.db, schema).query("units");
+    const ordered = args.authorId
+      ? units
+          .withIndex("by_teacher", (q) => q.eq("teacherId", args.authorId!))
+          .order("desc")
+      : args.showArchived
+        ? units.order("desc")
+        : units
+            .withIndex("by_active", (q) => q.eq("isActive", true))
+            .order("desc");
+    const subject = args.subject?.trim() || null;
+    const result = await ordered
+      .filterWith(
+        async (unit) =>
+          (args.showArchived || unit.isActive) &&
+          (!subject || subjectMatches(unit.subject, subject)) &&
+          inLens(unit),
+      )
+      .paginate({
+        ...args.paginationOpts,
+        maximumRowsRead: BROWSER_MAX_ROWS_READ_PER_PAGE,
+      });
+
+    const page = await Promise.all(
+      result.page.map(async (unit) => {
+        const teacher = await ctx.db.get(unit.teacherId);
+        const lessons = await ctx.db
+          .query("lessons")
+          .withIndex("by_unit", (q) => q.eq("unitId", unit._id))
+          .collect();
+        return {
+          _id: unit._id,
+          title: unit.title,
+          emoji: unit.emoji ?? null,
+          isActive: unit.isActive,
+          unpublished: unit.unpublished === true,
+          teacherId: unit.teacherId,
+          teacherName: teacher?.name ?? null,
+          lessonCount: lessons.length,
+        };
+      }),
+    );
+    return { ...result, page };
+  },
+});
+
+/**
+ * The Units browser's filter options — Author and Subject menus plus the
+ * "Show archived (N)" count — without shipping every unit's row. Same lens
+ * and same semantics the browser used to derive client-side: authors span
+ * every unit in the lens (archived too), subjects only units visible under the
+ * current archived toggle (and NOT narrowed by the author filter).
+ */
+export const browserFilterOptions = authedQuery({
+  args: {
+    scope: v.optional(v.string()),
+    showArchived: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    if (!(await canBrowseCurriculum(ctx, ctx.user))) {
+      return { authors: [], subjects: [], archivedCount: 0 };
+    }
+    const all = await ctx.db.query("units").order("desc").collect();
+    const units = await curriculumUnitsInLens(ctx, all, args.scope);
+
+    const authorIds: Id<"users">[] = [];
+    const seen = new Set<Id<"users">>();
+    for (const unit of units) {
+      if (!seen.has(unit.teacherId)) {
+        seen.add(unit.teacherId);
+        authorIds.push(unit.teacherId);
+      }
+    }
+    const authors = await Promise.all(
+      authorIds.map(async (id) => ({
+        id: String(id),
+        name: (await ctx.db.get(id))?.name ?? "Unknown",
+      })),
+    );
+    return {
+      authors,
+      subjects: uniqueSubjects(
+        units.filter((unit) => args.showArchived || unit.isActive),
+      ),
+      archivedCount: units.filter((unit) => !unit.isActive).length,
+    };
   },
 });
 
@@ -380,6 +616,78 @@ export const searchCurriculum = authedQuery({
   },
 });
 
+export const searchCurriculumForAide = internalQuery({
+  args: {
+    callerUserId: v.id("users"),
+    query: v.string(),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args): Promise<CurriculumSearchHit[]> => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller || !isTeacherRole(caller.role)) {
+      throw new Error("Forbidden: teacher or admin role required");
+    }
+    await assertInstitutionActive(ctx, caller);
+    const needle = args.query.trim().toLocaleLowerCase();
+    if (!needle) return [];
+    const all = await ctx.db.query("units").order("desc").collect();
+    const units = await curriculumUnitsInLens(
+      ctx,
+      all,
+      undefined,
+      caller,
+    );
+    const rank = (title: string) => {
+      const normalized = title.toLocaleLowerCase();
+      if (normalized === needle) return 0;
+      if (normalized.startsWith(needle)) return 1;
+      return 2;
+    };
+    const hits: Array<
+      Extract<CurriculumSearchHit, { kind: "activity" }> & { _rank: number }
+    > = [];
+    for (const unit of units) {
+      if (!unit.isActive) continue;
+      const lessons = await ctx.db
+        .query("lessons")
+        .withIndex("by_unit", (q) => q.eq("unitId", unit._id))
+        .collect();
+      for (const lesson of lessons) {
+        const activities = await ctx.db
+          .query("activities")
+          .withIndex("by_lesson", (q) => q.eq("lessonId", lesson._id))
+          .collect();
+        for (const activity of activities) {
+          if (
+            activity.archivedAt ||
+            !activity.title.toLocaleLowerCase().includes(needle)
+          ) {
+            continue;
+          }
+          hits.push({
+            kind: "activity",
+            unitId: unit._id,
+            unitTitle: unit.title,
+            lessonId: lesson._id,
+            lessonTitle: lesson.title,
+            activityId: activity._id,
+            activityTitle: activity.title,
+            _rank: rank(activity.title),
+          });
+        }
+      }
+    }
+    hits.sort(
+      (a, b) =>
+        a._rank - b._rank ||
+        a.activityTitle.localeCompare(b.activityTitle),
+    );
+    return hits
+      .slice(0, Math.max(1, Math.min(Math.floor(args.limit ?? 12), 30)))
+      .map(({ _rank: _r, ...hit }) => hit);
+  },
+});
+
 export const get = authedQuery({
   args: { id: v.id("units") },
   handler: async (ctx, args) => {
@@ -430,7 +738,7 @@ export const structureCounts = authedQuery({
  * Subject filter chips (teacher Curriculum list + scholar picker).
  *
  * Scoped exactly like `list`: managers see every unit's subject;
- * scholars see active non-IS units plus their own IS units. Deduped
+ * scholars see active published non-IS units plus their own IS units. Deduped
  * case-insensitively, keeping the first-seen display casing, so
  * "ELA" and "ela" collapse to one suggestion. Sorted alphabetically.
  */
@@ -448,8 +756,10 @@ export const subjects = authedQuery({
         .query("units")
         .withIndex("by_active", (q) => q.eq("isActive", true))
         .collect();
-      unitList = all.filter(
-        (u) => !u.authorScholarId || u.authorScholarId === ctx.user._id,
+      unitList = all.filter((u) =>
+        u.authorScholarId
+          ? u.authorScholarId === ctx.user._id
+          : isUnitPublished(u),
       );
     }
 
@@ -567,7 +877,7 @@ export async function independentStudyUnitsForScholar(
         unitId: u._id,
         title: await homeTitleForIndependentStudyUnit(ctx, u),
         emoji: u.emoji ?? null,
-        description: u.scholarDescription ?? u.description ?? null,
+        description: u.scholarDescription ?? null,
         activityCount: allActivityIds.length,
         onlineActivityCount: totalOnline,
         completedCount: completed,
@@ -665,6 +975,8 @@ export const create = curriculumMutation({
       subject: args.subject?.trim() || undefined,
       gradeLevel: args.gradeLevel?.trim() || undefined,
       isActive: true,
+      // Teachers only until published or assigned (TRA-490).
+      unpublished: true,
     });
   },
 });
@@ -765,17 +1077,11 @@ export const createQuest = authedMutation({
   handler: createQuestHandler,
 });
 
-// DEPRECATED alias for createQuest — the fleet iPad app (baked JS, no OTA) still calls
-// this name; remove after the next /ipad-release ships (TODO.html#drop-createindependentstudy-alias).
-export const createIndependentStudy = authedMutation({
-  args: createQuestArgs,
-  handler: createQuestHandler,
-});
-
 /**
  * Kick off the background "bake" for a Custom Quest: fill the scholar's
  * (empty) independent-study unit with a real lesson + activities via the
- * Curriculum Bot, then upgrade the live session in place when it lands. Called
+ * Curriculum Bot, then upgrade the live session in place when it lands (except
+ * for "Endless chat" — see below). Called
  * by the client right after it creates the unit + its session, so the scholar
  * is already chatting (ad-lib) while this runs. Owner-gated; idempotent (the
  * bake skips a unit that already has activities). See
@@ -794,10 +1100,39 @@ export const scheduleCustomQuestBake = authedMutation({
     if (unit.authorScholarId !== ctx.user._id) throw new Error("Forbidden");
     const session = await ctx.db.get(args.sessionId);
     if (!session || session.userId !== ctx.user._id) throw new Error("Forbidden");
+    // Mark the session as waiting BEFORE scheduling, so the client holds its
+    // opening turn instead of ad-libbing a topic the bake is about to replace
+    // (shared/questBakeHold.ts). Skipped once an activity exists — a re-bake of
+    // an already-structured session has nothing to wait for.
+    //
+    // NOT for "Endless chat". Both Custom Quest dialogs run the path picker to
+    // completion and omit `bakePath` for exactly one choice — the endless-chat
+    // card, whose entire promise to the scholar is "No plan — just start
+    // talking". It still bakes in the background so the unit becomes a
+    // structured quest with an earnable badge, but the live chat is never
+    // held behind a spinner NOR upgraded in place into the baked unit's first
+    // activity — that swap lands minutes into the conversation and reads to
+    // the scholar as being yanked out of the open chat they chose (a scholar
+    // remade the same quest three times on 2026-09-25 trying to keep it). A
+    // future caller that omits `bakePath` for some other reason must pass the
+    // scholar's intent explicitly rather than inheriting this.
+    const scholarIsWaitingForAQuest = !!args.bakePath;
+    if (
+      scholarIsWaitingForAQuest &&
+      !session.activityId &&
+      session.questBakeStatus !== "pending"
+    ) {
+      await ctx.db.patch(args.sessionId, { questBakeStatus: "pending" });
+    }
     await ctx.scheduler.runAfter(
       0,
       internal.bakeUnitFromSeed.bakeCustomQuestUnit,
-      { unitId: args.unitId, sessionId: args.sessionId, path: args.bakePath },
+      {
+        unitId: args.unitId,
+        // No session → the bake fills the unit but leaves the chat alone.
+        ...(scholarIsWaitingForAQuest ? { sessionId: args.sessionId } : {}),
+        path: args.bakePath,
+      },
     );
     return { scheduled: true as const };
   },
@@ -1216,6 +1551,59 @@ export const reactivate = authedMutation({
   },
 });
 
+/** Flip a catalog unit's publication (TRA-490). Independent Study units are
+ *  private to their scholar already, so publication has no meaning there. */
+async function setUnitPublished(
+  ctx: MutationCtx,
+  unit: Doc<"units">,
+  published: boolean,
+) {
+  if (unit.authorScholarId) {
+    throw new Error("Independent Study units are private to their scholar.");
+  }
+  if (published === isUnitPublished(unit)) return;
+  await ctx.db.patch(unit._id, { unpublished: published ? undefined : true });
+}
+
+/** Let scholars find and start a catalog unit on their own (TRA-490).
+ *  Same edit gate as archive. Assigning a unit also publishes it. */
+export const publish = authedMutation({
+  args: { id: v.id("units") },
+  handler: async (ctx, args) => {
+    const { unit } = await requireUnitEditAccess(ctx, { unitId: args.id });
+    await setUnitPublished(ctx, unit, true);
+  },
+});
+
+/** Take a catalog unit back to teachers only (TRA-490). Scholars who already
+ *  hold an assignment to it keep access to that assigned work. */
+export const unpublish = authedMutation({
+  args: { id: v.id("units") },
+  handler: async (ctx, args) => {
+    const { unit } = await requireUnitEditAccess(ctx, { unitId: args.id });
+    await setUnitPublished(ctx, unit, false);
+  },
+});
+
+/** The aide's `publish_unit` tool: the same flip under the caller's own
+ *  curriculum-edit gate. */
+export const aideSetUnitPublished = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    unitId: v.id("units"),
+    published: v.boolean(),
+  },
+  handler: async (ctx, { callerUserId, unitId, published }) => {
+    const caller = await ctx.db.get(callerUserId);
+    if (!caller) throw new Error("Caller not found");
+    const { unit } = await requireUnitEditAccessForUser(ctx, caller, {
+      unitId,
+    });
+    await setUnitPublished(ctx, unit, published);
+    return { title: unit.title, published };
+  },
+});
+
 /**
  * Pre-delete impact + gate for the Curriculum delete affordance.
  * Returns the unit's child-content counts plus whether a HARD delete is
@@ -1256,6 +1644,11 @@ export const deletionImpact = authedQuery({
     return {
       title: unit.title,
       isActive: unit.isActive,
+      // Publication (TRA-490): the lifecycle actions show the Unpublished
+      // badge and the Publish / Unpublish control from this. Scholar-owned
+      // Independent Study units have no publication state.
+      unpublished: unit.unpublished === true,
+      isIndependentStudy: !!unit.authorScholarId,
       lessonCount: lessons.length,
       activityCount,
       assignmentCount: assignments.length,
@@ -1497,7 +1890,7 @@ export const aideDeleteEmptyUnit = internalMutation({
 
 /**
  * Internal: scholar IS planning tutor counterparts (called from
- * convex/http.ts /project-stream tool runner). All verify the
+ * convex/http.ts /session-stream tool runner). All verify the
  * scholar is the IS unit's author before writing.
  */
 export const aiUpdateIsUnitMetadata = internalMutation({
@@ -1552,17 +1945,22 @@ export const aiSetIsUnitBadge = internalMutation({
 /**
  * Internal — simulate what a specific scholar would see from
  * units.list(). Only used by verification tooling. Post-refactor
- * (Apr 2026) all active units are visible to all scholars — units no
- * longer carry scholarId.
+ * (Apr 2026) all active, published units are visible to all scholars —
+ * units no longer carry scholarId.
  */
 export const listForScholarInternal = internalQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args) => {
-    void args;
     const activeUnits = await ctx.db
       .query("units")
       .withIndex("by_active", (q) => q.eq("isActive", true))
       .collect();
-    return activeUnits.map((u) => ({ id: u._id, title: u.title }));
+    return activeUnits
+      .filter((u) =>
+        u.authorScholarId
+          ? u.authorScholarId === args.scholarId
+          : isUnitPublished(u),
+      )
+      .map((u) => ({ id: u._id, title: u.title }));
   },
 });

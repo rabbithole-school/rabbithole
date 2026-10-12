@@ -1,5 +1,5 @@
-import { convexTest } from "convex-test";
-import { describe, expect, test } from "vitest";
+import { convexTest, type TestConvex } from "convex-test";
+import { beforeAll, describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
@@ -17,13 +17,30 @@ const DOMAIN = "whole-number-arithmetic";
 const SKILL = "subtract_2digit_regroup";
 const ITEM_ID = makeItemId(SKILL, 12_345);
 
-async function seedScholar(t: ReturnType<typeof convexTest>, username: string) {
+let sharedT: TestConvex<typeof schema>;
+
+beforeAll(async () => {
+  sharedT = convexTest(schema, modules);
+  await sharedT.mutation(internal.practiceSkills.seedGraph, {});
+});
+
+function sharedSeeded() {
+  return sharedT;
+}
+
+async function freshSeeded() {
+  const t = convexTest(schema, modules);
+  await t.mutation(internal.practiceSkills.seedGraph, {});
+  return t;
+}
+
+async function seedScholar(t: TestConvex<typeof schema>, username: string) {
   return t.run((ctx) =>
     ctx.db.insert("users", { name: username, username, role: "scholar" }),
   );
 }
 
-async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
+async function withUser(t: TestConvex<typeof schema>, userId: Id<"users">) {
   const sessionId = await t.run((ctx) =>
     ctx.db.insert("authSessions", {
       userId,
@@ -40,7 +57,7 @@ function correctAnswer() {
 }
 
 async function masteryFor(
-  t: ReturnType<typeof convexTest>,
+  t: TestConvex<typeof schema>,
   scholarId: Id<"users">,
 ) {
   const rows = await t.run(async (ctx) => ctx.db.query("practiceMastery").collect());
@@ -51,8 +68,7 @@ async function masteryFor(
 
 describe("reportHelpUsed", () => {
   test("marks an admitted correct answer assisted, withdraws fluency, and serves one bare fresh item", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedScholar(t, "help_happy");
     const scholar = await withUser(t, scholarId);
     await t.run((ctx) =>
@@ -108,8 +124,7 @@ describe("reportHelpUsed", () => {
   });
 
   test("is idempotent and only offers the fresh item on the first admission", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedScholar(t, "help_idempotent");
     const scholar = await withUser(t, scholarId);
     const verdict = await scholar.mutation(api.practiceSkills.submitAnswer, {
@@ -197,8 +212,7 @@ describe("reportHelpUsed", () => {
   });
 
   test("still records the admission but serves nothing outside the scholar's Practice scope", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = await freshSeeded();
     const scholarId = await seedScholar(t, "help_scoped");
     const scholar = await withUser(t, scholarId);
     const verdict = await scholar.mutation(api.practiceSkills.submitAnswer, {
@@ -236,8 +250,7 @@ describe("reportHelpUsed", () => {
 
 describe("undoHelpUsed", () => {
   test("takes the admission back and restores the fluency it withdrew", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedScholar(t, "undo_round_trip");
     const scholar = await withUser(t, scholarId);
     await t.run((ctx) =>
@@ -291,8 +304,7 @@ describe("undoHelpUsed", () => {
   });
 
   test("keeps a scaffold the SERVER detected, which was never the scholar's to take back", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedScholar(t, "undo_server_scaffold");
     const scholar = await withUser(t, scholarId);
     await t.run((ctx) =>
@@ -338,8 +350,7 @@ describe("undoHelpUsed", () => {
   });
 
   test("leaves a mastery row that something else has since claimed", async () => {
-    const t = convexTest(schema, modules);
-    await t.mutation(internal.practiceSkills.seedGraph, {});
+    const t = sharedSeeded();
     const scholarId = await seedScholar(t, "undo_moved_on");
     const scholar = await withUser(t, scholarId);
     await t.run((ctx) =>

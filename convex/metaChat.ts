@@ -21,7 +21,7 @@ import {
 } from "./lib/customFunctions";
 import { internalQuery, internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
-import type { QueryCtx } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   DEFAULT_TIMEZONE,
@@ -35,8 +35,11 @@ import { raiseAlert } from "./alerts";
 import {
   fanOutWorkshopIdea,
   MAX_OPEN_SUGGESTIONS_EXPORT,
+  openIdeas as openIdeasFor,
 } from "./scholarSuggestions";
 import { isIdeaConvosEnabled } from "./lib/scholarIdeaTools";
+import { scholarThreadFacts } from "./scholarMessages";
+import { scholarForThread } from "./lib/scholarThreadAccess";
 import { undeliveredCreditsFor } from "./changelog";
 import { siteUrl, scholarPath, withBase } from "./lib/channels";
 import { escapeSlackText } from "./lib/slackApi";
@@ -50,9 +53,10 @@ import {
 import { practiceDomainLabel } from "../shared/practiceDomainLabels";
 import { deriveGrowthStories } from "./lib/growthStories";
 import { PRACTICE_DIGEST_WINDOW_MS } from "./lib/practiceDigest";
-import { requireActiveScholarAccess } from "./lib/access";
+import { requireActiveScholarAccess, requireGroupScholarAccess } from "./lib/access";
 import { institutionPromptProfileForScholar } from "./lib/institutionPromptProfile";
 import { isTeacherRole } from "./lib/roles";
+import { renderStoppedAssistantContent } from "../shared/stoppedTurn";
 
 // ── Membership + block resolution (shared) ──────────────────────────────
 
@@ -136,6 +140,25 @@ const INTROSPECTION_THREAD_KEY = "standing";
 const MODEL_HISTORY_MESSAGE_LIMIT = 40;
 const MODEL_HISTORY_CHAR_LIMIT = 24_000;
 
+async function stampLatestStreamingMetaMessage(
+  ctx: Pick<MutationCtx, "db">,
+  chatId: Id<"metaChats">,
+): Promise<boolean> {
+  const recent = await ctx.db
+    .query("metaMessages")
+    .withIndex("by_chat", (q) => q.eq("chatId", chatId))
+    .order("desc")
+    .take(20);
+  const streaming = recent.find(
+    (message) => message.role === "assistant" && message.streamId,
+  );
+  if (!streaming) return false;
+  if (streaming.stopRequestedAt === undefined) {
+    await ctx.db.patch(streaming._id, { stopRequestedAt: Date.now() });
+  }
+  return true;
+}
+
 async function recentModelMessages(
   ctx: QueryCtx,
   chatId: Id<"metaChats">,
@@ -148,12 +171,19 @@ async function recentModelMessages(
   const selected: Array<Doc<"metaMessages">> = [];
   let chars = 0;
   for (const message of newest) {
-    if (!message.content.trim()) continue;
-    if (selected.length > 0 && chars + message.content.length > MODEL_HISTORY_CHAR_LIMIT) {
+    const modelContent =
+      message.role === "assistant"
+        ? renderStoppedAssistantContent(
+            message.content,
+            message.stopRequestedAt,
+          )
+        : message.content;
+    if (!modelContent.trim()) continue;
+    if (selected.length > 0 && chars + modelContent.length > MODEL_HISTORY_CHAR_LIMIT) {
       break;
     }
     selected.push(message);
-    chars += message.content.length;
+    chars += modelContent.length;
   }
   return selected.reverse();
 }
@@ -451,6 +481,7 @@ export const sendMessage = authedMutation({
     }
     const content = args.content.trim();
     if (!content) throw new Error("Message is empty");
+    await stampLatestStreamingMetaMessage(ctx, args.chatId);
 
     const bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
@@ -545,6 +576,7 @@ export const listMessages = authedQuery({
         role: m.role,
         content: m.content,
         streamId: m.streamId ?? null,
+        stopRequestedAt: m.stopRequestedAt ?? null,
         createdAt: m.createdAt,
       })),
     };
@@ -611,6 +643,7 @@ export const listForScholar = teacherQuery({
           _id: m._id,
           role: m.role,
           content: m.content,
+          stopRequestedAt: m.stopRequestedAt ?? null,
           createdAt: m.createdAt,
         })),
       },
@@ -690,8 +723,9 @@ export const workshopFlags = authedQuery({
 
 /**
  * Upsert or remove the `prepTime` daily block on a group. Group edits are
- * roster-wide today (any teacher may edit any group — see scholarGroups.ts), so
- * this only requires the group to exist.
+ * roster-wide within a school (any teacher at the group's institution may edit
+ * it — see scholarGroups.ts), gated by `requireGroupScholarAccess` so a
+ * wholly-foreign group is rejected.
  *
  * Move 5 ruling: this now controls PARTICIPATION only — the entry's mere
  * presence means "this pod runs Scholar's Prep". WHEN it runs comes from the
@@ -714,7 +748,9 @@ export const setGroupDailyBlock = teacherMutation({
     timezone: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const group = await ctx.db.get(args.groupId);
+    // Institution boundary: a foreign teacher must not edit another context's
+    // group config via a bare groupId.
+    const group = await requireGroupScholarAccess(ctx, ctx.user, args.groupId);
     if (!group) throw new Error("Group not found.");
     const existing = (group.dailyBlocks ?? []).filter(
       (b) => b.key !== PREP_TIME_KEY,
@@ -745,14 +781,19 @@ export const setGroupDailyBlock = teacherMutation({
 /**
  * The Scholar's Prep window for a group — null when the pod does NOT run the
  * ritual (no `prepTime` entry), else the institution's canonical bell-schedule
- * window (Move 5). Teacher-gated; group reads are roster-wide, so any teacher
- * may read any group. RosterBoard's Tonight auto-default consumes this shape
- * (isWithinPrepWindow), so it now reads the same clock the scholar pin does.
+ * window (Move 5). Teacher-gated; group reads are roster-wide within a school
+ * (any teacher at the group's institution may read it), so a wholly-foreign
+ * group is rejected while a missing group still renders null. RosterBoard's
+ * Tonight auto-default consumes this shape (isWithinPrepWindow), so it now
+ * reads the same clock the scholar pin does.
  */
 export const groupPrepTimeBlock = teacherQuery({
   args: { groupId: v.id("scholarGroups") },
   handler: async (ctx, args) => {
-    const group = await ctx.db.get(args.groupId);
+    // Institution boundary: a foreign teacher must not read another context's
+    // group config via a bare groupId. A missing group still returns null
+    // (requireGroupScholarAccess only throws on a wholly-foreign group).
+    const group = await requireGroupScholarAccess(ctx, ctx.user, args.groupId);
     if (!group) return null;
     const participates = (group.dailyBlocks ?? []).some(
       (b) => b.key === PREP_TIME_KEY,
@@ -772,7 +813,10 @@ export const groupPrepTimeBlock = teacherQuery({
 export const groupPrepControl = teacherQuery({
   args: { groupId: v.id("scholarGroups") },
   handler: async (ctx, args) => {
-    const group = await ctx.db.get(args.groupId);
+    // Institution boundary: a foreign teacher must not read another context's
+    // group config via a bare groupId. A missing group still returns null
+    // (requireGroupScholarAccess only throws on a wholly-foreign group).
+    const group = await requireGroupScholarAccess(ctx, ctx.user, args.groupId);
     if (!group) return null;
     const participates = (group.dailyBlocks ?? []).some(
       (b) => b.key === PREP_TIME_KEY,
@@ -804,13 +848,35 @@ export const getStreamValidation = internalQuery({
 });
 
 /**
+ * Has a human written back on this idea, and is there a staff reply the
+ * scholar hasn't read yet (whose author the pointer names)? Read from the
+ * idea's Workshop thread; a legacy idea without one falls back to the
+ * deprecated `staffResponse` for `answered` only.
+ */
+async function workshopReplyState(
+  ctx: QueryCtx,
+  idea: Doc<"scholarSuggestions">,
+): Promise<{ answered: boolean; unreadReplyAuthorId: Id<"users"> | null }> {
+  const linked = idea.threadId ? await ctx.db.get(idea.threadId) : null;
+  // Only a thread the scholar can actually open (not history left at a school
+  // they've moved from) — the pointer must never lead somewhere they can't go.
+  const thread = linked && (await scholarForThread(ctx, linked)) ? linked : null;
+  if (!thread) return { answered: !!idea.staffResponse, unreadReplyAuthorId: null };
+  const facts = await scholarThreadFacts(ctx, thread);
+  return {
+    answered: facts.hasStaffMessage,
+    unreadReplyAuthorId:
+      facts.scholarUnread && facts.lastStaffAuthorId ? facts.lastStaffAuthorId : null,
+  };
+}
+
+/**
  * Full context for the reflection prompt: reading level, today's session
  * titles, recent growth (last ~week), open ideas (dup-avoidance), and fresh
  * staff responses to deliver. NO transcripts and NO numeric mastery — the growth
  * fields are the SAME kid-facing LABELS /me shows (see weeklyGrowthFor). Only
- * what buildMetaSystemPrompt needs. `updateSuggestionIds` are the ideas whose
- * response is surfaced this turn (the handler stamps them seen at prompt-build
- * time via `markResponsesSeen`).
+ * what buildMetaSystemPrompt needs. `ideaUpdates` are pointers to unread staff
+ * replies in the scholar's Messages — never the replies' words.
  */
 export const getContext = internalQuery({
   args: { chatId: v.id("metaChats") },
@@ -852,48 +918,40 @@ export const getContext = internalQuery({
 
     // Ideas still on the kid's board (not archived by them) — title + whether a
     // human has written back, for duplicate-avoidance.
-    const openRows = await ctx.db
-      .query("scholarSuggestions")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", chat.scholarId))
-      .filter((q) => q.eq(q.field("archivedAt"), undefined))
-      .collect();
-    const openIdeas = openRows.map((r) => ({
-      title: r.title,
-      answered: !!r.staffResponse,
-    }));
+    const openRows = await openIdeasFor(ctx, chat.scholarId);
+    const openIdeas = await Promise.all(
+      openRows.map(async (r) => ({
+        title: r.title,
+        answered: (await workshopReplyState(ctx, r)).answered,
+      })),
+    );
 
-    let ideaUpdates: Array<{
+    const ideaUpdates: Array<{
       authorName: string;
       title: string;
-      body: string;
+      about: "idea" | "bug_report";
     }> = [];
-    let updateSuggestionIds: Array<Id<"scholarSuggestions">> = [];
     let credits: MetaCredit[] = [];
     let creditDeliverIds: Array<Id<"changelogEntries">> = [];
     if (purpose === "reflection") {
-      // Staff responses and shipped-feature credits are delivered only through
-      // Today's reflection. Ask Rabbithole must not consume that state.
+      // Unread staff replies are POINTED AT only through Today's reflection
+      // (Ask Rabbithole never mentions them). The reply itself lives in the
+      // scholar's Messages; this chat never reads or repeats its words. The
+      // pointer stops once the scholar has read the thread.
       const allIdeas = await ctx.db
         .query("scholarSuggestions")
         .withIndex("by_scholar", (q) => q.eq("scholarId", chat.scholarId))
         .collect();
-      const unseen = allIdeas.filter(
-        (r) =>
-          r.staffResponse &&
-          (r.responseSeenAt === undefined ||
-            r.responseSeenAt < r.staffResponse.at),
-      );
-      ideaUpdates = await Promise.all(
-        unseen.map(async (r) => {
-          const author = await ctx.db.get(r.staffResponse!.authorId);
-          return {
-            authorName: author?.name?.trim() || "Someone on the team",
-            title: r.title,
-            body: r.staffResponse!.body,
-          };
-        }),
-      );
-      updateSuggestionIds = unseen.map((r) => r._id);
+      for (const r of allIdeas) {
+        const state = await workshopReplyState(ctx, r);
+        if (!state.unreadReplyAuthorId) continue;
+        const author = await ctx.db.get(state.unreadReplyAuthorId);
+        ideaUpdates.push({
+          authorName: author?.name?.trim() || "Someone on the team",
+          title: r.title,
+          about: r.bugReportId ? "bug_report" : "idea",
+        });
+      }
       const undelivered = await undeliveredCreditsFor(ctx, chat.scholarId);
       credits = undelivered.credits;
       creditDeliverIds = undelivered.entryIds;
@@ -909,10 +967,15 @@ export const getContext = internalQuery({
       weeklyGrowth,
       openIdeas,
       ideaUpdates,
-      updateSuggestionIds,
       credits,
       creditDeliverIds,
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      messages: messages.map((m) => ({
+        role: m.role,
+        content:
+          m.role === "assistant"
+            ? renderStoppedAssistantContent(m.content, m.stopRequestedAt)
+            : m.content,
+      })),
     };
   },
 });
@@ -921,7 +984,34 @@ export const getContext = internalQuery({
 export const updateStreamContent = internalMutation({
   args: { messageId: v.id("metaMessages"), content: v.string() },
   handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.messageId);
+    if (!message) return { stopRequested: false };
     await ctx.db.patch(args.messageId, { content: args.content });
+    return { stopRequested: message.stopRequestedAt !== undefined };
+  },
+});
+
+export const isStopRequested = internalQuery({
+  args: { messageId: v.id("metaMessages") },
+  handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.messageId);
+    return message?.stopRequestedAt !== undefined;
+  },
+});
+
+export const requestStop = authedMutation({
+  args: { messageId: v.id("metaMessages") },
+  handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.messageId);
+    if (!message || !message.streamId) return { stopped: false };
+    const chat = await ctx.db.get(message.chatId);
+    if (!chat || chat.scholarId !== ctx.user._id) {
+      throw new Error("Forbidden: not your reflection chat");
+    }
+    if (message.stopRequestedAt === undefined) {
+      await ctx.db.patch(args.messageId, { stopRequestedAt: Date.now() });
+    }
+    return { stopped: true };
   },
 });
 
@@ -957,20 +1047,6 @@ export const finalizeStream = internalMutation({
       await ctx.scheduler.runAfter(0, internal.metaObserver.analyzeMetaChat, {
         chatId: row.chatId,
       });
-    }
-  },
-});
-
-/**
- * Stamp `responseSeenAt` on ideas whose staff response was surfaced in a
- * reflection chat's updates section. Called at PROMPT-BUILD time (§5.6) — when
- * the chat actually shows the response — not at observer time.
- */
-export const markResponsesSeen = internalMutation({
-  args: { suggestionIds: v.array(v.id("scholarSuggestions")), at: v.number() },
-  handler: async (ctx, args) => {
-    for (const id of args.suggestionIds) {
-      await ctx.db.patch(id, { responseSeenAt: args.at });
     }
   },
 });
@@ -1056,11 +1132,7 @@ export const claimMetaObserverRange = internalMutation({
             .order("desc")
             .take(META_OBSERVER_CONTEXT_MESSAGES);
     const scholar = await ctx.db.get(chat.scholarId);
-    const open = await ctx.db
-      .query("scholarSuggestions")
-      .withIndex("by_scholar", (q) => q.eq("scholarId", chat.scholarId))
-      .filter((q) => q.eq(q.field("archivedAt"), undefined))
-      .collect();
+    const open = await openIdeasFor(ctx, chat.scholarId);
     const leaseId = `${now}:${Math.random().toString(36).slice(2)}`;
     await ctx.db.patch(chat._id, {
       observerLeaseId: leaseId,
@@ -1239,11 +1311,7 @@ export const applyMetaAnalysis = internalMutation({
       purpose === "introspection" || isIdeaConvosEnabled();
     const open = ideaConvos
       ? []
-      : await ctx.db
-          .query("scholarSuggestions")
-          .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
-          .filter((q) => q.eq(q.field("archivedAt"), undefined))
-          .collect();
+      : await openIdeasFor(ctx, scholarId);
     let openCount = open.length;
     const existingTitles = new Set(
       open.map((o) => o.title.trim().toLowerCase()),

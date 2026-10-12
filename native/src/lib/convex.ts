@@ -11,7 +11,7 @@ export const convex = new ConvexReactClient(url, {
   unsavedChangesWarning: false,
 });
 
-// HTTP-action host (tutor SSE lives at `${convexSiteUrl}/project-stream`). The
+// HTTP-action host (tutor SSE lives at `${convexSiteUrl}/session-stream`). The
 // .site host serves Convex HTTP actions; .cloud serves queries/mutations.
 export const convexSiteUrl =
   process.env.EXPO_PUBLIC_CONVEX_SITE_URL ??

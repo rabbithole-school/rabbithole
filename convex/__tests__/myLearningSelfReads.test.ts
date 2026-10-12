@@ -160,6 +160,62 @@ describe("masteryObservations session recap", () => {
     ).rejects.toThrow("Forbidden");
   });
 
+  test("requestRecap moves an open exploration to Finished but leaves activity sessions on the plate", async () => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t, "scholar");
+    const { openId, activitySessionId } = await t.run(async (ctx) => {
+      const unitId = await ctx.db.insert("units", {
+        teacherId: scholarId,
+        title: "Quest unit",
+        isActive: true,
+      });
+      const lessonId = await ctx.db.insert("lessons", {
+        unitId,
+        title: "Lesson",
+        order: 0,
+      });
+      const activityId = await ctx.db.insert("activities", {
+        lessonId,
+        title: "An activity",
+        kind: "online",
+        order: 0,
+      });
+      const openId = await ctx.db.insert("sessions", {
+        userId: scholarId,
+        title: "The Equation x^y = y^x",
+        isArchived: false,
+      });
+      const activitySessionId = await ctx.db.insert("sessions", {
+        userId: scholarId,
+        title: "An activity",
+        isArchived: false,
+        unitId,
+        activityId,
+      });
+      return { openId, activitySessionId };
+    });
+    const asScholar = await withUser(t, scholarId);
+
+    await asScholar.action(api.masteryObservations.requestRecap, {
+      sessionId: openId,
+    });
+    await asScholar.action(api.masteryObservations.requestRecap, {
+      sessionId: activitySessionId,
+    });
+
+    const [open, withActivity] = await t.run(async (ctx) => [
+      await ctx.db.get(openId),
+      await ctx.db.get(activitySessionId),
+    ]);
+    expect(open?.isArchived).toBe(true);
+    expect(open?.activityCompletedAt).toBeUndefined();
+    expect(withActivity?.isArchived).toBe(false);
+    const finished = await asScholar.query(api.sessions.finishedForScholar, {
+      asLearner: true,
+    });
+    expect(finished.map((row) => String(row.id))).toContain(String(openId));
+  });
+
   test("returns a modest mirror when current session observations do not qualify as growth", async () => {
     const t = convexTest(schema, modules);
     const scholarId = await seedUser(t, "scholar");

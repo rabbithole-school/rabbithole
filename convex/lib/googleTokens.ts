@@ -46,24 +46,54 @@ export async function getValidAccessToken(
     );
   }
 
-  const { isExpiringSoon, refreshAccessToken, readOAuthConfig } = await import(
-    "./google"
+  const { isExpiringSoon, refreshAccessToken, readOAuthConfig, GoogleTokenRefreshError } =
+    await import("./google");
+  const { openGoogleAccountTokens, GoogleTokenDecryptError } = await import(
+    "./googleTokenCrypto"
   );
 
-  if (!isExpiringSoon(acct.expiresAt)) {
-    return acct.accessToken;
+  let tokens: { accessToken: string; refreshToken: string | undefined };
+  try {
+    tokens = await openGoogleAccountTokens(acct);
+  } catch (e) {
+    if (e instanceof GoogleTokenDecryptError) {
+      await ctx.runMutation(internal.googleAccounts.markReconnectRequiredInternal, {
+        userId,
+        reason: "token_unreadable",
+      });
+      throw new Error(
+        "Your stored Google connection can no longer be read. Reconnect Google.",
+      );
+    }
+    throw e;
   }
-  if (!acct.refreshToken) {
+
+  if (!isExpiringSoon(acct.expiresAt)) {
+    return tokens.accessToken;
+  }
+  if (!tokens.refreshToken) {
     throw new Error(
       "Google access token expired and no refresh token on file. Reconnect Google."
     );
   }
   const { clientId, clientSecret } = readOAuthConfig();
-  const refreshed = await refreshAccessToken({
-    refreshToken: acct.refreshToken,
-    clientId,
-    clientSecret,
-  });
+  let refreshed;
+  try {
+    refreshed = await refreshAccessToken({
+      refreshToken: tokens.refreshToken,
+      clientId,
+      clientSecret,
+    });
+  } catch (e) {
+    if (e instanceof GoogleTokenRefreshError && e.revoked) {
+      await ctx.runMutation(internal.googleAccounts.markReconnectRequiredInternal, {
+        userId,
+        reason: "refresh_revoked",
+      });
+    }
+    throw e;
+  }
+  // `updateTokensInternal` encrypts before it writes.
   await ctx.runMutation(internal.googleAccounts.updateTokensInternal, {
     userId,
     accessToken: refreshed.access_token,
@@ -71,6 +101,66 @@ export async function getValidAccessToken(
     refreshToken: refreshed.refresh_token,
   });
   return refreshed.access_token;
+}
+
+/**
+ * Mint a fresh access token for this user's link that carries ONLY `scopes`
+ * (a subset of the grant), by down-scoping a refresh-token grant. The token
+ * is never persisted: the stored token keeps the full grant. Returns null
+ * when no such token can be had (no link, no refresh token, Google refused,
+ * or Google answered with any scope outside `scopes`). A dead grant
+ * (`invalid_grant`, unreadable token) is still recorded for a reconnect.
+ *
+ * This is the only way a token may reach browser JS (the Drive Picker): the
+ * personal link also carries Gmail read and compose access.
+ */
+export async function mintDownscopedAccessToken(
+  ctx: GoogleActionCtx,
+  userId: Id<"users">,
+  scopes: readonly string[],
+): Promise<string | null> {
+  const acct = await ctx.runQuery(
+    internal.googleAccounts.getForUserInternal,
+    { userId },
+  );
+  if (!acct) return null;
+  const { refreshAccessToken, readOAuthConfig, scopesWithin, GoogleTokenRefreshError } =
+    await import("./google");
+  const { openGoogleAccountTokens, GoogleTokenDecryptError } = await import(
+    "./googleTokenCrypto"
+  );
+  let refreshToken: string | undefined;
+  try {
+    refreshToken = (await openGoogleAccountTokens(acct)).refreshToken;
+  } catch (e) {
+    if (e instanceof GoogleTokenDecryptError) {
+      await ctx.runMutation(internal.googleAccounts.markReconnectRequiredInternal, {
+        userId,
+        reason: "token_unreadable",
+      });
+    }
+    return null;
+  }
+  if (!refreshToken) return null;
+  const { clientId, clientSecret } = readOAuthConfig();
+  let minted;
+  try {
+    minted = await refreshAccessToken({ refreshToken, clientId, clientSecret, scopes });
+  } catch (e) {
+    if (e instanceof GoogleTokenRefreshError && e.revoked) {
+      await ctx.runMutation(internal.googleAccounts.markReconnectRequiredInternal, {
+        userId,
+        reason: "refresh_revoked",
+      });
+    }
+    return null;
+  }
+  // Google must have honoured the down-scope. A missing or broader `scope`
+  // means the token could carry Gmail access: never hand it out.
+  if (!minted.access_token || !scopesWithin([minted.scope ?? ""], scopes)) {
+    return null;
+  }
+  return minted.access_token;
 }
 
 /**

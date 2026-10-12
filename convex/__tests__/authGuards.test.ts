@@ -8,6 +8,8 @@ import {
   assertNotSystemAccount,
   assertScholarAdoptionAuthorized,
   grantPasswordBind,
+  admitMagicLinkRequest,
+  MAGIC_LINK_REQUESTS_PER_HOUR,
 } from "../lib/authGuards";
 
 const modules = (
@@ -206,6 +208,74 @@ describe("resolveMagicLinkUser", () => {
       (await ctx.db.query("users").collect()).length,
     );
     expect(count).toBe(0);
+  });
+});
+
+// ── admitMagicLinkRequest — the request-leg gate (security review S13) ──
+describe("admitMagicLinkRequest", () => {
+  const admit = (t: ReturnType<typeof convexTest>, email: string, now?: number) =>
+    t.run(async (ctx) => admitMagicLinkRequest(ctx, email, now));
+  const buckets = (t: ReturnType<typeof convexTest>) =>
+    t.run(async (ctx) => (await ctx.db.query("authRateLimits").collect()).length);
+
+  test("admits an account with a real email (case-insensitive)", async () => {
+    const t = convexTest(schema, modules);
+    await seedUser(t, "teacher", { email: "test.teacher@example.test" });
+    expect(await admit(t, "Test.Teacher@Example.test")).toBe(true);
+  });
+
+  test("refuses unknown, synthetic and invalid addresses and writes nothing", async () => {
+    const t = convexTest(schema, modules);
+    await seedUser(t, "scholar", { email: "test-kid@local" });
+    expect(await admit(t, "nobody@example.test")).toBe(false);
+    expect(await admit(t, "test-kid@local")).toBe(false);
+    expect(await admit(t, "not an email")).toBe(false);
+    expect(await buckets(t)).toBe(0);
+  });
+
+  test("a duplicate account for one email admits without throwing", async () => {
+    const t = convexTest(schema, modules);
+    await seedUser(t, "parent", { email: "test.twin@example.test" });
+    await t.run(async (ctx) =>
+      ctx.db.insert("users", {
+        name: "Test Twin",
+        username: "test-twin-2",
+        role: "parent",
+        email: "test.twin@example.test",
+      }),
+    );
+    expect(await admit(t, "test.twin@example.test")).toBe(true);
+  });
+
+  test("refuses a service account", async () => {
+    const t = convexTest(schema, modules);
+    await t.run(async (ctx) =>
+      ctx.db.insert("users", {
+        name: "Test Guide",
+        username: "test-guide",
+        role: "teacher",
+        isSystem: true,
+        email: "test-guide@example.test",
+      }),
+    );
+    expect(await admit(t, "test-guide@example.test")).toBe(false);
+  });
+
+  test(`allows ${MAGIC_LINK_REQUESTS_PER_HOUR} an hour per address, then refills`, async () => {
+    const t = convexTest(schema, modules);
+    await seedUser(t, "parent", { email: "test.parent@example.test" });
+    await seedUser(t, "teacher", { email: "test.other@example.test" });
+    const now = 1_800_000_000_000;
+    for (let i = 0; i < MAGIC_LINK_REQUESTS_PER_HOUR; i++) {
+      expect(await admit(t, "test.parent@example.test", now)).toBe(true);
+    }
+    expect(await admit(t, "test.parent@example.test", now)).toBe(false);
+    // Another address has its own bucket.
+    expect(await admit(t, "test.other@example.test", now)).toBe(true);
+    // One token back after a fifth of an hour.
+    const later = now + (60 * 60 * 1000) / MAGIC_LINK_REQUESTS_PER_HOUR;
+    expect(await admit(t, "test.parent@example.test", later)).toBe(true);
+    expect(await admit(t, "test.parent@example.test", later)).toBe(false);
   });
 });
 

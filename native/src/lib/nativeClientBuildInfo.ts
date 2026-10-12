@@ -14,7 +14,11 @@ type ExpoConfig = {
   ios?: { buildNumber?: string | number | null } | null;
 };
 
-type BuildEnvironment = Record<string, string | undefined>;
+export type NativeClientBuildEnvironment = {
+  EXPO_PUBLIC_NATIVE_CLIENT_CHANNEL?: string;
+  EXPO_PUBLIC_GIT_SHA?: string;
+  EXPO_PUBLIC_BUILD_STAMP?: string;
+};
 
 function valueOrUnknown(value: string | number | null | undefined): string {
   const normalized = String(value ?? "").trim();
@@ -22,16 +26,13 @@ function valueOrUnknown(value: string | number | null | undefined): string {
 }
 
 function channelFromEnvironment(
-  environment: BuildEnvironment,
+  environment: NativeClientBuildEnvironment,
 ): NativeClientChannel | null {
-  const configuredChannel =
-    environment.EXPO_PUBLIC_NATIVE_CLIENT_CHANNEL ??
-    environment.EXPO_PUBLIC_BUILD_CHANNEL;
-  const normalized = configuredChannel?.trim().toLowerCase();
+  const normalized = environment.EXPO_PUBLIC_NATIVE_CLIENT_CHANNEL?.trim().toLowerCase();
   return normalized === "stable" || normalized === "canary" ? normalized : null;
 }
 
-function gitShaFromEnvironment(environment: BuildEnvironment): string {
+function gitShaFromEnvironment(environment: NativeClientBuildEnvironment): string {
   const explicit = environment.EXPO_PUBLIC_GIT_SHA?.trim();
   if (explicit) return explicit;
 
@@ -41,12 +42,12 @@ function gitShaFromEnvironment(environment: BuildEnvironment): string {
 }
 
 /**
- * Only Stable and Canary report production client inventory. Test and Metro are
- * intentionally absent rather than mislabeled as Stable on their own backends.
+ * Only Stable and Canary report production client inventory. Metro is
+ * intentionally absent rather than mislabeled as Stable.
  */
 export function resolveNativeClientBuildInfo(
   expoConfig: ExpoConfig | null | undefined,
-  environment: BuildEnvironment = process.env,
+  environment: NativeClientBuildEnvironment,
 ): NativeClientBuildInfo {
   return {
     channel: channelFromEnvironment(environment),
@@ -56,6 +57,20 @@ export function resolveNativeClientBuildInfo(
   };
 }
 
+/**
+ * Each key is spelled out as a literal `process.env.EXPO_PUBLIC_X` read because
+ * that member expression is the only form babel-preset-expo inlines into a
+ * release bundle. At runtime `process.env` holds only NODE_ENV, so passing
+ * `process.env` itself (as a default parameter did until TRA-457) read nothing
+ * and left every release build with a null channel.
+ */
+const releaseBuildEnvironment: NativeClientBuildEnvironment = {
+  EXPO_PUBLIC_NATIVE_CLIENT_CHANNEL: process.env.EXPO_PUBLIC_NATIVE_CLIENT_CHANNEL,
+  EXPO_PUBLIC_GIT_SHA: process.env.EXPO_PUBLIC_GIT_SHA,
+  EXPO_PUBLIC_BUILD_STAMP: process.env.EXPO_PUBLIC_BUILD_STAMP,
+};
+
 export const nativeClientBuildInfo = resolveNativeClientBuildInfo(
   Constants.expoConfig,
+  releaseBuildEnvironment,
 );

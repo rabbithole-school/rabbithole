@@ -51,45 +51,22 @@ describe("game registry", () => {
   });
 });
 
-/**
- * The boot-time eager check and its FATALITY are deliberately separate switches.
- *
- * `EXPO_PUBLIC_EAGER_LOAD_GAMES=1` is how the rhtest variant opts into finding a
- * broken game at boot — but rhtest is a RELEASE build, where an unhandled JS
- * exception is process death, not a dismissible RedBox, on a kiosk iPad in
- * Single App Mode with no app switcher and no USB recovery. Rethrowing there
- * would re-create, one file below the lazy registry, the exact event the lazy
- * registry exists to prevent. These tests pin that: opting into the check must
- * never be able to opt into terminating the app.
- */
 describe("eager-load policy", () => {
   const realDev = (globalThis as { __DEV__?: unknown }).__DEV__;
-  const realFlag = process.env.EXPO_PUBLIC_EAGER_LOAD_GAMES;
 
   afterEach(() => {
     if (realDev === undefined) delete (globalThis as { __DEV__?: unknown }).__DEV__;
     else (globalThis as { __DEV__?: unknown }).__DEV__ = realDev;
-    if (realFlag === undefined) delete process.env.EXPO_PUBLIC_EAGER_LOAD_GAMES;
-    else process.env.EXPO_PUBLIC_EAGER_LOAD_GAMES = realFlag;
-  });
-
-  it("checks but never kills a release build that opted in (rhtest)", () => {
-    (globalThis as { __DEV__?: unknown }).__DEV__ = false;
-    process.env.EXPO_PUBLIC_EAGER_LOAD_GAMES = "1";
-    expect(shouldEagerLoadGames()).toBe(true);
-    expect(eagerLoadFailureIsFatal()).toBe(false);
   });
 
   it("leaves a fleet build lazy and non-fatal", () => {
     (globalThis as { __DEV__?: unknown }).__DEV__ = false;
-    delete process.env.EXPO_PUBLIC_EAGER_LOAD_GAMES;
     expect(shouldEagerLoadGames()).toBe(false);
     expect(eagerLoadFailureIsFatal()).toBe(false);
   });
 
   it("is fatal only in dev, where RedBox is dismissible", () => {
     (globalThis as { __DEV__?: unknown }).__DEV__ = true;
-    delete process.env.EXPO_PUBLIC_EAGER_LOAD_GAMES;
     expect(shouldEagerLoadGames()).toBe(true);
     expect(eagerLoadFailureIsFatal()).toBe(true);
   });

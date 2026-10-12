@@ -345,6 +345,7 @@ export async function insertRichCohort(
       : reqUser(u.teacherKey);
     const uId = await ctx.db.insert("units", {
       teacherId: unitTeacherId,
+      institutionId: u.stampDevSchool ? moli : undefined,
       authorScholarId: u.authorScholarKey
         ? reqUser(u.authorScholarKey)
         : undefined,
@@ -398,6 +399,16 @@ export async function insertRichCohort(
         });
         activityId.set(a.key, aId);
         bump("activities");
+        for (const [order, material] of (a.materials ?? []).entries()) {
+          await ctx.db.insert("activityResources", {
+            activityId: aId,
+            title: material.title,
+            source: { kind: "link", url: material.url },
+            order,
+            uploadedBy: unitTeacherId,
+          });
+          bump("activityResources");
+        }
       }
     }
   }
