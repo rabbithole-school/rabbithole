@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "661cb79c1a27258d29ec9ceb20a3dff99b01f19e",
+  "sourceCommit": "ffcf8014b556196c28bcc5b63b6e7d978ef96ebb",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -5145,6 +5145,11 @@
     {
       "path": "convex/__tests__/designerSteering.test.ts",
       "sha256": "5d05b5a74b4d8195bb7066ffe05fdc283e6dffc1510299f28899b73a7a7db299",
+      "mode": "100644"
+    },
+    {
+      "path": "convex/__tests__/devInstitutionsMemberships.test.ts",
+      "sha256": "0984ae9e1fe32804641344a04bf2482f80d9d83b659e853ea8e4d615b791431c",
       "mode": "100644"
     },
     {
@@ -10984,7 +10989,7 @@
     },
     {
       "path": "convex/seed/institutions.ts",
-      "sha256": "405d38b8014c1cd78c0ebec1de665d771eb963b57b17b6a92d7592c2cf1482c9",
+      "sha256": "d1edb7a7d7ff481f39ce6f78eab0294f39270a5eea3cb777fc290b7d07bbb06f",
       "mode": "100644"
     },
     {
@@ -14996,6 +15001,36 @@
       "path": "lib/voicePerf.ts",
       "sha256": "7153ce3a464f339648c0e06927da880f4149027a747db8d378a40cb80e64b542",
       "mode": "100644"
+    },
+    {
+      "path": "local/.gitignore",
+      "sha256": "07f1dd99a91cb1349496e454099c9831c60ad88125e66d76ded8c76245d21348",
+      "mode": "100644"
+    },
+    {
+      "path": "local/auth-keys.mjs",
+      "sha256": "b3582ddf34255cfe360b100d995fd50d0011f0fa79dd3a467437f1cf8630aa35",
+      "mode": "100644"
+    },
+    {
+      "path": "local/lib.sh",
+      "sha256": "5547a2e39ad636cf6116425d029c06906c70301a015fde74f7266c116ceda2da",
+      "mode": "100755"
+    },
+    {
+      "path": "local/setup.sh",
+      "sha256": "ec106ac5ca78f80111811742cb58163047d38993d675f6a6116587c1acdcff14",
+      "mode": "100755"
+    },
+    {
+      "path": "local/status.sh",
+      "sha256": "a4fb9f84dc842df5a39fb0c976c78c606a9feea6d3687c093283ce886cfc26fa",
+      "mode": "100755"
+    },
+    {
+      "path": "local/stop.sh",
+      "sha256": "47e2f9e16dd5427e09841f9dd806cf098f3cc70aab08a410443e01c8e9462129",
+      "mode": "100755"
     },
     {
       "path": "native/.gitignore",
@@ -21258,5 +21293,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "288bf68c49c04045923f6c63ef86951f3e959a86377aa0e97b341e5a96a461af"
+  "treeHash": "cc4504d2f78b0fb66c324e17c46edd0b44699df712c545859254a22024ca5f80"
 }
