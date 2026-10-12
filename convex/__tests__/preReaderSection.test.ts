@@ -1,8 +1,10 @@
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
+import { beginnerAlphabet } from "../../shared/beginnerReading";
 import { internal } from "../_generated/api";
 import {
+  buildBeginnerReaderSection,
   buildEarlyReaderSection,
   buildGenericReadingLevelSection,
   buildLevelsSection,
@@ -39,7 +41,14 @@ const sections = (
   youngReaderTurnRules: boolean,
   listenerDelivery: boolean,
   writeByVoice = false,
-) => ({ register, youngReaderTurnRules, listenerDelivery, writeByVoice });
+  beginnerDelivery = false,
+) => ({
+  register,
+  youngReaderTurnRules,
+  listenerDelivery,
+  beginnerDelivery,
+  writeByVoice,
+});
 
 describe("selectLevelSections", () => {
   test("talk 7 + listener → grade-7 register, turn rules, listener delivery", () => {
@@ -48,10 +57,10 @@ describe("selectLevelSections", () => {
     ).toEqual(sections("generic", true, true));
   });
 
-  test("talk 7 + beginner → grade-7 register plus the turn rules, no voice delivery", () => {
+  test("talk 7 + beginner → grade-7 register, the turn rules, beginner delivery (TRA-504)", () => {
     expect(
       selectLevelSections({ talk: "7", read: "beginner", write: "own" }),
-    ).toEqual(sections("generic", true, false));
+    ).toEqual(sections("generic", true, false, false, true));
   });
 
   test("talk 7 + reader → the grade-7 register alone", () => {
@@ -159,7 +168,9 @@ describe("buildLevelsSection", () => {
         buildWriteByVoiceSection(),
     );
     expect(buildLevelsSection({ talk: "7", read: "beginner", write: "own" })).toBe(
-      buildGenericReadingLevelSection("7") + buildYoungReaderTurnRules(),
+      buildGenericReadingLevelSection("7") +
+        buildYoungReaderTurnRules() +
+        buildBeginnerReaderSection(beginnerAlphabet([])),
     );
     expect(buildLevelsSection({ talk: "K", read: "listener", write: "own" })).toBe(
       buildPreReaderSection() + buildYoungReaderTurnRules(),

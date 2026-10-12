@@ -432,6 +432,8 @@ export type TutorPromptContext = {
   /** READ level and WRITE mode (TRA-503). Optional for offline callers. */
   readLevel?: ReadLevel;
   writeMode?: WriteMode;
+  /** Grapheme-inventory teams for a `beginner`'s your-turn line (TRA-504). */
+  beginnerTeams?: string[];
   scholarName: string | null;
   sessionMode?: "conversation" | "workbench" | "vibecode" | null;
   vibecodeStarterUsedAt?: number | null;
@@ -618,7 +620,11 @@ export function buildTutorSystemPromptParts(ctx: TutorPromptContext): {
     ctx.callerIsSessionOwner ?? true,
     ctx.freePlay ?? false,
     ctx.readLevel
-      ? { read: ctx.readLevel, write: ctx.writeMode ?? "own" }
+      ? {
+          read: ctx.readLevel,
+          write: ctx.writeMode ?? "own",
+          beginnerTeams: ctx.beginnerTeams ?? [],
+        }
       : null,
   );
 }

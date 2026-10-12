@@ -38,6 +38,15 @@
  * the old one's voice; the recording bar's ✕ cancels a take. Leaving the app,
  * leaving the session, or switching sessions stops both.
  *
+ * Beginner readers (read `beginner`, TRA-504) use the same loop with
+ * `autoListen: false`: replies are read to them by default, but the mic does
+ * NOT reopen on its own — a beginner is often looking at the words, tapping one
+ * to hear it, or reading their "your turn" line, and an open mic would record
+ * that. They talk back with the ordinary tap-to-talk mic (their WRITE mode
+ * decides how hard the tutor leans on it). A reply's `<your-turn>` line is
+ * never spoken in either mode (shared/beginnerReading YourTurnSpeechFilter):
+ * the child reads it.
+ *
  * The stream callbacks (`onReplyStart` / `onReplyText` / `onReplyDone` /
  * `onReplyEnd`) are called from the screen's SSE handler; everything else is
  * owned here so the 3k-line session screen only threads four calls through.
@@ -59,6 +68,12 @@ import {
   SentenceAccumulator,
   stripMarkdownForSpeech,
 } from "../../vendor/shared/sentenceStream";
+import {
+  checkDecodable,
+  YourTurnSpeechFilter,
+  yourTurnCue,
+  type DecodableAlphabet,
+} from "../../vendor/shared/beginnerReading";
 
 const KEEP_AWAKE_TAG = "rh-pre-reader-voice";
 
@@ -68,6 +83,13 @@ export function usePreReaderVoice(opts: {
   enabled: boolean;
   /** Speech-to-text isn't teacher-disabled (web: `sttEnabled`). */
   sttEnabled: boolean;
+  /** Reopen the mic hands-free after each spoken reply — `listener` only. A
+   *  `beginner` is read to but answers with the tap-to-talk mic. */
+  autoListen: boolean;
+  /** A beginner's alphabet: when a reply ends with a your-turn line the card
+   *  will show (it decodes with these letters), the voice ends with a short
+   *  cue pointing at it ("Your turn! …"). Null: no cue (listener). */
+  yourTurnAlphabet: DecodableAlphabet | null;
   /** Open the mic in latched (VAD auto-stop) mode. */
   startListening: () => void;
   /** Drop any open take without sending it. */
@@ -95,6 +117,7 @@ export function usePreReaderVoice(opts: {
 
   const voiceModeRef = useRef(false);
   const accRef = useRef(new SentenceAccumulator());
+  const turnFilterRef = useRef(new YourTurnSpeechFilter());
   const replyOpenRef = useRef(false);
   /** This session screen has focus — a backgrounded/covered screen's stream
    *  may still be delivering text, and it must not speak. */
@@ -102,12 +125,16 @@ export function usePreReaderVoice(opts: {
   const cueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const defaultAppliedForRef = useRef<string | null>(null);
   const sttEnabledRef = useRef(sttEnabled);
+  const autoListenRef = useRef(opts.autoListen);
+  const alphabetRef = useRef(opts.yourTurnAlphabet);
   const startRef = useRef(opts.startListening);
   const cancelRef = useRef(opts.cancelListening);
   const lastTutorTextRef = useRef(opts.lastTutorText);
   // Latest values for the engine/AppState/timer callbacks, synced after commit.
   useEffect(() => {
     sttEnabledRef.current = sttEnabled;
+    autoListenRef.current = opts.autoListen;
+    alphabetRef.current = opts.yourTurnAlphabet;
     startRef.current = opts.startListening;
     cancelRef.current = opts.cancelListening;
     lastTutorTextRef.current = opts.lastTutorText;
@@ -149,6 +176,7 @@ export function usePreReaderVoice(opts: {
    *  ended — the gate only opens for the voice loop's own. */
   const listenAfterCue = useCallback(
     (drainedSource: SpeechSource | null) => {
+      if (!autoListenRef.current) return; // beginner: read to, not listened to
       if (!canListenNow(drainedSource)) return;
       getNativeTTS().playListeningCue();
       clearCueTimer();
@@ -263,6 +291,7 @@ export function usePreReaderVoice(opts: {
    *  off — its sentences never play after the new one starts. */
   const onReplyStart = useCallback(() => {
     accRef.current = new SentenceAccumulator();
+    turnFilterRef.current = new YourTurnSpeechFilter();
     replyOpenRef.current = true;
     clearCueTimer();
     if (voiceModeRef.current) getNativeTTS().cancelSource("voice");
@@ -272,7 +301,9 @@ export function usePreReaderVoice(opts: {
   const onReplyText = useCallback((delta: string) => {
     if (!voiceModeRef.current || !focusedRef.current) return;
     const tts = getNativeTTS();
-    for (const s of accRef.current.push(delta)) {
+    // The child's own "your turn" line never goes to the voice.
+    const speakable = turnFilterRef.current.push(delta);
+    for (const s of accRef.current.push(speakable)) {
       tts.enqueue(stripMarkdownForSpeech(s), "voice");
     }
   }, []);
@@ -283,10 +314,21 @@ export function usePreReaderVoice(opts: {
     replyOpenRef.current = false;
     if (!voiceModeRef.current || !focusedRef.current) return;
     const tts = getNativeTTS();
+    const filter = turnFilterRef.current;
+    const tail = accRef.current.push(filter.flush());
+    for (const s of tail) tts.enqueue(stripMarkdownForSpeech(s), "voice");
     const rest = accRef.current.flush();
-    if (rest) {
-      tts.enqueue(stripMarkdownForSpeech(rest), "voice");
-    } else if (tts.state === "idle") {
+    if (rest) tts.enqueue(stripMarkdownForSpeech(rest), "voice");
+    // The line itself is never spoken; a short cue points the child at it —
+    // only when the card will actually show it (it decodes for them).
+    const line = filter.lines[filter.lines.length - 1];
+    const alphabet = alphabetRef.current;
+    const cue =
+      line && alphabet && checkDecodable(line, alphabet).ok
+        ? yourTurnCue(line)
+        : null;
+    if (cue) tts.enqueue(cue, "voice");
+    if (!rest && !cue && tail.length === 0 && tts.state === "idle") {
       maybeAutoListen(tts.lastDrainedSource);
     }
   }, [maybeAutoListen]);

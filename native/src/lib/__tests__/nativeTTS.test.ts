@@ -29,6 +29,16 @@ const hoisted = vi.hoisted(() => {
       this.cb = cb;
       return { remove() {} };
     }
+    /** Simulate a clock tick from the player. */
+    tick(currentTime: number, duration: number) {
+      (this.cb as unknown as (s: object) => void)?.({
+        playing: true,
+        didJustFinish: false,
+        isLoaded: true,
+        currentTime,
+        duration,
+      });
+    }
     /** Simulate playback reaching the end. */
     finish() {
       this.cb?.({ playing: false, didJustFinish: true });
@@ -312,5 +322,73 @@ describe("NativeTTSEngine sentence queue (pre-reader voice mode)", () => {
     await flush();
     expect(engine.state).toBe("paused");
     expect(onIdle).not.toHaveBeenCalled();
+  });
+});
+
+describe("NativeTTSEngine playback position (beginner word highlight)", () => {
+  it("reports the utterance and the player's clock, and clears when done", async () => {
+    const engine = getNativeTTS();
+    const seen = vi.fn();
+    const unsub = engine.subscribePlayback(seen);
+    await speakAndSettle("Can a pig dig?");
+    hoisted.state.last?.tick(0.4, 1.6);
+    expect(engine.playback).toEqual({
+      text: "Can a pig dig?",
+      currentTime: 0.4,
+      duration: 1.6,
+    });
+    expect(seen).toHaveBeenCalled();
+    hoisted.state.last?.finish();
+    expect(engine.playback).toBeNull();
+    unsub();
+  });
+
+  it("asks the player for frequent status updates", async () => {
+    const { createAudioPlayer } = await import("expo-audio");
+    await speakAndSettle("Fast clock.");
+    expect(vi.mocked(createAudioPlayer).mock.calls.at(-1)?.[1]).toEqual({
+      updateInterval: 50,
+    });
+  });
+});
+
+describe("NativeTTSEngine.interject (a tapped word mid-reply)", () => {
+  afterEach(() => {
+    getNativeTTS().onIdle = null;
+  });
+
+  it("pauses the reply, plays the word, then carries the reply on", async () => {
+    const engine = getNativeTTS();
+    const onIdle = vi.fn();
+    engine.onIdle = onIdle;
+    engine.enqueue("First sentence here.");
+    engine.enqueue("Second sentence here.");
+    await flush();
+    const sentence = hoisted.state.last!;
+    expect(sentence.playing).toBe(true);
+
+    await engine.interject("pig");
+    const word = hoisted.state.last!;
+    expect(word).not.toBe(sentence);
+    expect(sentence.playing).toBe(false); // paused, not dropped
+    expect(word.playing).toBe(true);
+
+    word.finish();
+    expect(sentence.playing).toBe(true); // resumed where it stopped
+    expect(engine.currentText).toBe("First sentence here.");
+
+    sentence.finish();
+    await flush();
+    expect(engine.currentText).toBe("Second sentence here."); // queue intact
+    hoisted.state.last!.finish();
+    await flush();
+    expect(onIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it("is an ordinary speak when nothing is playing", async () => {
+    const engine = getNativeTTS();
+    await engine.interject("dig");
+    expect(engine.state).toBe("speaking");
+    expect(engine.currentText).toBe("dig");
   });
 });

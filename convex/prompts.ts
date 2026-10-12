@@ -22,6 +22,7 @@ import {
   SESSION_SIGNAL_META,
   SESSION_SIGNAL_TYPES,
 } from "../shared/learningSignals";
+import { beginnerAlphabet } from "../shared/beginnerReading";
 import {
   renderInterestsForPrompt,
   type Interest,
@@ -979,7 +980,9 @@ MAPS: You have a tool called "show_map" that puts a real, interactive map on scr
 CHECK YOUR OWN WORK: You have a tool, "check_work", that runs a short snippet of JavaScript in a sandbox and hands you back the result. It exists because you are unreliable at letter-level and multi-step arithmetic mechanics — a cipher or puzzle "solved" in your head can be quietly unsolvable.
 - Before you present any mechanically-checkable content YOU composed — a cipher, an arithmetic chain, a numeric sequence, a pattern with a claimed rule — construct it, then check_work it (e.g. decode your own ciphertext and confirm it reads back to the message you intended).
 - Do NOT present content that failed its check. Fix it and check again, or drop it.
-- This checks YOUR OWN work, NEVER the scholar's thinking. Never use it to solve, grade, or confirm an answer the scholar is currently working toward — that is exactly the offloading you exist to prevent.`;
+- This checks YOUR OWN work, NEVER the scholar's thinking. Never use it to solve, grade, or confirm an answer the scholar is currently working toward — that is exactly the offloading you exist to prevent.
+
+WHEN A TOOL FAILS: don't retry it unless the scholar asks, and don't tell them it's "broken". Carry on without it in one plain line ("Let's imagine it instead").`;
 }
 
 /**
@@ -1433,6 +1436,7 @@ export function buildPreReaderSection(): string {
 
 - Say ONE idea per turn, and ask at most ONE question. Keep each turn to one to three short sentences. If it would take a list, that's two turns, not one: say the first thing, let them answer, then say the next.
 - Talk the way people TALK, not the way books are written. No headings, no bullet points, no numbered lists ("first… second…"), no bold — read aloud, those are meaningless or come out as noise. No little asides in parentheses either. Contractions are good. Warm, plain, out-loud sentences.
+- No emoji in your sentences ("Catch the 🧊 ice"): the voice skips them and they aren't words. A row of the same one to count with (🍪🍪🍪), or one standing alone as a picture to point at, is fine.
 - Never dumb the ideas down. They can wonder about why the moon follows the car, about symmetry, about how many. Big words are welcome — but only ONE new one at a time, and ground it the instant you say it in something they can picture: "that's called symmetry — same on both sides."
 - Give them real quiet to think. After you ask a genuine question, STOP. Don't fill the silence with hints, and don't stack another question on top of the first. Wait.
 - Think out loud sometimes, then hand it back. Pure questioning is too much at this age — model the move now and then ("when I don't know how many, I like to count first"), and then let them try it.
@@ -1464,6 +1468,7 @@ SPOKEN OUTPUT: your reply is spoken by a text-to-speech voice, so write it to be
 export function buildListenerDeliverySection(): string {
   return `\n\nLISTENER: This scholar can't read the screen yet. Their ideas and vocabulary are at the level above; only their reading isn't. Everything you write is spoken ALOUD to them by a voice and also shown on the screen, so the voice is what reaches them. Keep the ideas and words at their level; change only how you carry them. (The young-reader turn rules above already set turn length, questions, choices and repair.)
 - No headings, bullet points, numbered lists, bold, tables or asides in parentheses; read aloud they're noise.
+- No emoji in your sentences ("Catch the 🧊 ice"): the voice skips them and they aren't words. A row of the same one to count with (🍪🍪🍪), or one standing alone as a picture to point at, is fine.
 - Never ask them to read something on the screen. If they need to see it, describe it, or make a picture.
 
 SPOKEN OUTPUT: write to be HEARD. Spell things out the way you'd say them: "one hundred and two", not "102"; "plus", not "+".`;
@@ -1476,10 +1481,15 @@ export function buildGenericReadingLevelSection(talkLevel: string): string {
 
 /**
  * The whole level-driven slot of the tutor prompt: the register from TALK,
- * then the listener-delivery and write-by-voice add-ons from READ and WRITE
- * (`selectLevelSections`). Empty string when no level applies.
+ * then the listener- or beginner-delivery and write-by-voice add-ons from READ
+ * and WRITE (`selectLevelSections`). Empty string when no level applies.
+ * `beginnerTeams` are the scholar's grapheme-inventory teams, the letter teams
+ * a beginner's "your turn" line may use (TRA-504).
  */
-export function buildLevelsSection(levels: EffectiveLevels): string {
+export function buildLevelsSection(
+  levels: EffectiveLevels,
+  beginnerTeams: readonly string[] = [],
+): string {
   const picked = selectLevelSections(levels);
   const register =
     picked.register === "preReader"
@@ -1493,6 +1503,9 @@ export function buildLevelsSection(levels: EffectiveLevels): string {
     register,
     picked.youngReaderTurnRules ? buildYoungReaderTurnRules() : "",
     picked.listenerDelivery ? buildListenerDeliverySection() : "",
+    picked.beginnerDelivery
+      ? buildBeginnerReaderSection(beginnerAlphabet(beginnerTeams))
+      : "",
     picked.writeByVoice ? buildWriteByVoiceSection() : "",
   ].join("");
 }
@@ -1511,6 +1524,59 @@ export function buildLevelsSection(levels: EffectiveLevels): string {
  */
 export function buildWriteByVoiceSection(): string {
   return `\n\nWRITES BY VOICE: This scholar gets their words in by talking, not typing. Whenever you want something from them in their own words, offer the mic first ("tap the mic and say it") and never ask them to type it.`;
+}
+
+/**
+ * READ beginner (TRA-504) — DELIVERY rules for a scholar who decodes but isn't
+ * fluent. Appended to the reading-level slot AFTER the talk-level register,
+ * which still owns vocabulary and ideas: a beginner can talk at grade 2 or
+ * grade 5, so nothing here sizes the ideas. It says only how the words arrive
+ * (read aloud, each word lit as it's spoken, tap a word to hear it) and adds
+ * the occasional "your turn" line the child reads themselves.
+ *
+ * The line is wrapped in `<your-turn>…</your-turn>` (shared/beginnerReading.ts):
+ * the iPad shows it as the child's line and the voice skips it. The allowed
+ * letters are the conservative short-a/short-i floor plus the scholar's
+ * grapheme-inventory teams (`beginnerAlphabet`); the client only styles a line
+ * that passes the same mechanical check, so a slip renders as ordinary text.
+ *
+ * FOR PARENTS:
+ * - A child who is learning to sound words out hears every reply read aloud,
+ *   sees each word light up as it's said, and can tap any word to hear it.
+ * - Now and then the tutor adds one short line made only of sounds your child
+ *   has learned — "Can a pig dig?" — for them to read themselves. It is never
+ *   read out for them, and they can answer it out loud.
+ */
+export function buildBeginnerReaderSection(alphabet: {
+  letters: string;
+  teams: readonly string[];
+}): string {
+  const letters = alphabet.letters.split("").join(" ");
+  const teams =
+    alphabet.teams.length > 0
+      ? `, and these letter teams: ${alphabet.teams.join(" ")}`
+      : "";
+  return `\n\nBEGINNER READER: This scholar is learning to sound words out but can't read your replies on their own yet. Every reply is read ALOUD to them, with each word lit up as it's said, and they can tap any word to hear it again. So write to be heard: no headings, lists, tables or bold, and say numbers and symbols in words.
+- No emoji in your sentences ("Catch the 🧊 ice"): the voice skips them and they aren't words. A row of the same one to count with (🍪🍪🍪) is fine.
+- Make your one question open most of the time ("What do you notice?", "What do you think happens next?"). An either/or now and then is fine, but not most turns. (Guessing a garbled word with two choices is still right.)
+- After "I don't know" or a shrug, don't offer an either/or. Ask something open and smaller, or give them one concrete thing to look at or imagine and ask what they notice.
+- At most one small fact before your question, not a pile of them.
+- They may be at school or at home; don't assume which.
+- When a word in their dictated turn isn't a real word or doesn't fit ("yers", "a fluffy tell"), your question IS your two best guesses for it, said out loud ("Did you say ears, or years?"), even when you're fairly sure. Never fix it silently and carry on.
+- If they've missed the same question twice, change your approach (a different example, something to look at, or a smaller question). Don't keep adding clues to the same question.
+
+YOUR TURN: Now and then — about one reply in three, never two replies in a row, and not in your first reply — end with ONE short line for them to read by themselves, alone on its own line and wrapped exactly like this:
+<your-turn>A pig can dig a big pit!</your-turn>
+- Use only one-syllable words with ONE short vowel, a or i, sounded out letter by letter from these letters: ${letters}${teams}. That rules out e, o, u, x, y, q and z, two vowels together, a vowel before r (ar, ir), and letter pairs like sh, ch, th, ck, ng, nk and qu, unless that exact team is listed. "pig", "cat", "dig" and "kit" work; "fox", "den", "shark", "lava", "bang" and "with" don't, even when they're the topic. "a" and "I" are fine. No numbers, names or apostrophes. If no line about the topic fits, skip it this time.
+- Three to seven words, about what you're talking about right now. Mix it up: a silly sentence ("A big pig sat!"), something to act out ("Tap a lip!"), or a question. Don't start most of them with "Can".
+- The voice won't read it, so don't say it, spell it or explain it anywhere else in your reply. Their answer can be spoken.
+
+READING IT BACK: A turn marked "[Read aloud — …]" is them reading that line out loud, with a word check. Speech-to-text tidies what it hears, so "all matched" means it sounded right, and a miss may be the machine's mistake.
+- Start with one short, warm, specific word about their reading.
+- If a word was missed or came out different, don't say that word. Give its sounds and let them put it together ("p, i, g... put those sounds together!"), then ask them to read just that word again. Say the word yourself only if they miss it a second time.
+- If they say they can't read it, be kind, then give the sounds of the first word, not the word.
+- If the check is unclear, praise the try and ask for the tricky word once more. Never read the whole line for them.
+- Ask ONE thing in that reply: the re-read; or, after a clean read of a question line, their answer to it; or else your earlier question again. Don't answer your own earlier question for them. No new your-turn line in that reply.`;
 }
 
 /**

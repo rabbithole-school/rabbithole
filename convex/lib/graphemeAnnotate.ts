@@ -145,10 +145,11 @@ export function normalizeInventoryTeams(
  * The pre-stream decision: should this turn's tutor text be grapheme-annotated
  * for this reader? True iff BOTH hold:
  *   • the session's READ level is `listener` (TRA-503 — the former pre-reader
- *     tier; `beginner` joins in TRA-504), AND
+ *     tier) or `beginner` (TRA-504 — where the teacher-edited inventory first
+ *     reaches a child who is decoding), AND
  *   • the scholar's inventory has ≥1 team not yet `graduated`.
- * Everyone else — every other read level, and a listener who has graduated
- * every team — gets no annotation and no model call. Pure + total so the
+ * Everyone else — a `reader`, and a scholar who has graduated every team —
+ * gets no annotation and no model call. Pure + total so the
  * streaming hook can gate on it without a DB read of its own.
  *
  * `level` is a read level; a talk-field string is also accepted so a legacy
@@ -159,7 +160,7 @@ export function shouldAnnotateGraphemes(
   teams: GraphemeInventoryTeam[],
 ): boolean {
   const read = isReadLevel(level) ? level : readLevelOf({ readingLevel: level });
-  if (read !== "listener") return false;
+  if (read !== "listener" && read !== "beginner") return false;
   return nonGraduatedTeams(teams).length > 0;
 }
 

@@ -48,6 +48,16 @@ async function ensureAudioMode(): Promise<void> {
   audioModeReady = true;
 }
 
+/** The player's status interval: often enough for a word highlight. */
+const PLAYBACK_UPDATE_MS = 50;
+
+/** The utterance playing now and the player's clock, in seconds. */
+export type PlaybackPosition = {
+  text: string;
+  currentTime: number;
+  duration: number;
+};
+
 /** How many queued sentences fetch ahead of the one playing (web parity). */
 const FETCH_LOOKAHEAD = 2;
 
@@ -92,6 +102,14 @@ class NativeTTSEngine {
    * reply was still streaming) ask afterwards whose audio finished.
    */
   lastDrainedSource: SpeechSource | null = null;
+  /**
+   * Where the utterance playing now is: its raw text and the player's clock.
+   * Beginner-reader mode (TRA-504) lights the word being said from this — the
+   * `/tts` voice returns no word timings, so the word is estimated from the
+   * clock (shared/beginnerReading `spokenWordInMessage`). Null when idle or
+   * before playback starts. Subscribe with `subscribePlayback`.
+   */
+  playback: PlaybackPosition | null = null;
 
   private player: AudioPlayer | null = null;
   private sub: { remove: () => void } | null = null;
@@ -102,6 +120,18 @@ class NativeTTSEngine {
   /** A queue item is loading or playing (so enqueue() must not start another). */
   private active = false;
   private listeners = new Set<(s: TTSState) => void>();
+  private playbackListeners = new Set<() => void>();
+
+  subscribePlayback(fn: () => void): () => void {
+    this.playbackListeners.add(fn);
+    return () => this.playbackListeners.delete(fn);
+  }
+
+  private setPlayback(p: PlaybackPosition | null): void {
+    if (p === null && this.playback === null) return;
+    this.playback = p;
+    this.playbackListeners.forEach((fn) => fn());
+  }
 
   subscribe(fn: (s: TTSState) => void): () => void {
     this.listeners.add(fn);
@@ -127,9 +157,11 @@ class NativeTTSEngine {
       // player already removed
     }
     this.player = null;
+    this.setPlayback(null);
   }
 
   stop(): void {
+    this.finishWord(false);
     this.generation++; // invalidate any in-flight fetch / queued playback
     this.queue = [];
     this.active = false;
@@ -264,6 +296,85 @@ class NativeTTSEngine {
    * a NATURAL drain → idle + onIdle. Every await re-checks the generation so a
    * stop()/speak() mid-flight unwinds silently.
    */
+  /** A tapped word is playing in a gap in the queue (see `interject`). */
+  private interjecting = false;
+  /** A queued item became ready while a word played; start it after. */
+  private resumeAfterWord = false;
+  private wordPlayer: AudioPlayer | null = null;
+  /** Bumped per tapped word, so a slow fetch can't play after a newer tap. */
+  private wordGen = 0;
+
+  /**
+   * Play one short text (a tapped word, TRA-504) WITHOUT losing the queue: if
+   * a reply is being read, it pauses at that point, the word plays, and the
+   * reply carries on from where it stopped. Idle, it's an ordinary `speak`.
+   * While the word plays, `playback` reports the word, so its bubble can light
+   * it.
+   */
+  async interject(rawText: string): Promise<void> {
+    const text = prepareSpeech(rawText);
+    if (!text) return;
+    if (this.state === "idle") return this.speak(rawText);
+    const wasSpeaking = this.state === "speaking";
+    if (wasSpeaking) {
+      try {
+        this.player?.pause();
+      } catch {
+        // player already gone
+      }
+    }
+    // A word tapped during another word replaces it.
+    const keepResume = this.resumeAfterWord;
+    this.finishWord(false);
+    const myGen = ++this.wordGen;
+    this.interjecting = true;
+    this.resumeAfterWord = wasSpeaking || keepResume;
+    const uri = await this.loadFile(text);
+    if (myGen !== this.wordGen || !this.interjecting) return; // superseded
+    if (!uri) {
+      this.finishWord(true);
+      return;
+    }
+    try {
+      const word = createAudioPlayer({ uri }, { updateInterval: PLAYBACK_UPDATE_MS });
+      this.wordPlayer = word;
+      word.addListener("playbackStatusUpdate", (status) => {
+        if (this.wordPlayer !== word || myGen !== this.wordGen) return;
+        if (status.isLoaded && status.duration > 0) {
+          this.setPlayback({
+            text: rawText,
+            currentTime: status.currentTime,
+            duration: status.duration,
+          });
+        }
+        if (status.didJustFinish) this.finishWord(true);
+      });
+      word.play();
+    } catch {
+      this.finishWord(true);
+    }
+  }
+
+  /** End a tapped word; with `resume`, carry the reply on where it paused. */
+  private finishWord(resume: boolean): void {
+    if (!this.interjecting) return;
+    this.interjecting = false;
+    try {
+      this.wordPlayer?.remove();
+    } catch {
+      // already gone
+    }
+    this.wordPlayer = null;
+    if (resume && this.resumeAfterWord && this.player && this.state !== "paused") {
+      try {
+        this.player.play();
+      } catch {
+        // player already gone
+      }
+    }
+    this.resumeAfterWord = false;
+  }
+
   private async playNext(gen: number): Promise<void> {
     if (gen !== this.generation) return;
     this.teardownPlayer();
@@ -292,15 +403,26 @@ class NativeTTSEngine {
       return;
     }
     try {
-      const player = createAudioPlayer({ uri });
+      // Frequent status updates so a highlighted word keeps pace with speech.
+      const player = createAudioPlayer({ uri }, { updateInterval: PLAYBACK_UPDATE_MS });
       this.player = player;
       this.sub = player.addListener("playbackStatusUpdate", (status) => {
         if (gen !== this.generation || this.player !== player) return;
         if (status.playing) voiceMark("firstAudio");
+        // While a tapped word plays, the paused reply doesn't own `playback`.
+        if (status.isLoaded && status.duration > 0 && !this.interjecting) {
+          this.setPlayback({
+            text: item.display,
+            currentTime: status.currentTime,
+            duration: status.duration,
+          });
+        }
         if (status.didJustFinish) void this.playNext(gen);
       });
       this.setState("speaking");
-      player.play();
+      // A tapped word is playing: hold this sentence until it's done.
+      if (this.interjecting) this.resumeAfterWord = true;
+      else player.play();
     } catch {
       // A player that can't start fails silently, not by crashing the screen.
       if (gen === this.generation) this.stop();
@@ -337,6 +459,19 @@ function releaseOwner(token: symbol): void {
     ownerToken = null;
     notifyOwner();
   }
+}
+
+/**
+ * Speak a text no SpeakableLabel/SpeakableBubble owns — a beginner's tapped
+ * word (TRA-504). Drops any label's ownership first, so the bubble the word
+ * sits in doesn't show its own loading/speaking state for the word.
+ */
+export function speakUnowned(text: string): Promise<void> {
+  if (ownerToken) {
+    ownerToken = null;
+    notifyOwner();
+  }
+  return getNativeTTS().interject(text);
 }
 
 /**

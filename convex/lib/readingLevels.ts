@@ -438,6 +438,8 @@ export interface LevelSections {
   youngReaderTurnRules: boolean;
   /** Spoken-delivery rules for a listener whose register doesn't carry them. */
   listenerDelivery: boolean;
+  /** Read-along delivery + the "your turn" line for a beginner (TRA-504). */
+  beginnerDelivery: boolean;
   writeByVoice: boolean;
 }
 
@@ -456,6 +458,7 @@ export function selectLevelSections(levels: EffectiveLevels): LevelSections {
     register,
     youngReaderTurnRules: needsYoungReaderTurnRules(levels),
     listenerDelivery: listener && register !== "preReader",
+    beginnerDelivery: levels.read === "beginner",
     writeByVoice: levels.write === "voice",
   };
 }

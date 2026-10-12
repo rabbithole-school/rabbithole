@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useAuthToken } from "@convex-dev/auth/react";
 import { toaster } from "@/lib/toaster";
-import { LLM_BUSY_MESSAGE } from "@/shared/llmLimiter";
+import { busyRetryCopy, LLM_BUSY_MESSAGE } from "@/shared/llmLimiter";
 import type { ToolActivity, ThinkingActivity } from "@/lib/toolActivityGroups";
 import { reduceThinkingStreamState } from "@/lib/thinkingStreamState";
 
@@ -285,7 +285,7 @@ export function StreamRegistryProvider({ children }: { children: React.ReactNode
                 toaster.error({
                   title: isBusy ? "Just a moment" : "AI error",
                   description: isBusy
-                    ? data.error
+                    ? busyRetryCopy(null)
                     : "Something went wrong. Please try again.",
                 });
               }

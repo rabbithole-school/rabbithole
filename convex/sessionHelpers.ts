@@ -80,6 +80,7 @@ import {
 } from "./lib/readingLevels";
 import {
   nonGraduatedTeams,
+  normalizeTeams,
   shouldAnnotateGraphemes,
 } from "./lib/graphemeAnnotate";
 import { MAX_APP_ASSETS } from "../shared/appAssets";
@@ -816,6 +817,10 @@ export const getSessionContext = internalQuery({
         // `observerShared.groundAlertExcerpt`.
         ...(m.role === "user" && m.inputModality
           ? { inputModality: m.inputModality }
+          : {}),
+        // A beginner's read-aloud of their "your turn" line (TRA-504).
+        ...(m.role === "user" && m.readAloudOf
+          ? { readAloudOf: m.readAloudOf }
           : {}),
       }));
     let latestInstructionCompletionIndex = -1;
@@ -1630,6 +1635,15 @@ export const getSessionContext = internalQuery({
       readingLevel,
       readLevel: levels.read,
       writeMode: levels.write,
+      // The letter teams a beginner's "your turn" line may use (TRA-504): the
+      // context scholar's grapheme inventory, every stage — a graduated team
+      // is one they read without help. None in a synthetic view.
+      beginnerTeams:
+        levels.read === "beginner" && !isSyntheticView
+          ? normalizeTeams(
+              (await readInventoryTeams(ctx, contextUserId)).map((t) => t.team),
+            )
+          : [],
       scholarName: resolvedScholarName,
       // Staff-only. Consumed by the OBSERVER (teacher-facing output) via
       // ObserverContext; buildSystemPrompt deliberately never injects it, so
@@ -2507,7 +2521,20 @@ function buildOwnIsUnitCoDesignSection(
   outline: OwnIsUnitOutlineLesson[],
   builtInChat: boolean,
   nextActivityTitle: string | null,
+  youngReader = false,
 ): string {
+  // A listener or beginner (TRA-504 playtest): the planning vocabulary is
+  // adult jargon to them, and a 6-year-old who said no to planning was asked
+  // again turn after turn. Appended to whichever variant renders below.
+  const youngReaderNote = youngReader
+    ? `
+
+FOR THIS YOUNG READER: never say "unit", "lesson", "activity" or
+"chapter" to them: it's "your quest" and its "parts". Offer to set
+the quest up at most once. If they say no or change the subject,
+drop the planning for the rest of this chat and just explore what
+they're curious about.`
+    : "";
   const header = `
 INDEPENDENT STUDY CO-DESIGN — YOU CAN BUILD THIS UNIT WITH THEM:
 
@@ -2559,7 +2586,7 @@ scholar's to use however they like:
      going — don't steer them back to the activities or repeat the
      offer unless they ask what to do next.
   3. Don't re-plan the unit as if nothing exists. To change or add to
-     it, propose it out loud, wait for a yes, then use the tools above.`;
+     it, propose it out loud, wait for a yes, then use the tools above.${youngReaderNote}`;
   }
 
   return `${header}${outlineText}
@@ -2592,10 +2619,15 @@ How co-design should go:
 Don't overwhelm. The kid is here to learn what THEY chose. Match
 their energy. If they want to dive into the topic instead of
 planning, that's fine too — but help them put something in place
-before you let the session end so they have a unit to come back to.`;
+before you let the session end so they have a unit to come back to.${youngReaderNote}`;
 }
 
-function buildUnitSection(unitContext: UnitContext | null): string | null {
+function buildUnitSection(
+  unitContext: UnitContext | null,
+  // A listener or beginner READ level (TRA-504): kid words for the quest
+  // co-design, and no repeated planning push.
+  youngReader = false,
+): string | null {
   if (!unitContext) return null;
   const lines: string[] = [`\n\nUNIT: "${unitContext.title}"`];
   if (unitContext.bigIdea) lines.push(`Big Idea: ${unitContext.bigIdea}`);
@@ -2621,6 +2653,7 @@ ${unitContext.videoTranscript}`);
         unitContext.ownIsUnitOutline ?? [],
         !!unitContext.ownIsUnitBuiltInChat,
         unitContext.ownIsUnitNextActivityTitle ?? null,
+        youngReader,
       ),
     );
   }
@@ -4075,7 +4108,13 @@ export function buildSystemPromptParts(
   // `resolveEffectiveLevels`. Omitted by positional/offline callers (evals),
   // which pass only a talk-field string: then read comes from that string
   // (a legacy "pre-reader" → listener) and write is "own".
-  readWrite: { read: ReadLevel; write: WriteMode } | null = null,
+  // `beginnerTeams` (TRA-504): the scholar's grapheme-inventory teams, the
+  // letter teams a `beginner`'s "your turn" line may use. Absent → none.
+  readWrite: {
+    read: ReadLevel;
+    write: WriteMode;
+    beginnerTeams?: readonly string[];
+  } | null = null,
 ): { stable: string; dynamic: string; turnContext: string } {
   const readLevel = readWrite?.read ?? readLevelOf({ readingLevel });
   const writeMode = readWrite?.write ?? "own";
@@ -4114,7 +4153,7 @@ export function buildSystemPromptParts(
         talk: talkLevel,
         read: readLevel,
         write: writeMode,
-      }) || null,
+      }, readWrite?.beginnerTeams ?? []) || null,
     // DEPRECATED (anti-parasocial): the PERSONA block is intentionally omitted —
     // the tutor must never be instructed to act as a character. The
     // `personaContext` param above is retained only for call-site signature
@@ -4122,7 +4161,7 @@ export function buildSystemPromptParts(
     perspective: perspectiveContext
       ? `\n\nPERSPECTIVE LENS: Guide the conversation through the "${perspectiveContext.title}" ${perspectiveContext.icon || ""} lens.${perspectiveContext.systemPrompt ? `\n${perspectiveContext.systemPrompt}` : ""}`
       : null,
-    unit: buildUnitSection(unitContext),
+    unit: buildUnitSection(unitContext, readLevel !== "reader"),
     lesson: buildLessonSection(lessonContext, !!lessonActivityContext),
     activity: buildActivitySection(lessonActivityContext),
     // Baseline evidence is read from the (finished) baseline conversation, so

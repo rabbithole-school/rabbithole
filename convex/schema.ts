@@ -2190,6 +2190,11 @@ export default defineSchema({
     // How this user turn entered the composer. Optional preserves historical
     // rows and messages sent by older native clients during rollout.
     inputModality: v.optional(inputModalityValidator),
+    // Beginner reader (TRA-504): this spoken turn is the scholar READING ALOUD
+    // the "your turn" line of the reply before it, started from the line's own
+    // mic. Holds that line (copied server-side from the previous tutor reply,
+    // never from the client) so the tutor can check the reading word by word.
+    readAloudOf: v.optional(v.string()),
     // App designer (TRA-301): which of the session's two threads this turn
     // belongs to. Edit talks to the DESIGNER (code tools, versions); Play talks
     // to the TUTOR (no code tools, never a version). Stamped server-side from

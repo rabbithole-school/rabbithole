@@ -1481,13 +1481,15 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                 })()}
               </Surface>
             )}
-            {/* Reading-ramp grapheme inventory — read level listener only
-                (§10; beginner joins in TRA-504). The per-team fade editor lives
-                next to the levels because it's the same "how does this scholar
-                read?" region. */}
+            {/* Reading-ramp grapheme inventory — read level listener or
+                beginner (§10; TRA-504: a beginner's "your turn" line is built
+                from these teams too). The per-team fade editor lives next to
+                the levels because it's the same "how does this scholar read?"
+                region. */}
             {progressSection === "reading" &&
               !isOperationsMode &&
-              scholar?.readLevel === "listener" && (
+              (scholar?.readLevel === "listener" ||
+                scholar?.readLevel === "beginner") && (
                 <GraphemeInventoryEditor scholarId={scholarId as Id<"users">} />
               )}
               </Box>

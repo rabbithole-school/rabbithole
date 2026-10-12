@@ -82,6 +82,12 @@ import { inputModalityValidator } from "./lib/inputModality";
 import { markSeedMomentFollowed } from "./lib/moments/seedMomentLedger";
 import { rubricStarsEarned } from "../shared/rubricScore";
 import {
+  beginnerAlphabet,
+  checkDecodable,
+  lastYourTurnLine,
+} from "../shared/beginnerReading";
+import { readInventoryTeams } from "./graphemeInventory";
+import {
   hasScholarMembership,
   requireActiveLearnerInstitution,
   requireActiveSessionOwnerInstitution,
@@ -2162,6 +2168,7 @@ async function persistUserTurnMessage(
     imageId?: Id<"_storage">;
     inputModality?: InputModality;
     thread?: "designer" | "tutor";
+    readAloudOf?: string;
   },
 ): Promise<void> {
   const message =
@@ -2196,6 +2203,7 @@ async function persistUserTurnMessage(
       ? { inputModality: args.inputModality }
       : {}),
     ...(args.thread ? { thread: args.thread } : {}),
+    ...(args.readAloudOf ? { readAloudOf: args.readAloudOf } : {}),
   });
 
   // Denormalize last message info onto the session for efficient dashboard queries
@@ -2417,6 +2425,9 @@ export const sendMessage = authedMutation({
     // resulting thread on this turn (lib/workshopPolicy.ts). Absent (an older
     // client) counts as an Edit request, still clamped.
     mode: v.optional(v.union(v.literal("edit"), v.literal("play"))),
+    // Beginner reader (TRA-504): this spoken turn was started from the mic on
+    // the last reply's "your turn" line. The line itself is looked up here.
+    readingYourTurn: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
@@ -2461,11 +2472,35 @@ export const sendMessage = authedMutation({
 
     await stampLatestStreamingAssistant(ctx, args.sessionId);
 
+    // A read-aloud of the "your turn" line: take the line from the latest
+    // tutor reply (never from the client), so the tutor checks the real line.
+    let readAloudOf: string | undefined;
+    if (args.readingYourTurn && args.inputModality === "spoken") {
+      const lastAssistant = await ctx.db
+        .query("messages")
+        .withIndex("by_session_role", (q) =>
+          q.eq("sessionId", args.sessionId).eq("role", "assistant"),
+        )
+        .order("desc")
+        .first();
+      const line = lastAssistant
+        ? lastYourTurnLine(lastAssistant.content)
+        : null;
+      // Only a line the child could decode was shown as their card; anything
+      // else is not a reading to check (the client hides it too).
+      if (line) {
+        const teams = await readInventoryTeams(ctx, session.userId);
+        const alphabet = beginnerAlphabet(teams.map((t) => t.team));
+        if (checkDecodable(line, alphabet).ok) readAloudOf = line;
+      }
+    }
+
     await persistUserTurnMessage(ctx, session, {
       message: args.message,
       imageId: args.imageId,
       inputModality: args.inputModality,
       thread: turnThread,
+      readAloudOf,
     });
 
     // If there's a pending whisper, record it between user msg and assistant placeholder
