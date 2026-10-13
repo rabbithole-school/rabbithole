@@ -115,6 +115,8 @@ import { ComposerAttachMenu } from "@/components/ComposerAttachMenu";
 import { usePendingImage } from "@/hooks/usePendingImage";
 import { useNow } from "@/hooks/useNow";
 import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { practiceQuestionVoice } from "@/shared/beginnerReading";
 import { spokenToUnitAnswer } from "@/lib/spokenMath";
 import { haptic } from "@/lib/native";
 import { useBrowserOnline } from "@/lib/practiceOfflineQueue";
@@ -1470,11 +1472,14 @@ export function PracticeSession({
 
 
   const current = items?.[idx];
-  // Kindergarten (grade "K") items get a tap-to-hear speaker on the question
-  // stem so a pre-reader can hear it. `ServedItem` doesn't carry the node's
-  // grade band, so resolve it from the served skillKeys (cheap indexed batch
-  // read); the speaker only shows for grade-"K" items (and only when the
-  // scholar's TTS is on — SpeakableLabel enforces that).
+  // How the question reaches the scholar follows their READ level (TRA-514,
+  // `practiceQuestionVoice`): a listener hears every question read aloud as it
+  // appears, a beginner gets a speaker to tap, and a reader keeps the old rule
+  // (a speaker on grade-"K" items only). All of it only when the scholar's TTS
+  // is on — SpeakableLabel enforces that. `ServedItem` doesn't carry the
+  // node's grade band, so resolve it from the served skillKeys (cheap indexed
+  // batch read). The read level is the signed-in scholar's own, so a teacher
+  // watching remotely (or rehearsing as a teacher) gets the reader default.
   const stemSkillKeys = useMemo(
     () => (items ? Array.from(new Set(items.map((it) => it.skillKey))) : []),
     [items],
@@ -1484,6 +1489,12 @@ export function PracticeSession({
     stemSkillKeys.length > 0 ? { skillKeys: stemSkillKeys } : "skip",
   );
   const currentIsKinder = !!current && gradeBandByKey?.[current.skillKey] === "K";
+  const { user: viewer } = useCurrentUser();
+  const scholarReadLevel =
+    !isRemote && viewer && viewer._id === scholarId
+      ? viewer.effectiveReadLevel
+      : "reader";
+  const questionVoice = practiceQuestionVoice(scholarReadLevel, currentIsKinder);
   const hintRungActiveForCurrent =
     hintItemId === current?.itemId && activeHintRung !== null;
   const hintBlocksMainSubmit = hintLadderBlocksMainSubmit({
@@ -1960,6 +1971,8 @@ export function PracticeSession({
       nowMs: Date.now(),
       renderAtMs: itemRenderAtRef.current,
       firstKeyAtMs: firstKeyAtRef.current,
+      // A listener's question is read to them first: no latency (TRA-514).
+      readAloud: questionVoice === "auto",
     });
     const entry: OutboxAnswer = {
       clientEventId,
@@ -2006,6 +2019,7 @@ export function PracticeSession({
     machine,
     onNext,
     predictedConfidence,
+    questionVoice,
     quickFacts,
     rehearse,
     scholarId,
@@ -4036,7 +4050,9 @@ export function PracticeSession({
       tone={fbCorrect ? "correct" : fbMiss || frameNoted ? "miss" : null}
       label={frameNoted ? DONT_KNOW_STAMP_LABEL : undefined}
       announcement={frameNoted ? DONT_KNOW_STAMP_ANNOUNCEMENT : undefined}
-      speakable={currentIsKinder}
+      speakable={questionVoice !== "none"}
+      // A listener hears the question as it appears (and again on a retry).
+      autoRead={questionVoice === "auto" && phase === "answering"}
       big={!!current?.isFactSprint}
     />
   );
@@ -4998,6 +5014,7 @@ export function PracticeSession({
                           spec={manipulativeSpec}
                           onCommit={onManipulativeCommit}
                           onInteractionStart={onManipulativeInteraction}
+                          questionVoice={questionVoice}
                         />
                       ) : (
                         <Text color="#9b1c1c" fontSize="14px">

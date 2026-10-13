@@ -56,7 +56,6 @@ import {
 import { assembleCurriculumTools } from "./lib/aideTools";
 import type { WriteSurface } from "./lib/scholarWriteTools";
 import { assembleUnitDesignerTools } from "./lib/unitDesignerTools";
-import { makeDeviceOpsTools } from "./lib/deviceOpsTools";
 import { siteUrl, withBase } from "./lib/channels";
 import type { AideEmit } from "./lib/aideStream";
 import type { Doc, Id } from "./_generated/dataModel";
@@ -747,6 +746,9 @@ async function mcpCurriculumTools(
       : false,
     hasHealthManagementAccess:
       healthInstitutions === "all" || healthInstitutions.length > 0,
+    // Also carries the managed-iPad tools (lib/deviceOpsTools.ts) for a
+    // school-operations caller, audited as "mcp".
+    transport: "mcp",
   });
   const scholarReadNames = SCHOLAR_READ_TOOLS as readonly string[];
   return (
@@ -805,86 +807,6 @@ async function mcpUnitDesignerTools(
     .filter((tool) => UNIT_DESIGNER_CRUD_TOOL_NAMES.has(tool.name));
 }
 
-/**
- * The managed-iPad operations toolset for a caller — the SAME definitions the
- * Slack bot gets (lib/deviceOpsTools.ts), so "which iPad is scholar X on?" and
- * "disarm Rabbithole Lock on it" are one message from Claude just as they are
- * from Slack, instead of a hand-written script plus a trip to the web console.
- *
- * Gating, in order: the factory refuses any caller without school operations
- * (teacher / school_admin / platform_admin by role, base staff only with an
- * active institution-scoped `school:operations` grant), and each underlying
- * internal function then re-resolves the caller and intersects the target
- * institutions with their grants. A parent or scholar authenticating here gets
- * an empty list AND a "Forbidden" on any guessed tool name.
- *
- * `listDeviceTools` and `callDeviceTool` share this, so what is listed is
- * exactly what is callable.
- */
-async function mcpDeviceTools(
-  ctx: ActionCtx,
-  role: Role,
-  callerUserId: Id<"users">,
-): Promise<RunnableTool[]> {
-  const schoolOperations =
-    role === ROLES.STAFF
-      ? await ctx.runQuery(
-          internal.curriculumAssistant.schoolOperationsScopeForUser,
-          { callerUserId },
-        )
-      : null;
-  const noopEmit: AideEmit = () => {};
-  const tools = await makeDeviceOpsTools(ctx, noopEmit, {
-    role,
-    callerUserId,
-    hasSchoolOperationsAccess: schoolOperations
-      ? schoolOperations.institutionIds.length > 0
-      : false,
-    source: "mcp",
-  });
-  return (
-    tools as {
-      name?: unknown;
-      input_schema?: unknown;
-      run?: unknown;
-    }[]
-  ).filter(isMcpRunnableTool);
-}
-
-/** tools/list for the managed-iPad surface. Empty for every caller without
- *  school operations, so the connector never advertises a device control a
- *  parent or a scholar could try. */
-export const listDeviceTools = action({
-  args: {},
-  handler: async (
-    ctx,
-  ): Promise<
-    { name: string; description: string; inputSchema: Record<string, unknown> }[]
-  > => {
-    const { userId, role } = await resolveMcpCaller(ctx);
-    const tools = await mcpDeviceTools(ctx, role, userId);
-    return tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description ?? "",
-      inputSchema: tool.input_schema,
-    }));
-  },
-});
-
-/** tools/call for the managed-iPad surface. Re-resolves the caller and
- *  re-asserts the gate: a name outside the caller's set throws
- *  "Forbidden: <name>", indistinguishable from a tool that does not exist. */
-export const callDeviceTool = action({
-  args: { name: v.string(), input: v.optional(v.any()) },
-  handler: async (ctx, { name, input }): Promise<string> => {
-    const { userId, role } = await resolveMcpCaller(ctx);
-    await assertWritableAction(ctx);
-    const tools = await mcpDeviceTools(ctx, role, userId);
-    const tool = tools.find((candidate) => candidate.name === name);
-    if (!tool) throw new Error(`Forbidden: ${name}`);
-    return await tool.run(input ?? {});
-  },
-});
 
 /**
  * tools/list for the curriculum surface — the role-gated set of tool

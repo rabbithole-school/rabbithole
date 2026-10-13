@@ -15,6 +15,8 @@ import {
   decideEstimateWrite,
   isValidReadingLevel,
   legacyPreReaderSplit,
+  MIN_TYPED_WORDS_FOR_ESTIMATE,
+  normalizeReadingLevel,
   readLevelOf,
   readLevelValidator,
   talkLevelOf,
@@ -22,6 +24,7 @@ import {
   writeModeValidator,
   type EstimateWriteDecision,
   type ReadLevel,
+  type WriteMode,
 } from "./lib/readingLevels";
 import { scholarHasPasswordCredential } from "./lib/scholarCredential";
 import { underscoreUsername } from "./lib/username";
@@ -208,12 +211,14 @@ export const getProfile = authedQuery({
         readingLevelSuggestion: redactReadingLevel
           ? null
           : scholar.readingLevelSuggestion ?? null,
-        // When the pending estimate was computed. Without it the UI cannot tell
-        // a disagreement recorded this morning from one recorded in March.
-        // DEPENDS ON pending schema addition users.readingLevelSuggestionAt.
+        // When the estimate was computed, and how many typed words it was drawn
+        // from — the profile's Write row states both.
         readingLevelSuggestionAt: redactReadingLevel
           ? null
           : scholar.readingLevelSuggestionAt ?? null,
+        readingLevelSuggestionWords: redactReadingLevel
+          ? null
+          : scholar.readingLevelSuggestionWords ?? null,
         ttsEnabled: scholar.ttsEnabled ?? true,
         sttEnabled: scholar.sttEnabled ?? true,
         createdAt: scholar._creationTime,
@@ -260,12 +265,6 @@ export const updateReadingLevel = teacherMutation({
     await ctx.db.patch(args.scholarId, {
       ...(legacy ? { readLevel: legacy.readLevel } : {}),
       readingLevel: args.readingLevel ?? undefined,
-      // Clear the pending writing-derived estimate: the teacher has now ruled on
-      // it, so any stored disagreement is superseded. Clearing the stamp too
-      // keeps "no estimate" and "an estimate of unknown age" distinguishable.
-      // DEPENDS ON pending schema addition users.readingLevelSuggestionAt.
-      readingLevelSuggestion: undefined,
-      readingLevelSuggestionAt: undefined,
     });
     if (args.readingLevel !== null) {
       await ctx.db.insert("readingLevelHistory", {
@@ -452,16 +451,23 @@ export interface LevelSignalRow {
     level: string | null;
     /** The READ level; `listener` runs the tutor voice first. */
     readLevel: ReadLevel;
+    /** The WRITE mode; `voice` means they dictate (TRA-514). */
+    writeMode: WriteMode;
     /** When a human last ratified this exact value; null if unrecorded. */
     setAt: number | null;
     setBy: "teacher" | "observer" | null;
   };
-  /** The writing-derived estimate. Present only while it disagrees. */
+  /**
+   * DEPLOY-SKEW SHIM (TRA-513): always the empty stub. The estimate left this
+   * read model, but a tab still running the previous frontend reads
+   * `signals.estimate.level` and would throw on `undefined`. Delete this field
+   * (and the stub below) one release after TRA-513 ships.
+   */
   estimate: {
-    level: string | null;
-    computedAt: number | null;
-    ageDays: number | null;
-    disagreesWithConfirmed: boolean;
+    level: null;
+    computedAt: null;
+    ageDays: null;
+    disagreesWithConfirmed: false;
   };
 }
 
@@ -470,49 +476,56 @@ export interface LevelSignalRow {
  *
  * ⚠️ This is the single writer for `users.readingLevelSuggestion`. It is named
  * for the stored field, but what it stores is an estimate produced entirely from
- * the scholar's own PRODUCTION — typed tutor-chat messages plus OCR-transcribed
- * handwritten work. Nothing in its evidence chain observes what the scholar can
- * READ. It is not a Lexile measure, not a normed assessment, not a screener
+ * the scholar's own TYPED writing (plus OCR-transcribed handwritten work for the
+ * teacher-run analysis). Nothing in its evidence chain observes what the scholar
+ * can READ. It is not a Lexile measure, not a normed assessment, not a screener
  * result. See `convex/lib/readingLevels.ts` for the full record of what the two
  * reading-level values are and are not.
  *
- * The confirmed level (`users.readingLevel`) is a different real thing: a
- * human-ratified setting the tutor acts on. This function never touches it.
+ * It is INFO-ONLY (TRA-513): shown under the Write row of the profile, never
+ * promoted into the talk level (`users.readingLevel`), which this function never
+ * touches. It is the single choke point that VALIDATES the estimate — both the
+ * observer and the teacher-run analysis arrive here with model output — and
+ * refuses one drawn from fewer than `MIN_TYPED_WORDS_FOR_ESTIMATE` typed words.
  *
- * The decision itself — including recording AGREEMENT, which the observer used
- * to drop on the floor — is the pure `decideEstimateWrite`; this is only the
+ * The write decision is the pure `decideEstimateWrite`; this is only the
  * database half. Returns what it did, so callers can log or test it.
  */
 async function recordWritingDerivedEstimate(
   ctx: { db: MutationCtx["db"] },
   args: {
     scholarId: Id<"users">;
+    /** The model's answer, any spelling of a grade ("7", "7.0", "Grade 7"). */
     estimate: string;
+    /** Typed words the estimate was drawn from. */
+    typedWords: number;
     now: number;
     /** Skip the freshness guard — for explicit, teacher-initiated analysis. */
     force?: boolean;
   },
-): Promise<EstimateWriteDecision["action"] | "not_found"> {
+): Promise<EstimateWriteDecision["action"] | "not_found" | "invalid" | "too_few_words"> {
+  const level = normalizeReadingLevel(args.estimate);
+  if (!level) return "invalid";
+  if (args.typedWords < MIN_TYPED_WORDS_FOR_ESTIMATE) return "too_few_words";
+
   const scholar = await ctx.db.get(args.scholarId);
   if (!scholar || !(await hasScholarMembership(ctx, args.scholarId))) {
     return "not_found";
   }
 
   const decision = decideEstimateWrite({
-    confirmed: scholar.readingLevel ?? null,
     pending: scholar.readingLevelSuggestion ?? null,
-    // DEPENDS ON pending schema addition users.readingLevelSuggestionAt (routed
-    // separately) — see the report accompanying this change.
     pendingAt: scholar.readingLevelSuggestionAt ?? null,
-    estimate: args.estimate,
+    estimate: level,
     now: args.now,
     force: args.force,
   });
   if (decision.action === "skipped") return "skipped";
 
   await ctx.db.patch(args.scholarId, {
-    readingLevelSuggestion: decision.nextSuggestion,
+    readingLevelSuggestion: level,
     readingLevelSuggestionAt: args.now,
+    readingLevelSuggestionWords: args.typedWords,
   });
   return decision.action;
 }
@@ -520,51 +533,21 @@ async function recordWritingDerivedEstimate(
 /**
  * Internal: record the observer's writing-derived grade-level estimate.
  *
- * Called on the tutor-session hot path. Agreement with the confirmed level is
- * recorded too (by clearing any superseded suggestion), so what a teacher sees is
- * always current evidence rather than a stale disagreement. Bounded by
- * `ESTIMATE_REFRESH_MS` so repeated sessions do not thrash the doc.
+ * Called on the tutor-session hot path. Bounded by `ESTIMATE_REFRESH_MS` so
+ * repeated sessions do not thrash the doc.
  */
 export const setReadingLevelSuggestion = internalMutation({
   args: {
     scholarId: v.id("users"),
     suggestion: v.string(),
+    typedWords: v.number(),
   },
   handler: async (ctx, args) => {
     return await recordWritingDerivedEstimate(ctx, {
       scholarId: args.scholarId,
       estimate: args.suggestion,
+      typedWords: args.typedWords,
       now: Date.now(),
-    });
-  },
-});
-
-/**
- * Teacher accepts the pending writing-derived estimate — promotes it to the
- * confirmed level (a human-ratified setting the tutor acts on) and clears the
- * estimate, which is now superseded by the teacher's ruling.
- */
-export const acceptReadingLevelSuggestion = teacherMutation({
-  args: { scholarId: v.id("users") },
-  handler: async (ctx, args) => {
-    await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
-    const scholar = await ctx.db.get(args.scholarId);
-    if (!scholar || !scholar.readingLevelSuggestion) return;
-    // Keep a legacy pre-reader's listener half when its talk half is replaced.
-    const legacy = legacyPreReaderSplit(scholar);
-    await ctx.db.patch(args.scholarId, {
-      ...(legacy ? { readLevel: legacy.readLevel } : {}),
-      readingLevel: scholar.readingLevelSuggestion,
-      readingLevelSuggestion: undefined,
-      // DEPENDS ON pending schema addition users.readingLevelSuggestionAt.
-      readingLevelSuggestionAt: undefined,
-    });
-    await ctx.db.insert("readingLevelHistory", {
-      scholarId: args.scholarId,
-      dimension: "talk",
-      level: scholar.readingLevelSuggestion,
-      source: "observer",
-      changedBy: ctx.user._id,
     });
   },
 });
@@ -572,8 +555,9 @@ export const acceptReadingLevelSuggestion = teacherMutation({
 /**
  * Get the scholar's CONFIRMED reading-level history (teachers only).
  *
- * Every row here is a human-ratified transition — a teacher setting the level, or
- * a teacher accepting an estimate. Machine estimates are deliberately NOT written
+ * Every row here is a human-ratified transition — a teacher setting the level
+ * (`source: "observer"` rows are legacy: before TRA-513 a teacher could accept
+ * the writing estimate into the talk level). Machine estimates are deliberately NOT written
  * to this table: it is the record of settings the system acted on, and mixing
  * unratified guesses in would make existing consumers plot guesses as decisions.
  *
@@ -602,26 +586,17 @@ function isTalkHistoryRow(row: Doc<"readingLevelHistory">): boolean {
 /**
  * Weekly board read model for a scholar's **level signals**, roster-shaped.
  *
- * ⚠️ This returns TWO STRUCTURALLY DISTINCT THINGS, and they must stay distinct
- * on screen. They are not two measurements of one quantity:
+ * `confirmed` is the human-ratified SETTING the system acts on. It is rendered
+ * into the tutor's prompt as the TALK level; `readLevel: "listener"` switches
+ * the tutor to voice-first delivery. A teacher owns both. `setAt` is when a
+ * human last ratified it (from `readingLevelHistory`), NOT when anything was
+ * measured.
  *
- *  • `confirmed` — the human-ratified SETTING the system acts on. It is rendered
- *    into the tutor's prompt as the TALK level; `readLevel: "listener"` switches
- *    the tutor to voice-first delivery. A teacher owns both. `setAt` is when a human last
- *    ratified it (from `readingLevelHistory`), NOT when anything was measured.
- *
- *  • `estimate` — a WRITING-DERIVED grade-level estimate. Every input is the
- *    scholar's own production: typed tutor-chat messages plus OCR-transcribed
- *    handwritten work. Nothing in it observes what the scholar can READ. Not a
- *    Lexile measure, not a normed assessment, not a screener result. It exists
- *    only while it DISAGREES with the confirmed level — agreement clears it (see
- *    `setReadingLevelSuggestion`), so a present estimate always means "current
- *    evidence disagrees with the setting".
+ * The writing-derived estimate is deliberately NOT here (TRA-513): it is
+ * info-only on the scholar profile's Write row, and nothing on the Rounds board
+ * can act on it.
  *
  * Deliberately NOT returned:
- *  • Any week-over-week movement of the estimate. Only the latest value is
- *    stored, so a delta cannot be computed honestly today; the retained series
- *    proposed alongside this change is what would make one possible.
  *  • Any reading-COMPREHENSION claim. No reception evidence exists anywhere in
  *    this system, so there is no honest number to render.
  *  • The mechanical writing trend — that is a separate instrument
@@ -670,15 +645,13 @@ export const levelSignalsForScholars = teacherQuery({
       const ratifiedMatches =
         ratified !== null &&
         talkLevelOf(ratified.level) === talkLevelOf(confirmedLevel);
-      const estimateLevel = scholar.readingLevelSuggestion ?? null;
-      // DEPENDS ON pending schema addition users.readingLevelSuggestionAt.
-      const estimateAt = scholar.readingLevelSuggestionAt ?? null;
 
       rows.push({
         scholarId,
         confirmed: {
           level: talkLevelOf(confirmedLevel),
           readLevel: readLevelOf(scholar),
+          writeMode: writeModeOf(scholar),
           // Only meaningful when the latest history row matches the live value;
           // a level set before this table existed has no ratification record.
           // Compared as TALK levels, so a migrated scholar (live "K") keeps the
@@ -686,36 +659,17 @@ export const levelSignalsForScholars = teacherQuery({
           setAt: ratifiedMatches && ratified ? ratified._creationTime : null,
           setBy: ratifiedMatches && ratified ? ratified.source : null,
         },
+        // Deploy-skew shim, see `LevelSignalRow.estimate`.
         estimate: {
-          level: estimateLevel,
-          computedAt: estimateAt,
-          ageDays:
-            estimateAt === null
-              ? null
-              : Math.floor((now - estimateAt) / 86_400_000),
-          // An estimate is only stored while it disagrees, so its presence IS
-          // the disagreement. Made explicit so no consumer has to infer it.
-          disagreesWithConfirmed: estimateLevel !== null,
+          level: null,
+          computedAt: null,
+          ageDays: null,
+          disagreesWithConfirmed: false,
         },
       });
     }
 
     return { now, rows };
-  },
-});
-
-/**
- * Teacher dismisses the pending writing-derived estimate.
- */
-export const dismissReadingLevelSuggestion = teacherMutation({
-  args: { scholarId: v.id("users") },
-  handler: async (ctx, args) => {
-    await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
-    await ctx.db.patch(args.scholarId, {
-      readingLevelSuggestion: undefined,
-      // DEPENDS ON pending schema addition users.readingLevelSuggestionAt.
-      readingLevelSuggestionAt: undefined,
-    });
   },
 });
 
@@ -726,15 +680,20 @@ export const dismissReadingLevelSuggestion = teacherMutation({
  * pressed the button must see a fresh timestamp.
  *
  * The observer uses the internal version (`setReadingLevelSuggestion`); both go
- * through the same writer, so agreement is recorded on both paths.
+ * through the same validating writer.
  */
 export const setReadingLevelSuggestionFromAnalysis = teacherMutation({
-  args: { scholarId: v.id("users"), suggestion: v.string() },
+  args: {
+    scholarId: v.id("users"),
+    suggestion: v.string(),
+    typedWords: v.number(),
+  },
   handler: async (ctx, args) => {
     await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
     return await recordWritingDerivedEstimate(ctx, {
       scholarId: args.scholarId,
       estimate: args.suggestion,
+      typedWords: args.typedWords,
       now: Date.now(),
       force: true,
     });

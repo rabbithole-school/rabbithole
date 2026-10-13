@@ -11,9 +11,12 @@ const modules = (
   }
 ).glob("../**/*.ts");
 
-// The managed-iPad surface of the OAuth MCP connector. convex/mcp.ts is the
-// SECURITY BOUNDARY — the Next route's registration is UX — so these tests
-// drive api.mcp.listDeviceTools / callDeviceTool directly and pin the three
+// The managed-iPad surface of the OAuth MCP connector. The tools ride the
+// shared staff-aide registry (assembleCurriculumTools → lib/deviceOpsTools.ts),
+// so over MCP they are listed and called through the curriculum surface.
+// convex/mcp.ts is the SECURITY BOUNDARY — the Next route's registration is
+// UX — so these tests drive api.mcp.listCurriculumTools / callCurriculumTool
+// directly and pin the three
 // gates that stand between a chat client and a child's device: the
 // school-operations capability, the institution boundary, and the disarm
 // argument validation. The tool prose asks a model to list-then-confirm
@@ -160,7 +163,15 @@ const DEVICE_TOOL_NAMES = [
   "list_managed_devices",
   "list_rabbithole_lock_devices",
   "set_rabbithole_lock",
+  "restart_managed_device",
 ];
+
+/** The curriculum surface's managed-iPad subset — what tools/list advertises
+ *  for these four names. Each must appear at most once. */
+async function listDeviceTools(as: ReturnType<TestHarness["withIdentity"]>) {
+  const all = await as.action(api.mcp.listCurriculumTools, {});
+  return all.filter((tool) => DEVICE_TOOL_NAMES.includes(tool.name));
+}
 
 describe("mcp device tools — who sees them", () => {
   test("a teacher gets the full managed-iPad toolset", async () => {
@@ -168,7 +179,7 @@ describe("mcp device tools — who sees them", () => {
     const { teacherId } = await seedSchool(t, "moli", "Kai");
 
     const asTeacher = await withUser(t, teacherId);
-    const tools = await asTeacher.action(api.mcp.listDeviceTools, {});
+    const tools = await listDeviceTools(asTeacher);
     expect(tools.map((tool) => tool.name).sort()).toEqual(
       [...DEVICE_TOOL_NAMES].sort(),
     );
@@ -182,9 +193,9 @@ describe("mcp device tools — who sees them", () => {
     const ungrantedStaff = await seedUser(t, "staff", institutionId, "Ungranted Staff");
 
     const asStaff = await withUser(t, ungrantedStaff);
-    expect(await asStaff.action(api.mcp.listDeviceTools, {})).toEqual([]);
+    expect(await listDeviceTools(asStaff)).toEqual([]);
     await expect(
-      asStaff.action(api.mcp.callDeviceTool, {
+      asStaff.action(api.mcp.callCurriculumTool, {
         name: "set_rabbithole_lock",
         input: { paired_device_ids: [pairedDeviceId], state: "disarmed" },
       }),
@@ -203,7 +214,7 @@ describe("mcp device tools — who sees them", () => {
     await grantSchoolOperations(t, opsStaff, institutionId);
 
     const asStaff = await withUser(t, opsStaff);
-    const tools = await asStaff.action(api.mcp.listDeviceTools, {});
+    const tools = await listDeviceTools(asStaff);
     expect(tools.map((tool) => tool.name).sort()).toEqual(
       [...DEVICE_TOOL_NAMES].sort(),
     );
@@ -218,7 +229,7 @@ describe("mcp device tools — who sees them", () => {
 
     const asStaff = await withUser(t, opsStaff);
     const devices = JSON.parse(
-      await asStaff.action(api.mcp.callDeviceTool, {
+      await asStaff.action(api.mcp.callCurriculumTool, {
         name: "list_managed_devices",
         input: {},
       }),
@@ -227,7 +238,7 @@ describe("mcp device tools — who sees them", () => {
     // is absent even though "all" was requested internally.
     expect(devices.map((device) => device.serial)).toEqual(["SERIAL-MOLI"]);
 
-    await asStaff.action(api.mcp.callDeviceTool, {
+    await asStaff.action(api.mcp.callCurriculumTool, {
       name: "set_rabbithole_lock",
       input: {
         paired_device_ids: [pairedDeviceId],
@@ -241,6 +252,18 @@ describe("mcp device tools — who sees them", () => {
     });
   });
 
+  test("tools/list advertises each managed-iPad tool exactly once", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId } = await seedSchool(t, "moli", "Kai");
+    const asTeacher = await withUser(t, teacherId);
+    const names = (await asTeacher.action(api.mcp.listCurriculumTools, {})).map(
+      (tool) => tool.name,
+    );
+    for (const name of DEVICE_TOOL_NAMES) {
+      expect(names.filter((n) => n === name)).toHaveLength(1);
+    }
+  });
+
   test("a parent and a scholar see no device surface at all", async () => {
     const t = convexTest(schema, modules);
     const { scholarId, pairedDeviceId } = await seedSchool(t, "moli", "Kai");
@@ -248,9 +271,9 @@ describe("mcp device tools — who sees them", () => {
 
     for (const userId of [parentId, scholarId]) {
       const asUser = await withUser(t, userId);
-      expect(await asUser.action(api.mcp.listDeviceTools, {})).toEqual([]);
+      expect(await listDeviceTools(asUser)).toEqual([]);
       await expect(
-        asUser.action(api.mcp.callDeviceTool, {
+        asUser.action(api.mcp.callCurriculumTool, {
           name: "set_rabbithole_lock",
           input: { paired_device_ids: [pairedDeviceId], state: "disarmed" },
         }),
@@ -266,7 +289,7 @@ describe("mcp device tools — the institution boundary", () => {
     await seedSchool(t, "other", "Hoku");
 
     const asTeacher = await withUser(t, home.teacherId);
-    const raw = await asTeacher.action(api.mcp.callDeviceTool, {
+    const raw = await asTeacher.action(api.mcp.callCurriculumTool, {
       name: "list_managed_devices",
       input: {},
     });
@@ -308,7 +331,7 @@ describe("mcp device tools — the institution boundary", () => {
 
     const asTeacher = await withUser(t, home.teacherId);
     const devices = JSON.parse(
-      await asTeacher.action(api.mcp.callDeviceTool, {
+      await asTeacher.action(api.mcp.callCurriculumTool, {
         name: "list_managed_devices",
         input: {},
       }),
@@ -335,7 +358,7 @@ describe("mcp device tools — the institution boundary", () => {
     await seedSchool(t, "other", "Kaiona");
 
     const asTeacher = await withUser(t, home.teacherId);
-    const raw = await asTeacher.action(api.mcp.callDeviceTool, {
+    const raw = await asTeacher.action(api.mcp.callCurriculumTool, {
       name: "list_rabbithole_lock_devices",
       input: { search: "Kai" },
     });
@@ -358,7 +381,7 @@ describe("mcp device tools — the institution boundary", () => {
     const foreign = await seedSchool(t, "other", "Hoku");
 
     const asTeacher = await withUser(t, home.teacherId);
-    const message = await asTeacher.action(api.mcp.callDeviceTool, {
+    const message = await asTeacher.action(api.mcp.callCurriculumTool, {
       name: "set_rabbithole_lock",
       input: {
         paired_device_ids: [foreign.pairedDeviceId],
@@ -379,7 +402,7 @@ describe("mcp device tools — the institution boundary", () => {
     const foreign = await seedSchool(t, "other", "Hoku");
 
     const asTeacher = await withUser(t, home.teacherId);
-    await asTeacher.action(api.mcp.callDeviceTool, {
+    await asTeacher.action(api.mcp.callCurriculumTool, {
       name: "set_rabbithole_lock",
       input: {
         paired_device_ids: [home.pairedDeviceId, foreign.pairedDeviceId],
@@ -400,7 +423,7 @@ describe("mcp device tools — the write itself", () => {
 
     const asTeacher = await withUser(t, teacherId);
     await expect(
-      asTeacher.action(api.mcp.callDeviceTool, {
+      asTeacher.action(api.mcp.callCurriculumTool, {
         name: "set_rabbithole_lock",
         input: {
           paired_device_ids: [pairedDeviceId],
@@ -421,7 +444,7 @@ describe("mcp device tools — the write itself", () => {
 
     const asTeacher = await withUser(t, teacherId);
     await expect(
-      asTeacher.action(api.mcp.callDeviceTool, {
+      asTeacher.action(api.mcp.callCurriculumTool, {
         name: "set_rabbithole_lock",
         input: {
           paired_device_ids: [pairedDeviceId],
@@ -442,7 +465,7 @@ describe("mcp device tools — the write itself", () => {
     const { teacherId, pairedDeviceId } = await seedSchool(t, "moli", "Kai");
 
     const asTeacher = await withUser(t, teacherId);
-    const message = await asTeacher.action(api.mcp.callDeviceTool, {
+    const message = await asTeacher.action(api.mcp.callCurriculumTool, {
       name: "set_rabbithole_lock",
       input: {
         paired_device_ids: [pairedDeviceId],
@@ -464,6 +487,98 @@ describe("mcp device tools — the write itself", () => {
       (row) => row.action === "device.rabbithole-lock.disarm",
     );
     expect(disarm?.detail).toContain("via mcp");
+  });
+});
+
+describe("mcp device tools — restart_managed_device", () => {
+  // SimpleMDM is stubbed: these tests never reach a real tenant or device.
+  function stubSimpleMdm(serial: string) {
+    const realFetch = globalThis.fetch;
+    const urls: string[] = [];
+    let restarts = 0;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      urls.push(href);
+      if (href.includes(`/devices?search=${serial}`)) {
+        return Response.json({
+          data: [
+            { type: "device", id: 42, attributes: { serial_number: serial } },
+          ],
+          has_more: false,
+        });
+      }
+      if (href.endsWith("/devices/42")) {
+        return Response.json({
+          data: { type: "device", id: 42, attributes: { is_supervised: true } },
+        });
+      }
+      if (href.endsWith("/devices/42/restart")) {
+        restarts += 1;
+        return new Response(null, { status: 202 });
+      }
+      throw new Error(`Unexpected fetch: ${href}`);
+    }) as typeof fetch;
+    return {
+      urls,
+      restarts: () => restarts,
+      restore: () => {
+        globalThis.fetch = realFetch;
+      },
+    };
+  }
+
+  test("a granted operations staffer restarts their school's iPad, audited as MCP", async () => {
+    process.env.SIMPLEMDM_API_KEY = "test-key";
+    const t = convexTest(schema, modules);
+    const { institutionId, pairedDeviceId } = await seedSchool(t, "moli", "Kai");
+    await t.run((ctx) => ctx.db.patch(institutionId, { isPrimary: true }));
+    const opsStaff = await seedUser(t, "staff", institutionId, "Ops Staff");
+    await grantSchoolOperations(t, opsStaff, institutionId);
+    const simpleMdm = stubSimpleMdm("SERIAL-MOLI");
+    try {
+      const asStaff = await withUser(t, opsStaff);
+      const message = await asStaff.action(api.mcp.callCurriculumTool, {
+        name: "restart_managed_device",
+        input: { paired_device_id: pairedDeviceId },
+      });
+      expect(message).toMatch(/^Restart command sent/);
+      expect(simpleMdm.restarts()).toBe(1);
+      const audits = await t.run((ctx) => ctx.db.query("auditLog").collect());
+      const restart = audits.find(
+        (row) => row.action === "device.restart.requested",
+      );
+      expect(restart?.actorUserId).toBe(opsStaff);
+      expect(restart?.detail).toContain("mcp");
+    } finally {
+      simpleMdm.restore();
+      delete process.env.SIMPLEMDM_API_KEY;
+    }
+  });
+
+  test("another school's teacher is refused before any SimpleMDM request", async () => {
+    process.env.SIMPLEMDM_API_KEY = "test-key";
+    const t = convexTest(schema, modules);
+    const moli = await seedSchool(t, "moli", "Kai");
+    await t.run((ctx) => ctx.db.patch(moli.institutionId, { isPrimary: true }));
+    const other = await seedSchool(t, "other", "Hoku");
+    const simpleMdm = stubSimpleMdm("SERIAL-MOLI");
+    try {
+      const asOtherTeacher = await withUser(t, other.teacherId);
+      const message = await asOtherTeacher.action(api.mcp.callCurriculumTool, {
+        name: "restart_managed_device",
+        input: { paired_device_id: moli.pairedDeviceId },
+      });
+      expect(message).toMatch(/^Failed:/);
+      expect(simpleMdm.urls).toEqual([]);
+      expect(
+        (await t.run((ctx) => ctx.db.query("auditLog").collect())).filter(
+          (row) => row.action === "device.restart.requested",
+        ),
+      ).toEqual([]);
+    } finally {
+      simpleMdm.restore();
+      delete process.env.SIMPLEMDM_API_KEY;
+    }
   });
 });
 

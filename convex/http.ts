@@ -9,9 +9,10 @@ import { PLACEHOLDER_BINDING_ERROR } from "./workshopPolicy";
 import { Id } from "./_generated/dataModel";
 import { auth } from "./auth";
 import { getAuthUserId } from "@convex-dev/auth/server";
-import { canAccessSession, READ_ONLY_ACCOUNT_ERROR } from "./lib/auth";
+import { canAccessSession, READ_ONLY_ACCOUNT_ERROR, VIEWING_AS_READ_ONLY_ERROR } from "./lib/auth";
 import { llmBudgetExceeded, llmBudgetMessage } from "./llmBudget";
 import { acquireLlmLease } from "./lib/llmLease";
+import { levelsPromptLine } from "./lib/readingLevels";
 import { APP_UPDATE_LLM_SURFACE, LLM_BUSY_MESSAGE } from "./lib/llmLimiter";
 import {
   sseEvent,
@@ -2979,6 +2980,15 @@ http.route({
         { status: 403, headers: { "Content-Type": "text/event-stream" } }
       );
     }
+    // "Viewing as" another user is read-only app-wide, but getAuthUserId
+    // above is the REAL admin, so without this the aide would act with the
+    // admin's tools behind the viewed user's screen.
+    if (await ctx.runQuery(internal.users.isSessionImpersonating, {})) {
+      return new Response(
+        sseEvent({ error: VIEWING_AS_READ_ONLY_ERROR }),
+        { status: 403, headers: { "Content-Type": "text/event-stream" } }
+      );
+    }
     const caller = await ctx.runQuery(internal.users.getByIdInternal, {
       id: callerUserId,
     });
@@ -3171,6 +3181,10 @@ http.route({
       institutionId: aideInstitutionId ?? undefined,
       hasSchoolOperationsAccess,
       hasHealthManagementAccess,
+      // Names this transport in device audit lines. Runs as the REAL session
+      // owner (getAuthUserId ignores a view-as overlay), so the device writes
+      // themselves refuse while that session is impersonating.
+      transport: "app",
     });
 
 
@@ -3314,7 +3328,7 @@ http.route({
       );
       lines.push("");
       if (sc.readingLevel) {
-        lines.push(`Reading level: ${sc.readingLevel}`);
+        lines.push(levelsPromptLine(sc.readingLevel) ?? "");
         lines.push("");
       }
       lines.push(`Date of birth: ${sc.dateOfBirth ?? "(not recorded)"}`);
@@ -3411,7 +3425,7 @@ http.route({
         }
         lines.push("");
         if (focus.readingLevel) {
-          lines.push(`Reading level: ${focus.readingLevel}`);
+          lines.push(levelsPromptLine(focus.readingLevel) ?? "");
           lines.push("");
         }
         lines.push(`Date of birth: ${focus.dateOfBirth ?? "(not recorded)"}`);

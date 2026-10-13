@@ -826,6 +826,9 @@ export const getSessionContext = internalQuery({
         ...(m.role === "user" && m.readAloudOf
           ? { readAloudOf: m.readAloudOf }
           : {}),
+        // A staff member typed this "user" turn (TRA-515): not the
+        // scholar's own language for the observer's talk word floor.
+        ...(m.role === "user" && m.byStaff ? { byStaff: true } : {}),
       }));
     let latestInstructionCompletionIndex = -1;
     for (let index = messages.length - 1; index >= 0; index--) {
@@ -858,7 +861,7 @@ export const getSessionContext = internalQuery({
     const isFirstTurn = !chatHistory.some((m) => m.role === "assistant");
 
     // Resolve the "context identity" — the user whose dossier, mastery,
-    // signals, seeds, directives, and reading level the AI tutor should see.
+    // signals, seeds, directives, and talk/read/write levels the AI tutor should see.
     // Normally that's project.userId (the scholar). In a test-drive project
     // the teacher can override this:
     //   - testDriveAsScholarId set → render as that real scholar (read-only,
@@ -3010,6 +3013,7 @@ function buildArtifactSection(
   artifactData: ArtifactData[] | null,
   hasUnit: boolean,
   playMode: boolean = false,
+  isVibecode: boolean = false,
 ): string {
   const lines: string[] = [];
   // Maps are not documents — they get their own MAP section (buildMapSection).
@@ -3019,7 +3023,11 @@ function buildArtifactSection(
     for (const doc of docs) {
       const docLines = doc.content.split("\n");
       const numberedContent = docLines.map((l, i) => `${i + 1}: ${l}`).join("\n");
-      lines.push(`\n[Document ID: ${doc.id}] "${doc.title}" (revision ${doc.revision}, last edited by ${doc.lastEditedBy})
+      // Name the surface: a writing box and a live app look and behave
+      // differently on the scholar's screen, and the guidance below differs.
+      const surface =
+        doc.type === "code" ? "LIVE APP — HTML code" : "WRITING BOX — plain text";
+      lines.push(`\n[Document ID: ${doc.id}] "${doc.title}" — ${surface} (revision ${doc.revision}, last edited by ${doc.lastEditedBy})
 Content:
 ${numberedContent}`);
     }
@@ -3032,7 +3040,7 @@ ${numberedContent}`);
     if (!playMode) {
       lines.push(`\nThe DOCUMENTS section above is regenerated FRESH on every turn from the live database. It reflects the scholar's latest edits, including changes they made seconds ago. **Treat this section as the absolute source of truth for what the document currently says.** If a prior message of yours claimed the document said one thing and this section now shows something different, the scholar edited it since that message — accept the new content and move on. NEVER say "your edit didn't save," "I see the same version," "the edit may not have gone through," or any variant. If they typed it and the DOCUMENTS section shows it, it saved.
 
-Each document above is a BOX ON THE SCHOLAR'S SCREEN right now — not a file you are describing to them. They can see it and type into it while you talk. Call it by its title, "your writing box", or "the box on the side" — that last one is how most scholars see it and stays true even on a narrow screen where it sits above the chat instead. Do not name an exact corner ("on the right", "top left"), because the layout moves with the device. They may call it "the box", "the thing on the side", or "my writing"; those all mean the document.
+Each WRITING BOX above is a BOX ON THE SCHOLAR'S SCREEN right now — not a file you are describing to them. They can see it and type into it while you talk. Call it by its title, "your writing box", or "the box on the side" — that last one is how most scholars see it and stays true even on a narrow screen where it sits above the chat instead. Do not name an exact corner ("on the right", "top left"), because the layout moves with the device. They may call it "the box", "the thing on the side", or "my writing"; those all mean the document.
 
 Talking to you and typing in the box are two different places, and younger scholars routinely believe that telling you something has already put it there. A scholar who says they already did it while the box is empty is almost never lying — they answered you here in the chat, and to them that counted. Don't re-ask as if they hadn't answered.
 
@@ -3044,7 +3052,13 @@ The writing box is the scholar's. You cannot write in it, and you must never off
 
 You have a tool called "edit_document". For a text document you may only view it, rename it, or create a new EMPTY titled document for the scholar to write in — pass its document_id and the revision shown above as base_revision, and if a rename reports a conflict, re-view the document and retry only from its returned revision. It cannot put words into a text document: str_replace and insert are for code artifacts only. The scholar writes and renames their own documents directly.
 
-IMPORTANT: Documents are plain text only — do NOT use markdown formatting. Document titles are shown separately in the UI header. Do NOT include a title, headline, or byline at the top of document content — that would be redundant. Document body should start directly with the actual content.`);
+WHAT A WRITING BOX IS, on the web and the iPad alike: a plain-text box, usually with a mic. It has no formatting toolbar, no fonts or font sizes, no bold, no headings, and it does not run code. Anything typed in it stays literal text: an HTML tag or a markdown symbol shows on the page exactly as typed and does nothing. So never give styling, HTML, or markdown tips for a writing box — they cannot work there. If a scholar calls their writing box a code or HTML editor, asks where their code is, or wants to make something they can play or click, the writing box is not that place: code lives only in a LIVE APP (see CODE ARTIFACTS).
+
+A LIVE APP above is different: it runs as an interactive app the scholar can use, and you change it with edit_document str_replace or insert.${
+        isVibecode
+          ? " Here it fills the screen. While editing, the scholar can switch it between Preview and a Code view of its HTML, on the web and the iPad alike."
+          : " It sits in its own tab beside their writing, and on the web and the iPad alike the scholar can switch that tab between Preview (the running app) and Code (the HTML source, which they can read and edit themselves)."
+      }`);
     }
   } else if (hasUnit && !playMode) {
     lines.push(`\n\nYou have a tool called "edit_document" to create a working document for the scholar to write in. Use it when the unit involves writing or producing a written deliverable: create the document early and EMPTY so the scholar has a place to write and can watch their work take shape — you give it a title, they fill in the words. Documents are plain text only — do NOT use markdown formatting. Document titles are shown separately in the UI header, so do NOT include a title or byline in the document content itself. Multiple documents can be created for different parts of the work.`);
@@ -3203,6 +3217,10 @@ export type AppStateContext = AppStateSnapshot & {
  */
 export function buildAppStateSection(
   appState: AppStateContext | null,
+  // run_app_action is offered only in app-builder and Workbench sessions
+  // (tutorSessionTools canRunAppAction); elsewhere a registered action is not
+  // something the tutor can invoke, so it is not listed.
+  canRunAppActions: boolean = true,
 ): string {
   if (!appState) return "";
   const hasDoc =
@@ -3211,7 +3229,7 @@ export function buildAppStateSection(
     (typeof appState.doc !== "object" ||
       Array.isArray(appState.doc) ||
       Object.keys(appState.doc).length > 0);
-  const actions = appState.actions ?? [];
+  const actions = canRunAppActions ? (appState.actions ?? []) : [];
   if (!hasDoc && appState.log.length === 0 && actions.length === 0) return "";
 
   const suffixBytes = crypto.getRandomValues(new Uint8Array(4));
@@ -3344,6 +3362,11 @@ export function buildCharacterOnStageSection(
       : `You have given it no standing direction.`,
     ...(notes ? [buildAuthorNotesBlock(notes)] : []),
     `You are its director. Every exchange appears in the conversation as an IN-APP block. direct_character sets or clears its standing direction; speak_as_character says one line through it, and can overrule a verdict it got wrong. The scholar never sees your directions.`,
+    // The layout. The scholar sees two text boxes, the app's and this chat's;
+    // a tutor that does not know says "the box at the bottom" and invites
+    // the character's question into its own chat (2026-10-12).
+    `The scholar has two boxes: ${name}'s box in the app, where they talk to ${name}, and this chat, where they talk to you. Never say "the box" or "the box at the bottom"; name it by who it reaches ("ask ${name} in ${name}'s box", "tell me here"). If they write here something meant for ${name} (a question or a line to it), do not answer it, relay it, or use speak_as_character for it: say in one short line to ask ${name} in ${name}'s box, then stop.`,
+    `When their next move is in the app (asking ${name} something, trying a step), say where to do it and stop. End with a pointer ("Ask ${name} your first question in ${name}'s box."), never a question they could answer in this chat ("What will you ask ${name} first?").`,
     // The restraint. A tutor updated after every exchange otherwise narrates
     // the play and hands over the discovery the app exists to stage.
     `The scholar is in the middle of working something out with ${name}, and that struggle is the lesson: what they notice for themselves stays with them, and whatever you name for them is lost. So while they play, your default on every app update is to say nothing.`,
@@ -4197,7 +4220,12 @@ export function buildSystemPromptParts(
       ? buildOpenExplorationWrapUpSection()
       : null,
     priorActivities: buildPriorActivitiesSection(priorActivityContext),
-    tools: playMode ? null : buildToolsSection(),
+    tools: playMode
+      ? null
+      : buildToolsSection({
+          appBuilder: isVibecode,
+          appActions: isVibecode || isWorkbench,
+        }),
     seedOrigin: buildSeedOriginSection(seedOriginContext),
     storyThread: buildStoryThreadSection(
       seedOriginContext?.storyThreadContext ?? null,
@@ -4251,10 +4279,15 @@ export function buildSystemPromptParts(
     webPractice: buildWebPracticeSection(webPracticeContext),
     timing: buildTimingSection(timingContext),
     process: buildProcessSection(processContext, processStateData),
-    artifacts: buildArtifactSection(artifactData, !!unitContext, playMode),
+    artifacts: buildArtifactSection(
+      artifactData,
+      !!unitContext,
+      playMode,
+      isVibecode,
+    ),
     map: buildMapSection(artifactData),
     slides: buildSlidesSection(artifactData),
-    appState: buildAppStateSection(appStateContext),
+    appState: buildAppStateSection(appStateContext, isVibecode || isWorkbench),
     seeds: buildSeedsSection(seedsData),
     whisper: buildWhisperSection(teacherWhisper),
     // One-time non-human introduction, only on the opening message of the

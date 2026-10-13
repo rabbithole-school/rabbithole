@@ -515,6 +515,24 @@ describe("session app state", () => {
         result: { level: 3 },
       },
     });
+    // A repeat ack of the recorded result (a remounted iframe running the
+    // same request again) is a no-op while that result is still the latest.
+    await expect(
+      owner.mutation(api.appStates.updateSessionState, {
+        artifactId: fixture.artifactId,
+        actionResult: { requestId: first.id, ok: true, result: { stale: true } },
+      }),
+    ).resolves.not.toHaveProperty("actionRequest.id");
+    await expect(
+      t.run((ctx) =>
+        ctx.runQuery(internal.appStates.readSessionActionResultForTutor, {
+          sessionId: fixture.sessionId,
+          artifactId: fixture.artifactId,
+          callerUserId: fixture.ownerId,
+          requestId: first.id,
+        }),
+      ),
+    ).resolves.toMatchObject({ result: { level: 3 } });
     const afterCompletion = await t.mutation(
       internal.appStates.requestSessionActionForTutor,
       {
@@ -1211,7 +1229,10 @@ describe("app-state prompt projection", () => {
     // Both scholar-facing prompt builders (tools, vibecode) must stay in sync
     // on the instrumentation contract; a drift here means one surface stops
     // knowing about window.rabbithole entirely.
-    for (const prompt of [buildToolsSection(), buildVibecodeSection()]) {
+    for (const prompt of [
+      buildToolsSection({ appBuilder: true }),
+      buildVibecodeSection(),
+    ]) {
       expect(prompt).toContain("window.rabbithole.setState");
       expect(prompt).toContain("window.rabbithole.registerAction");
       expect(prompt).toContain("window.rabbithole.askTutor");
@@ -1221,6 +1242,37 @@ describe("app-state prompt projection", () => {
       expect(prompt).toMatch(/grade or verdict/);
       expect(prompt).toMatch(/tutor still coaches Socratically/);
     }
+  });
+
+  test("a chat session's tools section promises no builder-only capability", () => {
+    // Render check, /app-assets/ pictures (charm_icon), and tutor-run app
+    // actions are gated on the app builder server-side; a chat prompt that
+    // mentions them sends the tutor looking for things it will never get.
+    const chat = buildToolsSection({ appBuilder: false });
+    for (const builderOnly of ["RENDER CHECK", "charm_icon", "registerAction"]) {
+      expect(chat).not.toContain(builderOnly);
+      expect(buildToolsSection({ appBuilder: true })).toContain(builderOnly);
+    }
+    expect(chat).toContain("window.rabbithole.setState");
+    expect(chat).toContain("window.rabbithole.askTutor");
+    // Workbench runs app actions but has no render check or app assets.
+    const workbench = buildToolsSection({ appBuilder: false, appActions: true });
+    expect(workbench).toContain("registerAction");
+    expect(workbench).not.toContain("RENDER CHECK");
+    expect(workbench).not.toContain("charm_icon");
+  });
+
+  test("registered actions are listed only where the tutor can run them", () => {
+    const state = {
+      artifactId: "a1",
+      doc: { level: 1 },
+      log: [],
+      actions: [{ name: "seedScenario", description: "Set up a fair test" }],
+    } as unknown as Parameters<typeof buildAppStateSection>[0];
+    expect(buildAppStateSection(state, true)).toContain("run_app_action");
+    const chat = buildAppStateSection(state, false);
+    expect(chat).not.toContain("run_app_action");
+    expect(chat).toContain("LIVE APP STATE");
   });
 
   test("shares the closed-network app-kit contract across builder prompts", () => {

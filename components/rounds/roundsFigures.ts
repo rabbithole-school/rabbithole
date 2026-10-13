@@ -29,7 +29,7 @@
  *         is itself the signal.
  *       • writing complexity — Flesch–Kincaid over typed messages
  *         (`lib/readingTrend.ts`), mechanical and already charted on the
- *         profile as "Scholar writing over time".
+ *         profile as the growth chart's Write lane.
  *
  * Deliberately absent, because each was judged unsound upstream: band-count
  * deltas ("3 → 5 fluent"), "top strand" by time spent (no time-on-task exists),
@@ -37,7 +37,11 @@
  * stored). Do not approximate any of them here.
  */
 
-import { talkLevelLabel } from "@/convex/lib/readingLevels";
+import {
+  READ_LEVEL_LABELS,
+  WRITE_MODE_LABELS,
+  talkLevelLabel,
+} from "@/convex/lib/readingLevels";
 
 /** The friction floor is applied server-side; this is only for the caption. */
 export const FRICTION_MISS_FLOOR = 3;
@@ -285,14 +289,10 @@ export interface RoundsLevelSignals {
     level: string | null;
     /** The READ level (TRA-503); `listener` runs the tutor voice first. */
     readLevel: "listener" | "beginner" | "reader";
+    /** The WRITE mode (TRA-514); `voice` means they dictate. Absent = own. */
+    writeMode?: "own" | "voice";
     setAt: number | null;
     setBy: "teacher" | "observer" | null;
-  };
-  estimate: {
-    level: string | null;
-    computedAt: number | null;
-    ageDays: number | null;
-    disagreesWithConfirmed: boolean;
   };
 }
 
@@ -316,18 +316,33 @@ export function levelPhrase(level: string | null): string {
 
 /**
  * The confirmed setting, said plainly: the TALK level the tutor adapts its
- * language to, which a human ratified — and, for a listener, that the tutor
- * speaks first (TRA-503).
+ * language to, which a human ratified — and, when they differ from the
+ * default, how the scholar reads (listener / beginner, TRA-503) and writes
+ * (by voice, TRA-514), in the app's own level labels.
  */
 export function confirmedLevelLine(signals: RoundsLevelSignals): {
   headline: string;
   caption: string | null;
 } {
   const { confirmed } = signals;
-  if (confirmed.readLevel === "listener") {
+  const read = confirmed.readLevel;
+  const voice = confirmed.writeMode === "voice";
+  if (read !== "reader" || voice) {
+    const tags = [
+      read !== "reader" ? READ_LEVEL_LABELS[read] : null,
+      voice ? WRITE_MODE_LABELS.voice : null,
+    ].filter((t): t is string => t !== null);
+    const captions = [
+      read === "listener"
+        ? "The tutor speaks its turns, voice first"
+        : read === "beginner"
+          ? "The tutor reads its turns aloud, word by word"
+          : null,
+      voice ? "Gets their words in by talking, not typing" : null,
+    ].filter((c): c is string => c !== null);
     return {
-      headline: `Listener · talk level ${levelPhrase(confirmed.level)}`,
-      caption: "The tutor speaks its turns, voice first",
+      headline: `${tags.join(" · ")} · talk level ${levelPhrase(confirmed.level)}`,
+      caption: captions.join(". "),
     };
   }
   if (!confirmed.level) {
@@ -344,54 +359,6 @@ export function confirmedLevelLine(signals: RoundsLevelSignals): {
         : confirmed.setBy === "observer"
           ? "Set by the observer — no teacher has ratified it"
           : "Set before ratification was recorded",
-  };
-}
-
-/**
- * The writing-derived estimate — present ONLY while it disagrees with the
- * confirmed setting, because agreement clears it server-side. So a returned
- * estimate always means "current evidence disagrees with the setting", and that
- * is what this says out loud.
- *
- * It is never called a reading level. Nothing in its evidence chain observes
- * what the child can read.
- */
-export function writingEstimateLine(
-  signals: RoundsLevelSignals,
-  scholarName: string,
-): {
-  headline: string;
-  /** The full sentence, for the pane. */
-  caption: string;
-  /** The board's line — same claim, short enough to read across a room. */
-  shortCaption: string;
-  dismissLabel: string;
-} | null {
-  const { estimate, confirmed } = signals;
-  if (!estimate.level) return null;
-
-  const age =
-    estimate.ageDays === null
-      ? "computed date not recorded"
-      : estimate.ageDays <= 0
-        ? "computed today"
-        : `computed ${plural(estimate.ageDays, "day", "days")} ago`;
-
-  const against = confirmed.level
-    ? `Nobody has settled it against ${levelPhrase(confirmed.level)}.`
-    : "No confirmed level has been set against it.";
-
-  return {
-    headline: `Writing suggests ${levelText(estimate.level)}`,
-    caption: `Estimated from ${scholarName}'s own writing — typed chat and scanned work, ${age}. ${against}`,
-    shortCaption: confirmed.level
-      ? `From their own writing. Not settled against ${levelPhrase(confirmed.level)}.`
-      : "From their own writing. No confirmed level set against it.",
-    // "Keep <the confirmed value>", never "Dismiss": the teacher is choosing
-    // their standing ruling over a machine estimate, not discarding a message.
-    dismissLabel: confirmed.level
-      ? `Keep ${levelPhrase(confirmed.level)}`
-      : "Leave the level unset",
   };
 }
 

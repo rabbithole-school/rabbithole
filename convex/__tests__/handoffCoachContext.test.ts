@@ -4,10 +4,41 @@ import schema from "../schema";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import {
+  coachLevelLines,
   resolveCoachAgeBand,
   resolveCoachSkillStatus,
   resolveScholarCoachContext,
 } from "../lib/practice/handoff";
+
+describe("coach levels: talk, read and write (TRA-514)", () => {
+  const NOW_ = Date.UTC(2026, 9, 12);
+  test("carries read and write only when they differ from the default", () => {
+    expect(
+      resolveScholarCoachContext({ scholar: { readingLevel: "5" }, now: NOW_ }),
+    ).toEqual({ readingLevel: "5" });
+    expect(
+      resolveScholarCoachContext({
+        scholar: { readingLevel: "7", readLevel: "beginner", writeMode: "voice" },
+        now: NOW_,
+      }),
+    ).toEqual({ readingLevel: "7", readLevel: "beginner", writeMode: "voice" });
+    // A legacy pre-reader is talk K + read listener.
+    expect(
+      resolveScholarCoachContext({ scholar: { readingLevel: "pre-reader" }, now: NOW_ }),
+    ).toEqual({ readingLevel: "K", readLevel: "listener" });
+  });
+
+  test("one level line for a reader; a read line and a write line when they differ", () => {
+    expect(coachLevelLines(undefined)).toEqual([]);
+    expect(coachLevelLines({ readingLevel: "5" })).toHaveLength(1);
+    expect(coachLevelLines({ readingLevel: "7", readLevel: "beginner" })).toHaveLength(2);
+    expect(
+      coachLevelLines({ readingLevel: "K", readLevel: "listener", writeMode: "voice" }),
+    ).toHaveLength(3);
+    // Read and write without a talk level still reach the coach.
+    expect(coachLevelLines({ writeMode: "voice" })).toHaveLength(2);
+  });
+});
 
 const modules = (
   import.meta as ImportMeta & {

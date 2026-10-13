@@ -16,7 +16,7 @@
 // prior artifact-sourced evidence before re-writing.
 
 import { v } from "convex/values";
-import { describeLevelsForPrompt } from "./lib/readingLevels";
+import { describeLevelsForPrompt, levelsPromptLine } from "./lib/readingLevels";
 import { internalAction, internalMutation, internalQuery } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -188,7 +188,7 @@ export const assessArtifact = internalAction({
       .map((g) => `- [${g.key}] (${g.kind.toUpperCase()}) ${g.text}`)
       .join("\n");
     const readingLine = bundle.readingLevel
-      ? `Scholar reading level: ${bundle.readingLevel}. Judge understanding, not spelling/handwriting — calibrate expectations to this level.`
+      ? `${levelsPromptLine(bundle.readingLevel)}. Judge understanding, not spelling/handwriting — calibrate expectations to the talk level.`
       : null;
     const userMessage = [
       `Activity: ${bundle.activityTitle} (${bundle.recipe === "baseline" ? "BASELINE — start of unit; expect partial, pre-teaching thinking" : "EXIT TICKET — end of unit; look for grown understanding"})`,

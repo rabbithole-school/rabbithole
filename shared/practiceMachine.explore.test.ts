@@ -1127,7 +1127,9 @@ function describeExploration(
           if (text) console.info(text);
         }
       }
-    });
+      // Above the 20s budget asserted below, so that assertion is the guard
+      // and a slower CI runner fails with a message rather than a hook timeout.
+    }, 30_000);
 
     it("explores a non-trivial space inside its budget", () => {
       // Guards the harness itself: a refactor that collapses the alphabet (say,

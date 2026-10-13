@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { query, mutation, internalMutation, internalQuery } from "./_generated/server";
 import { authedQuery, authedMutation, teacherQuery, platformAdminMutation, platformAdminQuery, scholarAdminQuery, scholarAdminMutation, schoolAdminMutation } from "./lib/customFunctions";
-import { assertCanWrite, getCurrentUser, getSessionOwner } from "./lib/auth";
+import { assertCanWrite, getActiveOverlay, getCurrentUser, getSessionOwner } from "./lib/auth";
 import {
   assertInstitutionActive,
   requireActiveScholarAccess,
@@ -89,7 +89,7 @@ import {
   schoolOperationsInstitutionIds,
   STAFF_CAPABILITIES,
 } from "./lib/staffCapabilities";
-import { talkLevelOf } from "./lib/readingLevels";
+import { readLevelOf, talkLevelOf } from "./lib/readingLevels";
 
 /**
  * The outcome of a successful `registerWithCode`, telling the client how to
@@ -523,6 +523,10 @@ export const currentUser = query({
       ),
       institutionSuspended: suspension.blocked,
       institutionSuspendedName: suspension.institutionName,
+      // The READ level with the legacy "pre-reader" talk value resolved
+      // (`readLevelOf`), so practice can read questions aloud by it on both
+      // clients without re-deriving the rule (TRA-514).
+      effectiveReadLevel: readLevelOf(user),
     };
   },
 });
@@ -1044,6 +1048,14 @@ export const isSessionOwnerReadOnly = internalQuery({
     const owner = await getSessionOwner(ctx);
     return owner?.readOnly === true;
   },
+});
+
+/** Action-side impersonation probe: actions have no db, so an action that
+ *  authenticates and then writes asks here whether its session is "viewing
+ *  as" another user — read-only app-wide (lib/auth `assertNotImpersonating`). */
+export const isSessionImpersonating = internalQuery({
+  args: {},
+  handler: async (ctx): Promise<boolean> => (await getActiveOverlay(ctx)) !== null,
 });
 
 /**
@@ -2478,5 +2490,23 @@ export const assignmentsForScholar = teacherQuery({
     }
 
     return { assignments, focus };
+  },
+});
+
+/**
+ * Operator correction of an account's display name — for staff, whose only
+ * other rename path is editing their own profile (`updateProfile`). Internal
+ * only: run from the CLI (`npx convex run users:setDisplayName …`). Scholars
+ * have the school-operations path (`adminUpdateScholarProfile`).
+ */
+export const setDisplayName = internalMutation({
+  args: { userId: v.id("users"), name: v.string() },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) throw new Error("User not found.");
+    const name = args.name.trim();
+    if (!name) throw new Error("Name cannot be empty.");
+    await ctx.db.patch(user._id, { name });
+    return { previous: user.name ?? null, name };
   },
 });

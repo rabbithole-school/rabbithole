@@ -28,6 +28,8 @@ import { convexSiteUrl } from "@/lib/convexUrls";
 type EngineState = "idle" | "speaking" | "paused";
 
 const FETCH_LOOKAHEAD = 2;
+/** How long a sentence waits on a suspended (gesture-locked) AudioContext. */
+const SUSPENDED_GIVE_UP_MS = 1500;
 
 interface QueueItem {
   text: string;
@@ -48,6 +50,8 @@ export class TTSEngine {
   private generation = 0;
   private stopped = false;
   private paused = false;
+  /** Releases the pump from the sentence it is waiting on (see stop()). */
+  private abortPlay: (() => void) | null = null;
   private listeners = new Set<(s: EngineState) => void>();
 
   subscribe(fn: (s: EngineState) => void): () => void {
@@ -126,6 +130,11 @@ export class TTSEngine {
       // already stopped
     }
     this.current = null;
+    // A sentence whose audio never ends (a context the browser won't start
+    // without a gesture never fires `onended`) must not hold the pump: release
+    // it so the next speak() plays instead of queueing behind it forever.
+    this.abortPlay?.();
+    this.abortPlay = null;
     // If we were paused the context is suspended; resume it so a stopped
     // source's `onended` can fire and the parked pump loop unwinds (else
     // `playing` would stay true and block the next speak()).
@@ -212,7 +221,13 @@ export class TTSEngine {
         if (gen !== this.generation) continue; // stopped — queue already cleared
         this.queue.shift();
         if (buffer) {
-          await this.playBuffer(buffer);
+          await Promise.race([
+            this.playBuffer(buffer),
+            new Promise<void>((release) => {
+              this.abortPlay = release;
+            }),
+          ]);
+          this.abortPlay = null;
         }
       }
     } finally {
@@ -226,7 +241,6 @@ export class TTSEngine {
     return new Promise((resolve) => {
       const ctx = this.ensureCtx();
       if (!ctx) return resolve();
-      if (ctx.state === "suspended" && !this.paused) void ctx.resume();
       const src = ctx.createBufferSource();
       src.buffer = buffer;
       src.connect(ctx.destination);
@@ -234,6 +248,18 @@ export class TTSEngine {
         if (this.current === src) this.current = null;
         resolve();
       };
+      if (ctx.state === "suspended" && !this.paused) {
+        void ctx.resume();
+        // No user gesture yet: the browser keeps the context suspended, the
+        // source never plays and `onended` never fires. Give the sentence up
+        // after a moment rather than sit in "speaking" with no sound.
+        setTimeout(() => {
+          if (ctx.state === "suspended" && !this.paused && this.current === src) {
+            this.current = null;
+            resolve();
+          }
+        }, SUSPENDED_GIVE_UP_MS);
+      }
       this.current = src;
       voiceMark("firstAudio"); // no-op unless a voice-perf cycle is armed
       src.start();

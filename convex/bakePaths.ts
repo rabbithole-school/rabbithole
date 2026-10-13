@@ -14,7 +14,7 @@
 // chosen option is then threaded into the bake as the unit's "way in".
 
 import { v } from "convex/values";
-import { describeLevelsForPrompt } from "./lib/readingLevels";
+import { describeLevelsForPrompt, levelsPromptLine } from "./lib/readingLevels";
 import { authedAction } from "./lib/customFunctions";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -94,7 +94,7 @@ async function proposePaths(
     cx.rationale
       ? `What seems to pull them toward it (private — don't read this back to them): ${cx.rationale}`
       : "",
-    `Their reading level: ${cx.readingLevel ?? "(elementary — pick a sensible default)"}`,
+    levelsPromptLine(cx.readingLevel) ?? "Talk level: (elementary — pick a sensible default)",
     "",
     "Propose 2-4 GENUINELY DIFFERENT, concrete ways they could dive in — each a real, worthwhile gifted activity (not the same idea reworded, and NOT abstract labels like 'go deep' / 'go wide'). Make each one a specific angle or thing-they'd-do that a curious kid would actually want to pick, and that still leads to genuinely understanding the topic. Speak TO the kid (second person), warm and concrete. Use your judgment about what makes a good gifted activity. Call report_paths.",
   ]

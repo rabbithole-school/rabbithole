@@ -419,6 +419,23 @@ describe("character section and instruction", () => {
     expect(buildCharacterOnStageSection(character)).toBe(without);
   });
 
+  // 2026-10-12: the scholar sees two boxes (the app's and the tutor chat) and
+  // the tutor sent them to "the box at the bottom". Structure only: whatever
+  // the section says about a box, it says with the character's name.
+  test("names every box by the character it reaches", () => {
+    const name = "SENTINEL-NAME";
+    const section = buildCharacterOnStageSection({
+      name,
+      persona: "A witness.",
+      moods: ["calm"],
+      verdicts: [],
+      direction: null,
+    });
+    const boxLines = section.split("\n").filter((line) => /\bbox\b/i.test(line));
+    expect(boxLines.length).toBeGreaterThan(0);
+    for (const line of boxLines) expect(line).toContain(name);
+  });
+
   test("offers stay_silent only when it is offered", () => {
     expect(
       appUpdateInstruction({ hasAsks: false, hasCharacter: true, canStaySilent: true }),

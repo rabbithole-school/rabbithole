@@ -1248,14 +1248,17 @@ export default defineSchema({
     // WRITE mode (TRA-503): own | voice — how the scholar's words get in.
     // Unset = own. Teacher-set only.
     writeMode: v.optional(writeModeValidator),
-    // WRITING-DERIVED grade estimate pending teacher review. Every input is the
-    // scholar's own production (typed tutor chat + OCR'd handwritten work); nothing
-    // observes what they can READ. Not a Lexile measure, not a normed assessment,
-    // not a screener. Present only while it DISAGREES with `readingLevel` —
-    // agreement clears it, so a shown disagreement is always current evidence.
+    // WRITING-DERIVED grade estimate, INFO-ONLY (TRA-513): shown under the Write
+    // row of the profile, never promoted into `readingLevel`. Every input is the
+    // scholar's own TYPED tutor chat (dictated turns and handwriting are excluded);
+    // nothing observes what they can READ. Not a
+    // Lexile measure, not a normed assessment, not a screener. Stored only when
+    // drawn from >= MIN_TYPED_WORDS_FOR_ESTIMATE typed words.
     readingLevelSuggestion: v.optional(v.string()),
     /** When `readingLevelSuggestion` was computed. Without it the age is unknowable. */
     readingLevelSuggestionAt: v.optional(v.number()),
+    /** Typed words `readingLevelSuggestion` was drawn from ("from N typed words"). */
+    readingLevelSuggestionWords: v.optional(v.number()),
     dateOfBirth: v.optional(v.string()), // ISO date string, e.g. "2018-03-15"
     // Scholar's CHRONOLOGICAL grade ("K","1"…"8"). The reference notch on the
     // Acceleration view — what the calendar says, against which we celebrate how
@@ -2196,6 +2199,11 @@ export default defineSchema({
     // mic. Holds that line (copied server-side from the previous tutor reply,
     // never from the client) so the tutor can check the reading word by word.
     readAloudOf: v.optional(v.string()),
+    // TRA-515: a "user" turn a STAFF member sent in the scholar's session (a
+    // teacher typing for them, Remote Mode). Not the scholar's language, so it
+    // is left out of the Write row's spoken share and the observer's talk word
+    // floor. Unset on every row written before this field (read as the scholar's).
+    byStaff: v.optional(v.boolean()),
     // App designer (TRA-301): which of the session's two threads this turn
     // belongs to. Edit talks to the DESIGNER (code tools, versions); Play talks
     // to the TUTOR (no code tools, never a version). Stamped server-side from
@@ -2390,6 +2398,14 @@ export default defineSchema({
     summary: v.optional(v.string()),
     suggestedIntervention: v.optional(v.string()),
     promptVersion: v.optional(v.string()),
+    // TRA-515: the observer's judgment of the grade at which a typical child
+    // produces the LANGUAGE (vocabulary + sentence complexity) the scholar
+    // used in the window it read — spoken turns count; spelling doesn't. Canonical
+    // level (`normalizeReadingLevel`). Stored only when drawn from at least
+    // MIN_SCHOLAR_WORDS_FOR_TALK_JUDGMENT scholar words (`talkWords`). Evidence
+    // for the profile's Talk row; it never sets the talk level.
+    talkLevel: v.optional(v.string()),
+    talkWords: v.optional(v.number()),
   }).index("by_session", ["sessionId"]),
 
   observations: defineTable({
@@ -2789,6 +2805,12 @@ export default defineSchema({
     issuedAt: v.number(),
     // The proctoring teacher/admin who recorded the pass.
     issuedBy: v.id("users"),
+    // The last day the license is valid, as the school's calendar day
+    // ("YYYY-MM-DD" — a date, not an instant, so no time zone can shift it).
+    // Every grant must set it (grantCalculatorLicenseAs refuses one without
+    // a future date); optional only so rows issued before expiry existed
+    // stay valid until amended.
+    expiresOn: v.optional(v.string()),
     // Generated gold medallion displayed on the scholar's credential and in
     // their badge collection. Optional for forward-compatible legacy rows.
     badgeId: v.optional(v.id("scholarUnitBadges")),
@@ -8860,9 +8882,34 @@ export default defineSchema({
     .index("by_document", ["documentId"])
     .index("by_scholar", ["scholarId"]),
 
+  // TRA-515: one row per your-turn line a BEGINNER read aloud (a spoken turn
+  // stamped `messages.readAloudOf`), scored by `compareReading` when it was
+  // sent — the same check the tutor is told. Written in `sessions.sendMessage`,
+  // the one path both web and native take. The message keeps the line and the
+  // transcript, but not the letter teams the line was accepted with (which
+  // decide `missedUnits`) and has no scholar+time index: tallying a week from
+  // it would walk every session's messages. Evidence for the profile's Read row
+  // only. Deleted with its session (`deleteSessionCascade`) or scholar.
+  readAloudAttempts: defineTable({
+    scholarId: v.id("users"),
+    sessionId: v.id("sessions"),
+    messageId: v.id("messages"),
+    /** Words in the line. */
+    words: v.number(),
+    /** Line words read right, in order. */
+    matched: v.number(),
+    /** False for "I can't read that" or nothing heard (`compareReading`). */
+    attempted: v.boolean(),
+    /** Spellings (letter teams or letters) missed in the line (`missedUnits`). */
+    missedUnits: v.array(v.string()),
+  })
+    .index("by_scholar", ["scholarId"])
+    .index("by_session", ["sessionId"]),
+
   // Every human-ratified level change, for all three levels (TRA-503). `level`
   // holds the dimension's value ("3", "listener", "voice"); `dimension` unset
   // means talk, so every row written before the split is a talk row.
+
   readingLevelHistory: defineTable({
     scholarId: v.id("users"),
     dimension: v.optional(levelDimensionValidator),
@@ -9765,7 +9812,7 @@ export default defineSchema({
   syntheticScholarProfiles: defineTable({
     ownerId: v.id("users"),
     name: v.string(),
-    // e.g. "Grade 2", "Grade 5" — drives the tutor's READING LEVEL section.
+    // e.g. "Grade 2", "Grade 5" — drives the tutor's TALK LEVEL section.
     readingLevel: v.string(),
     // Synthetic dossier text; fed to the real tutor's buildDossierSection.
     // Teacher- or AI-authored — treat as untrusted, like a real dossier.

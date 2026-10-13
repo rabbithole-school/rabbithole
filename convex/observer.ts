@@ -21,6 +21,8 @@ import {
   resolveChatAlertRecency,
   resolveChatAlerts,
   resolveObservationEvidenceTime,
+  scholarWordCount,
+  typedScholarWordCount,
   type ObserverHistoryMessage,
   type ParsedObserverResponse,
 } from "./lib/observerShared";
@@ -569,6 +571,15 @@ export const analyzeSession = internalAction({
           summary: result.pulse.summary,
           pulseScore: result.pulse.pulseScore,
           promptVersion,
+          // Talk judgment (TRA-515): the grade of the language used, spoken turns
+          // included, counted over the window the model actually read.
+          // saveAnalysis drops it below the word floor or if it isn't a grade.
+          ...(result.talkLevel
+            ? {
+                talkLevel: result.talkLevel,
+                scholarWords: scholarWordCount(recentHistory),
+              }
+            : {}),
         });
         console.log(`[Observer] Pulse written OK`);
       }
@@ -782,30 +793,30 @@ export const analyzeSession = internalAction({
         console.log(`[Observer] ${written} granule attributions written${phase ? ` (phase: ${phase})` : ""}`);
       }
 
-      // 12. Writing-derived grade-level estimate.
+      // 12. Writing-derived grade-level estimate — INFO-ONLY (TRA-513).
       //
-      // This used to write ONLY when the inferred value differed from the
-      // confirmed level, which made agreement invisible: once later evidence
-      // caught up with the teacher's setting, nothing was recorded, so a
-      // weeks-old disagreement kept sitting on the profile looking current.
-      //
-      // The estimate is now always handed to `setReadingLevelSuggestion`, which
-      // stores a disagreement, CLEARS a superseded one on agreement, and stamps
-      // when the estimate was computed. That mutation carries its own freshness
-      // guard, so this hot path (it runs after every tutor session) does not
-      // thrash the scholar's user doc — an unchanged value inside the guard
-      // window is a no-op.
+      // Shown under the Write row of the scholar profile; nothing promotes it
+      // into the talk level. It may only be drawn from what the scholar TYPED:
+      // dictated turns arrive as fluent, punctuated adult prose and would grade
+      // the speech-to-text engine, not the child. So the typed word count comes
+      // from the same `isTypedScholarText` filter the teacher-run estimator and
+      // the Flesch-Kincaid trend use, over the window the model actually read;
+      // `setReadingLevelSuggestion` refuses a sample under the floor and
+      // validates the model's grade before storing it. Its freshness guard keeps
+      // this hot path (after every tutor session) from thrashing the user doc.
       if (result.inferredReadingLevel) {
+        const typedWords = typedScholarWordCount(recentHistory);
         const outcome = await ctx.runMutation(
           internal.scholars.setReadingLevelSuggestion,
           {
             scholarId: context.scholarId,
             suggestion: result.inferredReadingLevel,
+            typedWords,
           },
         );
         if (outcome !== "skipped") {
           console.log(
-            `[Observer] 📝 Writing-derived level estimate ${result.inferredReadingLevel} → ${outcome}`,
+            `[Observer] 📝 Writing-derived level estimate ${result.inferredReadingLevel} (${typedWords} typed words) → ${outcome}`,
           );
         }
       }

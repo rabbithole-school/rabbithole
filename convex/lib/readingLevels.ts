@@ -12,11 +12,13 @@
 //   • The CONFIRMED level (`users.readingLevel`, appended to
 //     `readingLevelHistory` when a teacher sets or accepts it) is a
 //     HUMAN-RATIFIED SETTING that the system ACTS ON. It is rendered verbatim
-//     into the tutor's READING LEVEL prompt section (`sessionHelpers`). It is
+//     into the tutor's TALK LEVEL prompt section (`buildLevelsSection`). It is
 //     the TALK level (see "Talk, read, write" below). A teacher owns it.
 //
 //   • The COMPUTED estimate (`users.readingLevelSuggestion`) is current
-//     evidence, not a setting. It is WRITING-DERIVED: every input to
+//     evidence, not a setting, and it never becomes one: nothing promotes it
+//     into the talk level (TRA-513 removed "Set as talk level"); it is shown
+//     info-only under the Write row. It is WRITING-DERIVED: every input to
 //     `readingLevelAnalysis` is the child's own PRODUCTION — typed tutor-chat
 //     messages plus OCR-transcribed handwritten portfolio prose. There is no
 //     reception evidence anywhere in it; nothing measures what the child can
@@ -41,8 +43,8 @@
 //
 // Consumed by the teacher setter/validator (`scholars.updateReadingLevel`), the
 // writing-derived estimator (`readingLevelAnalysis`), and rendered verbatim into
-// the tutor's READING LEVEL prompt section (`sessionHelpers`) — so any string
-// here must read naturally after "the scholar's reading level is set to …".
+// the tutor's TALK LEVEL prompt section (`buildLevelsSection`) — so any string
+// here must read naturally after "the scholar's talk level is …".
 //
 // ── Talk, read, write (TRA-503) ─────────────────────────────────────────
 //
@@ -178,61 +180,65 @@ export function normalizeReadingLevel(raw: string): string | null {
  */
 export const ESTIMATE_REFRESH_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * The fewest TYPED words a writing-derived estimate may be computed from, and
+ * the floor under which the profile says "too few typed words to trust".
+ *
+ * 100 is the classic readability sample size (Fry and SMOG both score a
+ * 100-word sample): below it one long word swings the grade by a band, and the
+ * estimator is asked for a tenth of a grade. The old gate was 10 words, which
+ * made the model answer but not the answer mean anything.
+ */
+export const MIN_TYPED_WORDS_FOR_ESTIMATE = 100;
+
+/** Words in `text`: tokens containing a letter ("-" and "3" are not words). */
+export function countWords(text: string): number {
+  return text.split(/\s+/).filter((w) => /[a-zA-Z]/.test(w)).length;
+}
+
 /** What a writer should do with a freshly computed writing-derived estimate. */
 export interface EstimateWriteDecision {
   /**
-   * `"stored"`    — a new/changed disagreement to show the teacher.
-   * `"cleared"`   — evidence now AGREES with the confirmed level, so the
-   *                 previously stored disagreement is superseded.
-   * `"refreshed"` — same conclusion as last time, but the stamp was stale
-   *                 enough that its age was about to mislead.
-   * `"skipped"`   — nothing to say and the stamp is still fresh; do not write.
+   * `"stored"`    — a new or changed estimate.
+   * `"refreshed"` — same grade as last time, but the stamp was stale enough
+   *                 that its age was about to mislead.
+   * `"skipped"`   — same grade and the stamp is still fresh; do not write.
    */
-  action: "stored" | "cleared" | "refreshed" | "skipped";
-  /** The value to patch into `users.readingLevelSuggestion`. */
-  nextSuggestion: string | undefined;
+  action: "stored" | "refreshed" | "skipped";
 }
 
 /**
  * Decide how to record a writing-derived grade-level estimate.
  *
+ * The estimate is information about the scholar's typed writing, shown on the
+ * Write row. It is never compared with the talk level (TRA-513: framing it as a
+ * disagreement with the talk level is what let it overwrite that level), so
+ * agreement is not special and nothing here clears a stored value.
+ *
  * Pure, so the honesty properties are testable without a database:
- *
- *  • AGREEMENT IS RECORDED. The old observer path wrote only on disagreement, so
- *    once later evidence caught up with the teacher's setting nothing happened —
- *    and a weeks-old disagreement kept sitting on the profile looking current.
- *    Agreement now clears the superseded suggestion. A displayed disagreement is
- *    therefore always current evidence.
- *
  *  • AGE IS NEVER SILENTLY STALE. Any write stamps `computedAt`; an unchanged
- *    conclusion still refreshes it once the stamp passes `ESTIMATE_REFRESH_MS`.
+ *    grade still refreshes it once the stamp passes `ESTIMATE_REFRESH_MS`.
+ *  • THE HOT PATH IS BOUNDED. The same grade inside the window is a no-op.
  *
- *  • THE HOT PATH IS BOUNDED. Same conclusion inside the window is a no-op.
+ * `pending` and `estimate` are canonical levels (`normalizeReadingLevel`), so
+ * "7" and "7.0" can never read as different.
  */
 export function decideEstimateWrite(args: {
-  /** The teacher-ratified level the system acts on, or null if unset. */
-  confirmed: string | null;
-  /** The currently stored pending estimate, or null if none. */
+  /** The currently stored estimate, or null if none. */
   pending: string | null;
   /** When the stored estimate was computed, or null if never stamped. */
   pendingAt: number | null;
-  /** The freshly computed writing-derived estimate. */
+  /** The freshly computed, canonical estimate. */
   estimate: string;
   now: number;
   /** Skip the freshness guard — for an explicit, teacher-initiated analysis. */
   force?: boolean;
 }): EstimateWriteDecision {
-  const agrees = args.confirmed !== null && args.confirmed === args.estimate;
-  const nextSuggestion = agrees ? undefined : args.estimate;
-  const valueUnchanged = (nextSuggestion ?? null) === args.pending;
+  const valueUnchanged = args.estimate === args.pending;
   const stampFresh =
     args.pendingAt !== null && args.now - args.pendingAt < ESTIMATE_REFRESH_MS;
-
-  if (valueUnchanged && stampFresh && !args.force) {
-    return { action: "skipped", nextSuggestion };
-  }
-  if (valueUnchanged) return { action: "refreshed", nextSuggestion };
-  return { action: agrees ? "cleared" : "stored", nextSuggestion };
+  if (valueUnchanged && stampFresh && !args.force) return { action: "skipped" };
+  return { action: valueUnchanged ? "refreshed" : "stored" };
 }
 
 // ── Talk, read, write helpers (TRA-503) ──────────────────────────────────
@@ -414,6 +420,47 @@ export function talkLevelLabel(
   return `Grade ${talk}`;
 }
 
+/**
+ * The Write row's info line for the writing-derived estimate (TRA-513).
+ *
+ *  • No estimate (or an unreadable stored grade), or a counted sample under
+ *    `MIN_TYPED_WORDS_FOR_ESTIMATE`: refuses to state a grade.
+ *  • An estimate stored before word counts existed (`typedWords` null): its
+ *    sample is unknown, which is not the same as small, so it is labelled as
+ *    coming from an older method rather than called untrustworthy.
+ *  • Otherwise the grade and its sample. Every stated estimate carries its age.
+ */
+export function writingEstimateText(
+  level: string | null | undefined,
+  typedWords: number | null | undefined,
+  computedAt: number | null | undefined,
+  now: number,
+): string {
+  const canonical = level ? normalizeReadingLevel(level) : null;
+  const counted = typeof typedWords === "number";
+  if (!canonical || (counted && typedWords < MIN_TYPED_WORDS_FOR_ESTIMATE)) {
+    return "Typed writing: too few typed words to trust";
+  }
+  const grade =
+    canonical === "K"
+      ? "kindergarten"
+      : canonical === "college"
+        ? "college level"
+        : `grade ${canonical}`;
+  const age =
+    typeof computedAt === "number"
+      ? ` · ${estimateAgeText(Math.max(0, Math.floor((now - computedAt) / 86_400_000)))}`
+      : "";
+  return counted
+    ? `Typed writing reads like ${grade} · from ${typedWords.toLocaleString("en-US")} typed words${age}`
+    : `Estimate from an older method: ${grade}${age}`;
+}
+
+function estimateAgeText(days: number): string {
+  if (days === 0) return "today";
+  return days === 1 ? "1 day ago" : `${days} days ago`;
+}
+
 // ── Talk decides WHAT, read decides HOW ──────────────────────────────────
 //
 // TALK picks the tutor's register (vocabulary, ideas, sentence size). READ
@@ -512,4 +559,24 @@ export function describeEffectiveLevelsForPrompt({
 }: EffectiveLevels): string | null {
   if (read === DEFAULT_READ_LEVEL && write === DEFAULT_WRITE_MODE) return talk;
   return `talk ${talk ?? "unset"}; reads: ${READ_LEVEL_PROMPT_PHRASES[read]}; writes: ${WRITE_MODE_PROMPT_PHRASES[write]}`;
+}
+
+/**
+ * The label a model-facing prompt puts in front of a `describe…ForPrompt`
+ * string. That string has two shapes: the bare talk level ("3") for a reader
+ * who writes on their own, or "talk K; reads: …; writes: …" otherwise. The
+ * first is a TALK level (ideas and vocabulary), never a reading level; the
+ * second names all three itself. A grade band never starts with "talk ".
+ */
+export function levelsPromptLabel(described: string): string {
+  return described.startsWith("talk ")
+    ? "Talk, read and write levels"
+    : "Talk level";
+}
+
+/** `<label>: <described>`, e.g. "Talk level: 3"; null when nothing is set. */
+export function levelsPromptLine(
+  described: string | null | undefined,
+): string | null {
+  return described ? `${levelsPromptLabel(described)}: ${described}` : null;
 }

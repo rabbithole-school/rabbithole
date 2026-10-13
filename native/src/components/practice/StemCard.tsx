@@ -49,6 +49,8 @@ export function StemCard({
   stampLabel,
   stampAnnouncement,
   speakable = false,
+  readAlong = false,
+  autoRead = false,
   big = false,
 }: {
   stem: string | null | undefined;
@@ -62,10 +64,18 @@ export function StemCard({
   /** Overrides the stamp's accessibility announcement (defaults to
    *  `stampLabel`) — lets a caller speak a fuller retired-title phrase. */
   stampAnnouncement?: string;
-  /** Kindergarten (grade "K") item: wrap the stem in a tap-to-hear speaker so a
-   *  pre-reader can hear the question. Uses the shared native `SpeakableLabel`
-   *  (which respects the scholar's `ttsEnabled`). Default off ⇒ unchanged. */
+  /** Wrap the stem in a tap-to-hear speaker — a scholar who doesn't read on
+   *  their own yet (read level listener / beginner, TRA-514) or a grade-"K"
+   *  item. Uses the shared native `SpeakableLabel` (which respects the
+   *  scholar's `ttsEnabled`). Default off ⇒ unchanged. */
   speakable?: boolean;
+  /** Light each word violet as the voice says it — the tutor reply's
+   *  read-along, on the same voice and clock (TRA-514): a listener's auto-read
+   *  and a beginner's tapped speaker alike. */
+  readAlong?: boolean;
+  /** Read the question aloud on its own when this turns true (a listener's
+   *  question as it appears). Implies `speakable` and `readAlong`. */
+  autoRead?: boolean;
   /** A bare "Fast math" retrieval item — render the fact LARGER so a single-
    *  digit fact reads as an instant, focused recall prompt (the tactile FastMath
    *  feel on iPad), not a wordy card. Default off ⇒ the ordinary STEM_FONT_SM. */
@@ -97,14 +107,20 @@ export function StemCard({
         shakeStyle,
       ]}
     >
-      {speakable ? (
+      {speakable || autoRead ? (
         <SpeakableLabel
           text={stemToSpeech(stem ?? "")}
           tapAnywhere
           accessibilityLabel="Hear the question"
           iconSize={22}
+          autoPlay={autoRead}
         >
-          <StemText value={superscriptExponents(stem ?? "")} fontSize={big ? STEM_FONT_LG : STEM_FONT_SM} align="center" />
+          <StemText
+            value={superscriptExponents(stem ?? "")}
+            fontSize={big ? STEM_FONT_LG : STEM_FONT_SM}
+            align="center"
+            readAlong={readAlong || autoRead}
+          />
         </SpeakableLabel>
       ) : (
         <StemText value={superscriptExponents(stem ?? "")} fontSize={big ? STEM_FONT_LG : STEM_FONT_SM} align="center" />

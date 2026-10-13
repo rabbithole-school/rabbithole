@@ -19,6 +19,7 @@ import {
   type InstitutionPromptProfile,
 } from "./institutionPromptProfile";
 import { writingMechanicsPolicy } from "./writingMechanicsPolicy";
+import { levelsPromptLine } from "./readingLevels";
 import {
   renderCriteriaForRubricCheck,
   type DeliverableCriterion,
@@ -84,7 +85,7 @@ export function buildRubricCheckUserMessage(input: {
 
   const rubricBlock = renderCriteriaForRubricCheck(input.criteria);
   const readingLevelLine = input.readingLevel
-    ? `Scholar reading level: ${input.readingLevel}. CALIBRATE level-dependent criteria (length, ${input.assessesWritingMechanics === true ? "mechanics, " : ""}vocabulary) to this level — but apply level-INDEPENDENT criteria (specificity, structure, engagement, originality) at the same bar regardless of level. Don't grade-inflate.`
+    ? `${levelsPromptLine(input.readingLevel)}. CALIBRATE level-dependent criteria (length, vocabulary) to the talk level${input.assessesWritingMechanics === true ? "; calibrate mechanics to how they read and write (the read and write levels), never to the talk level" : ""} — but apply level-INDEPENDENT criteria (specificity, structure, engagement, originality) at the same bar regardless of level. Don't grade-inflate.`
     : null;
   return [
     `Activity: ${input.activityTitle}${input.activityDescription ? ` — ${input.activityDescription}` : ""}`,

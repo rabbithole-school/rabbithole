@@ -3,37 +3,26 @@
 /**
  * Reading and writing, told apart.
  *
- * THREE instruments share a vocabulary in this product and must never share a
+ * TWO instruments share a vocabulary in this product and must never share a
  * rendering:
  *
  *   confirmed          a teacher-ratified SETTING the tutor adapts to. `setAt`
  *                      is when a human ratified, not when anything was measured.
- *   writing estimate   derived from the child's OWN PRODUCTION — typed chat and
- *                      OCR'd handwriting. No reception evidence exists anywhere
- *                      in this system, so this is never called a reading level.
- *                      It is stored only while it disagrees, so its presence is
- *                      the signal.
  *   writing complexity Flesch–Kincaid over typed messages. Mechanical. Its
- *                      canonical rendering is the profile chart; we state the
+ *                      canonical rendering is the profile growth chart (Write
+ *                      lane); we state the
  *                      latest value and point there instead of drawing a second.
  *
- * The board carries `confirmed` for everyone and surfaces the estimate only
- * where it disagrees. The pane shows all three, each labelled for its own
- * instrument, with the estimate's age visible so staleness is legible.
+ * The AI's writing estimate is a third thing, and it is deliberately NOT here:
+ * it is info-only on the scholar profile's Write row (TRA-513), and nothing in
+ * a meeting can act on it.
  */
 
-import { Badge, Button, HStack, Stack, Text } from "@chakra-ui/react";
-import { useMutation } from "convex/react";
-import { useState } from "react";
-
-import { api } from "@/convex/_generated/api";
-import type { Id } from "@/convex/_generated/dataModel";
+import { Badge, HStack, Stack, Text } from "@chakra-ui/react";
 
 import {
   confirmedLevelLine,
-  levelPhrase,
   writingComplexityLine,
-  writingEstimateLine,
   type RoundsLevelSignals,
 } from "./roundsFigures";
 
@@ -43,60 +32,9 @@ import {
  * week is theirs to read, and the meeting should not stop for a boundary
  * working as designed.
  */
-const LEVEL_UNAVAILABLE = "Reading level not available to your role";
+const LEVEL_UNAVAILABLE = "Levels not available to your role";
 
-/** The compact board form: the setting, plus the disagreement when there is one. */
-export function RoundsLevelLine({
-  signals,
-  scholarName,
-  unavailable = false,
-}: {
-  signals: RoundsLevelSignals | null;
-  scholarName: string;
-  unavailable?: boolean;
-}) {
-  if (unavailable) {
-    return (
-      <Text fontFamily="heading" fontSize="sm" fontWeight="600" color="charcoal.300">
-        {LEVEL_UNAVAILABLE}
-      </Text>
-    );
-  }
-  if (!signals) return null;
-  const confirmed = confirmedLevelLine(signals);
-  const estimate = writingEstimateLine(signals, scholarName);
-
-  return (
-    <Stack gap={1}>
-      <Text fontFamily="heading" fontSize="sm" fontWeight="600" color="charcoal.400">
-        {confirmed.headline}
-      </Text>
-      {estimate ? (
-        <Stack
-          gap={0.5}
-          borderWidth="1px"
-          borderColor="orange.300"
-          bg="orange.50"
-          borderRadius="md"
-          px={2}
-          py={1.5}
-        >
-          <Text fontFamily="heading" fontSize="sm" fontWeight="700" color="charcoal.500">
-            {estimate.headline}
-          </Text>
-          <Text fontFamily="body" fontSize="sm" color="charcoal.400">
-            {estimate.shortCaption}
-          </Text>
-        </Stack>
-      ) : null}
-    </Stack>
-  );
-}
-
-/** The pane form: all three instruments, told apart. The estimate DECISION is
- *  hoisted out to `RoundsLevelRuling` so the one real action on the pane is
- *  visible without scrolling; this card is the reference reading of each
- *  instrument, not where the ruling is made. */
+/** The pane form: the setting and the mechanical writing trend, told apart. */
 export function RoundsLevelCard({
   scholarName,
   signals,
@@ -131,7 +69,6 @@ export function RoundsLevelCard({
   }
 
   const confirmed = confirmedLevelLine(signals);
-  const estimate = writingEstimateLine(signals, scholarName);
   const complexity = writingComplexityLine(writingComplexity);
 
   return (
@@ -157,17 +94,6 @@ export function RoundsLevelCard({
         ) : null}
       </Stack>
 
-      {estimate ? (
-        <Text fontFamily="body" fontSize="sm" color="charcoal.400">
-          {estimate.headline} — settle it at the top of the week.
-        </Text>
-      ) : (
-        <Text fontFamily="body" fontSize="sm" color="charcoal.400">
-          {scholarName}&rsquo;s writing currently agrees with that setting, so
-          there is no estimate to settle.
-        </Text>
-      )}
-
       <Stack gap={0.5}>
         <Text fontFamily="heading" fontSize="sm" fontWeight="600" color="charcoal.400">
           {complexity.headline}
@@ -177,94 +103,6 @@ export function RoundsLevelCard({
           writing over time&rdquo;.
         </Text>
       </Stack>
-    </Stack>
-  );
-}
-
-/**
- * The one real decision on the pane, lifted out of the reading card so it is
- * visible without scrolling: accept the writing-derived estimate as the
- * confirmed setting, or keep the standing ruling. Renders NOTHING unless an
- * estimate is currently disagreeing — agreement clears it server-side, so a
- * returned estimate always means there is a decision to make.
- *
- * The mutation logic lives here, once. `RoundsLevelCard` explains the
- * instruments; this is where the ruling is made.
- */
-export function RoundsLevelRuling({
-  scholarId,
-  scholarName,
-  signals,
-  unavailable = false,
-}: {
-  scholarId: Id<"users">;
-  scholarName: string;
-  signals: RoundsLevelSignals | null;
-  unavailable?: boolean;
-}) {
-  const accept = useMutation(api.scholars.acceptReadingLevelSuggestion);
-  const dismiss = useMutation(api.scholars.dismissReadingLevelSuggestion);
-  const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
-
-  const estimate = signals ? writingEstimateLine(signals, scholarName) : null;
-  if (unavailable || !signals || !estimate) return null;
-
-  const run = async (action: "accept" | "dismiss") => {
-    setBusy(true);
-    setFailure(null);
-    try {
-      if (action === "accept") await accept({ scholarId });
-      else await dismiss({ scholarId });
-    } catch {
-      setFailure(
-        `That did not save, so ${scholarName}'s level is unchanged. Try again in a moment.`,
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Stack
-      gap={2}
-      borderWidth="1px"
-      borderColor="orange.300"
-      bg="orange.50"
-      borderRadius="md"
-      p={4}
-    >
-      <Text fontFamily="heading" fontSize="md" fontWeight="700" color="charcoal.600">
-        {estimate.headline}
-      </Text>
-      <Text fontFamily="body" fontSize="sm" color="charcoal.500">
-        {estimate.caption}
-      </Text>
-      <HStack gap={3} flexWrap="wrap" pt={1}>
-        <Button
-          size="sm"
-          colorPalette="navy"
-          fontFamily="heading"
-          loading={busy}
-          onClick={() => void run("accept")}
-        >
-          Use {levelPhrase(signals.estimate.level)}
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          fontFamily="heading"
-          loading={busy}
-          onClick={() => void run("dismiss")}
-        >
-          {estimate.dismissLabel}
-        </Button>
-      </HStack>
-      {failure ? (
-        <Text fontFamily="body" fontSize="sm" color="red.600">
-          {failure}
-        </Text>
-      ) : null}
     </Stack>
   );
 }

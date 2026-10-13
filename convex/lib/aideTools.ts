@@ -17,6 +17,7 @@
 // `betaTool` and does NO static `@anthropic-ai/sdk` import (keeps
 // node:* out of the edge bundle — see the SDK-pin TODO).
 
+import { SESSION_SURFACE } from "./sessionSurface";
 import type { ActionCtx } from "../_generated/server";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
@@ -72,6 +73,9 @@ import { makeExternalAppsTools } from "./externalAppsTools";
 import { makeAuditLogTools } from "./auditLogTools";
 import { makeHealthRecordTools } from "./healthRecordTools";
 import { makeSpellingEvidenceTools } from "./spellingEvidenceTools";
+import { makeClassFocusTools } from "./classFocusTools";
+import { makeDeviceOpsTools, type AgentTransport } from "./deviceOpsTools";
+import { makeDriveTools } from "./driveTools";
 import { makeListGeomapAssetsTool } from "./geomapAssetsTool";
 import { makeAssignmentTools } from "./assignmentTools";
 import { makeActivityKindTools } from "./activityKindTools";
@@ -137,6 +141,8 @@ export function pickActivityByTitle<T extends { title: string }>(
  *   teacher + admin only. They resolve a scholar by name, so handing them
  *   to a designer would both write per-scholar records and leak the roster.
  * - tag_session — teacher/admin AND only when a sessionId is in scope.
+ * - read_drive_link / search_drive — every staff role, read as the asker's
+ *   own linked Google account, only when a transport names itself.
  */
 export async function assembleCurriculumTools(
   ctx: ActionCtx,
@@ -183,8 +189,12 @@ export async function assembleCurriculumTools(
     hasSchoolOperationsAccess?: boolean;
     /** Established by the transport through the server-side health capability. */
     hasHealthManagementAccess?: boolean;
-    /** Audit entry path for app-grant mutations; omitted means in-app/MCP aide. */
-    appGrantVia?: "aide" | "slack";
+    /** Which agent transport is assembling this set. Lands in audit lines:
+     *  the managed-iPad writes record it verbatim, and app-grant mutations
+     *  record "slack" for Slack and "aide" otherwise. The managed-iPad tools
+     *  are offered ONLY when a transport names itself, so a caller that
+     *  omits it (e.g. the Google Docs comment lane) never gets device writes. */
+    transport?: AgentTransport;
     /** Transport-owned file delivery; intentionally absent outside Slack. */
     attachFile?: (args: {
       filename: string;
@@ -211,9 +221,10 @@ export async function assembleCurriculumTools(
     institutionId,
     hasSchoolOperationsAccess = false,
     hasHealthManagementAccess = false,
-    appGrantVia,
+    transport,
     attachFile,
   } = opts;
+  const appGrantVia = transport === "slack" ? "slack" : undefined;
   const isSchoolOperator =
     role === ROLES.STAFF && hasSchoolOperationsAccess;
   // curriculum_designers design general curriculum and must NOT reach
@@ -282,6 +293,37 @@ export async function assembleCurriculumTools(
     role,
     callerUserId,
     allowedScholarIds,
+  });
+  // Class focus (list_focus_options / make_class_focus / list_class_focus /
+  // end_class_focus) — teacher roles, every surface; empty otherwise. The
+  // backing functions in convex/pushes.ts re-check role + institution lens.
+  const classFocusTools = await makeClassFocusTools(ctx, emit, {
+    role,
+    callerUserId,
+  });
+
+  // Managed-iPad operations (list_managed_devices / list_rabbithole_lock_devices
+  // / set_rabbithole_lock / restart_managed_device) — school operations
+  // (teacher / school_admin / platform_admin, or base staff with an active
+  // school:operations grant), every surface; empty otherwise. Needs a named
+  // transport because the writes audit it. The backing internal functions
+  // re-check caller + institution on every call.
+  const deviceOpsTools = transport
+    ? await makeDeviceOpsTools(ctx, emit, {
+        role,
+        callerUserId,
+        hasSchoolOperationsAccess,
+        source: transport,
+      })
+    : [];
+
+  // Google Drive (read_drive_link / search_drive) — every staff role, every
+  // surface, read with the ASKER's own linked Google account; needs a named
+  // transport to render the connect link. Empty otherwise.
+  const driveTools = await makeDriveTools(ctx, emit, {
+    role,
+    callerUserId,
+    transport,
   });
 
   // School physical-inventory tools (rooms + equipment) — read + write, for
@@ -1132,7 +1174,7 @@ export async function assembleCurriculumTools(
   const createScholarActivityTool = betaTool({
     name: "create_scholar_activity",
     description:
-      "Create an activity inside a lesson. Idempotent by (lessonId, title). When creating multiple activities for the same lesson, ALWAYS pass each activity's zero-based position in the intended sequence (0, 1, 2, ...) because tool calls may run in parallel. Without position, a new activity appends. If position is already occupied, the activity inserts there and shifts the consecutive occupied slots after it by one — but when the lesson ALREADY has activities, prefer positions continuing after the existing ones: parallel insert-at into occupied slots can land relative to pre-existing activities in arrival order.\n\n**kind** selects the activity type (default `online`):\n  - `online` — the scholar opens this in Rabbithole and it drives an AI tutor session. Give it a `systemPrompt` AND exactly ONE evaluation shape — a `deliverable` OR an `advanceRubric` (see below).\n  - `offline` — a teacher-run classroom task (discussion, lab, worksheet). Not opened in Rabbithole; no systemPrompt or rubric needed.\n  - `vibecode` — a full-screen app-builder workshop: the scholar describes an app/game and DIRECTS an AI builder that writes + iterates a live web app; the app is the artifact. Reach for this whenever the teacher wants scholars to make/build/\"vibecode\" something interactive. Here the `systemPrompt` IS the BUILD BRIEF (what to build + the learning goal), NOT a tutor prompt. No rubric needed. ALWAYS also write a `buildContract` (2–3 testable invariants, the scholar's freedoms, one gate) and set `allowSilence: true` — see the buildContract property; never ask the teacher how off-topic ideas should be handled. Also set `scholarEdit`: `build` when scholars make/remix their own app (the default when omitted), `play` when they only USE an app — and when it's genuinely unclear which the teacher wants, ASK one short question before creating (\"Should scholars just play it, or be able to change it?\"). (If the teacher may instead want a fixed simulation the scholar TUNES and observes, that's a Simulator — use `create_simulator_activity`, and ask first if it's ambiguous.)\nFor a Simulator activity (stored as `world`), use `create_simulator_activity`; for `problem_set`, use `create_problem_set`. Do NOT widen this tool's kind: both dedicated tools validate payloads this generic writer cannot carry. For `game`, `web`, or `shareBack`, create the lesson, link its Edit surface, and hand off to the teacher to choose the catalog-backed activity there.\n\n**Choosing the evaluation shape for an ONLINE activity — the most important decision.** Pick ONE:\n\n  • **`deliverable`** — when the scholar produces any ARTIFACT/PRODUCT (a story, drawing, photo, code, slide deck, audio, a written write-up). This explicitly includes kind 'map' when the saved map itself is the work scholars should repeatedly 'Check my work' or 'Send'. Its criteria are a private quality map for the tutor, NOT a scholar checklist or a completion gate. The scholar clicks 'Check my work' and the AI verdicts each criterion 'not'/'half'/'full'. A full criterion permanently awards it as scholar-visible flair; its label and description are shown together. Half/not-full remain private, and normal completion is separate.\n\n  • **`advanceRubric`** — when the learning happens IN CONVERSATION or through interactions and there is NO produced artifact: a Socratic discussion, or an INTERACTIVE MAP / GEOGRAPHY DISCOVERY activity. The tutor grades the scholar's talk + map interactions (pins, predictions, explanations) against the criteria and a full pass completes the activity — with no noise document. Criteria grade what the scholar DEMONSTRATES ('Located the requested places', 'Predicted before revealing', 'Explained the pattern in their own words', 'Transferred it to a new case').\n\nCriteria written only into `systemPrompt` are decorative and cannot award flair or complete an advance rubric.\n\n**GEOGRAPHY / MAP activities specifically:** do NOT build a rapid verbal quiz over a mute base map, and do NOT force a write-up document onto it. For a discovery sequence, build it as an `online` activity whose `systemPrompt` drives the tutor's `show_map` tool — open ONE map (op 'create', once), then before each change call op 'read' and reveal ONE variable with op 'patch'. Ask a question between patches, and have the scholar COMMIT a pin BEFORE each reveal (predict-before-reveal). Set a checkable `task` on the map when there's a right answer to locate, and design the prompt so the scholar drops a pin before each reveal. Give discovery sequences an `advanceRubric`; when the saved map itself is the product scholars should repeatedly 'Check my work' or 'Send', use a kind 'map' deliverable instead. (See the seeded Geography Quests for the canonical shape.)\n\n**criteria** (in either shape) is an array of 3-6 DIMENSIONAL items, each { label, description }. Give each a short label and put the concrete quality bar in its description. State what counts as 'full' vs 'half'/'not'. Never attach BOTH a deliverable and an advanceRubric.",
+      "Create an activity inside a lesson. Idempotent by (lessonId, title). When creating multiple activities for the same lesson, ALWAYS pass each activity's zero-based position in the intended sequence (0, 1, 2, ...) because tool calls may run in parallel. Without position, a new activity appends. If position is already occupied, the activity inserts there and shifts the consecutive occupied slots after it by one — but when the lesson ALREADY has activities, prefer positions continuing after the existing ones: parallel insert-at into occupied slots can land relative to pre-existing activities in arrival order.\n\n**kind** selects the activity type (default `online`):\n  - `online` — the scholar opens this in Rabbithole and it drives an AI tutor session. Give it a `systemPrompt` AND exactly ONE evaluation shape — a `deliverable` OR an `advanceRubric` (see below).\n  - `offline` — a teacher-run classroom task (discussion, lab, worksheet). Not opened in Rabbithole; no systemPrompt or rubric needed.\n  - `vibecode` — a full-screen app-builder workshop: the scholar describes an app/game and DIRECTS an AI builder that writes + iterates a live web app; the app is the artifact. Reach for this whenever the teacher wants scholars to make/build/\"vibecode\" something interactive. Here the `systemPrompt` IS the BUILD BRIEF (what to build + the learning goal), NOT a tutor prompt. No rubric needed. ALWAYS also write a `buildContract` (2–3 testable invariants, the scholar's freedoms, one gate) and set `allowSilence: true` — see the buildContract property; never ask the teacher how off-topic ideas should be handled. Also set `scholarEdit`: `build` when scholars make/remix their own app (the default when omitted), `play` when they only USE an app — and when it's genuinely unclear which the teacher wants, ASK one short question before creating (\"Should scholars just play it, or be able to change it?\"). (If the teacher may instead want a fixed simulation the scholar TUNES and observes, that's a Simulator — use `create_simulator_activity`, and ask first if it's ambiguous.) What the scholar gets: " + SESSION_SURFACE.vibecode + " So put it in the SAME unit as the work it builds on, and don't make the brief ask the scholar to retype what they already wrote.\nFor a Simulator activity (stored as `world`), use `create_simulator_activity`; for `problem_set`, use `create_problem_set`. Do NOT widen this tool's kind: both dedicated tools validate payloads this generic writer cannot carry. For `game`, `web`, or `shareBack`, create the lesson, link its Edit surface, and hand off to the teacher to choose the catalog-backed activity there.\n\n**Choosing the evaluation shape for an ONLINE activity — the most important decision.** Pick ONE:\n\n  • **`deliverable`** — when the scholar produces any ARTIFACT/PRODUCT (a story, drawing, photo, code, slide deck, audio, a written write-up). This explicitly includes kind 'map' when the saved map itself is the work scholars should repeatedly 'Check my work' or 'Send'. Its criteria are a private quality map for the tutor, NOT a scholar checklist or a completion gate. The scholar clicks 'Check my work' and the AI verdicts each criterion 'not'/'half'/'full'. A full criterion permanently awards it as scholar-visible flair; its label and description are shown together. Half/not-full remain private, and normal completion is separate.\n\n  • **`advanceRubric`** — when the learning happens IN CONVERSATION or through interactions and there is NO produced artifact: a Socratic discussion, or an INTERACTIVE MAP / GEOGRAPHY DISCOVERY activity. The tutor grades the scholar's talk + map interactions (pins, predictions, explanations) against the criteria and a full pass completes the activity — with no noise document. Criteria grade what the scholar DEMONSTRATES ('Located the requested places', 'Predicted before revealing', 'Explained the pattern in their own words', 'Transferred it to a new case').\n\nCriteria written only into `systemPrompt` are decorative and cannot award flair or complete an advance rubric.\n\n**GEOGRAPHY / MAP activities specifically:** do NOT build a rapid verbal quiz over a mute base map, and do NOT force a write-up document onto it. For a discovery sequence, build it as an `online` activity whose `systemPrompt` drives the tutor's `show_map` tool — open ONE map (op 'create', once), then before each change call op 'read' and reveal ONE variable with op 'patch'. Ask a question between patches, and have the scholar COMMIT a pin BEFORE each reveal (predict-before-reveal). Set a checkable `task` on the map when there's a right answer to locate, and design the prompt so the scholar drops a pin before each reveal. Give discovery sequences an `advanceRubric`; when the saved map itself is the product scholars should repeatedly 'Check my work' or 'Send', use a kind 'map' deliverable instead. (See the seeded Geography Quests for the canonical shape.)\n\n**criteria** (in either shape) is an array of 3-6 DIMENSIONAL items, each { label, description }. Give each a short label and put the concrete quality bar in its description. State what counts as 'full' vs 'half'/'not'. Never attach BOTH a deliverable and an advanceRubric.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1823,9 +1865,13 @@ export async function assembleCurriculumTools(
         ...scholarWriteTools,
         ...externalAppsTools,
         ...auditLogTools,
+        ...deviceOpsTools,
       );
     }
     if (hasHealthManagementAccess) tools.push(...healthRecordTools);
+    // The asker's OWN Drive — no school authority involved, so every base
+    // staff account gets it, grant or not (as on Slack before the move).
+    tools.push(...driveTools);
     return tools;
   }
   tools.push(
@@ -1843,6 +1889,7 @@ export async function assembleCurriculumTools(
     // A scholar's typed-message spelling evidence — teacher/admin only; the
     // factory returns [] for every other role (designer, staff, parent, scholar).
     ...spellingEvidenceTools,
+    ...classFocusTools,
     // General curriculum reads + the quality-run kickoffs — teacher /
     // admin / curriculum_designer. Scholar-agnostic, so safe for designers
     // (rehearse/debrief gate the same as the public start/groundExperiment,
@@ -1939,7 +1986,13 @@ export async function assembleCurriculumTools(
     ...masterScheduleTools,
     ...externalAppsTools,
     ...auditLogTools,
+    // Managed-iPad operations — school-operations roles, gated inside
+    // makeDeviceOpsTools; empty otherwise.
+    ...deviceOpsTools,
     ...googleDocsTools,
+    // Google Drive read/search as the asker — every staff role; gated inside
+    // makeDriveTools; empty without a named transport.
+    ...driveTools,
   );
   return tools;
 }

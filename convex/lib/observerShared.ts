@@ -14,7 +14,8 @@
 import { OBSERVER_ORIGIN_LABELS } from "./observerOrigin";
 import type { AppAiContextTurn } from "./appUpdateTools";
 import type { ImageContentPart } from "./imageBytes";
-import type { InputModality } from "./inputModality";
+import { isTypedScholarText, type InputModality } from "./inputModality";
+import { countWords } from "./readingLevels";
 import { scholarNamePronounHint } from "./scholarPronouns";
 import {
   SESSION_SIGNAL_TYPES,
@@ -27,11 +28,18 @@ export const OBSERVER_TOOL = {
   description: "Record the observer's full analysis of the student session.",
   input_schema: {
     type: "object" as const,
-    required: ["pulse", "observations", "sessionSignals", "interests", "crossDomainConnections", "seeds"],
+    // talkLevel is required (TRA-515): as an optional field the model skipped it
+    // on ~40% of sessions in the spot eval, including fluent ones. Thin samples
+    // are discarded downstream by the 100-word floor (`validTalkJudgment`).
+    required: ["pulse", "observations", "sessionSignals", "interests", "crossDomainConnections", "seeds", "talkLevel"],
     properties: {
       inferredReadingLevel: {
         type: "string" as const,
-        description: "Estimated reading/writing level based on scholar messages: K, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, or college. Omit if insufficient evidence.",
+        description: "Estimated grade level of the scholar's TYPED writing. Use only lines labelled SCHOLAR:; ignore SCHOLAR (spoken) and APP BUTTON lines. A grade 1-12 with an optional tenth (e.g. 7 or 7.3), K, or college. Omit if insufficient evidence.",
+      },
+      talkLevel: {
+        type: "string" as const,
+        description: "The grade at which a typical child would produce the LANGUAGE the scholar used this session — vocabulary and sentence complexity, not how sophisticated the ideas are (section 7b). SCHOLAR and SCHOLAR (spoken) lines both count; ignore spelling, punctuation and capitalisation. K, a whole grade 1-12, or college. Always give your best estimate, even from a short session; when torn between two grades, give the lower.",
       },
       pulse: {
         type: "object" as const,
@@ -317,6 +325,8 @@ export interface ObserverHistoryMessage {
    * marked in the transcript and can never be presented as a verbatim quote.
    */
   inputModality?: InputModality;
+  /** A staff member typed this turn in the scholar's session (TRA-515). */
+  byStaff?: boolean;
 }
 
 /**
@@ -338,6 +348,47 @@ function isScholarAuthoredTurn(message: ObserverHistoryMessage): boolean {
     message.inputModality !== "app" &&
     !message.generatedImage
   );
+}
+
+/**
+ * Words the scholar TYPED in `history` — the only text the observer's
+ * writing-derived grade estimate may be drawn from (TRA-513). Same
+ * `isTypedScholarText` filter as the teacher-run estimator and the
+ * Flesch-Kincaid trend; a tutor row, a generated image and an app button are
+ * not the scholar's typing either.
+ */
+export function typedScholarWordCount(
+  history: Pick<ObserverHistoryMessage, "sourceRole" | "generatedImage" | "inputModality" | "content">[],
+): number {
+  return history
+    .filter(
+      (m) => m.sourceRole === "user" && !m.generatedImage && isTypedScholarText(m),
+    )
+    .reduce((sum, m) => sum + countWords(m.content), 0);
+}
+
+/**
+ * Words the scholar said OR typed in `history` — the sample the observer's
+ * talk judgment (grade of the language used, TRA-515) is drawn from. Spoken turns
+ * count here, unlike `typedScholarWordCount`: talk is how the child expresses
+ * ideas, whatever way the words got in. App buttons, generated images and a
+ * turn a staff member typed in the scholar's session are not the scholar's words.
+ */
+export function scholarWordCount(
+  history: Pick<
+    ObserverHistoryMessage,
+    "sourceRole" | "generatedImage" | "inputModality" | "content" | "byStaff"
+  >[],
+): number {
+  return history
+    .filter(
+      (m) =>
+        m.sourceRole === "user" &&
+        !m.generatedImage &&
+        m.inputModality !== "app" &&
+        !m.byStaff,
+    )
+    .reduce((sum, m) => sum + countWords(m.content), 0);
 }
 
 /**
@@ -614,6 +665,14 @@ export function parseObserverResponse(
       : null;
   return {
     inferredReadingLevel: parsed.inferredReadingLevel ?? undefined,
+    // The schema asks for a string, but the model sometimes answers a bare
+    // number (5); saveAnalysis validates whatever comes through.
+    talkLevel:
+      typeof parsed.talkLevel === "string"
+        ? parsed.talkLevel
+        : typeof parsed.talkLevel === "number"
+          ? String(parsed.talkLevel)
+          : undefined,
     safetyAlert: parsed.safetyAlert ?? undefined,
     socialRelianceAlert: parsed.socialRelianceAlert ?? undefined,
     stuckAlert: parsed.stuckAlert ?? undefined,
@@ -930,6 +989,11 @@ export function buildObserverUserMessageBlocks(
 
 export interface ObserverResult {
   inferredReadingLevel?: string;
+  /**
+   * The grade a typical child would produce the scholar's language at
+   * (TRA-515) — raw model output; `analysisHelpers.saveAnalysis` validates it.
+   */
+  talkLevel?: string;
   /**
    * Set only when the transcript discloses possible ongoing harm. Routes an
    * immediate human alert (convex/alerts.ts). Absent in the overwhelming

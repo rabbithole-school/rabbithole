@@ -65,7 +65,10 @@ import {
 } from "../lib/geomap/stored";
 import { portfolioFamilySharingEligibility } from "./lib/schoolMediaConsent";
 import { assertFreshUpload } from "./lib/freshUpload";
-import { describeEffectiveLevelsForPrompt } from "./lib/readingLevels";
+import {
+  describeEffectiveLevelsForPrompt,
+  levelsPromptLine,
+} from "./lib/readingLevels";
 
 // ── Queries ───────────────────────────────────────────────────────────
 
@@ -1394,11 +1397,11 @@ const buildCriteriaGenSystemPrompt = (
   profile: InstitutionPromptProfile = DEFAULT_INSTITUTION_PROMPT_PROFILE,
 ): string => `You write rubric criteria for an AI tutor at ${profile.schoolName}, a gifted elementary school.
 
-A scholar is about to work on an activity. Your job: produce 3-5 dimensional rubric criteria that capture the quality bar for THIS scholar, given their reading level and the teacher's intent. The criteria are a private map for the AI tutor, not a scholar checklist and not a completion gate. The tutor later judges each criterion not/half/full. Only a full criterion is revealed to the scholar: its label and description appear together as permanent flair.
+A scholar is about to work on an activity. Your job: produce 3-5 dimensional rubric criteria that capture the quality bar for THIS scholar, given their talk level and the teacher's intent. The criteria are a private map for the AI tutor, not a scholar checklist and not a completion gate. The tutor later judges each criterion not/half/full. Only a full criterion is revealed to the scholar: its label and description appear together as permanent flair.
 
 CALIBRATION RULES:
-- Level-dependent dimensions (length, vocabulary): SCALE to the scholar's reading level. A 6-year-old emerging reader's "Length: full" might be 2 sentences; a 5th grader's might be 6 with varied structure. Don't hold a 1st grader to a 5th grader's bar.
-- Level-INDEPENDENT dimensions (specificity, structure, engagement, originality, evidence): use the SAME bar regardless of reading level. "Names a specific person" is the same for a 1st grader and a 5th grader; gifted scholars at any age can engage with content specifically.
+- Level-dependent dimensions (length, vocabulary): SCALE to the scholar's talk level. A 6-year-old emerging reader's "Length: full" might be 2 sentences; a 5th grader's might be 6 with varied structure. Don't hold a 1st grader to a 5th grader's bar.
+- Level-INDEPENDENT dimensions (specificity, structure, engagement, originality, evidence): use the SAME bar regardless of level. "Names a specific person" is the same for a 1st grader and a 5th grader; gifted scholars at any age can engage with content specifically.
 
 CRITERIA SHAPE:
 - 3-5 items. Fewer is fine if the deliverable is small.
@@ -1416,7 +1419,7 @@ You MUST call the report_criteria tool.`;
 const CRITERIA_GEN_TOOL = {
   name: "report_criteria",
   description:
-    "Report 3-5 rubric criteria calibrated for this scholar's reading level.",
+    "Report 3-5 rubric criteria calibrated for this scholar's talk level.",
   strict: true,
   input_schema: {
     type: "object" as const,
@@ -1641,7 +1644,7 @@ export function buildCriteriaGenUserMessage(
     `Activity: ${bundle.activityTitle}${bundle.activityDescription ? ` — ${bundle.activityDescription}` : ""}`,
     `Deliverable prompt (what the scholar produces): ${bundle.deliverablePrompt}`,
     `Teacher's notes about quality bar / intent: ${bundle.teacherNotes ?? "(none — infer from the deliverable prompt and unit context)"}`,
-    `Scholar's reading level: ${bundle.readingLevel ?? "(not set — pick a sensible default for elementary)"}`,
+    levelsPromptLine(bundle.readingLevel) ?? "Talk level: (not set — pick a sensible default for elementary)",
     bundle.assessesWritingMechanics
       ? WRITING_MECHANICS_CRITERIA_ALLOWED
       : WRITING_MECHANICS_CRITERIA_FORBIDDEN,

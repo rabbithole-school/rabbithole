@@ -36,11 +36,13 @@ import {
 } from "@chakra-ui/react";
 import {
   ArrowClockwise,
+  ArrowUp,
   ChatCircle,
   ClockCounterClockwise,
   Hammer,
   List,
   Lock,
+  Microphone,
   PaperPlaneRight,
   Square,
   X,
@@ -53,7 +55,10 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { useAgentStream, type StreamEvent } from "@/hooks/useAgentStream";
 import { useWorkshopMode } from "@/hooks/useWorkshopMode";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { useStreamingDictation } from "@/hooks/useStreamingDictation";
+import { composerMicButtonStyle, composerStopRecordingStyle } from "@/components/composerMicStyles";
 import {
+  defaultChatOpen,
   defaultWorkshopMode,
   editControlFor,
   formatSavedAt,
@@ -269,7 +274,8 @@ export function VibecodeWorkshop({
     fallback: modeDefault,
     editSelectable: editUnlocked,
   });
-  const { user: currentUser } = useCurrentUser();
+  const { user: currentUser, isLoading: currentUserLoading } =
+    useCurrentUser();
   const isSessionOwner =
     !!data?.session &&
     !!currentUser &&
@@ -334,7 +340,31 @@ export function VibecodeWorkshop({
   );
 
   const isNarrow = useBreakpointValue({ base: true, lg: false }) ?? false;
-  const [chatOpen, setChatOpen] = useState(false);
+  // The chat pane is a toggle that starts closed (F14b), except beside a
+  // Play-only character app the scholar is playing (`defaultChatOpen`). That
+  // default is latched ONCE, when the session, artifact, and viewer reads
+  // first resolve, so a later re-render never reopens a pane the scholar
+  // closed; any toggle is the scholar's choice and wins from then on. A narrow
+  // screen never auto-opens: its chat is a bottom drawer that covers the app.
+  const [chatChoice, setChatChoice] = useState<boolean | null>(null);
+  const [chatAutoOpen, setChatAutoOpen] = useState<boolean | null>(null);
+  if (
+    chatAutoOpen === null &&
+    data !== undefined &&
+    artifacts !== undefined &&
+    !currentUserLoading
+  ) {
+    setChatAutoOpen(
+      defaultChatOpen({
+        access: effectiveEditAccess,
+        hasAppCharacter,
+        isSessionOwner,
+        isTestDrive: data?.session?.isTestDrive === true,
+      }),
+    );
+  }
+  const chatOpen = chatChoice ?? (!isNarrow && chatAutoOpen === true);
+  const setChatOpen = setChatChoice;
   // App-designer version History (Edit) and app-state Reset (Play).
   const [historyOpen, setHistoryOpen] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -370,6 +400,15 @@ export function VibecodeWorkshop({
   const runWithSendLock = useSendLock();
   const threadRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  // The composer's mic — the same recorder the main scholar chat uses
+  // (SessionInterface): a take auto-sends as a "spoken" turn, which the tutor
+  // sees labelled [Dictated …]. The prompt promises every scholar composer a
+  // mic (convex/prompts.ts, "Saying it counts as writing it").
+  const sendSpokenRef = useRef<(text: string) => void>(() => {});
+  const dictation = useStreamingDictation(
+    (text) => sendSpokenRef.current(text),
+    sessionId,
+  );
   const snapshotCaptureRef = useRef<CaptureAppSnapshot | null>(null);
   // The assistant row of an in-flight app-update turn (startAppUpdateTurn):
   // it stays invisible until the tutor actually says something.
@@ -890,6 +929,7 @@ export function VibecodeWorkshop({
       batch: AppTutorUpdateBatch;
       onPrepared: (result: AppTutorSendResult) => void;
     },
+    inputModality: "typed" | "spoken" = "typed",
   ): Promise<boolean> => {
     if (!text && !appUpdate) return false;
     const appContext = appUpdate
@@ -940,14 +980,15 @@ export function VibecodeWorkshop({
         const result = await sendMsg({
           sessionId,
           message: text,
-          inputModality: "typed",
+          inputModality,
           mode,
         });
         // The server clamped a requested Edit to Play (policy): the turn is
         // already in the tutor thread, so snap NOW rather than waiting for the
         // stream, which may never open (a 429/403 returns before any event).
         if (result.workshopMode === "play" && mode === "edit") setMode("play");
-        setInput("");
+        // A dictated turn never touches the box: whatever is typed there stays.
+        if (inputModality === "typed") setInput("");
         return result;
       } catch (error) {
         console.error("[vibecode] send failed", error);
@@ -1044,6 +1085,15 @@ export function VibecodeWorkshop({
     tutorLine.markRead();
     return sendTutorTurn(input.trim());
   };
+  const handleSendSpoken = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    appTutorUpdates.clearAppAi();
+    tutorLine.markRead();
+    void sendTutorTurn(trimmed, undefined, "spoken");
+  };
+  // eslint-disable-next-line react-hooks/refs -- the dictation callback reads the latest send
+  sendSpokenRef.current = handleSendSpoken;
   // Talking to the app's character is the scholar carrying on: the tutor's
   // last line has had its moment and must not come back after the update
   // turn this queues (which may well end in silence).
@@ -1169,6 +1219,8 @@ export function VibecodeWorkshop({
     );
   }
 
+  const sttEnabled = currentUser?.sttEnabled !== false;
+  const isRecording = dictation.state === "recording";
   const composerPlaceholder =
     mode === "edit"
       ? "Tell the designer what to change…"
@@ -1346,6 +1398,20 @@ export function VibecodeWorkshop({
         borderColor="gray.200"
         flexShrink={0}
       >
+        {isRecording && (
+          // Cancel the take — discard the audio, nothing sends (main chat's X).
+          <IconButton
+            aria-label="Cancel recording"
+            variant="ghost"
+            color="charcoal.400"
+            _hover={{ bg: "red.50" }}
+            borderRadius="full"
+            size="lg"
+            onClick={dictation.cancelRecording}
+          >
+            <X />
+          </IconButton>
+        )}
         <Textarea
           ref={composerRef}
           value={input}
@@ -1353,16 +1419,26 @@ export function VibecodeWorkshop({
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
+              if (isRecording) return;
               void handleSend();
             }
           }}
-          placeholder={composerPlaceholder}
+          placeholder={isRecording ? "Listening…" : composerPlaceholder}
+          readOnly={isRecording}
           rows={1}
           resize="none"
           fontSize="sm"
           maxH="120px"
-          bg="white"
-          borderColor="gray.300"
+          minH="48px"
+          px={4}
+          py={3}
+          // Rounded corners, matching the main chat's composer field (Andy,
+          // 2026-10-12: "match main").
+          borderRadius="xl"
+          bg={isRecording ? "red.50" : "white"}
+          border="0.5px solid"
+          borderColor={isRecording ? "red.300" : "gray.400"}
+          _focus={{ borderColor: isRecording ? "red.300" : "violet.400" }}
         />
         {isStreaming && !quietTurn ? (
           <IconButton
@@ -1372,6 +1448,38 @@ export function VibecodeWorkshop({
             onClick={handleStop}
           >
             <Square weight="fill" />
+          </IconButton>
+        ) : isRecording ? (
+          // Stop the take and send it — a dictated turn, like the main chat.
+          <IconButton
+            aria-label="Stop and send recording"
+            {...composerStopRecordingStyle(dictation.hasSpeech)}
+            onClick={() => void dictation.stopRecording()}
+          >
+            <ArrowUp />
+          </IconButton>
+        ) : sttEnabled && (!input.trim() || dictation.state === "transcribing") ? (
+          // An empty box offers the mic where Send sits (main chat's pattern):
+          // tap to talk, tap again to send.
+          <IconButton
+            aria-label={
+              dictation.state === "transcribing"
+                ? "Transcribing…"
+                : "Start recording — tap to talk, tap again to send"
+            }
+            {...composerMicButtonStyle}
+            onClick={() => void dictation.toggleRecording()}
+            disabled={
+              dictation.state === "transcribing" ||
+              dictation.isMicBusy ||
+              (sending && !quietTurn)
+            }
+          >
+            {dictation.state === "transcribing" ? (
+              <Spinner size="sm" />
+            ) : (
+              <Microphone weight="fill" />
+            )}
           </IconButton>
         ) : (
           // During a quiet app-update turn Send stays live: sending steers it,
@@ -1386,6 +1494,18 @@ export function VibecodeWorkshop({
           </IconButton>
         )}
       </Flex>
+      {(dictation.error || (isRecording && dictation.isTooLoud)) && (
+        <Text
+          fontSize="xs"
+          color="red.500"
+          textAlign="center"
+          pb={2}
+          px={3}
+          fontFamily="heading"
+        >
+          {dictation.error ?? "Too loud!"}
+        </Text>
+      )}
     </Flex>
   );
 
@@ -1522,14 +1642,17 @@ export function VibecodeWorkshop({
       ) : null}
       {/* The chat pane is a TOGGLE, not a consequence of the mode: closed by
           default, opened by this rightmost ghost button in EVERY state (F14b).
-          Narrow uses an icon; wide uses a labelled ghost button. */}
+          One exception to the closed default: a scholar playing their own
+          Play-only app that has a character starts with it open on wide
+          screens (`defaultChatOpen`). Narrow uses an icon; wide uses a
+          labelled ghost button. */}
       {isNarrow ? (
         <IconButton
           aria-label={chatOpen ? "Hide chat" : "Show chat"}
           size="xs"
           variant={chatOpen ? "solid" : "outline"}
           colorPalette="violet"
-          onClick={() => setChatOpen((open) => !open)}
+          onClick={() => setChatOpen(!chatOpen)}
         >
           <ChatCircle weight={chatOpen ? "fill" : "regular"} />
         </IconButton>
@@ -1539,7 +1662,7 @@ export function VibecodeWorkshop({
           variant="ghost"
           colorPalette="violet"
           fontFamily="heading"
-          onClick={() => setChatOpen((open) => !open)}
+          onClick={() => setChatOpen(!chatOpen)}
         >
           <ChatCircle
             weight={chatOpen ? "fill" : "regular"}
@@ -1624,15 +1747,19 @@ export function VibecodeWorkshop({
     </Flex>
   );
 
-  // The chat is closed by default, so a coach line from an app-update turn
-  // would land out of sight: show it under the app until read. The slot is
-  // reserved for the whole of Play (empty when there is no line), so the app
+  // While the chat is closed, a coach line from an app-update turn would land
+  // out of sight: show it under the app until read. The slot is reserved for
+  // as long as the chat stays closed (empty when there is no line), so the app
   // never moves when a line arrives or is read (a jump made taps miss,
-  // TRA-477).
+  // TRA-477). With the thread open beside the app on a wide screen the line
+  // is already on screen, so the slot would be a blank white band under the
+  // app; it comes back when the scholar hides the chat. The narrow layout
+  // keeps it always: its chat is a drawer over the app, never beside it.
+  const chatBesideApp = chatOpen && !isNarrow;
   const appPane = (
     <Flex flexDir="column" flex={1} minH={0} minW={0}>
       {preview}
-      {isSessionOwner && mode === "play" && !!htmlArtifact && (
+      {isSessionOwner && mode === "play" && !!htmlArtifact && !chatBesideApp && (
         <TutorLineSlot
           line={tutorLine.unread ?? null}
           onOpen={() => setChatOpen(true)}
@@ -1676,7 +1803,12 @@ export function VibecodeWorkshop({
       ) : (
         // The chat pane is a toggle, NOT a consequence of the mode: the thread
         // sits beside the app only when the teacher/scholar opens it, so the
-        // app pane keeps its full width by default (F14b).
+        // app pane keeps its full width by default (F14b). The one exception:
+        // a scholar (session owner, not a teacher rehearsal) playing a
+        // Play-only app (`effectiveEditAccess === "hidden"`) that has a
+        // character starts with the thread open here, so the tutor's questions
+        // sit on screen beside the character (`defaultChatOpen`). It is only
+        // the initial value; the toggle still closes it and the choice sticks.
         <Flex flex={1} minH={0}>
           {appPane}
           {chatOpen && (

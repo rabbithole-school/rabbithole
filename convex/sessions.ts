@@ -58,6 +58,7 @@ import { computePromptVersion } from "./lib/promptVersion";
 import { resolveContextIdentity } from "./sessionContextHelpers";
 import {
   describeEffectiveLevelsForPrompt,
+  levelsPromptLine,
   readLevelValidator,
   resolveEffectiveLevels,
   talkLevelOf,
@@ -84,8 +85,10 @@ import { rubricStarsEarned } from "../shared/rubricScore";
 import {
   beginnerAlphabet,
   checkDecodable,
+  compareReading,
   lastYourTurnLine,
 } from "../shared/beginnerReading";
+import { missedUnits } from "./lib/levelEvidence";
 import { readInventoryTeams } from "./graphemeInventory";
 import {
   hasScholarMembership,
@@ -2173,8 +2176,10 @@ async function persistUserTurnMessage(
     inputModality?: InputModality;
     thread?: "designer" | "tutor";
     readAloudOf?: string;
+    /** Who pressed send — a staff member in the scholar's session is stamped `byStaff`. */
+    senderId: Id<"users">;
   },
-): Promise<void> {
+): Promise<Id<"messages">> {
   const message =
     args.inputModality === "app"
       ? args.message.slice(0, MAX_APP_TUTOR_MESSAGE_CHARS)
@@ -2193,7 +2198,7 @@ async function persistUserTurnMessage(
   const processId = unit?.processId ? String(unit.processId) : undefined;
 
   // Save user message
-  await ctx.db.insert("messages", {
+  const messageId = await ctx.db.insert("messages", {
     sessionId: session._id,
     role: "user",
     content: message,
@@ -2208,6 +2213,7 @@ async function persistUserTurnMessage(
       : {}),
     ...(args.thread ? { thread: args.thread } : {}),
     ...(args.readAloudOf ? { readAloudOf: args.readAloudOf } : {}),
+    ...(args.senderId !== session.userId ? { byStaff: true } : {}),
   });
 
   // Denormalize last message info onto the session for efficient dashboard queries
@@ -2219,6 +2225,40 @@ async function persistUserTurnMessage(
           lastMessageRole: "user",
           lastMessagePreview: message.slice(0, 120) || undefined,
         }),
+  });
+  return messageId;
+}
+
+/**
+ * Keep the score of a beginner's read-aloud of their your-turn line (TRA-515).
+ * The tutor is told the same `compareReading` check on every turn
+ * (`projectStreamMessages.readAloudLabel`); this is the record the profile's
+ * Read row tallies. Missed spellings are split by the letter teams the line
+ * was accepted with, as they are NOW — which the message itself does not keep.
+ */
+async function recordReadAloudAttempt(
+  ctx: MutationCtx,
+  args: {
+    scholarId: Id<"users">;
+    sessionId: Id<"sessions">;
+    messageId: Id<"messages">;
+    line: string;
+    heard: string;
+    teams: readonly string[];
+  },
+): Promise<void> {
+  const check = compareReading(args.line, args.heard);
+  const units = check.attempted
+    ? [...new Set(check.misses.flatMap((m) => missedUnits(m.word, m.heard, args.teams)))]
+    : [];
+  await ctx.db.insert("readAloudAttempts", {
+    scholarId: args.scholarId,
+    sessionId: args.sessionId,
+    messageId: args.messageId,
+    words: check.words,
+    matched: check.attempted ? check.matched : 0,
+    attempted: check.attempted,
+    missedUnits: units,
   });
 }
 
@@ -2392,6 +2432,7 @@ export const startAppUpdateTurn = authedMutation({
         message,
         inputModality: "app",
         thread: turn?.thread,
+        senderId: ctx.user._id,
       });
     }
     const { streamId, assistantMsgId } =
@@ -2479,6 +2520,10 @@ export const sendMessage = authedMutation({
     // A read-aloud of the "your turn" line: take the line from the latest
     // tutor reply (never from the client), so the tutor checks the real line.
     let readAloudOf: string | undefined;
+    // The letter teams the line was accepted with (the inventory plus any taught
+    // by their phonics program), for splitting a missed word into the spellings
+    // the Read row names (TRA-515) — so a known "sh" is never read as "s" + "h".
+    let acceptedTeams: readonly string[] = [];
     if (args.readingYourTurn && args.inputModality === "spoken") {
       const lastAssistant = await ctx.db
         .query("messages")
@@ -2497,16 +2542,33 @@ export const sendMessage = authedMutation({
         let extra: { letters: string; teams: string[] } | null = null;
         const alphabet = beginnerAlphabet(teams.map((t) => t.team), extra);
         if (checkDecodable(line, alphabet).ok) readAloudOf = line;
+        acceptedTeams = alphabet.teams;
       }
     }
 
-    await persistUserTurnMessage(ctx, session, {
+    const userMessageId = await persistUserTurnMessage(ctx, session, {
       message: args.message,
       imageId: args.imageId,
       inputModality: args.inputModality,
       thread: turnThread,
       readAloudOf,
+      senderId: ctx.user._id,
     });
+
+    // Both clients (web SessionInterface, native session/[id]) send the
+    // read-aloud through this mutation, so this one write covers both. Only
+    // the scholar's own reading counts — not a teacher typing in their session,
+    // not a Test Drive rehearsal.
+    if (readAloudOf && ctx.user._id === session.userId && !session.isTestDrive) {
+      await recordReadAloudAttempt(ctx, {
+        scholarId: session.userId,
+        sessionId: session._id,
+        messageId: userMessageId,
+        line: readAloudOf,
+        heard: args.message,
+        teams: acceptedTeams,
+      });
+    }
 
     // If there's a pending whisper, record it between user msg and assistant placeholder
     if (session.pendingWhisper) {
@@ -3746,7 +3808,7 @@ NEVER do these (they're filler, not content):
 ALWAYS:
 - Speak directly to the scholar in second person. Warm but not gushy.
 - Ground every claim in the input data. Never fabricate prior activities, books, or events.
-- Match the scholar's reading level. A K-2 scholar gets short sentences and common words. A 4-5 scholar can handle richer vocabulary.
+- Match the scholar's talk level. A K-2 scholar gets short sentences and common words. A 4-5 scholar can handle richer vocabulary.
 - Use prose. No bullet points or markdown inside bodies.
 
 Pick headings that fit the content. Examples (don't repeat them rotely):
@@ -4025,7 +4087,7 @@ export const generateReflectionForSession = internalAction({
             .join("\n");
 
     const userMessage = [
-      `Scholar: ${bundle.scholarName ?? "(unknown)"} · reading level ${bundle.readingLevel ?? "(unspecified — write at K-2)"}`,
+      `Scholar: ${bundle.scholarName ?? "(unknown)"} · ${levelsPromptLine(bundle.readingLevel) ?? "Talk level: (unspecified — write at K-2)"}`,
       "",
       `Unit: ${bundle.unitTitle ?? "(no unit — standalone activity)"}`,
       bundle.unitBigIdea ? `Unit big idea: ${bundle.unitBigIdea}` : null,

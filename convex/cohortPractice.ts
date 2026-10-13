@@ -991,6 +991,7 @@ export const fastMathForScholars = teacherQuery({
           ? {
               issuedAt: licenseRow.issuedAt,
               issuedByName: issuer?.name ?? null,
+              expiresOn: licenseRow.expiresOn ?? null,
             }
           : null,
       });

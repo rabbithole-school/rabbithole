@@ -29,6 +29,7 @@ import { useQuery as useRetainedQuery } from "convex-helpers/react/cache";
 import { useCachedQuery } from "@/hooks/useCachedQuery";
 import type { DispatchCompletionReceipt as DispatchCompletionReceiptData } from "@/shared/dispatchCompletionReceipt";
 import { getTTSEngine, useTTSQueue } from "@/hooks/useTTSQueue";
+import { composerMicButtonStyle, composerStopRecordingStyle } from "@/components/composerMicStyles";
 import {
   SentenceAccumulator,
   stripMarkdownForSpeech,
@@ -3853,11 +3854,7 @@ function ChatColumn({
               <IconButton
                 ref={sendRecBtnRef}
                 aria-label="Stop and send recording"
-                bg={hasSpeech ? "red.500" : "charcoal.300"}
-                color="white"
-                _hover={{ bg: hasSpeech ? "red.600" : "charcoal.400" }}
-                borderRadius="full"
-                size="lg"
+                {...composerStopRecordingStyle(hasSpeech)}
                 onClick={stopRecording}
               >
                 <ArrowUp />
@@ -4089,13 +4086,7 @@ function ChatColumn({
                   // (matches the Send button so an empty box reads "the mic is
                   // how you talk"). Tap to start an open recording; tap the stop
                   // button to send. Hold still works for push-to-talk.
-                  variant="solid"
-                  bg="violet.500"
-                  color="white"
-                  _hover={{ bg: "violet.600" }}
-                  _disabled={{ opacity: 0.5, cursor: "not-allowed" }}
-                  borderRadius="full"
-                  size="lg"
+                  {...composerMicButtonStyle}
                   onPointerDown={handleMicPointerDown}
                   onPointerUp={handleMicPointerUp}
                   onPointerLeave={handleMicPointerUp}

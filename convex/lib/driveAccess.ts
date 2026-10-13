@@ -1,5 +1,5 @@
-// Drive access for surfaces that act AS a Rabbithole user (today: the Slack
-// bot). Two jobs, both about never leaving someone at a dead end:
+// Drive access for surfaces that act AS a Rabbithole user (the staff aide's
+// Drive tools on every transport — lib/driveTools.ts). Two jobs, both about never leaving someone at a dead end:
 //
 //   1. Resolve a usable Drive access token for a user, or explain exactly why
 //      not — with a one-click fix, not "go check your settings".
@@ -30,8 +30,12 @@ const DRIVE_READ_SCOPE = "drive.readonly";
 
 export type DriveAccess =
   | { ok: true; token: string; email: string }
-  /** `message` is Slack-mrkdwn ready and ALWAYS carries the next step. */
+  /** `message` is in the caller's link format and ALWAYS carries the next step. */
   | { ok: false; message: string };
+
+/** How a transport renders a link: Slack mrkdwn `<url|label>` or Markdown
+ *  `[label](url)` (the in-app aide and MCP clients). */
+export type DriveLinkFormat = "slack" | "markdown";
 
 /**
  * URL of the app's one-click Google connect flow. `returnTo` is where the
@@ -42,9 +46,10 @@ export function buildGoogleConnectUrl(returnTo = "/teacher"): string {
   return `${site}/connect-google?returnTo=${encodeURIComponent(returnTo)}`;
 }
 
-/** A Slack-mrkdwn link to the connect flow. */
-function connectCta(label: string): string {
-  return `<${buildGoogleConnectUrl()}|${label}>`;
+/** A link to the connect flow, in the transport's link format. */
+function connectCta(label: string, links: DriveLinkFormat): string {
+  const url = buildGoogleConnectUrl();
+  return links === "slack" ? `<${url}|${label}>` : `[${label}](${url})`;
 }
 
 /**
@@ -59,13 +64,16 @@ function connectCta(label: string): string {
 export async function getDriveAccess(
   ctx: GoogleActionCtx,
   userId: Id<"users">,
+  /** Required: a Slack link pasted into Markdown (or vice versa) renders as
+   *  junk, and this message's whole job is to be a clickable way out. */
+  links: DriveLinkFormat,
 ): Promise<DriveAccess> {
   const acct = await ctx.runQuery(internal.googleAccounts.getForUserInternal, {
     userId,
   });
 
   if (!acct) {
-    const cta = connectCta("Connect Google Drive");
+    const cta = connectCta("Connect Google Drive", links);
     return {
       ok: false,
       message: `I can't reach your Google Drive — your Google account isn't connected to Rabbithole yet. ${cta} (takes about ten seconds), then ask me again.`,
@@ -73,7 +81,7 @@ export async function getDriveAccess(
   }
 
   if (!acct.scopes.some((s) => s.includes(DRIVE_READ_SCOPE))) {
-    const cta = connectCta("Reconnect Google Drive");
+    const cta = connectCta("Reconnect Google Drive", links);
     return {
       ok: false,
       message: `Your Google account (${acct.email}) is connected, but without permission to read your Drive — so I can only see files Rabbithole created itself. ${cta} to grant Drive access, then ask me again.`,
@@ -88,7 +96,7 @@ export async function getDriveAccess(
     };
   } catch (e) {
     console.error("[driveAccess] token refresh failed:", e);
-    const cta = connectCta("Reconnect Google Drive");
+    const cta = connectCta("Reconnect Google Drive", links);
     return {
       ok: false,
       message: `Your Google connection (${acct.email}) has expired and I couldn't refresh it. ${cta} to sign in again, then ask me again.`,
@@ -209,7 +217,7 @@ export async function readDriveFileText(
       ok: false,
       reason:
         kind === "pdf" || kind === "image"
-          ? `it's a ${kind}, which I can read when it's attached in Slack but not straight from a Drive link`
+          ? `it's a ${kind}, which I can read when it's attached to a message but not straight from a Drive link`
           : `I can't read ${file.mimeType || "that file type"}`,
     };
   }

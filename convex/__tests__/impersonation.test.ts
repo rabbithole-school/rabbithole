@@ -283,6 +283,29 @@ describe("impersonation overlay — read-only gate", () => {
   });
 });
 
+describe("impersonation overlay — action-side probe", () => {
+  test("users.isSessionImpersonating is true only on the impersonating session", async () => {
+    const t = convexTest(schema, modules);
+    const admin = await seedUser(t, "platform_admin", "avery");
+    const target = await seedUser(t, "teacher", "lehua");
+    const impersonating = await withUserSession(t, admin);
+    const probe = (as: typeof impersonating.as) =>
+      as.run(async (ctx) => ctx.runQuery(internal.users.isSessionImpersonating, {}));
+
+    expect(await probe(impersonating.as)).toBe(false);
+    await impersonating.as.mutation(api.impersonation.startImpersonation, {
+      targetUserId: target,
+    });
+    expect(await probe(impersonating.as)).toBe(true);
+
+    // The admin's other session and the target's own login are unaffected.
+    expect(await probe((await withUserSession(t, admin)).as)).toBe(false);
+    expect(await probe((await withUserSession(t, target)).as)).toBe(false);
+    // No session at all (Slack, MCP) is never "viewing as".
+    expect(await t.run(async (ctx) => ctx.runQuery(internal.users.isSessionImpersonating, {}))).toBe(false);
+  });
+});
+
 describe("impersonation overlay — stop + banner + supersede", () => {
   test("stop ends the overlay; currentUser + myImpersonation revert", async () => {
     const t = convexTest(schema, modules);

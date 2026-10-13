@@ -154,12 +154,11 @@ export async function assertNotImpersonating(
   ctx: MutationCtx,
 ): Promise<void> {
   const overlay = await getActiveOverlay(ctx);
-  if (overlay) {
-    throw new Error(
-      "Read-only while viewing as another user — exit impersonation to act as yourself.",
-    );
-  }
+  if (overlay) throw new Error(VIEWING_AS_READ_ONLY_ERROR);
 }
+
+export const VIEWING_AS_READ_ONLY_ERROR =
+  "Read-only while viewing as another user — exit impersonation to act as yourself.";
 
 export const READ_ONLY_ACCOUNT_ERROR =
   "This account is read-only — it can run queries but cannot make changes.";

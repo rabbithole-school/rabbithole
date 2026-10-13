@@ -303,10 +303,9 @@ describe("buildMetaSystemPrompt — deterministic sections", () => {
 
   test("reading level line present when set, absent (no trailing junk) when null", () => {
     const withRL = buildMetaSystemPrompt(baseInput({ readingLevel: "grade 4" }));
-    expect(withRL).toContain('reading level is set to "grade 4"');
+    expect(withRL).toContain('"grade 4"');
 
     const noRL = buildMetaSystemPrompt(baseInput({ readingLevel: null }));
-    expect(noRL).not.toContain("reading level is set to");
     // No dangling space after the editor line when there's no reading level.
     expect(noRL).toContain("like a good editor.\n\n## Reflection");
   });

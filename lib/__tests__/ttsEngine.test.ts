@@ -265,6 +265,31 @@ describe("TTSEngine", () => {
     expect(ctx.createOscillator).toHaveBeenCalledTimes(2);
   });
 
+  test("a sentence whose audio never ends can't wedge the next speak() (TRA-514)", async () => {
+    // A gesture-locked AudioContext never fires `onended`, so playBuffer never
+    // settles. speak() of the next question must still play.
+    const played: string[] = [];
+    class StuckEngine extends TTSEngine {
+      protected override async fetchBuffer(text: string): Promise<AudioBuffer | null> {
+        return { __text: text } as unknown as AudioBuffer;
+      }
+      protected override playBuffer(buffer: AudioBuffer): Promise<void> {
+        const text = (buffer as unknown as { __text: string }).__text;
+        played.push(text);
+        // The first question hangs forever; the next one plays normally.
+        return text.startsWith("First") ? new Promise<void>(() => {}) : Promise.resolve();
+      }
+    }
+    const engine = new StuckEngine();
+    engine.speak("First question.");
+    await settleUntil(() => played.length === 1);
+    engine.speak("Second question.");
+    await settleUntil(() => played.length === 2);
+    expect(played).toEqual(["First question.", "Second question."]);
+    await settleUntil(() => engine.state === "idle");
+    expect(engine.state).toBe("idle");
+  });
+
   test("stop() while paused clears state and suppresses onIdle", async () => {
     const { engine, played, release } = makeControllableEngine();
     let idle = 0;

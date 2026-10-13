@@ -59,8 +59,11 @@ import {
   StyleSheet,
   Text,
   View,
+  type StyleProp,
+  type TextStyle,
 } from "react-native";
 import { ScrollView } from "react-native-gesture-handler";
+import { SpeakableLabel } from "@/components/SpeakableLabel";
 import Animated from "react-native-reanimated";
 import { AppTextInput } from "@/components/AppTextInput";
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
@@ -193,6 +196,32 @@ export interface NativeManipulativeItemProps {
   online?: boolean;
   /** Ask the host to dismiss (Close, or after handing off to the WebView). */
   onRequestClose?: () => void;
+  /**
+   * How the question reaches the scholar (TRA-514, `practiceQuestionVoice`):
+   * `auto` reads it aloud as the board appears (a listener) and drops the
+   * latency reading, `tap` offers a speaker (a beginner), `none` (default)
+   * leaves it as text.
+   */
+  questionVoice?: "auto" | "tap" | "none";
+}
+
+/** The board's question, with a speaker (and an auto-read for a listener)
+ *  when the scholar is read to (TRA-514). Plain text otherwise. */
+function SpokenPrompt({
+  text,
+  voice,
+  style,
+}: {
+  text: string;
+  voice: "auto" | "tap" | "none";
+  style: StyleProp<TextStyle>;
+}) {
+  if (voice === "none") return <Text style={style}>{text}</Text>;
+  return (
+    <SpeakableLabel text={text} accessibilityLabel="Hear the question" autoPlay={voice === "auto"}>
+      <Text style={style}>{text}</Text>
+    </SpeakableLabel>
+  );
 }
 
 /**
@@ -229,6 +258,7 @@ export function NativeManipulativeItem({
   dontKnowLabel,
   online = true,
   onRequestClose,
+  questionVoice = "none",
 }: NativeManipulativeItemProps) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -359,6 +389,7 @@ export function NativeManipulativeItem({
             nowMs: Date.now(),
             renderAtMs: itemRenderAtRef.current,
             firstKeyAtMs: firstInteractionAtRef.current,
+            readAloud: questionVoice === "auto",
           });
     // Board state plus the typed number (if any) in ONE payload — the server's
     // `*Solved` reads `value` first, then falls back to the board.
@@ -449,6 +480,7 @@ export function NativeManipulativeItem({
     itemId,
     getSubmissionContext,
     onGraded,
+    questionVoice,
   ]);
   const doneDisabled = committed || grading || (state === null && !question);
   // First-look "I haven't learned this yet" gate — mirrors the pad items: shown
@@ -552,11 +584,11 @@ export function NativeManipulativeItem({
                           way in, never as the thing being graded. Derived from
                           the spec (not the stored prompt, which restates the
                           question) so every item of the kind reads the same. */}
-                      <Text style={styles.prompt}>{question.question}</Text>
+                      <SpokenPrompt text={question.question} voice={questionVoice} style={styles.prompt} />
                       <Text style={styles.strategy}>{`(${question.strategy.replace(/\.$/, "")})`}</Text>
                     </>
                   ) : (
-                    <Text style={styles.prompt}>{spec.prompt}</Text>
+                    <SpokenPrompt text={spec.prompt} voice={questionVoice} style={styles.prompt} />
                   )}
                 </View>
                 <View style={[styles.badge, badgeStyle]}>

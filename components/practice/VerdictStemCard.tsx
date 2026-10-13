@@ -53,6 +53,7 @@ export function VerdictStemCard({
   announcement,
   stampKey,
   speakable = false,
+  autoRead = false,
   big = false,
 }: {
   stem: string;
@@ -71,10 +72,14 @@ export function VerdictStemCard({
    *  per-attempt value if a caller needs the beat to replay across two
    *  consecutive misses on the SAME card (practice's retry flow). */
   stampKey?: string;
-  /** Kindergarten (grade "K") item: wrap the stem in a tap-to-hear speaker so a
-   *  pre-reader can hear the question. Uses the shared `SpeakableLabel` (which
-   *  itself respects the scholar's `ttsEnabled`). Default off ⇒ unchanged. */
+  /** Wrap the stem in a tap-to-hear speaker — for a scholar who doesn't read
+   *  on their own yet (read level listener / beginner, TRA-514) or a grade-"K"
+   *  item. Uses the shared `SpeakableLabel` (which itself respects the
+   *  scholar's `ttsEnabled`). Default off ⇒ unchanged. */
   speakable?: boolean;
+  /** Also read the question aloud on its own when it appears (a listener,
+   *  TRA-514). Implies `speakable`. */
+  autoRead?: boolean;
   /** A bare "Fast math" retrieval item — render the stem LARGER and tighter so
    *  a single-digit fact reads as an instant, focused recall prompt (the tactile
    *  FastMath feel), not a wordy word-problem card. Default off ⇒ STEM_FONT_SM. */
@@ -104,12 +109,13 @@ export function VerdictStemCard({
         transition="border-color 0.3s, box-shadow 0.3s"
       >
         <VStack gap={promptVisual ? 4 : 0} w="100%">
-          {speakable ? (
+          {speakable || autoRead ? (
             <SpeakableLabel
               text={stemToSpeech(stem)}
               tapAnywhere
               ariaLabel="Hear the question"
               iconSize={24}
+              autoPlay={autoRead}
             >
               <StemText value={superscriptExponents(stem)} fontSize={stemFontSize} align="center" />
             </SpeakableLabel>

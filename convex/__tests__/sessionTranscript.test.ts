@@ -2,6 +2,7 @@ import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import type { Doc, Id } from "../_generated/dataModel";
+import { SESSION_SURFACE } from "../lib/sessionSurface";
 import {
   readScholarSessions,
   readSessionTranscript,
@@ -185,6 +186,56 @@ describe("readSessionTranscript", () => {
       readSessionTranscript(ctx, oliver, { sessionId: maesSession }),
     );
     expect(result).toBeNull();
+  });
+
+  test("returns the session's documents and what that screen could do", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedScholar(t, "oliver");
+    const s = await seedSession(t, scholar);
+    const longApp = `<!doctype html>${"x".repeat(5000)}`;
+    await t.run(async (ctx) => {
+      await ctx.db.insert("artifacts", {
+        sessionId: s,
+        title: "Game design",
+        content: "Rise: 6 Run: 3 Slope: 2",
+        lastEditedBy: "scholar",
+      });
+      await ctx.db.insert("artifacts", {
+        sessionId: s,
+        title: "Slope game",
+        content: longApp,
+        lastEditedBy: "ai",
+        type: "code",
+        language: "html",
+      });
+      await ctx.db.insert("artifacts", {
+        sessionId: s,
+        title: "Where it happened",
+        content: "{\"v\":1}",
+        lastEditedBy: "ai",
+        type: "map",
+      });
+    });
+
+    const result = await t.run((ctx) => readSessionTranscript(ctx, scholar, {}));
+    expect(result!.sessionMode).toBe("conversation");
+    expect(result!.whatTheScholarSees).toBe(SESSION_SURFACE.conversation);
+    const bySurface = Object.fromEntries(
+      result!.documents.map((d) => [d.surface, d]),
+    );
+    expect(bySurface["writing box"]).toMatchObject({
+      title: "Game design",
+      content: "Rise: 6 Run: 3 Slope: 2",
+      contentTruncated: false,
+    });
+    expect(bySurface["live app"].contentTruncated).toBe(true);
+    expect(bySurface["live app"].content!.length).toBeLessThan(longApp.length);
+    // Structured artifacts are named, never dumped.
+    expect(bySurface.map).toEqual({
+      title: "Where it happened",
+      surface: "map",
+      lastEditedBy: "ai",
+    });
   });
 
   test("default (no sessionId) skips test-drive sessions", async () => {

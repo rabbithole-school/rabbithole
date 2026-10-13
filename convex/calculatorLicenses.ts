@@ -40,6 +40,7 @@ type MyLicenseStatus = {
   license: {
     issuedAt: number;
     issuedByName: string | null;
+    expiresOn: string | null;
     badge: {
       imageUrl: string | null;
       artStatus: string;
@@ -56,6 +57,73 @@ type MyLicenseStatus = {
     facts: ScholarFastMathFact[];
   };
 } | null;
+
+/**
+ * The school's calendar day for an instant, "YYYY-MM-DD" (en-CA formats ISO
+ * order), so it compares to an `expiresOn` as a plain string.
+ */
+export function schoolCalendarDay(at: number, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    timeZone,
+  }).format(new Date(at));
+}
+
+/**
+ * Validate a teacher-chosen expiration date. Every license must carry one,
+ * and it must be a real calendar date after the school's today — a license
+ * that expires today or earlier is a typo, not a credential. Returns the
+ * normalized "YYYY-MM-DD"; throws a teacher-readable message otherwise.
+ */
+export function validateLicenseExpiry(
+  expiresOn: string,
+  now: number,
+  timeZone: string,
+): string {
+  const trimmed = expiresOn.trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  const asDate = match
+    ? new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])))
+    : null;
+  if (
+    !match ||
+    !asDate ||
+    asDate.getUTCFullYear() !== Number(match[1]) ||
+    asDate.getUTCMonth() !== Number(match[2]) - 1 ||
+    asDate.getUTCDate() !== Number(match[3])
+  ) {
+    throw new Error(
+      `The expiration date must be a calendar date like 2027-01-15 (got "${expiresOn}").`,
+    );
+  }
+  if (trimmed <= schoolCalendarDay(now, timeZone)) {
+    throw new Error("The expiration date must be after today.");
+  }
+  return trimmed;
+}
+
+/** "Jan 15, 2027" for a stored "YYYY-MM-DD" (no time zone involved). */
+export function formatLicenseExpiry(expiresOn: string): string {
+  const [y, m, d] = expiresOn.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+async function scholarTimeZone(
+  ctx: QueryCtx | MutationCtx,
+  scholar: Doc<"users">,
+): Promise<string> {
+  const institution = scholar.institutionId
+    ? await ctx.db.get(scholar.institutionId)
+    : null;
+  return effectiveInstitutionTimeZone(institution?.timeZone);
+}
 
 const CALCULATOR_LICENSE_BADGE = {
   title: "Calculator license",
@@ -112,6 +180,7 @@ async function schedulePrintCalculatorLicense(
   licenseId: Id<"calculatorLicenses">,
   issuedAt: number,
   reissued: boolean,
+  reprintOf?: number,
 ) {
 }
 
@@ -162,6 +231,7 @@ export const myLicenseStatus = authedQuery({
         license: {
           issuedAt: license.issuedAt,
           issuedByName: issuer?.name ?? null,
+          expiresOn: license.expiresOn ?? null,
           badge: badge
             ? {
                 imageUrl,
@@ -191,12 +261,14 @@ export const myLicenseStatus = authedQuery({
  * existing record (when / who), re-renders the badge card, and schedules a new
  * print — which is how a mis-recorded grant is fixed; there is no separate edit
  * mutation to keep in sync. There is no score input or validation: pass/not-yet
- * is entirely a human judgment made in the room.
+ * is entirely a human judgment made in the room. The one required input is
+ * the expiration date, which the granting teacher always chooses.
  */
 async function grantCalculatorLicenseAs(
   ctx: MutationCtx,
   caller: Doc<"users">,
   scholarId: Id<"users">,
+  requestedExpiresOn: string,
 ): Promise<{
   licenseId: Id<"calculatorLicenses">;
   corrected: boolean;
@@ -208,12 +280,18 @@ async function grantCalculatorLicenseAs(
     throw new Error("Target user is not a scholar");
   }
 
+  const issuedAt = Date.now();
+  const expiresOn = validateLicenseExpiry(
+    requestedExpiresOn,
+    issuedAt,
+    await scholarTimeZone(ctx, scholar),
+  );
+
   const existing = await ctx.db
     .query("calculatorLicenses")
     .withIndex("by_scholar", (q) => q.eq("scholarId", scholarId))
     .first();
 
-  const issuedAt = Date.now();
   if (existing) {
     const linkedBadge = existing.badgeId
       ? await ctx.db.get(existing.badgeId)
@@ -232,6 +310,7 @@ async function grantCalculatorLicenseAs(
     await ctx.db.patch(existing._id, {
       issuedAt,
       issuedBy: caller._id,
+      expiresOn,
       badgeId,
     });
     await schedulePrintCalculatorLicense(ctx, existing._id, issuedAt, true);
@@ -243,6 +322,7 @@ async function grantCalculatorLicenseAs(
     scholarId,
     issuedAt,
     issuedBy: caller._id,
+    expiresOn,
     badgeId,
   });
   await schedulePrintCalculatorLicense(ctx, licenseId, issuedAt, false);
@@ -284,12 +364,15 @@ async function revokeCalculatorLicenseAs(
 export const grantCalculatorLicense = teacherMutation({
   args: {
     scholarId: v.id("users"),
+    /** "YYYY-MM-DD", the school calendar day the license expires. */
+    expiresOn: v.string(),
   },
   handler: async (ctx, args) => {
     const { licenseId, corrected } = await grantCalculatorLicenseAs(
       ctx,
       ctx.user,
       args.scholarId,
+      args.expiresOn,
     );
     return { licenseId, corrected };
   },
@@ -335,12 +418,18 @@ function formatIssuedOn(issuedAt: number, timeZone: string): string {
  * re-recorded: a re-record reprints the physical card and re-renders the
  * badge, so the bot gets `already_licensed` back (with who/when) and passes
  * `rerecord: true` only after the teacher confirms.
+ *
+ * `expiresOn` is optional HERE only so the bot can learn the scholar is
+ * already licensed before it has asked for a date; a grant without one
+ * returns `needs_expiry` so the bot asks the teacher instead of inventing a
+ * date.
  */
 export const grantForCaller = internalMutation({
   args: {
     callerUserId: v.id("users"),
     scholarId: v.id("users"),
     rerecord: v.optional(v.boolean()),
+    expiresOn: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const caller = await requireTeacherCaller(ctx, args.callerUserId);
@@ -366,14 +455,21 @@ export const grantForCaller = internalMutation({
         scholarName,
         issuedOn: formatIssuedOn(existing.issuedAt, timeZone),
         issuedByName: issuer?.name ?? null,
+        expiresOn: existing.expiresOn
+          ? formatLicenseExpiry(existing.expiresOn)
+          : null,
         printsCard: false,
       };
+    }
+    if (!args.expiresOn?.trim()) {
+      return { status: "needs_expiry" as const, scholarName };
     }
 
     const { corrected, issuedAt } = await grantCalculatorLicenseAs(
       ctx,
       caller,
       args.scholarId,
+      args.expiresOn,
     );
     // Mirrors printContext's gate: only the primary institution prints.
     let printsCard = false;
@@ -382,8 +478,71 @@ export const grantForCaller = internalMutation({
       scholarName,
       issuedOn: formatIssuedOn(issuedAt, timeZone),
       issuedByName: caller.name ?? null,
+      expiresOn: formatLicenseExpiry(args.expiresOn.trim()),
       printsCard,
     };
+  },
+});
+
+/**
+ * Operator correction of an existing license's terms — its expiration date
+ * and/or the proctor on record — WITHOUT re-issuing it: the issue date and
+ * license number stay, the badge card re-renders, and nothing reprints
+ * unless `reprint: true` — a physical side effect, so opt-in. A reprint is
+ * its own print job (keyed apart from the original issuance's) and posts no
+ * new Slack celebration: the license wasn't re-earned. Internal only: run
+ * from the CLI, e.g. to give licenses issued before expiry existed their date.
+ */
+export const amendLicenseTerms = internalMutation({
+  args: {
+    scholarId: v.id("users"),
+    expiresOn: v.optional(v.string()),
+    issuedBy: v.optional(v.id("users")),
+    reprint: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const license = await ctx.db
+      .query("calculatorLicenses")
+      .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
+      .first();
+    if (!license) throw new Error("This scholar has no calculator license.");
+    const scholar = await ctx.db.get(args.scholarId);
+    if (!scholar) throw new Error("Scholar not found.");
+    const patch: Partial<Doc<"calculatorLicenses">> = {};
+    if (args.expiresOn !== undefined) {
+      patch.expiresOn = validateLicenseExpiry(
+        args.expiresOn,
+        Date.now(),
+        await scholarTimeZone(ctx, scholar),
+      );
+    }
+    if (args.issuedBy !== undefined) {
+      const proctor = await ctx.db.get(args.issuedBy);
+      if (!proctor || !isTeacherRole(proctor.role)) {
+        throw new Error("The proctor must be a teacher or admin.");
+      }
+      // The same institution boundary a grant enforces on its caller.
+      await requireActiveScholarAccess(ctx, proctor, args.scholarId);
+      patch.issuedBy = args.issuedBy;
+    }
+    if (Object.keys(patch).length > 0) await ctx.db.patch(license._id, patch);
+    if (license.badgeId) {
+      const badge = await ctx.db.get(license.badgeId);
+      if (badge?.kind === "calculator_license") {
+        await ctx.db.patch(badge._id, { artStatus: "generating" });
+        await scheduleCalculatorLicenseCardRender(ctx, badge._id);
+      }
+    }
+    if (args.reprint === true) {
+      await schedulePrintCalculatorLicense(
+        ctx,
+        license._id,
+        license.issuedAt,
+        false,
+        Date.now(),
+      );
+    }
+    return { amended: Object.keys(patch).length > 0, reprinted: args.reprint === true };
   },
 });
 
@@ -438,6 +597,7 @@ export const printContext = internalQuery({
       scholarSlug: scholarSlug(scholar.username, scholar._id),
       issuedAt: license.issuedAt,
       issuedByName: issuer?.name ?? null,
+      expiresOn: license.expiresOn ?? null,
       // The scholar's profile photo, for the card's portrait. Returned only
       // past the gates above, so it reaches the print pipeline solely for a
       // current, primary-institution issuance.
@@ -489,6 +649,7 @@ export const badgeRenderContext = internalQuery({
         scholarName: scholar.name ?? "Scholar",
         issuedAt: license.issuedAt,
         issuedByName: issuer?.name ?? null,
+        expiresOn: license.expiresOn ?? null,
       },
       scholarPhotoUrl: scholar.image ?? null,
       issuer: {

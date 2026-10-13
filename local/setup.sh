@@ -153,7 +153,9 @@ fi
 
 step "5/5  Start the web app on port $WEB_PORT"
 : >"$STATE/next.log"
-nohup ./node_modules/.bin/next dev -p "$WEB_PORT" </dev/null >>"$STATE/next.log" 2>&1 &
+# Loopback only: /dev-login signs anyone in without a password, so the web app
+# must not be reachable from other machines on the network.
+nohup ./node_modules/.bin/next dev -H 127.0.0.1 -p "$WEB_PORT" </dev/null >>"$STATE/next.log" 2>&1 &
 echo $! >"$STATE/next.pid"
 for i in $(seq 1 120); do
   grep -q "Ready in" "$STATE/next.log" && break

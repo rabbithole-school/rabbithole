@@ -22,6 +22,7 @@ import { ROLES, isTeacherRole, type Role } from "./roles";
 import { liveSeedsForScholar } from "./seeds";
 import { normalizeName } from "./scholarMatch";
 import { classifySessionOrigin } from "./sessionOrigin";
+import { SESSION_SURFACE } from "./sessionSurface";
 import { isEnrolledScholar } from "./enrollmentStanding";
 import { extendedEducationTag } from "./scholarParticipationTooling";
 import {
@@ -1592,6 +1593,9 @@ export async function readScholarSessions(
   );
 }
 
+const TRANSCRIPT_WRITING_CHARS = 4000;
+const TRANSCRIPT_APP_CHARS = 3000;
+
 /**
  * The full(er) transcript of ONE session, plus the context needed to judge
  * it: origin (assigned vs self-initiated), the activity's prompt/deliverable,
@@ -1664,6 +1668,42 @@ export async function readSessionTranscript(
     .withIndex("by_session", (q) => q.eq("sessionId", session!._id))
     .order("asc")
     .collect();
+
+  // The documents beside the chat — the scholar's writing and any live app —
+  // so the aide reads the work itself, not only the talk about it. Same tier
+  // as the transcript (teacher/admin; the writing is quoted in the chat
+  // anyway). Maps, slides and manipulatives are named but not dumped: their
+  // content is structured JSON, not something to read.
+  const artifacts = await ctx.db
+    .query("artifacts")
+    .withIndex("by_session", (q) => q.eq("sessionId", session!._id))
+    .collect();
+  const documents = artifacts.map((a) => {
+    const surface =
+      a.type === "code"
+        ? "live app"
+        : a.type === undefined || a.type === "text"
+          ? "writing box"
+          : a.type;
+    const cap =
+      surface === "writing box"
+        ? TRANSCRIPT_WRITING_CHARS
+        : surface === "live app"
+          ? TRANSCRIPT_APP_CHARS
+          : 0;
+    return {
+      title: a.title,
+      surface,
+      lastEditedBy: a.lastEditedBy,
+      ...(cap > 0
+        ? {
+            content: a.content.slice(0, cap),
+            contentTruncated: a.content.length > cap,
+          }
+        : {}),
+    };
+  });
+  const sessionMode = session.sessionMode ?? "conversation";
   const conversational = allMessages.filter(
     (m) => m.role === "user" || m.role === "assistant",
   );
@@ -1687,6 +1727,15 @@ export async function readSessionTranscript(
     // (scholarReadPolicy), so the TEACHER description is the right context here
     // — the aide judging a session needs the design intent.
     activityDescription: activity?.description ?? null,
+    activityKind: activity?.kind ?? null,
+    // Vibecode only: whether the scholar could open Edit (and so the Code
+    // view) — whatTheScholarSees explains the values.
+    ...(activity?.kind === "vibecode"
+      ? { appEditAccess: activity.editAccess ?? null }
+      : {}),
+    sessionMode,
+    whatTheScholarSees: SESSION_SURFACE[sessionMode],
+    documents,
     deliverablePrompt: activity?.deliverable?.prompt ?? null,
     deliverableCriteria: criteria,
     activityComplete,

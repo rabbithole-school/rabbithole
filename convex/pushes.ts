@@ -1,8 +1,8 @@
 // Pushes — "this, to these scholars, right now."
 //
 // The single write surface behind every "Make focus" / "Dispatch as focus"
-// affordance: the Run page, an app tile, a curriculum node, and the Slack
-// agent all land here. See review/class-focus-rethink.html.
+// affordance: the Run page, an app tile, a curriculum node, and the staff
+// aide (in-app · Slack · MCP) all land here. See review/class-focus-rethink.html.
 //
 // Conventions are deliberately borrowed from roomCues.ts, the closest
 // existing surface (a teacher broadcasting to a group or a whole school,
@@ -256,7 +256,7 @@ export const makeFocus = teacherMutation({
 
 /**
  * The one code path every "make focus" surface runs through — the web
- * dialog, the Slack agent, and anything added later. Kept as ONE function
+ * dialog, the staff aide, and anything added later. Kept as ONE function
  * so an authorization or audience rule can never be enforced on one
  * surface and quietly skipped on another.
  */
@@ -468,8 +468,8 @@ export const livePushesForMe = authedQuery({
  * app makes the push reappear with no write to `pushes` needed.
  *
  * Scoped to scholar-facing live reads only (`livePushesForMe`) — the
- * teacher's own view (`livePushesForScope`) and the Slack surface
- * (`liveFocusForSlack`) deliberately keep showing an archived-app push, so
+ * teacher's own view (`livePushesForScope`) and the staff aide
+ * (`liveFocusForAide`) deliberately keep showing an archived-app push, so
  * staff can still see and clear/wrap it.
  */
 async function withoutArchivedAppPushes(
@@ -633,8 +633,10 @@ async function hydratePush(
   }
 }
 
-// ───────────────────── Slack surface (agent-facing) ─────────────────────
+// ─────────────────── Staff aide (agent-facing) ───────────────────
 //
+// Backs the class-focus tools in lib/classFocusTools.ts, which every aide
+// transport (in-app · Slack · MCP) assembles from assembleCurriculumTools.
 // Read-before-write, the same split deviceLock.ts uses: the model resolves
 // opaque ids and shows the requester the exact app + group + window before
 // anything lands on a scholar's screen. These internal functions repeat the
@@ -645,7 +647,7 @@ async function hydratePush(
  * Everything the agent needs to name a target and an audience: the app
  * catalog, this school's groups, and the durations the UI offers.
  */
-export const focusOptionsForSlack = internalQuery({
+export const focusOptionsForAide = internalQuery({
   args: { callerUserId: v.id("users") },
   handler: async (ctx, { callerUserId }) => {
     const caller = await ctx.db.get(callerUserId);
@@ -686,7 +688,7 @@ export const focusOptionsForSlack = internalQuery({
 });
 
 /** Put an app or a link in front of a group for a bounded window. */
-export const makeFocusFromSlack = internalMutation({
+export const makeFocusFromAide = internalMutation({
   args: {
     callerUserId: v.id("users"),
     appId: v.optional(v.id("externalApps")),
@@ -750,7 +752,7 @@ export const makeFocusFromSlack = internalMutation({
 });
 
 /** What is on scholars' screens right now, so the agent can report or wrap. */
-export const liveFocusForSlack = internalQuery({
+export const liveFocusForAide = internalQuery({
   args: { callerUserId: v.id("users") },
   handler: async (ctx, { callerUserId }) => {
     const caller = await ctx.db.get(callerUserId);
@@ -795,7 +797,7 @@ export const liveFocusForSlack = internalQuery({
 });
 
 /** End a live focus early. */
-export const clearFocusFromSlack = internalMutation({
+export const clearFocusFromAide = internalMutation({
   args: { callerUserId: v.id("users"), pushId: v.id("pushes") },
   handler: async (ctx, { callerUserId, pushId }) => {
     const caller = await ctx.db.get(callerUserId);
@@ -823,7 +825,7 @@ export const clearFocusFromSlack = internalMutation({
       clearedReason: "teacher",
       scheduledFnId: undefined,
     });
-    // Same allowlist edge as the web `clearPush` — the Slack surface must not
+    // Same allowlist edge as the web `clearPush` — the aide surface must not
     // be the one that silently skips it.
     await schedulePushProjectionRefresh(ctx, pushId);
     return { ok: true as const, message: "Wrapped up." };

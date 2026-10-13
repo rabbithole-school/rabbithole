@@ -20,7 +20,12 @@
  *      `analyses.learningIndicators` (connections, deeper questions, revised
  *      understanding), labelled "Noticed in that session". This is the one
  *      observer output read here.
- *   3. When a session left no deliverable, the scholar's own turns in it
+ *   3. When a session left no usable submitted deliverable, its writing box:
+ *      the most recently created plain-text document the scholar last edited
+ *      (one a tutor last touched, even by a rename, is skipped). A scholar who designed something and moved on
+ *      without pressing Send is the common case, and the builder starting
+ *      cold on a finished design is the failure this section exists to stop.
+ *   4. When a session left no writing at all, the scholar's own turns in it
  *      (role "user", never tool/system/notebook/instruction rows or app-button
  *      presses), most recent kept.
  *
@@ -54,6 +59,7 @@ export type PriorUnitWorkLine =
       /** The tutor transcribed part of this writing (hasTutorTranscription). */
       transcribed?: boolean;
     }
+  | { kind: "drafted"; text: string; transcribed?: boolean }
   | { kind: "said"; text: string }
   | { kind: "noticed"; text: string };
 
@@ -230,6 +236,30 @@ export async function loadPriorUnitWork(
       }
 
       if (!lines.some((l) => l.kind === "wrote")) {
+        const draft = (
+          await ctx.db
+            .query("artifacts")
+            .withIndex("by_session", (q) => q.eq("sessionId", session._id))
+            .collect()
+        )
+          .filter(
+            (a) =>
+              (a.type === undefined || a.type === "text") &&
+              a.lastEditedBy === "scholar",
+          )
+          .sort((a, b) => b._creationTime - a._creationTime)
+          .map((a) => ({ a, text: deliverableText(a.content) }))
+          .find((d) => d.text !== null);
+        if (draft?.text) {
+          lines.push({
+            kind: "drafted",
+            text: draft.text,
+            ...(draft.a.hasTutorTranscription ? { transcribed: true } : {}),
+          });
+        }
+      }
+
+      if (!lines.some((l) => l.kind === "wrote" || l.kind === "drafted")) {
         const userTurns = (
           await ctx.db
             .query("messages")
@@ -255,6 +285,7 @@ export async function loadPriorUnitWork(
 
 const LINE_PREFIX: Record<PriorUnitWorkLine["kind"], string> = {
   wrote: "They wrote",
+  drafted: "In their writing box",
   said: "They said",
   noticed: "Noticed in that session",
 };
@@ -287,7 +318,7 @@ export function buildPriorUnitWorkSection(
       item.lines
         .map(
           (l) =>
-            `\n  ${l.kind === "wrote" && l.transcribed ? TRANSCRIBED_PREFIX : LINE_PREFIX[l.kind]}: ${l.text}`,
+            `\n  ${l.kind === "wrote" && l.transcribed ? TRANSCRIBED_PREFIX : LINE_PREFIX[l.kind]}${l.kind === "drafted" && l.transcribed ? " (partly transcribed by the tutor)" : ""}: ${l.text}`,
         )
         .join("");
     const remaining = cap - body.length;

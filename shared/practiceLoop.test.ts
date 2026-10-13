@@ -431,6 +431,18 @@ describe("placementFeedback — unified verdict stamp", () => {
 });
 
 describe("computeTiming", () => {
+  it("omits the latency for a question read aloud to the scholar (TRA-514)", () => {
+    expect(
+      computeTiming({
+        firstAttempt: true,
+        nowMs: 9000,
+        renderAtMs: 200,
+        firstKeyAtMs: 6000,
+        readAloud: true,
+      }),
+    ).toEqual({ elapsedMs: 8800 });
+  });
+
   it("measures elapsed + first-key latency on the first attempt", () => {
     expect(
       computeTiming({ firstAttempt: true, nowMs: 1000, renderAtMs: 200, firstKeyAtMs: 500 }),

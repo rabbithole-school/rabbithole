@@ -22,6 +22,7 @@ const { items, passthrough, scrollToEnd, dismissKeyboard } = vi.hoisted(() => ({
   dismissKeyboard: vi.fn(),
 }));
 
+vi.mock("@/components/SpeakableLabel", () => ({ SpeakableLabel: passthrough }));
 vi.mock("react-native", () => ({
   ActivityIndicator: passthrough,
   Keyboard: { dismiss: dismissKeyboard },

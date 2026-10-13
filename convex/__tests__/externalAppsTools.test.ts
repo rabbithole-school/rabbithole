@@ -548,9 +548,9 @@ describe("external-apps aide tools (end-to-end)", () => {
       async (ctx) => (await ctx.db.query("externalApps").first())!._id,
     );
 
-    // The real writer: the Slack agent's make-focus runs the same createFocus
+    // The real writer: the staff aide's make-focus runs the same createFocus
     // as the web dialog. Its default window is 60 minutes.
-    const pushed = await t.mutation(internal.pushes.makeFocusFromSlack, {
+    const pushed = await t.mutation(internal.pushes.makeFocusFromAide, {
       callerUserId: teacher,
       appId,
       groupId,
@@ -598,7 +598,7 @@ describe("external-apps aide tools (end-to-end)", () => {
     expect(await tiles()).toEqual(["Scratch"]);
 
     // Wrapped up, it leaves the tile and this read together.
-    await t.mutation(internal.pushes.clearFocusFromSlack, {
+    await t.mutation(internal.pushes.clearFocusFromAide, {
       callerUserId: teacher,
       pushId: pushed.pushId,
     });
@@ -1480,7 +1480,7 @@ describe("external-apps aide tools (end-to-end)", () => {
         appId: (await ctx.db.query("externalApps").first())!._id,
         groupId: (await ctx.db.query("scholarGroups").first())!._id,
       }));
-      const pushed = await t.mutation(internal.pushes.makeFocusFromSlack, {
+      const pushed = await t.mutation(internal.pushes.makeFocusFromAide, {
         callerUserId: moliTeacher,
         appId,
         groupId,

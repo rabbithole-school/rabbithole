@@ -21,6 +21,7 @@ import {
 } from "../sessionStreamHelpers";
 import { buildSystemPrompt } from "../sessionHelpers";
 import {
+  buildTalkLevelSection,
   buildToolsSection,
   FIRST_DYNAMIC_TUTOR_SECTION,
   TUTOR_PROMPT_SECTION_ORDER,
@@ -941,13 +942,13 @@ describe("buildTutorSystemPromptParts — session-stable sections join the cache
     );
   });
 
-  test("curriculum, deliverable, tools description and reading level are in the cached prefix", () => {
+  test("curriculum, deliverable, tools description and talk level are in the cached prefix", () => {
     const { stable, dynamic } = buildTutorSystemPromptParts(rich);
     for (const marker of [
       "Equal areas",
       "Tangram swap",
       "Show two different shapes with the same area.",
-      "READING LEVEL:",
+      buildTalkLevelSection("Grade 5"),
       "Uses a counting argument",
     ]) {
       expect(stable).toContain(marker);

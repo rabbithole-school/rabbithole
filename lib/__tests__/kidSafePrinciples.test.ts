@@ -77,7 +77,7 @@ import { KID_SAFE_PRINCIPLES } from "../kidSafePrinciples";
 // against the gloss: it supports "No doing your work for you" (the words stay
 // the scholar's). No gloss change needed.
 const EXPECTED_TUTOR_GUIDELINES_HASH =
-  "84eece60c98c0f11745319cb0372e2ce324ae0c6a3d68d6f4919dd73477cb7d8";
+  "8f699ed698256d52565e7e8effafc0ed4e5a9003e6a31df4b2a6f833032f44ae";
 
 const FORBIDDEN_TOKENS = [
   /\bwhisper\b/i,

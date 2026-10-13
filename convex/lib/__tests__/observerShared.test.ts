@@ -7,6 +7,8 @@ import {
   groundAlertExcerpt,
   groundSessionSignalEvidence,
   parseObserverResponse,
+  scholarWordCount,
+  typedScholarWordCount,
   type ObserverContentBlock,
   type ObserverHistoryMessage,
 } from "../observerShared";
@@ -850,5 +852,55 @@ describe("OBSERVER_TOOL schema — interests is a top-level output", () => {
     expect(Object.keys(props)).toContain("interests");
     expect(Object.keys(props.sessionSignals as Record<string, unknown>)).not.toContain("interests");
     expect(OBSERVER_TOOL.input_schema.required).toContain("interests");
+  });
+});
+
+describe("typedScholarWordCount (TRA-513)", () => {
+  test("counts only what the scholar typed", () => {
+    const row = (
+      over: Partial<ObserverHistoryMessage> & { content: string },
+    ): ObserverHistoryMessage => ({ role: "user", sourceRole: "user", ...over });
+    expect(
+      typedScholarWordCount([
+        row({ content: "one two three", inputModality: "typed" }),
+        row({ content: "four five", inputModality: undefined }), // legacy row counts as typed
+        row({ content: "dictated words that are not typing", inputModality: "spoken" }),
+        row({ content: "check my answer", inputModality: "app" }),
+        row({ content: "alt text of a generated image", generatedImage: true }),
+        row({ content: "the tutor said this", role: "assistant", sourceRole: "assistant" }),
+      ]),
+    ).toBe(5);
+  });
+});
+
+describe("scholarWordCount (TRA-515)", () => {
+  test("counts what the scholar said OR typed, never the tutor, a staff member, an app button or an image", () => {
+    const row = (
+      over: Partial<ObserverHistoryMessage> & { content: string },
+    ): ObserverHistoryMessage => ({ role: "user", sourceRole: "user", ...over });
+    expect(
+      scholarWordCount([
+        row({ content: "one two three", inputModality: "typed" }),
+        row({ content: "four five", inputModality: "spoken" }),
+        row({ content: "six", inputModality: undefined }),
+        row({ content: "check my answer", inputModality: "app" }),
+        row({ content: "alt text of a generated image", generatedImage: true }),
+        row({ content: "the tutor said this", role: "assistant", sourceRole: "assistant" }),
+        row({ content: "a teacher typed this for them", inputModality: "typed", byStaff: true }),
+      ]),
+    ).toBe(6);
+  });
+});
+
+describe("parseObserverResponse — talkLevel (TRA-515)", () => {
+  test("passes a string through for saveAnalysis to validate, coerces a bare number, and drops anything else", () => {
+    const parse = (talkLevel: unknown) =>
+      parseObserverResponse([
+        { type: "tool_use", input: { talkLevel, observations: [] } },
+      ])?.talkLevel;
+    expect(parse("3")).toBe("3");
+    expect(parse(3)).toBe("3"); // a bare number from the model
+    expect(parse({ grade: 3 })).toBeUndefined();
+    expect(parse(undefined)).toBeUndefined();
   });
 });
