@@ -2480,3 +2480,21 @@ export const assignmentsForScholar = teacherQuery({
     return { assignments, focus };
   },
 });
+
+/**
+ * Operator correction of an account's display name — for staff, whose only
+ * other rename path is editing their own profile (`updateProfile`). Internal
+ * only: run from the CLI (`npx convex run users:setDisplayName …`). Scholars
+ * have the school-operations path (`adminUpdateScholarProfile`).
+ */
+export const setDisplayName = internalMutation({
+  args: { userId: v.id("users"), name: v.string() },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) throw new Error("User not found.");
+    const name = args.name.trim();
+    if (!name) throw new Error("Name cannot be empty.");
+    await ctx.db.patch(user._id, { name });
+    return { previous: user.name ?? null, name };
+  },
+});
