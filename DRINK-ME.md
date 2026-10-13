@@ -199,8 +199,8 @@ remove it, and offer the postcard.
 - Package downloads from the npm registry (pnpm may also fetch the exact
   version the app pins), and the Convex backend from GitHub.
 - Fonts the app's pages load from Google Fonts and fonts.cdnfonts.com.
-- The Convex backend's anonymous usage ping and crash reports, which every
-  local Convex backend sends to Convex.
+- Crash reports from the local Convex backend, sent to Convex only if it
+  crashes. Its anonymous usage ping is turned off.
 - With a key, the tutor's conversations, sent to Anthropic.
 
 Nothing is sent to the people who make Rabbithole.
