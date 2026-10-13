@@ -180,6 +180,57 @@ describe("prior unit work in a vibecode session", () => {
     expect(c.priorUnitWork).not.toContain("TUTOR-WORDS-NEVER-REPLAYED");
   });
 
+  test("carries an unsubmitted writing-box draft, labelled, ahead of chat turns", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t);
+    const prior = await seedSession(t, w, w.scholarId, w.onlineActivityId);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("artifacts", {
+        sessionId: prior,
+        title: "Game design",
+        content: "Rise: 6 Run: 3 Slope: 2",
+        lastEditedBy: "scholar",
+      });
+      await ctx.db.insert("artifacts", {
+        sessionId: prior,
+        title: "Tutor notes",
+        content: "AI-WRITTEN-DRAFT",
+        lastEditedBy: "ai",
+      });
+      await ctx.db.insert("artifacts", {
+        sessionId: prior,
+        title: "App",
+        content: "<!doctype html><p>CODE-APP</p>",
+        lastEditedBy: "scholar",
+        type: "code",
+        language: "html",
+      });
+      await ctx.db.insert("messages", {
+        sessionId: prior,
+        role: "user",
+        content: "CHAT-TURN-NOT-NEEDED-WHEN-DRAFTED",
+        flagged: false,
+      });
+    });
+    const sessionId = await seedSession(t, w, w.scholarId, w.vibecodeActivityId, {
+      sessionMode: "vibecode",
+    });
+    const items = await t.run((ctx) =>
+      loadPriorUnitWork(ctx, {
+        scholarId: w.scholarId,
+        unitId: w.unitId,
+        currentSessionId: sessionId,
+        currentActivityId: w.vibecodeActivityId,
+      }),
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0].lines).toEqual([
+      { kind: "drafted", text: "Rise: 6 Run: 3 Slope: 2" },
+    ]);
+    const c = await contextFor(t, sessionId);
+    expect(c.priorUnitWork).toContain("Rise: 6 Run: 3 Slope: 2");
+  });
+
   test("never carries another scholar's work", async () => {
     const t = convexTest(schema, modules);
     const w = await seedWorld(t);
