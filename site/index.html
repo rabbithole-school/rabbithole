@@ -5,83 +5,290 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
 <title>Rabbithole · Drink me</title>
-<meta name="description" content="Paste one line into an AI agent on your computer and go down the rabbit hole.">
+<meta name="description" content="Now showing: the school you wish existed. Paste one line into an AI agent on your computer and go down the rabbit hole.">
 <link rel="alternate" type="text/markdown" href="/drink-me" title="Instructions for agents">
+<link rel="preload" href="hg-Bold.woff2" as="font" type="font/woff2" crossorigin>
 <style>
-  /* One screen at night: the rabbit on its moon, and the one line to copy.
-     The agent explains everything else, so the page says almost nothing. */
+  /* THE MARQUEE. A midnight show on a dark street: a sign in chasing bulbs,
+     a changeable-letter readerboard whose letters snap into their rails,
+     and one ticket, which is the line you paste. */
+  /* Hanken Grotesk, subset to Latin. SIL Open Font License 1.1: https://openfontlicense.org */
+  @font-face { font-family: "Hanken Grotesk"; src: url(hg-Regular.woff2) format("woff2"); font-weight: 400; font-display: swap; }
+  @font-face { font-family: "Hanken Grotesk"; src: url(hg-Bold.woff2) format("woff2"); font-weight: 700; font-display: swap; }
   :root {
     color-scheme: dark;
-    --sky-1: #3B2E7E; --sky-2: #221A4D; --sky-3: #0C0A18;
-    --ink: #F3F0FF; --dim: #A99FD8;
-    --tag: #F4E9C8; --tag-ink: #2A1C05; --go: #63D5C8; --go-ink: #072421;
-    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hanken Grotesk", system-ui, sans-serif;
+    --sky-1: #2E2266; --sky-2: #17113A; --sky-3: #07050F;
+    --ink: #F6F1FF; --dim: #B9AEE3;
+    --bulb: #FFE6A6; --bulb-hot: #FFB443; --bulb-off: #4A3212;
+    --brass: #C8913A;
+    --board: #F3E6C4; --tile: #FCF6E4; --tile-ink: #17110A; --tile-red: #A11E19;
+    --ticket: #F2BE4A; --ticket-ink: #231404;
+    --font: "Hanken Grotesk", system-ui, sans-serif;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --s: 22px; /* bulb pitch */
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; min-height: 100%; }
+  html, body { margin: 0; }
   body {
-    background: var(--sky-3) linear-gradient(150deg, var(--sky-1) 0%, var(--sky-2) 42%, var(--sky-3) 100%) fixed;
-    color: var(--ink); font: 17px/1.55 var(--font);
+    min-height: 100vh; overflow-x: hidden;
+    background: var(--sky-3) radial-gradient(120% 70% at 50% 0%, var(--sky-1) 0%, var(--sky-2) 45%, var(--sky-3) 100%) no-repeat;
+    color: var(--ink); font: 400 17px/1.55 var(--font);
   }
-  button:focus-visible { outline: 2px solid var(--go); outline-offset: 3px; }
-  main { position: relative; min-height: 100vh; min-height: 100svh; display: flex; align-items: center; overflow: hidden; }
-  img.art {
-    position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 78% 40%;
-    pointer-events: none;
+  button:focus-visible { outline: 3px solid var(--bulb); outline-offset: 3px; }
+
+  /* searchlights behind everything, like an opening night */
+  .beams { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: 0; }
+  .beams i {
+    position: absolute; bottom: -10vh; width: 40vmax; height: 140vh; transform-origin: 50% 100%;
+    background: linear-gradient(to top, rgba(200,180,255,.16), rgba(200,180,255,0) 85%);
+    clip-path: polygon(46% 100%, 54% 100%, 100% 0, 0 0);
   }
-  main::after { /* keep the line readable over the art */
-    content: ""; position: absolute; inset: 0;
-    background: linear-gradient(90deg, rgba(12,10,24,.9) 0%, rgba(12,10,24,.6) 42%, rgba(12,10,24,0) 70%);
+  .beams i:nth-child(1) { left: 2%; transform: rotate(-18deg); }
+  .beams i:nth-child(2) { right: 2%; transform: rotate(16deg); }
+
+  .wrap { position: relative; z-index: 1; max-width: 76rem; margin: 0 auto; padding: 2.5rem 16px 3rem; }
+
+  /* ── the sign ─────────────────────────────────────────── */
+  .sign {
+    position: relative; padding: calc(var(--s) + 1.4rem) calc(var(--s) + 1.6rem);
+    background:
+      repeating-linear-gradient(90deg, rgba(255,255,255,.025) 0 2px, transparent 2px 14px),
+      linear-gradient(#1E1440, #110B26);
+    border-radius: 6px;
+    box-shadow: 0 0 0 2px #2c1d0b, 0 0 0 5px var(--brass), 0 0 0 7px #2c1d0b,
+                0 30px 80px -20px rgba(255,170,60,.28), 0 0 140px rgba(255,170,60,.10);
   }
-  .door { position: relative; z-index: 1; width: 100%; max-width: 72rem; margin: 0 auto; padding: 3rem 20px; }
-  .door > * { max-width: 35rem; }
-  h1 { font-size: clamp(2.6rem, 2rem + 3vw, 4rem); line-height: 1.05; margin: 0; letter-spacing: -.02em; }
-  .bottle {
-    position: relative; margin-top: 2.6rem; background: rgba(11,9,24,.82); border: 1px solid rgba(255,255,255,.16);
-    border-radius: 14px; padding: 1.6rem .7rem .7rem 1rem; display: grid; grid-template-columns: 1fr auto; gap: .6rem; align-items: center;
+  .bulbs { position: absolute; pointer-events: none; }
+  .bulbs.t, .bulbs.b { left: 0; right: 0; height: var(--s); }
+  .bulbs.l, .bulbs.r { top: 0; bottom: 0; width: var(--s); }
+  .bulbs.t { top: 0; } .bulbs.b { bottom: 0; } .bulbs.l { left: 0; } .bulbs.r { right: 0; }
+  .bulbs.t, .bulbs.b {
+    background:
+      radial-gradient(circle at calc(var(--s) / 2) 50%, #fff 0 2px, var(--bulb) 3.5px, rgba(255,180,67,.55) 5px, transparent 9px) 0 0 / calc(var(--s) * 3) var(--s) repeat-x,
+      radial-gradient(circle, #7a5520 0 3.5px, var(--bulb-off) 4.5px, transparent 5.5px) 0 0 / var(--s) var(--s) repeat-x;
   }
-  .bottle .tagpaper {
-    position: absolute; top: -.85rem; left: 1.1rem; transform: rotate(-3deg);
-    background: var(--tag); color: var(--tag-ink); font-weight: 750; font-size: .72rem; letter-spacing: .2em; text-transform: uppercase;
-    padding: .3rem .75rem .3rem 1.3rem; border-radius: 3px 8px 8px 3px; box-shadow: 0 4px 10px -4px #000;
+  .bulbs.l, .bulbs.r {
+    background:
+      radial-gradient(circle at 50% calc(var(--s) / 2), #fff 0 2px, var(--bulb) 3.5px, rgba(255,180,67,.55) 5px, transparent 9px) 0 0 / var(--s) calc(var(--s) * 3) repeat-y,
+      radial-gradient(circle, #7a5520 0 3.5px, var(--bulb-off) 4.5px, transparent 5.5px) 0 0 / var(--s) var(--s) repeat-y;
   }
-  .bottle .tagpaper::before { content: ""; position: absolute; left: .48rem; top: 50%; width: .4rem; height: .4rem; margin-top: -.2rem; border-radius: 50%; background: #0B0918; }
-  .bottle code { font: 1rem/1.5 var(--mono); color: var(--ink); overflow-wrap: anywhere; }
-  .bottle code .url { white-space: nowrap; } /* never split the address at "drink-" */
+
+  .marquee-top {
+    display: flex; justify-content: center; align-items: center; gap: .8em;
+    margin: 0 0 1.1rem; font-weight: 700; font-size: clamp(.72rem, .6rem + .5vw, .95rem);
+    letter-spacing: .32em; text-transform: uppercase; color: var(--bulb);
+  }
+  .marquee-top::before, .marquee-top::after { content: ""; height: 2px; flex: 1; max-width: 9rem; background: linear-gradient(90deg, transparent, var(--brass)); }
+  .marquee-top::after { transform: scaleX(-1); }
+
+  /* the name, in lights: a bronze letter, a lit rim, then a field of bulbs clipped to the letterform */
+  h1 {
+    margin: 0; text-align: center; font-weight: 700; line-height: .92;
+    font-size: min(8.4vw, 8.2rem); letter-spacing: .02em; text-transform: uppercase;
+  }
+  h1 .w { position: relative; display: inline-block; color: #2E1B07; -webkit-text-stroke: .018em var(--bulb-hot); }
+  h1 .w::after {
+    content: attr(data-text); position: absolute; inset: 0; -webkit-text-stroke: 0;
+    background: radial-gradient(circle, #fff 0 18%, var(--bulb) 30%, rgba(255,180,67,.85) 44%, transparent 60%) 0 0 / .072em .072em;
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 0 .05em rgba(255,180,67,.9)) drop-shadow(0 0 .22em rgba(255,150,40,.45));
+  }
+
+  /* the readerboard: changeable letters that snap into rails */
+  .board {
+    margin: 1.6rem auto 0; max-width: 60rem; background: var(--board);
+    border: 6px solid #0d0820; outline: 2px solid var(--brass);
+    padding: .9rem clamp(.6rem, 2vw, 1.6rem) 1rem; text-align: center; color: var(--tile-ink);
+    box-shadow: inset 0 0 40px rgba(120,80,20,.25), 0 0 50px rgba(255,220,150,.12);
+  }
+  .row {
+    margin: 0; padding: .32em 0 .38em; font-weight: 700; line-height: 1; text-transform: uppercase;
+    background: linear-gradient(transparent calc(100% - 3px), rgba(60,40,10,.35) calc(100% - 3px) calc(100% - 1px), transparent 0);
+    display: flex; flex-wrap: wrap; justify-content: center; column-gap: .42em; row-gap: .3em;
+  }
+  .row.sm { font-size: clamp(.95rem, .7rem + 1vw, 1.45rem); color: var(--tile-red); }
+  .row.lg { font-size: clamp(1.25rem, .55rem + 3.2vw, 2.45rem); }
+  .tile.wide { width: 1.02em; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .word { display: inline-flex; white-space: nowrap; gap: .06em; }
+  .tile {
+    display: inline-block; width: .8em; padding: .1em 0 .08em; text-align: center;
+    background: var(--tile); border-radius: 2px;
+    box-shadow: 0 1px 0 rgba(0,0,0,.28), 0 2px 3px -1px rgba(60,40,10,.35);
+  }
+
+  /* ── the ask ──────────────────────────────────────────── */
+  .lede { max-width: 44rem; margin: 2.2rem auto 0; text-wrap: balance; text-align: center; font-size: clamp(1.1rem, 1rem + .5vw, 1.35rem); line-height: 1.45; }
+  .lede b { color: var(--bulb); font-weight: 700; }
+
+  .ticket {
+    --notch: 11px; --cut: 4.2rem;
+    position: relative; display: grid; grid-template-columns: var(--cut) 1fr;
+    max-width: 54rem; margin: 1.8rem auto 0; background: var(--ticket); color: var(--ticket-ink);
+    border-radius: 10px; transform: rotate(-.7deg);
+    box-shadow: 0 24px 50px -18px rgba(0,0,0,.8), 0 0 60px rgba(242,190,74,.18);
+    -webkit-mask: radial-gradient(circle at var(--cut) 0, #0000 var(--notch), #000 calc(var(--notch) + .5px)) top / 100% 51% no-repeat,
+                  radial-gradient(circle at var(--cut) 100%, #0000 var(--notch), #000 calc(var(--notch) + .5px)) bottom / 100% 51% no-repeat;
+            mask: radial-gradient(circle at var(--cut) 0, #0000 var(--notch), #000 calc(var(--notch) + .5px)) top / 100% 51% no-repeat,
+                  radial-gradient(circle at var(--cut) 100%, #0000 var(--notch), #000 calc(var(--notch) + .5px)) bottom / 100% 51% no-repeat;
+  }
+  .stub {
+    display: grid; place-items: center; border-right: 2px dashed rgba(35,20,4,.45);
+    background: repeating-linear-gradient(135deg, rgba(35,20,4,.06) 0 6px, transparent 6px 12px);
+  }
+  .stub span {
+    writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap;
+    font-weight: 700; font-size: 1.05rem; letter-spacing: .3em; text-transform: uppercase;
+  }
+  .tix { padding: 1rem 1.2rem 1.1rem 1.3rem; min-width: 0; }
+  .tix-head {
+    display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+    font-weight: 700; font-size: .74rem; letter-spacing: .22em; text-transform: uppercase;
+    border-bottom: 2px solid rgba(35,20,4,.8); padding-bottom: .45rem; margin-bottom: .8rem;
+  }
+  .tix code { display: block; font: 600 1.06rem/1.5 var(--mono); color: var(--ticket-ink); overflow-wrap: anywhere; }
+  .tix code .nb { white-space: nowrap; } /* never split the address at "drink-" */
+  .tix-foot { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin-top: .95rem; }
   button.copy-btn {
-    font: 700 .85rem var(--font); letter-spacing: .03em; border: 0; border-radius: 10px; cursor: pointer;
-    padding: .7rem 1.05rem; background: var(--go); color: var(--go-ink); min-width: 6.5rem;
+    font: 700 .95rem var(--font); letter-spacing: .14em; text-transform: uppercase; cursor: pointer;
+    border: 0; border-radius: 999px; padding: .75rem 1.5rem; min-width: 8.5rem;
+    background: #1B1033; color: var(--bulb); box-shadow: inset 0 0 0 2px #1B1033, inset 0 0 0 4px var(--brass);
   }
-  button.copy-btn:hover { filter: brightness(1.08); }
-  .hint { color: var(--dim); font-size: .95rem; margin: 1rem 0 0; }
-  @media (max-width: 720px) { /* on a phone the rabbit gets its own band above the line */
-    main { display: block; }
-    img.art { position: static; display: block; height: 300px; object-position: 82% 38%;
-      -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
-    main::after { display: none; }
-    .door { padding-top: .5rem; }
+  button.copy-btn:hover { background: #2a1a4f; }
+  .fine { font-size: .8rem; font-weight: 700; letter-spacing: .04em; color: #4A3008; }
+
+  .hint { text-align: center; color: var(--dim); font-size: 1rem; margin: 1.5rem 0 0; }
+
+  /* ── the program ──────────────────────────────────────── */
+  .program { margin: 5rem auto 0; max-width: 64rem; }
+  .program h2 {
+    margin: 0 0 2rem; text-align: center; font-size: .82rem; letter-spacing: .4em; text-transform: uppercase; color: var(--bulb);
   }
-  @media (max-width: 560px) { .bottle { grid-template-columns: 1fr; } .bottle code { font-size: .8125rem; } button.copy-btn { justify-self: start; } }
-  @media (max-width: 359px) { .bottle code .url { white-space: normal; } }
-  @media (prefers-reduced-motion: no-preference) { .bottle { animation: rise .6s ease-out both; } @keyframes rise { from { transform: translateY(6px); opacity: .6; } to { transform: none; opacity: 1; } } }
+  .acts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2.4rem; }
+  .act { border-top: 2px solid var(--brass); padding-top: 1rem; }
+  .act small { display: block; font-weight: 700; font-size: .78rem; letter-spacing: .3em; text-transform: uppercase; color: var(--dim); }
+  .act h3 { margin: .35rem 0 .5rem; font-size: 1.55rem; line-height: 1.15; letter-spacing: -.01em; }
+  .act p { margin: 0; color: #DCD4F7; }
+
+  footer { margin: 4.5rem auto 0; text-align: center; color: var(--dim); font-size: .92rem; }
+  footer .dots { display: block; height: 10px; width: min(18rem, 70%); margin: 0 auto 1.2rem;
+    background: radial-gradient(circle, var(--bulb) 0 2.5px, transparent 3.5px) 0 50% / 18px 10px space no-repeat; opacity: .8; }
+
+  /* ── small screens ────────────────────────────────────── */
+  @media (max-width: 760px) {
+    h1 { font-size: calc(15vw + 8px); }
+    h1 .w { display: block; }
+    .acts { grid-template-columns: 1fr; gap: 1.8rem; }
+  }
+  @media (max-width: 560px) {
+    :root { --s: 16px; }
+    .wrap { padding-top: 1.4rem; }
+    .marquee-top { letter-spacing: .2em; margin-bottom: .8rem; }
+    .marquee-top::before, .marquee-top::after { display: none; }
+    .sign { padding: calc(var(--s) + .9rem) calc(var(--s) + .55rem); }
+    .bulbs.t, .bulbs.b { background-size: calc(var(--s) * 3) var(--s), var(--s) var(--s); }
+    .bulbs.l, .bulbs.r { background-size: var(--s) calc(var(--s) * 3), var(--s) var(--s); }
+    .board { border-width: 4px; }
+    .ticket { grid-template-columns: 1fr; transform: rotate(-.8deg); --cut: 2.6rem;
+      -webkit-mask: none; mask: none; }
+    .stub { border-right: 0; border-bottom: 2px dashed rgba(35,20,4,.45); padding: .55rem 0; }
+    .stub span { writing-mode: horizontal-tb; transform: none; font-size: .9rem; }
+    .tix { padding: .9rem .9rem 1rem; }
+    .tix code { font-size: .84rem; }
+    button.copy-btn { width: 100%; }
+  }
+
+  /* ── motion (off when the visitor asks for stillness) ─── */
+  @media (prefers-reduced-motion: no-preference) {
+    .bulbs.t { animation: chase-x .9s steps(3) infinite; }
+    .bulbs.b { animation: chase-x .9s steps(3) infinite reverse; }
+    .bulbs.r { animation: chase-y .9s steps(3) infinite; }
+    .bulbs.l { animation: chase-y .9s steps(3) infinite reverse; }
+    @keyframes chase-x { from { background-position: 0 0, 0 0; } to { background-position: calc(var(--s) * 3) 0, 0 0; } }
+    @keyframes chase-y { from { background-position: 0 0, 0 0; } to { background-position: 0 calc(var(--s) * 3), 0 0; } }
+    h1 .w::after { animation: ignite 1.6s ease-out both, hum 5s ease-in-out 1.6s infinite; }
+    h1 .w:nth-child(2)::after { animation-delay: .35s, 2s; }
+    @keyframes ignite { 0% { opacity: 0; } 12% { opacity: .9; } 18% { opacity: .1; } 30% { opacity: 1; } 36% { opacity: .35; } 55%, 100% { opacity: 1; } }
+    @keyframes hum { 0%, 100% { opacity: 1; } 47% { opacity: 1; } 50% { opacity: .82; } 53% { opacity: 1; } }
+    .js .tile { animation: snap .42s cubic-bezier(.2, 1.6, .4, 1) both; animation-delay: calc(var(--i) * 28ms + .5s); }
+    @keyframes snap { 0% { transform: translateY(-.7em) rotate(-6deg); opacity: 0; } 70% { transform: translateY(.06em); opacity: 1; } 100% { transform: none; } }
+    .beams i:nth-child(1) { animation: sweep-l 14s ease-in-out infinite alternate; }
+    .beams i:nth-child(2) { animation: sweep-r 17s ease-in-out infinite alternate; }
+    @keyframes sweep-l { from { transform: rotate(-28deg); } to { transform: rotate(10deg); } }
+    @keyframes sweep-r { from { transform: rotate(26deg); } to { transform: rotate(-8deg); } }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    /* bulbs hold still, all lit */
+    .bulbs.t, .bulbs.b { background-size: var(--s) var(--s), var(--s) var(--s); }
+    .bulbs.l, .bulbs.r { background-size: var(--s) var(--s), var(--s) var(--s); }
+  }
 </style>
 </head>
 <body>
-  <main>
-    <img class="art" src="/hero.webp" alt="" width="1600" height="855">
-    <div class="door">
-      <h1>Rabbithole</h1>
-      <div class="bottle">
-        <span class="tagpaper">Drink me</span>
-        <code id="line">Read <span class="url">drink-me.rabbithole.school/drink-me</span> and take me down the rabbit hole.</code>
-        <button class="copy-btn" type="button" id="copy">Copy</button>
+  <div class="beams" aria-hidden="true"><i></i><i></i></div>
+  <div class="wrap">
+    <header class="sign">
+      <span class="bulbs t" aria-hidden="true"></span><span class="bulbs r" aria-hidden="true"></span>
+      <span class="bulbs b" aria-hidden="true"></span><span class="bulbs l" aria-hidden="true"></span>
+      <p class="marquee-top">Midnight show · Every night</p>
+      <h1 aria-label="Rabbithole"><span class="w" data-text="Rabbit" aria-hidden="true">Rabbit</span><span class="w" data-text="hole" aria-hidden="true">hole</span></h1>
+      <div class="board">
+        <p class="row sm">Now showing</p>
+        <p class="row lg">The school you wish existed</p>
+        <p class="row sm">Snap it together yourself</p>
+      </div>
+    </header>
+
+    <main>
+      <p class="lede">A new way for teachers and parents to build an amazing place to learn: a tutor that asks instead of answers, in blocks that snap together any way you like. <b>Nobody is selling you anything. You don’t subscribe. You build.</b></p>
+
+      <div class="ticket">
+        <div class="stub"><span>Admit one</span></div>
+        <div class="tix">
+          <div class="tix-head"><span>Your ticket in</span><span>No. 000001</span></div>
+          <code id="line">Read <span class="nb">drink-me.rabbithole.school/</span><wbr><span class="nb">drink-me</span> and take me down the rabbit hole.</code>
+          <div class="tix-foot">
+            <button class="copy-btn" type="button" id="copy">Copy</button>
+            <span class="fine">Valid on your own computer. Never sold.</span>
+          </div>
+        </div>
       </div>
       <p class="hint">Paste it into Claude Code, or any AI agent on your computer.</p>
-    </div>
-  </main>
+
+      <section class="program" aria-labelledby="prog">
+        <h2 id="prog">Tonight’s program</h2>
+        <div class="acts">
+          <div class="act"><small>Act one</small><h3>The tutor asks.</h3>
+            <p>It won’t hand over the answer. It asks, waits, and asks a sharper question, until the thinking belongs to the kid.</p></div>
+          <div class="act"><small>Act two</small><h3>You build the show.</h3>
+            <p>Lessons, characters, questions, quests: pieces that snap into one another. Stack them into the learning you always wanted to give.</p></div>
+          <div class="act"><small>Act three</small><h3>The house is yours.</h3>
+            <p>Your agent sets it all up on your own computer, with a make-believe school and no accounts. The code is yours: read it, break it, change anything. Nothing rented. Nothing phones home to us; when the tutor speaks, it talks to the AI model you choose, on your own key.</p></div>
+        </div>
+      </section>
+    </main>
+
+    <footer><span class="dots" aria-hidden="true"></span>From a small nonprofit school, and given away. The doors open when you paste.</footer>
+  </div>
   <script>
     (function () {
+      // Readerboard: split each row into letter tiles that snap into the rail.
+      document.documentElement.className = "js";
+      var i = 0;
+      [].forEach.call(document.querySelectorAll(".row"), function (row) {
+        var words = row.textContent.trim().split(/\s+/);
+        var label = document.createElement("span"); label.className = "sr"; label.textContent = row.textContent.trim();
+        row.textContent = ""; row.appendChild(label);
+        words.forEach(function (w) {
+          var word = document.createElement("span"); word.className = "word"; word.setAttribute("aria-hidden", "true");
+          w.split("").forEach(function (ch) {
+            var t = document.createElement("span"); t.className = /[MW]/i.test(ch) ? "tile wide" : "tile"; t.textContent = ch;
+            t.style.setProperty("--i", i++); word.appendChild(t);
+          });
+          row.appendChild(word);
+        });
+      });
+
       var btn = document.getElementById("copy"), line = document.getElementById("line");
       btn.addEventListener("click", function () {
         var text = line.textContent.trim();

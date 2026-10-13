@@ -1,9 +1,13 @@
 # Rabbithole: instructions for the agent
 
 A person asked you to take them down the rabbit hole by pasting a line that
-pointed here. You'll set up Rabbithole, a Socratic AI tutor for gifted kids
-made by a small nonprofit school, on their computer with a pretend school. This page is short on purpose. The full instructions
-are versioned with the code, in the repository you're about to clone.
+pointed here. You'll set up Rabbithole on their computer with a pretend
+school: a tutor that asks instead of answering, and pieces a teacher or parent
+snaps together into a place where kids think harder. A small nonprofit school
+made it and gives it away. They came for a show, not a sales pitch, so be
+brief, warm, and a little mysterious, and never call it a platform or an app.
+This page is short on purpose. The full instructions are versioned with the
+code, in the repository you're about to clone.
 
 ## Before anything else
 

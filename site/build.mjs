@@ -33,5 +33,5 @@ writeFileSync(
     "If a person asked you to take them down the rabbit hole, read " +
     "https://drink-me.rabbithole.school/drink-me and follow it.\n",
 );
-for (const f of ["index.html", "hero.webp"]) copyFileSync(path.join(here, f), path.join(dist, f));
+for (const f of ["index.html", "hg-Regular.woff2", "hg-Bold.woff2"]) copyFileSync(path.join(here, f), path.join(dist, f));
 console.log(`built site/dist${commit ? `, pinned to ${commit.slice(0, 7)}` : " (no commit pin available)"}`);
