@@ -22,7 +22,7 @@ if (!commit) {
   }
 }
 const pin = commit
-  ? `       git -C ~/rabbithole-drink-me checkout --quiet ${commit}\n\n` +
+  ? `       git -C rabbithole-drink-me checkout --quiet ${commit}\n\n` +
     "   The second command pins the kit to the exact version this page was published with.\n\n"
   : "\n";
 const md = readFileSync(path.join(here, "drink-me.md"), "utf8").replace("{{PIN}}\n", pin);

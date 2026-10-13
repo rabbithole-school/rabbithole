@@ -23,7 +23,7 @@ That page tells the agent to clone this branch and follow
 `/drink-me` in Claude Code (or tell any agent to follow DRINK-ME.md):
 
 ```sh
-git clone --branch drink-me --single-branch https://github.com/rabbithole-school/rabbithole ~/rabbithole-drink-me
+git clone --branch drink-me --single-branch https://github.com/rabbithole-school/rabbithole rabbithole-drink-me
 ```
 
 The agent asks who you are, checks your computer, and sets up a local copy

@@ -29,13 +29,16 @@ code, in the repository you're about to clone.
 
 ## Steps
 
-1. Clone the kit into a folder of its own, outside any other project:
+1. Clone the kit into a new folder named `rabbithole-drink-me`, inside the
+   folder you're working in:
 
-       git clone --branch drink-me --single-branch https://github.com/rabbithole-school/rabbithole ~/rabbithole-drink-me
+       git clone --branch drink-me --single-branch https://github.com/rabbithole-school/rabbithole rabbithole-drink-me
 {{PIN}}
-   If `~/rabbithole-drink-me` already exists, ask before replacing it.
+   If the folder you're in is inside another project (a git repository), ask
+   the person where to put the kit instead, and suggest their home folder.
+   If `rabbithole-drink-me` already exists there, ask before replacing it.
 
-2. Open `~/rabbithole-drink-me/DRINK-ME.md` and follow it from the top. It
+2. Open `rabbithole-drink-me/DRINK-ME.md` and follow it from the top. It
    starts by asking the person who they are.
 
 ## Done when

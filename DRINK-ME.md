@@ -51,10 +51,11 @@ report it (step 7).
 ## 1. Find the kit
 
 You need this kit cloned into a folder of its own, outside any other project.
-It lives on the `drink-me` branch of the public Rabbithole repository, and
-`~/rabbithole-drink-me` is a good place for it:
+It lives on the `drink-me` branch of the public Rabbithole repository. Clone it
+into a `rabbithole-drink-me` folder inside the folder you're working in, unless
+that folder is inside another project (then ask, and suggest the home folder):
 
-    git clone --branch drink-me --single-branch https://github.com/rabbithole-school/rabbithole ~/rabbithole-drink-me
+    git clone --branch drink-me --single-branch https://github.com/rabbithole-school/rabbithole rabbithole-drink-me
 
 If you came from drink-me.rabbithole.school/drink-me, you've already cloned
 it. Run every command below from the kit's folder.
@@ -143,10 +144,10 @@ model too, so they should stop Rabbithole when they're done.
 Ask them to run the key script themselves, in their own terminal. Give them
 the exact command with the kit's full path, for example:
 
-    cd ~/rabbithole-drink-me && bin/set-key.sh
+    cd /full/path/to/rabbithole-drink-me && bin/set-key.sh
 
 If they've never used a terminal, open one for them in the kit's folder (on
-a Mac, `open -a Terminal ~/rabbithole-drink-me`). Tell them to type
+a Mac, `open -a Terminal /full/path/to/rabbithole-drink-me`). Tell them to type
 `bin/set-key.sh`, press Return, and paste the key when it asks. Nothing
 shows while they paste; that's on purpose.
 
