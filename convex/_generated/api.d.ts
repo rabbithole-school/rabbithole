@@ -441,6 +441,7 @@ import type * as lib_serviceAccount from "../lib/serviceAccount.js";
 import type * as lib_sessionActivitySetup from "../lib/sessionActivitySetup.js";
 import type * as lib_sessionOrigin from "../lib/sessionOrigin.js";
 import type * as lib_sessionRecap from "../lib/sessionRecap.js";
+import type * as lib_sessionSurface from "../lib/sessionSurface.js";
 import type * as lib_simpleMdmClient from "../lib/simpleMdmClient.js";
 import type * as lib_simpleMdmSnapshots from "../lib/simpleMdmSnapshots.js";
 import type * as lib_simulatorRedTeam from "../lib/simulatorRedTeam.js";
@@ -1167,6 +1168,7 @@ declare const fullApi: ApiFromModules<{
   "lib/sessionActivitySetup": typeof lib_sessionActivitySetup;
   "lib/sessionOrigin": typeof lib_sessionOrigin;
   "lib/sessionRecap": typeof lib_sessionRecap;
+  "lib/sessionSurface": typeof lib_sessionSurface;
   "lib/simpleMdmClient": typeof lib_simpleMdmClient;
   "lib/simpleMdmSnapshots": typeof lib_simpleMdmSnapshots;
   "lib/simulatorRedTeam": typeof lib_simulatorRedTeam;
