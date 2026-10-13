@@ -366,6 +366,14 @@ export const scholarOwnedRowSources = [
     blobIds: noBlobIds,
   },
   {
+    table: "readAloudAttempts",
+    index: "by_scholar",
+    blobFields: [],
+    collectByScholar: (ctx, scholarId) => ctx.db.query("readAloudAttempts").withIndex("by_scholar", (q) => q.eq("scholarId", scholarId)).collect(),
+    collectAll: (ctx) => ctx.db.query("readAloudAttempts").withIndex("by_scholar").collect(),
+    blobIds: noBlobIds,
+  },
+  {
     table: "courseNarratives",
     index: "by_scholar",
     blobFields: [],
@@ -681,6 +689,7 @@ export async function deleteSessionCascade(
   await del(ctx, counts, "messages", messages);
 
   await del(ctx, counts, "analyses", await ctx.db.query("analyses").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect());
+  await del(ctx, counts, "readAloudAttempts", await ctx.db.query("readAloudAttempts").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect());
   await del(ctx, counts, "artifacts", await ctx.db.query("artifacts").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect());
   await del(ctx, counts, "codeArtifactRevisions", await ctx.db.query("codeArtifactRevisions").withIndex("by_session", (q) => q.eq("sessionId", sessionId)).collect());
   // In-app AI record: the scholar's typed lines to an app's character/judge.

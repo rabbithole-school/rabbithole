@@ -570,20 +570,14 @@ async function buildServer(
     reads.map((entry) => [entry.name as string, entry]),
   );
 
-  // Curriculum/design + assignment tools — proxied verbatim from the shared
-  // assemble layer. Role-gated server-side (empty for non-staff), so this is
-  // exactly the set the caller may both see and call.
+  // Curriculum/design + assignment + managed-iPad tools — proxied verbatim
+  // from the shared assemble layer. Role-gated server-side (empty for
+  // non-staff; the iPad tools only for school operations), so this is exactly
+  // the set the caller may both see and call.
   const curriculumTools = await convex.action(api.mcp.listCurriculumTools, {});
   const curriculumNames = new Set(curriculumTools.map((t) => t.name));
   const unitDesignerTools = await convex.action(api.mcp.listUnitDesignerTools, {});
   const unitDesignerNames = new Set(unitDesignerTools.map((t) => t.name));
-
-  // Managed-iPad operations — the same tools the Slack bot carries, proxied
-  // from the shared factory (convex/lib/deviceOpsTools.ts). Empty for any
-  // caller without school operations, so this registration adds nothing for a
-  // parent, a scholar, or a curriculum designer.
-  const deviceTools = await convex.action(api.mcp.listDeviceTools, {});
-  const deviceNames = new Set(deviceTools.map((t) => t.name));
 
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -603,11 +597,6 @@ async function buildServer(
         description: t.description,
         inputSchema: t.inputSchema as Tool["inputSchema"],
       })),
-      ...deviceTools.map((t) => ({
-        name: t.name,
-        description: t.description,
-        inputSchema: t.inputSchema as Tool["inputSchema"],
-      })),
     ];
     return { tools };
   });
@@ -621,15 +610,6 @@ async function buildServer(
       // The proxy re-asserts the role gate; a name outside the caller's set
       // throws "Forbidden: <name>" → surfaced to the client as an error.
       const result = await convex.action(api.mcp.callCurriculumTool, {
-        name,
-        input: args,
-      });
-      return text(result);
-    }
-    if (deviceNames.has(name)) {
-      // Same shape as the curriculum proxy: the action re-asserts the gate,
-      // so a guessed name throws "Forbidden: <name>" rather than running.
-      const result = await convex.action(api.mcp.callDeviceTool, {
         name,
         input: args,
       });

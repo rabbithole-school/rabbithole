@@ -29,7 +29,7 @@
  *         is itself the signal.
  *       • writing complexity — Flesch–Kincaid over typed messages
  *         (`lib/readingTrend.ts`), mechanical and already charted on the
- *         profile as "Scholar writing over time".
+ *         profile as the growth chart's Write lane.
  *
  * Deliberately absent, because each was judged unsound upstream: band-count
  * deltas ("3 → 5 fluent"), "top strand" by time spent (no time-on-task exists),

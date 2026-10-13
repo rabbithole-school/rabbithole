@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { query, mutation, internalMutation, internalQuery } from "./_generated/server";
 import { authedQuery, authedMutation, teacherQuery, platformAdminMutation, platformAdminQuery, scholarAdminQuery, scholarAdminMutation, schoolAdminMutation } from "./lib/customFunctions";
-import { assertCanWrite, getCurrentUser, getSessionOwner } from "./lib/auth";
+import { assertCanWrite, getActiveOverlay, getCurrentUser, getSessionOwner } from "./lib/auth";
 import {
   assertInstitutionActive,
   requireActiveScholarAccess,
@@ -1048,6 +1048,14 @@ export const isSessionOwnerReadOnly = internalQuery({
     const owner = await getSessionOwner(ctx);
     return owner?.readOnly === true;
   },
+});
+
+/** Action-side impersonation probe: actions have no db, so an action that
+ *  authenticates and then writes asks here whether its session is "viewing
+ *  as" another user — read-only app-wide (lib/auth `assertNotImpersonating`). */
+export const isSessionImpersonating = internalQuery({
+  args: {},
+  handler: async (ctx): Promise<boolean> => (await getActiveOverlay(ctx)) !== null,
 });
 
 /**

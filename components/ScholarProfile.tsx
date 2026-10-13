@@ -14,7 +14,6 @@ import {
   WRITE_MODE_LABELS,
   talkLevelLabel,
   writingEstimateText,
-  talkLevelToNumber,
   type ReadLevel,
   type WriteMode,
 } from "@/convex/lib/readingLevels";
@@ -104,7 +103,15 @@ import { MathSkillsPortrait } from "@/components/practice/MathSkillsPortrait";
 import { useAideDockOptional } from "@/components/aide/AideDockProvider";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { GenericBodySkeleton } from "@/app/teacher/(dashboard)/_components/Skeletons";
-import { useSmoothedQueryWithPending } from "@/hooks/useSmoothedQuery";
+import { useSmoothedQuery, useSmoothedQueryWithPending } from "@/hooks/useSmoothedQuery";
+import {
+  LevelsGrowthChart,
+  ReadEvidence,
+  TalkEvidence,
+  WriteEvidence,
+  type ScannedSample,
+  type VocabularyWin,
+} from "@/components/TalkReadWriteEvidence";
 import { ScholarAppsManager } from "@/components/ScholarAppsManager";
 import { HealthRecordStaffView } from "@/components/HealthRecordStaffView";
 import { formatRelative, formatTimeAgo } from "@/lib/relativeTime";
@@ -409,133 +416,6 @@ function InterestsBlock({
   );
 }
 
-type ScholarReadingTrendPoint = {
-  startAt: number;
-  endAt: number;
-  meanGradeLevel: number | null;
-  messageCount: number;
-  wordCount: number;
-};
-
-type VocabularyWin = {
-  word: string;
-  firstSeenAt: number;
-  snippet: string;
-  useCount: number;
-};
-
-type ScholarPortfolioSample = {
-  id: string;
-  caption: string | null;
-  snippet: string;
-  gradeLevel: number;
-  wordCount: number;
-  createdAt: number;
-};
-
-function formatGradeSignal(grade: number | null): string {
-  return grade === null ? "—" : `Grade ${grade.toFixed(1)}`;
-}
-
-function nonEmptyTrendPoints(points: ScholarReadingTrendPoint[]) {
-  return points.filter((point): point is ScholarReadingTrendPoint & { meanGradeLevel: number } =>
-    point.meanGradeLevel !== null
-  );
-}
-
-function ScholarWritingSparkline({
-  points,
-  portfolioSamples = [],
-}: {
-  points: ScholarReadingTrendPoint[];
-  portfolioSamples?: ScholarPortfolioSample[];
-}) {
-  const plotted = nonEmptyTrendPoints(points);
-  if (plotted.length === 0 && portfolioSamples.length === 0) return null;
-
-  const width = 280;
-  const height = 72;
-  const pad = 10;
-  const chatGrades = plotted.map((point) => point.meanGradeLevel);
-  const portfolioGrades = portfolioSamples.map((sample) => sample.gradeLevel);
-  const allGrades = [...chatGrades, ...portfolioGrades];
-  const minGrade = Math.min(...allGrades);
-  const maxGrade = Math.max(...allGrades);
-  // The trend buckets always span the full window; fall back to sample times
-  // only when there are no buckets at all (portfolio-only case).
-  const allTimes = [
-    ...points.map((point) => point.startAt),
-    ...points.map((point) => point.endAt),
-    ...portfolioSamples.map((sample) => sample.createdAt),
-  ];
-  const minTime = points[0]?.startAt ?? Math.min(...allTimes);
-  const maxTime = points[points.length - 1]?.endAt ?? Math.max(...allTimes);
-  const gradeRange = maxGrade - minGrade || 1;
-  const timeRange = maxTime - minTime || 1;
-  const toX = (time: number) => pad + ((time - minTime) / timeRange) * (width - pad * 2);
-  const toY = (grade: number) => height - pad - ((grade - minGrade) / gradeRange) * (height - pad * 2);
-  const polyline = plotted
-    .map((point) => `${toX(point.startAt)},${toY(point.meanGradeLevel)}`)
-    .join(" ");
-
-  return (
-    <Box color="violet.500" mt={3}>
-      <svg
-        width="100%"
-        viewBox={`0 0 ${width} ${height}`}
-        role="img"
-        aria-label="Scholar writing reading level trend"
-        style={{ display: "block" }}
-      >
-        <line
-          x1={pad}
-          x2={width - pad}
-          y1={height - pad}
-          y2={height - pad}
-          stroke="currentColor"
-          strokeOpacity="0.18"
-          strokeWidth="1"
-        />
-        {plotted.length > 1 && (
-          <polyline
-            points={polyline}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinejoin="round"
-            strokeLinecap="round"
-          />
-        )}
-        {plotted.map((point) => (
-          <circle
-            key={point.startAt}
-            cx={toX(point.startAt)}
-            cy={toY(point.meanGradeLevel)}
-            r="3"
-            fill="currentColor"
-          />
-        ))}
-        {/* Portfolio (scanned) writing samples — a DISTINCT source, drawn as
-            amber diamonds and never joined into the chat trend line. */}
-        {portfolioSamples.map((sample) => {
-          const cx = toX(sample.createdAt);
-          const cy = toY(sample.gradeLevel);
-          const r = 3.5;
-          return (
-            <polygon
-              key={sample.id}
-              points={`${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`}
-              fill="#d97706"
-              stroke="white"
-              strokeWidth="1"
-            />
-          );
-        })}
-      </svg>
-    </Box>
-  );
-}
-
 export function ScholarProfile({ scholarId, institutionScope, activeTab: controlledTab, onTabChange, onDelete, onOpenObservation, mode = "teacher", addAction = null, onAddConsumed }: ScholarProfileProps) {
   // Operations staff: account-admin + portfolio only. Skip every sensitive read
   // (they're teacher-gated server-side and would 403) and hide the
@@ -624,6 +504,16 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
     api.messages.getRecentTutorReadabilityByScholar,
     shouldLoadReadingLevelInsights ? { scholarId: scholarId as Id<"users">, limit: 20 } : "skip"
   );
+  // Evidence + growth for the three levels (TRA-515). The clock is a
+  // minute-rounded argument (T11), so the 7-day / 2-week / 13-week windows
+  // move without the query reading the wall clock.
+  const minuteNow = Math.floor(useNow(60_000) / 60_000) * 60_000;
+  const levelEvidence = useSmoothedQuery(
+    api.levelEvidence.forScholar,
+    shouldLoadReadingLevelInsights
+      ? { scholarId: scholarId as Id<"users">, now: minuteNow }
+      : "skip",
+  );
   const adminUpdateScholarProfile = useMutation(api.users.adminUpdateScholarProfile);
   const institutions = useQuery(api.institutions.list, {}) ?? [];
   const setScholarInstitution = useMutation(api.institutions.setScholarInstitution);
@@ -638,10 +528,6 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
   const updateReadLevel = useMutation(api.scholars.updateReadLevel);
   const updateWriteMode = useMutation(api.scholars.updateWriteMode);
   const updateAudioSettings = useMutation(api.scholars.updateAudioSettings);
-  const readingLevelHistory = useQuery(
-    api.scholars.getReadingLevelHistory,
-    !isOperationsMode ? { scholarId: scholarId as Id<"users"> } : "skip"
-  ) ?? [];
   const runAIAnalysis = useAction(api.readingLevelAnalysis.analyzeReadingLevelAI);
   const addObservation = useMutation(api.observations.add);
   const removeObservation = useMutation(api.observations.remove);
@@ -652,12 +538,8 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
   };
 
   const isLoading = profile === undefined;
-  const scholarTrendPoints: ScholarReadingTrendPoint[] = scholarReadingTrend?.trend ?? [];
-  const scholarTrendSamples = nonEmptyTrendPoints(scholarTrendPoints);
-  const firstScholarTrendPoint = scholarTrendSamples[0] ?? null;
-  const latestScholarTrendPoint = scholarTrendSamples[scholarTrendSamples.length - 1] ?? null;
   const vocabularyWinItems: VocabularyWin[] = scholarReadingTrend?.vocabularyWins ?? [];
-  const scholarPortfolioSamples: ScholarPortfolioSample[] = scholarReadingTrend?.portfolioSamples ?? [];
+  const scholarPortfolioSamples: ScannedSample[] = scholarReadingTrend?.portfolioSamples ?? [];
 
   const [dossierDraft, setDossierDraft] = useState<string | null>(null);
   const [isSavingReadingLevel, setIsSavingReadingLevel] = useState(false);
@@ -1147,158 +1029,12 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                   action={isSavingReadingLevel ? <Spinner size="xs" color="violet.500" /> : undefined}
                 />
 
-                <VStack align="stretch" gap={3} mb={4}>
-                  <Box p={3} borderWidth="1px" borderColor="violet.100" bg="violet.50" borderRadius="md">
-                    <Flex justify="space-between" align="start" gap={3}>
-                      <Box minW={0}>
-                        <Text fontSize="xs" fontFamily="heading" fontWeight="700" color="navy.500">
-                          Scholar writing over time
-                        </Text>
-                        {scholarReadingTrend === undefined ? (
-                          <HStack gap={2} mt={1}>
-                            <Spinner size="xs" color="violet.500" />
-                            <Text fontSize="2xs" color="charcoal.400" fontFamily="body">
-                              Reading recent writing…
-                            </Text>
-                          </HStack>
-                        ) : latestScholarTrendPoint ? (
-                          <Text fontSize="2xs" color="charcoal.500" fontFamily="body" mt={1}>
-                            Recent writing averages {formatGradeSignal(latestScholarTrendPoint.meanGradeLevel)}
-                            {" "}across {scholarReadingTrend.sampledMessageCount} writing sample
-                            {scholarReadingTrend.sampledMessageCount === 1 ? "" : "s"}
-                            {firstScholarTrendPoint && firstScholarTrendPoint !== latestScholarTrendPoint
-                              ? `; earliest bucket in this window was ${formatGradeSignal(firstScholarTrendPoint.meanGradeLevel)}.`
-                              : "."}
-                            {scholarPortfolioSamples.length > 0
-                              ? ` Plus ${scholarPortfolioSamples.length} scanned written-work sample${scholarPortfolioSamples.length === 1 ? "" : "s"} (amber).`
-                              : ""}
-                          </Text>
-                        ) : scholarPortfolioSamples.length > 0 ? (
-                          <Text fontSize="2xs" color="charcoal.500" fontFamily="body" mt={1}>
-                            {scholarPortfolioSamples.length} scanned written-work sample
-                            {scholarPortfolioSamples.length === 1 ? "" : "s"} (amber) in this window; no tutor-chat writing yet.
-                          </Text>
-                        ) : (
-                          <Text fontSize="2xs" color="charcoal.400" fontFamily="body" mt={1}>
-                            No recent scholar-authored writing yet. New sessions and scanned work will start a portrait here.
-                          </Text>
-                        )}
-                      </Box>
-                      {latestScholarTrendPoint && (
-                        <Badge bg="white" color="violet.700" borderWidth="1px" borderColor="violet.100" fontSize="2xs" fontFamily="heading">
-                          {formatGradeSignal(latestScholarTrendPoint.meanGradeLevel)}
-                        </Badge>
-                      )}
-                    </Flex>
-                    {latestScholarTrendPoint || scholarPortfolioSamples.length > 0 ? (
-                      <>
-                        <ScholarWritingSparkline points={scholarTrendPoints} portfolioSamples={scholarPortfolioSamples} />
-                        <HStack justify="space-between" mt={1} color="charcoal.300" fontSize="2xs" fontFamily="body">
-                          <Text>{scholarTrendPoints[0] ? formatRelative(scholarTrendPoints[0].startAt) : ""}</Text>
-                          <Text>
-                            {scholarReadingTrend?.wordCount.toLocaleString()} words · {scholarReadingTrend?.bucketDays}-day buckets
-                          </Text>
-                        </HStack>
-                      </>
-                    ) : scholarReadingTrend !== undefined ? (
-                      <Box mt={3} h="36px" borderBottom="1px dashed" borderColor="violet.200" />
-                    ) : null}
-                  </Box>
-
-                  {scholarPortfolioSamples.length > 0 && (
-                    <Box p={3} borderWidth="1px" borderColor="amber.100" bg="amber.50" borderRadius="md">
-                      <HStack justify="space-between" align="center" mb={2}>
-                        <Text fontSize="xs" fontFamily="heading" fontWeight="700" color="navy.500">
-                          Written work samples
-                        </Text>
-                        <Text fontSize="2xs" color="charcoal.300" fontFamily="body">
-                          Scanned · OCR text
-                        </Text>
-                      </HStack>
-                      <VStack align="stretch" gap={2}>
-                        {scholarPortfolioSamples.map((sample) => (
-                          <Box key={sample.id} p={2} bg="white" borderRadius="md" borderWidth="1px" borderColor="amber.100">
-                            <HStack justify="space-between" align="baseline" gap={2}>
-                              <Text fontSize="xs" fontFamily="heading" fontWeight="700" color="charcoal.600" lineClamp={1}>
-                                {sample.caption || "Scanned writing"}
-                              </Text>
-                              <Badge bg="amber.100" color="amber.700" fontSize="2xs" fontFamily="heading" flexShrink={0}>
-                                Grade {sample.gradeLevel.toFixed(1)}
-                              </Badge>
-                            </HStack>
-                            {sample.snippet && (
-                              <Text fontSize="2xs" color="charcoal.400" fontFamily="body" lineClamp={2} mt={0.5}>
-                                “{sample.snippet}”
-                              </Text>
-                            )}
-                            <Text fontSize="2xs" color="charcoal.300" fontFamily="body" mt={0.5}>
-                              {formatRelative(sample.createdAt)} · {sample.wordCount} words
-                            </Text>
-                          </Box>
-                        ))}
-                      </VStack>
-                      <Text fontSize="2xs" color="charcoal.300" fontFamily="body" mt={2}>
-                        Transcribed from scans — a vocabulary and sentence-structure signal, not a spelling check.
-                      </Text>
-                    </Box>
-                  )}
-
-                  <Box p={3} borderWidth="1px" borderColor="gray.100" bg="white" borderRadius="md">
-                    <HStack justify="space-between" align="center" mb={2}>
-                      <Text fontSize="xs" fontFamily="heading" fontWeight="700" color="navy.500">
-                        Vocabulary wins
-                      </Text>
-                      {vocabularyWinItems.length > 0 && (
-                        <Text fontSize="2xs" color="charcoal.300" fontFamily="body">
-                          First appearances
-                        </Text>
-                      )}
-                    </HStack>
-                    {scholarReadingTrend === undefined ? (
-                      <HStack gap={2}>
-                        <Spinner size="xs" color="violet.500" />
-                        <Text fontSize="2xs" color="charcoal.400" fontFamily="body">
-                          Looking for new vocabulary…
-                        </Text>
-                      </HStack>
-                    ) : vocabularyWinItems.length > 0 ? (
-                      <VStack align="stretch" gap={2}>
-                        {vocabularyWinItems.map((win) => (
-                          <Box key={win.word} p={2} bg="gray.50" borderRadius="md" borderWidth="1px" borderColor="gray.100">
-                            <HStack justify="space-between" align="baseline" gap={2}>
-                              <Text fontSize="xs" fontFamily="heading" fontWeight="700" color="charcoal.600">
-                                {win.word}
-                              </Text>
-                              <Text fontSize="2xs" color="charcoal.300" fontFamily="body" flexShrink={0}>
-                                {formatRelative(win.firstSeenAt)}
-                                {win.useCount > 1 ? ` · ${win.useCount} uses` : ""}
-                              </Text>
-                            </HStack>
-                            {win.snippet && (
-                              <Text fontSize="2xs" color="charcoal.400" fontFamily="body" lineClamp={1} mt={0.5}>
-                                “{win.snippet}”
-                              </Text>
-                            )}
-                          </Box>
-                        ))}
-                      </VStack>
-                    ) : (
-                      <Text fontSize="2xs" color="charcoal.400" fontFamily="body">
-                        No new vocabulary wins in this window yet. Sophisticated first-use words will appear here as the scholar writes.
-                      </Text>
-                    )}
-                  </Box>
-                </VStack>
-
-                {/* Levels table: Method | Level | ⋯ */}
-                <Box display="grid" gridTemplateColumns="1fr 1fr 24px" gap={2} alignItems="center">
-                  {/* Header row */}
-                  <Text fontSize="2xs" color="charcoal.300" fontFamily="heading" fontWeight="600" textTransform="uppercase" letterSpacing="wider" pb={1} borderBottom="1px solid" borderColor="gray.100">Method</Text>
-                  <Text fontSize="2xs" color="charcoal.300" fontFamily="heading" fontWeight="600" textTransform="uppercase" letterSpacing="wider" pb={1} borderBottom="1px solid" borderColor="gray.100">Level</Text>
-                  <Box pb={1} borderBottom="1px solid" borderColor="gray.100" />
-
-                  {/* Talk level row — the grade band the tutor talks at */}
-                  <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5}>Talk level</Text>
+                {/* One row per level: the setting, then its evidence lines
+                    (each shown only when it means something), then ONE growth
+                    chart for all three (TRA-515). */}
+                <Box display="grid" gridTemplateColumns="56px 1fr 24px" columnGap={2} alignItems="center">
+                  {/* Talk — the grade band the tutor talks at */}
+                  <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5}>Talk</Text>
                   <Box py={1.5}>
                     <FieldSelect
                       w="full"
@@ -1315,12 +1051,19 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                       ))}
                     </FieldSelect>
                   </Box>
-                  <Box py={1.5} /> {/* no menu for the talk row — edited directly */}
+                  <Box py={1.5} />
+                  <Box gridColumn="1 / -1" pb={2}>
+                    <TalkEvidence
+                      talkLevel={scholar?.readingLevel || null}
+                      tutorReadability={tutorReadability}
+                      vocabularyWins={vocabularyWinItems}
+                    />
+                  </Box>
 
-                  {/* Read row — how the tutor's words arrive (TRA-503).
+                  {/* Read — how the tutor's words arrive (TRA-503).
                       Listener turns on voice-first. */}
-                  <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5} borderTop="1px solid" borderColor="gray.50">Read</Text>
-                  <Box py={1.5} borderTop="1px solid" borderColor="gray.50">
+                  <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5} borderTop="1px solid" borderColor="gray.100">Read</Text>
+                  <Box py={1.5} borderTop="1px solid" borderColor="gray.100">
                     <FieldSelect
                       w="full"
                       size="xs"
@@ -1336,11 +1079,18 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                       ))}
                     </FieldSelect>
                   </Box>
-                  <Box py={1.5} borderTop="1px solid" borderColor="gray.50" />
+                  <Box py={1.5} borderTop="1px solid" borderColor="gray.100" />
+                  {/* Read-aloud evidence exists only for a beginner: a
+                      listener doesn't read aloud, a reader isn't checked. */}
+                  {scholar?.readLevel === "beginner" && (
+                    <Box gridColumn="1 / -1" pb={2}>
+                      <ReadEvidence evidence={levelEvidence} />
+                    </Box>
+                  )}
 
-                  {/* Write row — how the scholar's words get in (TRA-503) */}
-                  <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5} borderTop="1px solid" borderColor="gray.50">Write</Text>
-                  <Box py={1.5} borderTop="1px solid" borderColor="gray.50">
+                  {/* Write — how the scholar's words get in (TRA-503) */}
+                  <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5} borderTop="1px solid" borderColor="gray.100">Write</Text>
+                  <Box py={1.5} borderTop="1px solid" borderColor="gray.100">
                     <FieldSelect
                       w="full"
                       size="xs"
@@ -1356,7 +1106,7 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                       ))}
                     </FieldSelect>
                   </Box>
-                  <Box py={1.5} borderTop="1px solid" borderColor="gray.50">
+                  <Box py={1.5} borderTop="1px solid" borderColor="gray.100">
                     {!aiLoading && (
                       <Menu.Root positioning={{ placement: "bottom-end" }}>
                         <Menu.Trigger asChild>
@@ -1374,105 +1124,29 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                       </Menu.Root>
                     )}
                   </Box>
-
-                  {/* The writing estimate — information, never a setting
-                      (TRA-513): it is not compared with the talk level and
-                      nothing here can promote it into it. */}
-                  <Box gridColumn="1 / -1" pb={1.5}>
+                  {/* Spoken share + the writing estimate — information, never
+                      a setting (TRA-513): nothing here can promote the
+                      estimate into the talk level. */}
+                  <Box gridColumn="1 / -1" pb={2}>
                     {aiLoading ? (
                       <Spinner size="xs" color="violet.500" />
                     ) : (
-                      <Text fontSize="2xs" fontFamily="body" color="charcoal.400">
-                        {writingEstimateText(
+                      <WriteEvidence
+                        evidence={levelEvidence}
+                        writingEstimate={writingEstimateText(
                           scholar?.readingLevelSuggestion ?? null,
                           scholar?.readingLevelSuggestionWords ?? null,
                           scholar?.readingLevelSuggestionAt ?? null,
                           estimateNow,
                         )}
-                      </Text>
+                      />
                     )}
                   </Box>
-
-                  <>
-                    {/* Recent tutor-response readability row */}
-                    <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5} borderTop="1px solid" borderColor="gray.50">Tutor responses</Text>
-                    <Box py={1.5} borderTop="1px solid" borderColor="gray.50">
-                      {tutorReadability === undefined ? (
-                        <Spinner size="xs" color="violet.500" />
-                      ) : tutorReadability.meanGradeLevel !== null ? (
-                        <VStack align="start" gap={0.5}>
-                          <Badge bg="violet.100" color="violet.700" fontSize="2xs" fontFamily="heading">
-                            Grade {tutorReadability.meanGradeLevel.toFixed(1)}
-                          </Badge>
-                          <Text fontSize="2xs" color="charcoal.400" fontFamily="body">
-                            Ease {tutorReadability.meanReadingEase === null ? "—" : tutorReadability.meanReadingEase.toFixed(1)}
-                          </Text>
-                        </VStack>
-                      ) : (
-                        <Text
-                          fontSize="xs"
-                          fontFamily="heading"
-                          color="charcoal.300"
-                        >
-                          —
-                        </Text>
-                      )}
-                    </Box>
-                    <Box py={1.5} borderTop="1px solid" borderColor="gray.50" />
-                  </>
                 </Box>
 
-                {tutorReadability && (
-                  <Text fontSize="2xs" color="charcoal.400" fontFamily="body" mt={3}>
-                    Tutor response grade is the average of {tutorReadability.sampledResponseCount} recent assistant replies from the last {tutorReadability.windowDays} days
-                    {tutorReadability.sampledResponseCount > 0
-                      ? ` (${tutorReadability.wordCount.toLocaleString()} words, ${tutorReadability.minWordsPerResponse}+ words per reply).`
-                      : "."}
-                  </Text>
+                {levelEvidence && (
+                  <LevelsGrowthChart evidence={levelEvidence} scans={scholarPortfolioSamples} />
                 )}
-
-                {/* Talk level sparkline — only shown when 2+ plottable history
-                    entries. talkLevelToNumber plots a legacy "pre-reader" row
-                    as K and skips anything unparseable (never NaN). */}
-                {(() => {
-                  const pts = [...readingLevelHistory]
-                    .reverse()
-                    .map((h) => talkLevelToNumber(h.level))
-                    .filter((n): n is number => n !== null);
-                  if (pts.length < 2) return null;
-                  const minY = Math.min(...pts);
-                  const maxY = Math.max(...pts);
-                  const range = maxY - minY || 1;
-                  const W = 240;
-                  const H = 56;
-                  const pad = 6;
-                  const xStep = pts.length > 1 ? (W - pad * 2) / (pts.length - 1) : 0;
-                  const toX = (i: number) => pad + i * xStep;
-                  const toY = (v: number) => H - pad - ((v - minY) / range) * (H - pad * 2);
-                  const polyline = pts.map((v, i) => `${toX(i)},${toY(v)}`).join(" ");
-                  const lastEntry = readingLevelHistory[0];
-                  const lastDate = lastEntry ? formatRelative(lastEntry._creationTime) : "";
-                  return (
-                    <Box mt={3}>
-                      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
-                        <polyline
-                          points={polyline}
-                          fill="none"
-                          stroke="#AD60BF"
-                          strokeWidth="1.5"
-                          strokeLinejoin="round"
-                          strokeLinecap="round"
-                        />
-                        {pts.map((v, i) => (
-                          <circle key={i} cx={toX(i)} cy={toY(v)} r="3" fill="#AD60BF" />
-                        ))}
-                      </svg>
-                      <Text fontSize="2xs" color="charcoal.300" fontFamily="body" textAlign="right" mt={1}>
-                        Last updated {lastDate}
-                      </Text>
-                    </Box>
-                  );
-                })()}
               </Surface>
             )}
             {/* Reading-ramp grapheme inventory — read level listener or

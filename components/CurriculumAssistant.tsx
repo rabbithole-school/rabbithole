@@ -388,6 +388,17 @@ function CurriculumAssistantInner({
   const createChat = useMutation(api.curriculumAssistant.createChat);
   const createUnitSession = useMutation(api.curriculumAssistant.createUnitSession);
   const sendSessionMessage = useMutation(api.curriculumAssistant.sendSessionMessage);
+  // "Viewing as" another user is read-only app-wide, so the send mutations
+  // refuse; say so here instead of failing silently.
+  const viewingAs = useQuery(api.impersonation.myImpersonation, {}) != null;
+  const refuseWhileViewingAs = useCallback(() => {
+    if (!viewingAs) return false;
+    toaster.error({
+      title: "The aide is off while you're viewing as someone else",
+      description: "Exit “view as” to use it as yourself.",
+    });
+    return true;
+  }, [viewingAs]);
   const sendUnitSessionMessage = useMutation(
     api.curriculumAssistant.sendUnitSessionMessage,
   );
@@ -582,6 +593,7 @@ function CurriculumAssistantInner({
   }, [sessionId, streamingMsgId, stopStream, requestStop]);
 
   const handleSend = useCallback(async () => {
+    if (refuseWhileViewingAs()) return;
     const text = input.trim();
     // Allow an attachment-only turn (e.g. "here's the file") — send if there's
     // text OR at least one attached file.
@@ -698,7 +710,7 @@ function CurriculumAssistantInner({
       setPendingAttachments((prev) => [...attachments, ...prev]);
       setPendingDriveAttachments((prev) => [...driveAttachments, ...prev]);
     }
-  }, [input, pendingAttachments, pendingDriveAttachments, isStreaming, stopActiveStream, user, sessionId, createChat, goToSession, sendSessionMessage, startStream, scopeParam, focusScholarId, activeSession?.scholarId, focusScholarName, messages.length, practiceContext]);
+  }, [refuseWhileViewingAs, input, pendingAttachments, pendingDriveAttachments, isStreaming, stopActiveStream, user, sessionId, createChat, goToSession, sendSessionMessage, startStream, scopeParam, focusScholarId, activeSession?.scholarId, focusScholarName, messages.length, practiceContext]);
 
   // ── Unit-designer scope send path ──────────────────────────────────────
   // Routes to sendUnitSessionMessage → the /aide-stream `unitId` branch
@@ -710,6 +722,7 @@ function CurriculumAssistantInner({
       attachments: ChatAttachment[],
       driveAttachments: DriveAttachment[] = [],
     ) => {
+      if (refuseWhileViewingAs()) return;
       const text = rawText.trim();
       if (
         (!text && attachments.length === 0 && driveAttachments.length === 0) ||
@@ -771,6 +784,7 @@ function CurriculumAssistantInner({
       }
     },
     [
+      refuseWhileViewingAs,
       user,
       unitContext,
       sessionId,

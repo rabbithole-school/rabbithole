@@ -108,6 +108,10 @@ import {
   type WorkshopMode,
 } from "../../../vendor/shared/workshopMode";
 import { AppTextInput } from "@/components/AppTextInput";
+import { RecordingBar } from "@/components/RecordingBar";
+import { useStreamingDictation } from "@/hooks/useStreamingDictation";
+import { appStatusBus } from "@/lib/appStatusBus";
+import { getNativeTTS } from "@/lib/nativeTTS";
 import {
   VibecodeHistorySheet,
   type HistoryRevision,
@@ -806,9 +810,10 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
       batch: AppTutorUpdateBatch;
       onPrepared: (result: AppTutorSendResult) => void;
     },
+    spoken = false,
   ): Promise<boolean> => {
     if (!text && !appUpdate) return false;
-    const inputModality = appUpdate ? "app" : "typed";
+    const inputModality = appUpdate ? "app" : spoken ? "spoken" : "typed";
     const appContext = appUpdate
       ? newestAppTutorAskContext(appUpdate.batch)
       : undefined;
@@ -909,7 +914,7 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
         (await sendMessage({
           sessionId,
           message: text,
-          inputModality: "typed",
+          inputModality: spoken ? "spoken" : "typed",
           mode: turnMode,
         }));
       messagePersisted = true;
@@ -1041,6 +1046,30 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     appTutorUpdates.clearAppAi();
     tutorLine.markRead();
     return sendTutorTurn(input.trim());
+  };
+  // The composer's mic — the same recorder and RecordingBar the session
+  // screen's chat uses: the bar's check transcribes and sends a "spoken" turn
+  // (the tutor sees it labelled [Dictated …]); the composer text is untouched.
+  const voice = useStreamingDictation((text) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    appTutorUpdates.clearAppAi();
+    tutorLine.markRead();
+    void sendTutorTurn(trimmed, undefined, true);
+  }, sessionId);
+  const onMicStart = async () => {
+    if (appStatusBus.isMicOwned()) return; // the writing box is dictating — one recorder at a time
+    getNativeTTS().stop(); // don't record over the tutor's voice
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    await voice.start();
+  };
+  const onMicStop = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    voice.stop();
+  };
+  const onMicCancel = () => {
+    Haptics.selectionAsync();
+    voice.cancel();
   };
   // Talking to the app's character is the scholar carrying on: the tutor's
   // last line has had its moment and must not come back after the update
@@ -1744,46 +1773,63 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
             />
           ) : null}
 
-          <View style={[styles.composer, { borderTopColor: colors.border }]}>
-            <AppTextInput
-              ref={composerRef}
-              value={input}
-              onChangeText={onChangeInput}
-              placeholder={
-                mode === "edit"
-                  ? "Tell the designer what to change…"
-                  : "Talk to the tutor…"
-              }
-              placeholderTextColor={colors.fgMuted}
-              style={[styles.input, { color: colors.fg, borderColor: colors.border }]}
-              multiline
-              submitBehavior="submit"
-              onSubmitEditing={handleSend}
-            />
-            {/* During a quiet app-update turn this stays Send: sending steers
-                it, and the scholar's turn carries the in-app events instead. */}
-            <Pressable
-              onPress={visiblyStreaming ? stopStream : handleSend}
-              disabled={!visiblyStreaming && !input.trim()}
-              accessibilityRole="button"
-              accessibilityLabel={visiblyStreaming ? "Stop generating" : "Send"}
-              style={[
-                styles.send,
-                {
-                  backgroundColor:
-                    !visiblyStreaming && !input.trim()
-                      ? colors.gray200
-                      : colors.violetSolid,
-                },
-              ]}
-            >
-              {visiblyStreaming ? (
-                <SymbolView name="stop.fill" size={16} tintColor={colors.white} />
+          {voice.isRecording || voice.isTranscribing ? (
+            <View style={[styles.composer, { borderTopColor: colors.border }]}>
+              <RecordingBar
+                level={voice.level}
+                durationMs={voice.durationMs}
+                isTranscribing={voice.isTranscribing}
+                isMaxed={voice.isMaxed}
+                onCancel={onMicCancel}
+                onStop={onMicStop}
+              />
+            </View>
+          ) : (
+            <View style={[styles.composer, { borderTopColor: colors.border }]}>
+              <AppTextInput
+                ref={composerRef}
+                value={input}
+                onChangeText={onChangeInput}
+                placeholder={
+                  mode === "edit"
+                    ? "Tell the designer what to change…"
+                    : "Talk to the tutor…"
+                }
+                placeholderTextColor={colors.fgMuted}
+                style={[styles.input, { color: colors.fg, borderColor: colors.border }]}
+                multiline
+                submitBehavior="submit"
+                onSubmitEditing={handleSend}
+              />
+              {/* During a quiet app-update turn this stays Send: sending steers
+                  it, and the scholar's turn carries the in-app events instead.
+                  An empty box offers the mic in the same slot (the session
+                  screen's pattern): tap to talk, tap the check to send. */}
+              {!visiblyStreaming && !input.trim() ? (
+                <Pressable
+                  onPress={() => void onMicStart()}
+                  accessibilityRole="button"
+                  accessibilityLabel="Start recording — tap to talk, tap the check to send"
+                  style={[styles.send, { backgroundColor: colors.violetSolid }]}
+                >
+                  <SymbolView name="mic.fill" size={16} tintColor={colors.white} />
+                </Pressable>
               ) : (
-                <Text style={[styles.sendText, { color: colors.white }]}>Send</Text>
+                <Pressable
+                  onPress={visiblyStreaming ? stopStream : handleSend}
+                  accessibilityRole="button"
+                  accessibilityLabel={visiblyStreaming ? "Stop generating" : "Send"}
+                  style={[styles.send, { backgroundColor: colors.violetSolid }]}
+                >
+                  {visiblyStreaming ? (
+                    <SymbolView name="stop.fill" size={16} tintColor={colors.white} />
+                  ) : (
+                    <Text style={[styles.sendText, { color: colors.white }]}>Send</Text>
+                  )}
+                </Pressable>
               )}
-            </Pressable>
-          </View>
+            </View>
+          )}
         </View>
       </Drawer>
 

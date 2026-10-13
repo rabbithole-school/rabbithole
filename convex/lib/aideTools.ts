@@ -73,6 +73,9 @@ import { makeExternalAppsTools } from "./externalAppsTools";
 import { makeAuditLogTools } from "./auditLogTools";
 import { makeHealthRecordTools } from "./healthRecordTools";
 import { makeSpellingEvidenceTools } from "./spellingEvidenceTools";
+import { makeClassFocusTools } from "./classFocusTools";
+import { makeDeviceOpsTools, type AgentTransport } from "./deviceOpsTools";
+import { makeDriveTools } from "./driveTools";
 import { makeListGeomapAssetsTool } from "./geomapAssetsTool";
 import { makeAssignmentTools } from "./assignmentTools";
 import { makeActivityKindTools } from "./activityKindTools";
@@ -138,6 +141,8 @@ export function pickActivityByTitle<T extends { title: string }>(
  *   teacher + admin only. They resolve a scholar by name, so handing them
  *   to a designer would both write per-scholar records and leak the roster.
  * - tag_session — teacher/admin AND only when a sessionId is in scope.
+ * - read_drive_link / search_drive — every staff role, read as the asker's
+ *   own linked Google account, only when a transport names itself.
  */
 export async function assembleCurriculumTools(
   ctx: ActionCtx,
@@ -184,8 +189,12 @@ export async function assembleCurriculumTools(
     hasSchoolOperationsAccess?: boolean;
     /** Established by the transport through the server-side health capability. */
     hasHealthManagementAccess?: boolean;
-    /** Audit entry path for app-grant mutations; omitted means in-app/MCP aide. */
-    appGrantVia?: "aide" | "slack";
+    /** Which agent transport is assembling this set. Lands in audit lines:
+     *  the managed-iPad writes record it verbatim, and app-grant mutations
+     *  record "slack" for Slack and "aide" otherwise. The managed-iPad tools
+     *  are offered ONLY when a transport names itself, so a caller that
+     *  omits it (e.g. the Google Docs comment lane) never gets device writes. */
+    transport?: AgentTransport;
     /** Transport-owned file delivery; intentionally absent outside Slack. */
     attachFile?: (args: {
       filename: string;
@@ -212,9 +221,10 @@ export async function assembleCurriculumTools(
     institutionId,
     hasSchoolOperationsAccess = false,
     hasHealthManagementAccess = false,
-    appGrantVia,
+    transport,
     attachFile,
   } = opts;
+  const appGrantVia = transport === "slack" ? "slack" : undefined;
   const isSchoolOperator =
     role === ROLES.STAFF && hasSchoolOperationsAccess;
   // curriculum_designers design general curriculum and must NOT reach
@@ -283,6 +293,37 @@ export async function assembleCurriculumTools(
     role,
     callerUserId,
     allowedScholarIds,
+  });
+  // Class focus (list_focus_options / make_class_focus / list_class_focus /
+  // end_class_focus) — teacher roles, every surface; empty otherwise. The
+  // backing functions in convex/pushes.ts re-check role + institution lens.
+  const classFocusTools = await makeClassFocusTools(ctx, emit, {
+    role,
+    callerUserId,
+  });
+
+  // Managed-iPad operations (list_managed_devices / list_rabbithole_lock_devices
+  // / set_rabbithole_lock / restart_managed_device) — school operations
+  // (teacher / school_admin / platform_admin, or base staff with an active
+  // school:operations grant), every surface; empty otherwise. Needs a named
+  // transport because the writes audit it. The backing internal functions
+  // re-check caller + institution on every call.
+  const deviceOpsTools = transport
+    ? await makeDeviceOpsTools(ctx, emit, {
+        role,
+        callerUserId,
+        hasSchoolOperationsAccess,
+        source: transport,
+      })
+    : [];
+
+  // Google Drive (read_drive_link / search_drive) — every staff role, every
+  // surface, read with the ASKER's own linked Google account; needs a named
+  // transport to render the connect link. Empty otherwise.
+  const driveTools = await makeDriveTools(ctx, emit, {
+    role,
+    callerUserId,
+    transport,
   });
 
   // School physical-inventory tools (rooms + equipment) — read + write, for
@@ -1824,9 +1865,13 @@ export async function assembleCurriculumTools(
         ...scholarWriteTools,
         ...externalAppsTools,
         ...auditLogTools,
+        ...deviceOpsTools,
       );
     }
     if (hasHealthManagementAccess) tools.push(...healthRecordTools);
+    // The asker's OWN Drive — no school authority involved, so every base
+    // staff account gets it, grant or not (as on Slack before the move).
+    tools.push(...driveTools);
     return tools;
   }
   tools.push(
@@ -1844,6 +1889,7 @@ export async function assembleCurriculumTools(
     // A scholar's typed-message spelling evidence — teacher/admin only; the
     // factory returns [] for every other role (designer, staff, parent, scholar).
     ...spellingEvidenceTools,
+    ...classFocusTools,
     // General curriculum reads + the quality-run kickoffs — teacher /
     // admin / curriculum_designer. Scholar-agnostic, so safe for designers
     // (rehearse/debrief gate the same as the public start/groundExperiment,
@@ -1940,7 +1986,13 @@ export async function assembleCurriculumTools(
     ...masterScheduleTools,
     ...externalAppsTools,
     ...auditLogTools,
+    // Managed-iPad operations — school-operations roles, gated inside
+    // makeDeviceOpsTools; empty otherwise.
+    ...deviceOpsTools,
     ...googleDocsTools,
+    // Google Drive read/search as the asker — every staff role; gated inside
+    // makeDriveTools; empty without a named transport.
+    ...driveTools,
   );
   return tools;
 }

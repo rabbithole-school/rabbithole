@@ -18,7 +18,8 @@
  *     (RABBITHOLE_SOUL_DOC) renders it. This is what makes the hash change when
  *     the soul doc is edited or switched off.
  *   - buildNonHumanIntroSection(true) — the static first-session self-intro.
- *   - buildToolsSection() — the static tool-affordance description.
+ *   - buildToolsSection() — the static tool-affordance description (chat and
+ *     app-builder variants).
  *   - buildOpenExplorationWrapUpSection() — the static "how an open
  *     exploration ends" note (rendered only for activity-less sessions).
  *   - TUTOR_PROMPT_SECTION_ORDER + TUTOR_TURN_CONTEXT_SECTIONS + the
@@ -128,7 +129,9 @@ export function buildVersionMaterial(): string {
     // doc (and returns null when it's switched off).
     buildSoulSection(),
     buildNonHumanIntroSection(true),
-    buildToolsSection(),
+    buildToolsSection({ appBuilder: false }),
+    buildToolsSection({ appBuilder: true }),
+    buildToolsSection({ appBuilder: false, appActions: true }),
     buildOpenExplorationWrapUpSection(),
     // Section layout + where the prompt-cache breakpoint falls.
     `layout: ${TUTOR_PROMPT_SECTION_ORDER.join(",")} | turn-context: ${TUTOR_TURN_CONTEXT_SECTIONS.join(",")} | breakpoint: ${FIRST_DYNAMIC_TUTOR_SECTION}`,

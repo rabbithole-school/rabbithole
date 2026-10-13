@@ -1026,6 +1026,11 @@ export const purgeCloneScholar = internalMutation({
       readingLevelHistory,
       counts,
     );
+    const readAloudAttempts = await ctx.db
+      .query("readAloudAttempts")
+      .withIndex("by_scholar", (q) => q.eq("scholarId", args.userId))
+      .collect();
+    await deleteRows(ctx, "readAloudAttempts", readAloudAttempts, counts);
     const teacherDirectives = await ctx.db
       .query("teacherDirectives")
       .withIndex("by_scholar", (q) => q.eq("scholarId", args.userId))

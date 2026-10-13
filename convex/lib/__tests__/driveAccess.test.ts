@@ -108,7 +108,7 @@ const USER = "user_1" as never;
 
 describe("getDriveAccess", () => {
   test("no linked account → connect link, not a dead end", async () => {
-    const r = await getDriveAccess(ctxWithAccount(null), USER);
+    const r = await getDriveAccess(ctxWithAccount(null), USER, "slack");
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.message).toContain("/connect-google");
@@ -124,6 +124,7 @@ describe("getDriveAccess", () => {
         scopes: ["openid", "https://www.googleapis.com/auth/drive.file"],
       }),
       USER,
+      "slack",
     );
     expect(r.ok).toBe(false);
     if (r.ok) return;
@@ -140,10 +141,19 @@ describe("getDriveAccess", () => {
         scopes: ["https://www.googleapis.com/auth/drive.readonly"],
       }),
       USER,
+      "slack",
     );
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.message).toMatch(/<https?:\/\/[^|]+\|Reconnect Google Drive>/);
+  });
+
+  test("Markdown transports get a Markdown connect link", async () => {
+    const r = await getDriveAccess(ctxWithAccount(null), USER, "markdown");
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.message).toMatch(/\[Connect Google Drive\]\(https?:\/\/[^)]+\/connect-google[^)]*\)/);
+    expect(r.message).not.toContain("<http");
   });
 
   test("healthy link → token + email", async () => {
@@ -155,6 +165,7 @@ describe("getDriveAccess", () => {
         scopes: ["https://www.googleapis.com/auth/drive.readonly"],
       }),
       USER,
+      "slack",
     );
     expect(r).toEqual({
       ok: true,
@@ -173,7 +184,7 @@ describe("getDriveAccess", () => {
         scopes: ["https://www.googleapis.com/auth/drive.file"],
       },
     ]) {
-      const r = await getDriveAccess(ctxWithAccount(acct), USER);
+      const r = await getDriveAccess(ctxWithAccount(acct), USER, "slack");
       expect(r.ok).toBe(false);
       if (r.ok) continue;
       expect(r.message).toMatch(/then ask me again\.$/);
@@ -289,7 +300,7 @@ describe("readDriveFileText", () => {
     );
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.reason).toContain("attached in Slack");
+    expect(r.reason).toContain("attached to a message");
   });
 
   test("unsupported types are named, not silently empty", async () => {

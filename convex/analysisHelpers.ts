@@ -12,12 +12,17 @@ import {
   type PendingObserverRun,
 } from "./lib/observerShared";
 import { maybeRaiseAppOffTrackAlert } from "./appOffTrackAlert";
+import { validTalkJudgment } from "./lib/levelEvidence";
 
 /**
  * Save an observer analysis result.
  */
 export const saveAnalysis = internalMutation({
   args: {
+    /** Raw model answer for the talk judgment (TRA-515); validated here. */
+    talkLevel: v.optional(v.string()),
+    /** Words the scholar said or typed in the window the observer read. */
+    scholarWords: v.optional(v.number()),
     sessionId: v.id("sessions"),
     engagementScore: v.number(),
     complexityLevel: v.number(),
@@ -43,6 +48,7 @@ export const saveAnalysis = internalMutation({
       summary: args.summary,
       suggestedIntervention: args.suggestedIntervention,
       promptVersion: args.promptVersion,
+      ...(validTalkJudgment(args.talkLevel, args.scholarWords) ?? {}),
     });
 
     // Update project pulse score

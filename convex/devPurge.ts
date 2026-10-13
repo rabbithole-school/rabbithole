@@ -125,6 +125,7 @@ export const purgeUser = internalMutation({
     await del("scholarDossiers", (await ctx.db.query("scholarDossiers").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect()).map((r) => r._id));
     await del("teacherDirectives", (await ctx.db.query("teacherDirectives").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect()).map((r) => r._id));
     await del("readingLevelHistory", (await ctx.db.query("readingLevelHistory").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect()).map((r) => r._id));
+    await del("readAloudAttempts", (await ctx.db.query("readAloudAttempts").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect()).map((r) => r._id));
     await del("scholarActivityAngles", (await ctx.db.query("scholarActivityAngles").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect()).map((r) => r._id));
     await del("scholarUnitBadges", (await ctx.db.query("scholarUnitBadges").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect()).map((r) => r._id));
     await del("activityCompletions", (await ctx.db.query("activityCompletions").withIndex("by_scholar", (q) => q.eq("scholarId", uid)).collect()).map((r) => r._id));
