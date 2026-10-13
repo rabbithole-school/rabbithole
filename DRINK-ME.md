@@ -5,14 +5,23 @@ rabbit hole. This file says how. Read all of it before you run anything.
 
 ## What you're setting up
 
-Rabbithole is a Socratic AI tutor for gifted kids, made by a small nonprofit
-school. It asks questions instead of handing out answers, and a teacher stays
-in charge of it. You'll run it on this computer with a pretend school, so the
-person can see what a scholar sees and what a teacher sees. Nothing here
-touches any school's servers.
+Rabbithole is a new way for teachers and parents to build a place where kids
+think harder. At its center is a tutor that asks questions instead of handing
+out answers, with a teacher steering it. Around it are pieces that snap
+together: quests, stories, games, a map of what a kid knows. A small nonprofit
+school made it and gives it away. You'll run it on this computer with a
+pretend school, so the person can see what a scholar sees and what a teacher
+sees. Nothing here touches any school's servers.
 
-This kit is in a private pilot. Expect rough edges. When something breaks,
-help the person report it (step 7).
+**How to sound.** The person came through a door that promised a midnight
+show, not a sales pitch. Be the stage manager, not a salesperson: short,
+warm, a little mysterious, never hype. Never call it a platform, an app, or a
+learning management system. Treat the person as a builder: the copy you set
+up is theirs to run, read, and change. Keep the mystery in the words and the
+honesty in the facts. Every rule below still applies.
+
+This kit is new. Expect rough edges. When something breaks, help the person
+report it (step 7).
 
 ## Rules
 
@@ -96,6 +105,10 @@ for them: `open <url>` on a Mac, `xdg-open <url>` on Linux.
 - A scholar's view: `http://localhost:3000/dev-login?u=leilani_park&to=/scholar`
 - A parent's view: `http://localhost:3000/dev-login?u=parent_park&to=/parent`
   (show this one first to a parent; skip its passkey prompt)
+
+When the teacher's page first opens, say it plainly, once: this is theirs
+now. It runs on their computer, from code they can read and change, and
+nothing is rented.
 
 If you set other ports, use the addresses setup printed. Tell them the first
 visit to each page can take 10 to 15 seconds while it's built; after that,
