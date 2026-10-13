@@ -515,6 +515,24 @@ describe("session app state", () => {
         result: { level: 3 },
       },
     });
+    // A repeat ack of the recorded result (a remounted iframe running the
+    // same request again) is a no-op while that result is still the latest.
+    await expect(
+      owner.mutation(api.appStates.updateSessionState, {
+        artifactId: fixture.artifactId,
+        actionResult: { requestId: first.id, ok: true, result: { stale: true } },
+      }),
+    ).resolves.not.toHaveProperty("actionRequest.id");
+    await expect(
+      t.run((ctx) =>
+        ctx.runQuery(internal.appStates.readSessionActionResultForTutor, {
+          sessionId: fixture.sessionId,
+          artifactId: fixture.artifactId,
+          callerUserId: fixture.ownerId,
+          requestId: first.id,
+        }),
+      ),
+    ).resolves.toMatchObject({ result: { level: 3 } });
     const afterCompletion = await t.mutation(
       internal.appStates.requestSessionActionForTutor,
       {

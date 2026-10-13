@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "b00afeb1577bb31ddadfde16135ae8d807209dc2",
+  "sourceCommit": "dd9e44cc9f16c53f376686aab7b6afdaff5da7d2",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -4779,7 +4779,7 @@
     },
     {
       "path": "convex/__tests__/appStates.test.ts",
-      "sha256": "78586b64751cac5474398037f3f94905e74da152679304423edc5ceaeaaaabdf",
+      "sha256": "eec971257f577c9ce56dba635c247d71d96d2f9a1ea5ab73c12f3a3e7f2b4acc",
       "mode": "100644"
     },
     {
@@ -7299,7 +7299,7 @@
     },
     {
       "path": "convex/appStates.ts",
-      "sha256": "b46fa42bd391859f515155f8ea7a11cafbb63e22613bd50f544e8b6fdb7e63c6",
+      "sha256": "ce1772da6147ec484e47f930a21590b2606e1b671c039b06b4f6fda70581d893",
       "mode": "100644"
     },
     {
@@ -21293,5 +21293,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "3508284f75727edddebc834a3c5efc784aac309c15c700dd68709ff55079cdce"
+  "treeHash": "49fca0e3bf63664a93151a86607dec2fc253bf4c124153eb080b6f13de8230f8"
 }
