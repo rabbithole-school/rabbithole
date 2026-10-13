@@ -23,6 +23,7 @@ import {
 } from "./institutionTestHelpers";
 import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
+import { formatLicenseExpiry, validateLicenseExpiry } from "../calculatorLicenses";
 import { WHOLE_NUMBER_ARITHMETIC_DOMAIN } from "../seed/wholeNumberArithmeticGraph";
 import { fastMathFactKeys } from "../lib/practice/fastMath";
 import { FACT_FAMILY_SKILLS } from "../../shared/factKey";
@@ -276,7 +277,7 @@ describe("calculatorLicenses.grantCalculatorLicense", () => {
 
     const granted = await asTeacher.mutation(
       api.calculatorLicenses.grantCalculatorLicense,
-      { scholarId },
+      { expiresOn: "2099-01-15", scholarId },
     );
     expect(granted.corrected).toBe(false);
   });
@@ -294,7 +295,7 @@ describe("calculatorLicenses.grantCalculatorLicense", () => {
     const asTeacher = await withUser(t, teacher);
     const granted = await asTeacher.mutation(
       api.calculatorLicenses.grantCalculatorLicense,
-      { scholarId },
+      { expiresOn: "2099-01-15", scholarId },
     );
     expect(granted.corrected).toBe(false);
 
@@ -361,7 +362,7 @@ describe("calculatorLicenses.grantCalculatorLicense", () => {
     const asTeacher = await withUser(t, teacher);
     const granted = await asTeacher.mutation(
       api.calculatorLicenses.grantCalculatorLicense,
-      { scholarId },
+      { expiresOn: "2099-01-15", scholarId },
     );
     expect(granted.corrected).toBe(false);
     const res = await asTeacher.query(api.cohortPractice.fastMathForScholars, {
@@ -388,7 +389,7 @@ describe("calculatorLicenses.grantCalculatorLicense", () => {
 
     const asTeacher = await withUser(t, teacher);
     await expect(
-      asTeacher.mutation(api.calculatorLicenses.grantCalculatorLicense, {
+      asTeacher.mutation(api.calculatorLicenses.grantCalculatorLicense, { expiresOn: "2099-01-15",
         scholarId: otherScholar,
       }),
     ).rejects.toThrow();
@@ -404,7 +405,7 @@ describe("calculatorLicenses.grantCalculatorLicense", () => {
     });
     await seedFactLedger(t, scholarId);
     const asTeacher = await withUser(t, teacher);
-    await asTeacher.mutation(api.calculatorLicenses.grantCalculatorLicense, {
+    await asTeacher.mutation(api.calculatorLicenses.grantCalculatorLicense, { expiresOn: "2099-01-15",
       scholarId,
     });
 
@@ -419,7 +420,7 @@ describe("calculatorLicenses.grantCalculatorLicense", () => {
 
     const corrected = await asTeacher.mutation(
       api.calculatorLicenses.grantCalculatorLicense,
-      { scholarId },
+      { expiresOn: "2099-01-15", scholarId },
     );
     expect(corrected.corrected).toBe(true);
 
@@ -446,7 +447,7 @@ describe("calculatorLicenses.revokeCalculatorLicense", () => {
     });
     await seedFactLedger(t, scholarId);
     const asTeacher = await withUser(t, teacher);
-    await asTeacher.mutation(api.calculatorLicenses.grantCalculatorLicense, {
+    await asTeacher.mutation(api.calculatorLicenses.grantCalculatorLicense, { expiresOn: "2099-01-15",
       scholarId,
     });
     const badgeId = await t.run(async (ctx) => {
@@ -502,6 +503,53 @@ describe("calculatorLicenses.revokeCalculatorLicense", () => {
  * callerUserId. Pins the role gate, the institution boundary, and the
  * already-licensed guard that keeps a bot from silently reprinting a card.
  */
+describe("calculator license expiration", () => {
+  test("validateLicenseExpiry requires a real date after the school's today", () => {
+    // 2026-10-12 23:30 in Honolulu is already 10-13 in UTC: "today" is the
+    // school's calendar day, so 10-13 is still a valid (future) expiry.
+    const now = Date.UTC(2026, 9, 13, 9, 30);
+    expect(validateLicenseExpiry("2026-10-13", now, "Pacific/Honolulu")).toBe("2026-10-13");
+    expect(() => validateLicenseExpiry("2026-10-12", now, "Pacific/Honolulu")).toThrow(/after today/);
+    expect(() => validateLicenseExpiry("2027-02-30", now, "Pacific/Honolulu")).toThrow(/calendar date/);
+    expect(() => validateLicenseExpiry("1/15/2027", now, "Pacific/Honolulu")).toThrow(/calendar date/);
+    expect(formatLicenseExpiry("2027-01-15")).toBe("Jan 15, 2027");
+  });
+
+  test("amendLicenseTerms sets the expiry and proctor without re-issuing", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedTestInstitution(t, { slug: "school-a" });
+    const teacher = await seedTeacher(t, institutionId, "teacher-a");
+    const proctor = await seedTeacher(t, institutionId, "teacher-b");
+    const outsider = await seedTeacher(
+      t,
+      await seedTestInstitution(t, { slug: "school-b" }),
+      "teacher-c",
+    );
+    const scholarId = await seedScholarInInstitution(t, { institutionId, username: "kai" });
+    // A license from before expiry existed.
+    const licenseId = await t.run((ctx) =>
+      ctx.db.insert("calculatorLicenses", { scholarId, issuedAt: 1_000, issuedBy: teacher }),
+    );
+
+    await expect(
+      t.mutation(internal.calculatorLicenses.amendLicenseTerms, { scholarId, issuedBy: outsider }),
+    ).rejects.toThrow(/Forbidden/);
+    await expect(
+      t.mutation(internal.calculatorLicenses.amendLicenseTerms, { scholarId, expiresOn: "2001-01-01" }),
+    ).rejects.toThrow(/after today/);
+
+    expect(
+      await t.mutation(internal.calculatorLicenses.amendLicenseTerms, {
+        scholarId,
+        expiresOn: "2099-01-15",
+        issuedBy: proctor,
+      }),
+    ).toEqual({ amended: true, reprinted: false });
+    const row = await t.run((ctx) => ctx.db.get(licenseId));
+    expect(row).toMatchObject({ issuedAt: 1_000, issuedBy: proctor, expiresOn: "2099-01-15" });
+  });
+});
+
 describe("calculatorLicenses bot path (grantForCaller / revokeForCaller)", () => {
   async function licenseRows(t: TC, scholarId: Id<"users">) {
     return await t.run((ctx) =>
@@ -522,12 +570,23 @@ describe("calculatorLicenses bot path (grantForCaller / revokeForCaller)", () =>
       username: "kai",
     });
 
+    // No expiration date yet: nothing is granted; the bot is told to ask.
+    expect(
+      await t.mutation(internal.calculatorLicenses.grantForCaller, {
+        callerUserId: teacher,
+        scholarId,
+      }),
+    ).toEqual({ status: "needs_expiry", scholarName: "Kai Nakamura" });
+    expect(await licenseRows(t, scholarId)).toHaveLength(0);
+
     const granted = await t.mutation(internal.calculatorLicenses.grantForCaller, {
       callerUserId: teacher,
       scholarId,
+      expiresOn: "2099-01-15",
     });
     expect(granted).toMatchObject({
       status: "granted",
+      expiresOn: "Jan 15, 2099",
       scholarName: "Kai Nakamura",
       issuedByName: "Teacher teacher-a",
       printsCard: false, // non-primary institution: no card
@@ -549,6 +608,7 @@ describe("calculatorLicenses bot path (grantForCaller / revokeForCaller)", () =>
       status: "already_licensed",
       scholarName: "Kai Nakamura",
       issuedByName: "Teacher teacher-a",
+      expiresOn: "Jan 15, 2099",
     });
     const [unchanged] = await licenseRows(t, scholarId);
     expect(unchanged.issuedAt).toBe(first.issuedAt);
@@ -562,10 +622,12 @@ describe("calculatorLicenses bot path (grantForCaller / revokeForCaller)", () =>
     // The teacher confirmed: rerecord goes through the shared correction path.
     const rerecorded = await t.mutation(
       internal.calculatorLicenses.grantForCaller,
-      { callerUserId: teacher, scholarId, rerecord: true },
+      { callerUserId: teacher, scholarId, rerecord: true, expiresOn: "2099-06-30" },
     );
     expect(rerecorded.status).toBe("rerecorded");
-    expect(await licenseRows(t, scholarId)).toHaveLength(1);
+    const rerecordedRows = await licenseRows(t, scholarId);
+    expect(rerecordedRows).toHaveLength(1);
+    expect(rerecordedRows[0].expiresOn).toBe("2099-06-30");
 
     expect(
       await t.mutation(internal.calculatorLicenses.revokeForCaller, {

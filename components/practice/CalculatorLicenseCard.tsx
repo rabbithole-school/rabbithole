@@ -12,11 +12,15 @@
  * call — there is no score input, no numeric threshold, and no server-side
  * validation. The exam itself is paper and proctored in the room; this
  * records an outcome, it does not administer or grade one.
+ *
+ * The one required input is the expiration date: every license carries one,
+ * and the teacher chooses it (the server refuses a grant without a future
+ * date).
  */
 
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
-import { Box, Button, Flex, Text } from "@chakra-ui/react";
+import { Box, Button, Flex, Input, Text } from "@chakra-ui/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { MASTERY_DOT_COLOR } from "@/shared/masteryDialPalette";
@@ -25,6 +29,7 @@ import {
   fastMathAutomaticFraction,
 } from "@/shared/fastMathName";
 import { toaster } from "@/lib/toaster";
+import { useNow } from "@/hooks/useNow";
 
 export function CalculatorLicenseCard({
   scholarId,
@@ -42,6 +47,9 @@ export function CalculatorLicenseCard({
   const revoke = useMutation(api.calculatorLicenses.revokeCalculatorLicense);
 
   const [busy, setBusy] = useState(false);
+  // null = untouched, so a re-record starts from the license's current date.
+  const [expiresDraft, setExpiresDraft] = useState<string | null>(null);
+  const now = useNow(60_000);
 
   if (data === undefined) return null;
   const reading = data.scholars[0];
@@ -49,11 +57,16 @@ export function CalculatorLicenseCard({
 
   const license = reading.license;
   const firstName = scholarName.split(" ")[0];
+  const expiresOn = expiresDraft ?? license?.expiresOn ?? "";
+  const tomorrow = localDateKey(new Date(now + 24 * 60 * 60 * 1000));
+  const expiryValid = expiresOn >= tomorrow;
 
   const submit = async () => {
+    if (!expiryValid) return;
     setBusy(true);
     try {
-      const result = await grant({ scholarId });
+      const result = await grant({ scholarId, expiresOn });
+      setExpiresDraft(null);
       toaster.create({
         description: result.corrected
           ? `Updated ${firstName}'s calculator license`
@@ -115,7 +128,11 @@ export function CalculatorLicenseCard({
               {license ? (
                 <>
                   Licensed on {new Date(license.issuedAt).toLocaleDateString()}
-                  {license.issuedByName ? ` by ${license.issuedByName}` : ""}.
+                  {license.issuedByName ? ` by ${license.issuedByName}` : ""}
+                  {license.expiresOn
+                    ? ` · expires ${formatExpiry(license.expiresOn)}`
+                    : " · no expiration date on record"}
+                  .
                 </>
               ) : reading.ready ? (
                 <Box as="span" color={MASTERY_DOT_COLOR.fluent} fontWeight="700">
@@ -138,11 +155,26 @@ export function CalculatorLicenseCard({
             </Text>
           </Box>
           <Flex align="center" gap={2}>
+            <Box as="label" display="flex" alignItems="center" gap={2}>
+              <Text as="span" fontSize="xs" color="charcoal.500" whiteSpace="nowrap">
+                Expires
+              </Text>
+              <Input
+                type="date"
+                size="sm"
+                w="auto"
+                min={tomorrow}
+                value={expiresOn}
+                onChange={(event) => setExpiresDraft(event.target.value)}
+                disabled={busy}
+                data-testid="license-expires"
+              />
+            </Box>
             <Button
               size="sm"
               colorPalette="green"
               onClick={submit}
-              disabled={busy}
+              disabled={busy || !expiryValid}
               data-testid="license-grant"
             >
               {license ? "Re-record license" : "Grant license"}
@@ -164,4 +196,20 @@ export function CalculatorLicenseCard({
       </Box>
     </Box>
   );
+}
+
+/** The viewer's calendar day as "YYYY-MM-DD" (the date input's format). */
+function localDateKey(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** "Jan 15, 2027" for a stored "YYYY-MM-DD" — a date, so no zone shift. */
+function formatExpiry(expiresOn: string): string {
+  const [y, m, d] = expiresOn.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }

@@ -2789,6 +2789,12 @@ export default defineSchema({
     issuedAt: v.number(),
     // The proctoring teacher/admin who recorded the pass.
     issuedBy: v.id("users"),
+    // The last day the license is valid, as the school's calendar day
+    // ("YYYY-MM-DD" — a date, not an instant, so no time zone can shift it).
+    // Every grant must set it (grantCalculatorLicenseAs refuses one without
+    // a future date); optional only so rows issued before expiry existed
+    // stay valid until amended.
+    expiresOn: v.optional(v.string()),
     // Generated gold medallion displayed on the scholar's credential and in
     // their badge collection. Optional for forward-compatible legacy rows.
     badgeId: v.optional(v.id("scholarUnitBadges")),

@@ -685,6 +685,7 @@ export async function makeScholarWriteTools(
         name: "grant_calculator_license",
         description:
           "Grant a scholar their Calculator License. Use it when a teacher says a scholar passed the proctored paper Calculator License Test, or asks to give them the license. Granting is the teacher's call: there is no score and no readiness gate, so never ask for one or check Fast Math first. Granting prints a physical license card (at schools with the card printer) and shows the scholar a celebration on their iPad. " +
+          "Every license needs an expiration date the TEACHER chooses: if they haven't said when it expires, ask them — never pick a date yourself. " +
           "If the scholar already holds a license, this does NOT re-grant; it returns who granted it and when. Pass rerecord=true only after the teacher confirms they want it re-recorded, because that reprints the card.",
         inputSchema: {
           type: "object" as const,
@@ -694,6 +695,11 @@ export async function makeScholarWriteTools(
               type: "boolean" as const,
               description:
                 "Re-record an EXISTING license (new date and issuer, reprints the card). Only after the teacher explicitly confirms.",
+            },
+            expiresOn: {
+              type: "string" as const,
+              description:
+                "The date the license expires, as YYYY-MM-DD, exactly as the teacher stated it. Must be after today. Omit it if the teacher hasn't given one (the tool will say to ask).",
             },
           },
           required: ["scholarName"] as const,
@@ -707,13 +713,18 @@ export async function makeScholarWriteTools(
               callerUserId,
               scholarId: scholar.id as Id<"users">,
               rerecord: input.rerecord === true,
+              ...(input.expiresOn ? { expiresOn: input.expiresOn } : {}),
             });
           } catch (e) {
             return e instanceof Error ? e.message : String(e);
           }
+          if (res.status === "needs_expiry") {
+            return `Not granted yet: every calculator license needs an expiration date. Ask the teacher when ${res.scholarName}'s license should expire, then call again with expiresOn.`;
+          }
           const by = res.issuedByName ? ` by ${res.issuedByName}` : "";
+          const expires = res.expiresOn ? `, expires ${res.expiresOn}` : "";
           if (res.status === "already_licensed") {
-            return `${res.scholarName} already has a calculator license (granted ${res.issuedOn}${by}). Nothing changed. Re-recording it would reprint the card; only call again with rerecord=true if the teacher confirms. ${scholarLink(scholar.id)}`;
+            return `${res.scholarName} already has a calculator license (granted ${res.issuedOn}${by}${expires}). Nothing changed. Re-recording it would reprint the card; only call again with rerecord=true if the teacher confirms. ${scholarLink(scholar.id)}`;
           }
           const verb = res.status === "rerecorded" ? "Re-recorded" : "Granted";
           emit({
@@ -723,7 +734,7 @@ export async function makeScholarWriteTools(
             },
           });
           const card = res.printsCard ? " The license card is printing." : "";
-          return `${verb} ${res.scholarName}'s calculator license on ${res.issuedOn}${by}.${card} They'll see a celebration on their iPad. ${scholarLink(scholar.id)}`;
+          return `${verb} ${res.scholarName}'s calculator license on ${res.issuedOn}${by}${expires}.${card} They'll see a celebration on their iPad. ${scholarLink(scholar.id)}`;
         },
       }),
     );
