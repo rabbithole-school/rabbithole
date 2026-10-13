@@ -80,6 +80,7 @@ import {
 import { QuestionCard } from "@/components/practice/QuestionCard";
 import { storyMomentKey } from "../../vendor/shared/storyReveal";
 import { FAST_MATH_NAME } from "../../vendor/shared/fastMathName";
+import { practiceQuestionVoice } from "../../vendor/shared/beginnerReading";
 import { resolveCompletionOffers } from "../../vendor/shared/completionOffers";
 import {
   dedupeDispatchCompletionReceipts,
@@ -1049,11 +1050,14 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
   }, [needsPlacement]);
 
   const current = items?.[idx];
-  // Kindergarten (grade "K") items get a tap-to-hear speaker on the question
-  // stem for pre-readers. `ServedItem` doesn't carry the node's grade band, so
-  // resolve it from the served skillKeys (cheap indexed batch read); the
-  // speaker shows only for grade-"K" items (and only when the scholar's TTS is
-  // on — SpeakableLabel enforces that).
+  // How the question reaches the scholar follows their READ level (TRA-514,
+  // `practiceQuestionVoice`, web parity): a listener hears every question read
+  // aloud as it appears, each word lit violet as it's said (the tutor reply's
+  // read-along); a beginner gets a speaker to tap; a reader keeps the old rule
+  // (a speaker on grade-"K" items only). All of it only when the scholar's TTS
+  // is on — SpeakableLabel enforces that. `ServedItem` doesn't carry the
+  // node's grade band, so resolve it from the served skillKeys (cheap indexed
+  // batch read). The iPad's practice scholar is always the signed-in user.
   const stemSkillKeys = useMemo(
     () => (items ? Array.from(new Set(items.map((it) => it.skillKey))) : []),
     [items],
@@ -1063,6 +1067,11 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
     stemSkillKeys.length > 0 ? { skillKeys: stemSkillKeys } : "skip",
   );
   const currentIsKinder = !!current && gradeBandByKey?.[current.skillKey] === "K";
+  const viewer = useQuery(api.users.currentUser, {});
+  const questionVoice = practiceQuestionVoice(
+    viewer?._id === scholarId ? viewer.effectiveReadLevel : "reader",
+    currentIsKinder,
+  );
   // "See an example" idea shelf (instructional segments v1, native parity —
   // #native-idea-shelf-parity): the verified strand-level worked example for
   // the CURRENT item's strand, if any. The RN twin of web's `strandExample`
@@ -1948,6 +1957,8 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
         nowMs: Date.now(),
         renderAtMs: itemRenderAtRef.current,
         firstKeyAtMs: firstKeyAtRef.current,
+        // A listener's question is read to them first: no latency (TRA-514).
+        readAloud: questionVoice === "auto",
       });
 
       // ── Option D: a `· mapping` item grades through the PLACEMENT path.
@@ -2128,6 +2139,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
       quickFacts,
       breaker,
       predictedConfidence,
+      questionVoice,
     ],
   );
   const checkEnabled =
@@ -4405,6 +4417,7 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
             onRequestClose={
               onBreakerItem ? finishBreakerItem : advance
             }
+            questionVoice={questionVoice}
           />
         ) : isHandoff ? (
           // Teachable-moment phase keeps the bottom-anchored choreography: the
@@ -4432,7 +4445,8 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
                 feedback={null}
                 reduceMotion={reduceMotion}
                 styles={styles}
-                speakable={currentIsKinder}
+                speakable={questionVoice !== "none"}
+                readAlong={questionVoice !== "none"}
                 big={!!current?.isFactSprint}
               />
               {current ? (
@@ -4511,7 +4525,10 @@ function PracticeScreen({ scholarId }: { scholarId: Id<"users"> }) {
                   stampAnnouncement={frameNoted ? DONT_KNOW_STAMP_ANNOUNCEMENT : undefined}
                   reduceMotion={reduceMotion}
                   styles={styles}
-                  speakable={currentIsKinder}
+                  speakable={questionVoice !== "none"}
+                  readAlong={questionVoice !== "none"}
+                  // A listener hears the question as it appears (and again on a retry).
+                  autoRead={questionVoice === "auto" && phase === "answering"}
                   big={!!current?.isFactSprint}
                 />
 

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "4fee4d25d81f2d5385821919bed71f0a18f119b2",
+  "sourceCommit": "2d2f4c99c5f397d407a4753bfe0160d35e87d8e1",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -1954,7 +1954,7 @@
     },
     {
       "path": "components/ScholarPicker.tsx",
-      "sha256": "89a69b2925482c6ca217f22224ede488bfacf9809b8792c7cfe1b6f0f9b07f14",
+      "sha256": "f82d4f16c121f41ddff2ae44e81df2503bcaf1d300558de4f9879b9736b7a382",
       "mode": "100644"
     },
     {
@@ -2089,7 +2089,7 @@
     },
     {
       "path": "components/SpeakableLabel.tsx",
-      "sha256": "449f2b2ba4fcfa80175eee101d263b6241947d4b433b4c448513b0d818499038",
+      "sha256": "ed6d9adeeb3158d82cf876df916726324a405ff0f37edd1f826a4650b7cd9e1a",
       "mode": "100644"
     },
     {
@@ -2564,7 +2564,7 @@
     },
     {
       "path": "components/manipulative/Manipulative.tsx",
-      "sha256": "a9b8c7fcfbaded58f60c33d9b13f1d5f140b4e74f0869855bb537feea5ddd337",
+      "sha256": "ce3e56e296f9d4d272f725256c798acb1aa08b4a2c1b59798ce373551d011491",
       "mode": "100644"
     },
     {
@@ -3349,7 +3349,7 @@
     },
     {
       "path": "components/practice/Placement.tsx",
-      "sha256": "0d9e38017d2290128ebece6719ffab4338a0a6052848c9f58f5c13f2af8c1341",
+      "sha256": "2edd279b39d75899b8a0fb14a14cab14c59eec549d4e36f6079943b5bb2e24e7",
       "mode": "100644"
     },
     {
@@ -3364,7 +3364,7 @@
     },
     {
       "path": "components/practice/PracticeSession.tsx",
-      "sha256": "c861cf688910654486e8217631298f7f1d6ff4b4195d24687128fc730a176f88",
+      "sha256": "9112c5a90adef65746f182b899de269ab5f40fe4000eff5c9073afe576aa4b8d",
       "mode": "100644"
     },
     {
@@ -3469,7 +3469,7 @@
     },
     {
       "path": "components/practice/VerdictStemCard.tsx",
-      "sha256": "cfa07794acbaf55727bfa2d4d574755e891b4630742e882e807486f91206b731",
+      "sha256": "5763038fe01e0b2495f454bb7b0302fa0a5ea65c80857d4ea35e3125337d0c69",
       "mode": "100644"
     },
     {
@@ -3794,7 +3794,7 @@
     },
     {
       "path": "components/rounds/RoundsLevels.tsx",
-      "sha256": "61f070b304b6974d28a22ad3a92fb6d925a81c7c093f5a99643bae4344c94e40",
+      "sha256": "8535380eea87aa3c8c433d0a7f55f234bc3c4f8650afc91357145e04b099b8d6",
       "mode": "100644"
     },
     {
@@ -3844,7 +3844,7 @@
     },
     {
       "path": "components/rounds/__tests__/roundsFigures.test.ts",
-      "sha256": "e6aed211c543b1ebc7697a0068e3a6f7834abccd8b2410a9c7ce63c6631b14a4",
+      "sha256": "4e48faa2e3edbb4da665fb35f197f8bfbdd7d457ce5b9f78cf4aa1f8a2ef0076",
       "mode": "100644"
     },
     {
@@ -3879,7 +3879,7 @@
     },
     {
       "path": "components/rounds/roundsFigures.ts",
-      "sha256": "ab3a0abe8bc9c3ce3d33b458fc179fe6ef3675a7e33c615b66fc92f721146575",
+      "sha256": "346ffeab5220dc2efcda63f6dbee1f62c51e9c09a8ee626e615851071171cd31",
       "mode": "100644"
     },
     {
@@ -4849,7 +4849,7 @@
     },
     {
       "path": "convex/__tests__/beginnerReaderSection.test.ts",
-      "sha256": "be6dbc8a22405534eef1b2a9e5121cee88424659e5ab678f99dbdad9f2c6c156",
+      "sha256": "4a3a5fc7e3c71c632387cd19ddf94c5cfa1bc85c0ef7dd5c90c5dd94e3b63677",
       "mode": "100644"
     },
     {
@@ -5419,7 +5419,7 @@
     },
     {
       "path": "convex/__tests__/handoffCoachContext.test.ts",
-      "sha256": "ec12bc2cb178b07599e5c71f92cd3715b0188003b9ddcfae3a48d5596e6f2f67",
+      "sha256": "badccf58bcd4e41db2ebe2fc534b031cf94e739b172c4777cabce831a80921c0",
       "mode": "100644"
     },
     {
@@ -5809,7 +5809,7 @@
     },
     {
       "path": "convex/__tests__/metaPrompts.test.ts",
-      "sha256": "94187e10397c5e56d99836cb602aefe14adb21ee29fd811bb84aa053a166782e",
+      "sha256": "732f0ee15ce3ab03b3828f96677fc256f6f7bfa2b42dfaa1dfe6a283810c2222",
       "mode": "100644"
     },
     {
@@ -6164,7 +6164,7 @@
     },
     {
       "path": "convex/__tests__/preReaderSection.test.ts",
-      "sha256": "4ced80bdb32f643b033aed0389a0380433b708143f3d70af764090c61f07c620",
+      "sha256": "fa7ecc101fa8e31ce7e81b8dd64d6329d6d6ed408a859d85d62fc62decc3e806",
       "mode": "100644"
     },
     {
@@ -6299,7 +6299,7 @@
     },
     {
       "path": "convex/__tests__/readingLevels.test.ts",
-      "sha256": "84c49fcf698e657641e8f728347326f7e98b8afdd8321fe25bf1ad2b40558724",
+      "sha256": "2e379357c742bbc3a4916095f2cbe3b5bd90139b03cc4afb7f9732de914642dd",
       "mode": "100644"
     },
     {
@@ -6609,7 +6609,7 @@
     },
     {
       "path": "convex/__tests__/sessionStreamHelpers.test.ts",
-      "sha256": "9e7aa5e1f3faaffc278fb9309e4c14ad06e9b2eecb59d4a8311c34396fb61005",
+      "sha256": "81ecb921ffece1e98bb661c6aa6df72f60fbaa1afdef378a41e174626b09fd54",
       "mode": "100644"
     },
     {
@@ -6800,6 +6800,11 @@
     {
       "path": "convex/__tests__/staffHealthDocumentUpload.test.ts",
       "sha256": "aac11f9ad7c35a65d309fc599892c9b19576e171c782f839074c9ff840d447e6",
+      "mode": "100644"
+    },
+    {
+      "path": "convex/__tests__/standardsMapperGradeRange.test.ts",
+      "sha256": "a5b5f973e2bcc7079b99b683241050aa168a36da92e0a33a10e523f570d332c5",
       "mode": "100644"
     },
     {
@@ -7429,7 +7434,7 @@
     },
     {
       "path": "convex/bakePaths.ts",
-      "sha256": "9057e070cbec318e98d9d631c8a0501c5e2653ad86f0e0fbcd8f7eb0894d0550",
+      "sha256": "c1d06d956eb8c3ba081a8ea3bf3c2be5c22444f3dc9b0770b2605b80bff327a0",
       "mode": "100644"
     },
     {
@@ -7439,7 +7444,7 @@
     },
     {
       "path": "convex/bakeUnitFromSeed.ts",
-      "sha256": "f2500a78dc8a9e070936de9c5aff485083fd92afb814761226d8c6db56a789ef",
+      "sha256": "2d45645334a84444638b3469cdcd083b5d7ffeac0a3097f15bef81a7e7b60c55",
       "mode": "100644"
     },
     {
@@ -7574,12 +7579,12 @@
     },
     {
       "path": "convex/deliverableAssess.ts",
-      "sha256": "0dc6b650b65149daa0b25a8492b7c162228149ff5ae88c25141907c9c07af88b",
+      "sha256": "9cd5896440f96f8282b13795002a697c38cde8ca7ffc6458ba37040036f8b77e",
       "mode": "100644"
     },
     {
       "path": "convex/deliverables.ts",
-      "sha256": "a8f1c7b3468f73ba9beb0717d44072954a0bb6e2c61957c128101273aa4e35e4",
+      "sha256": "4e4893eeb7e5d05c09fe5d06483612afc9cb3cdd657abaefb2d11a5361fe01e4",
       "mode": "100644"
     },
     {
@@ -7734,7 +7739,7 @@
     },
     {
       "path": "convex/granuleAssessment.ts",
-      "sha256": "c0046f184382eaa77af706fc26f659f853fd070b94c3cfb4e6d98b1e3c519a11",
+      "sha256": "887fbe64a3ec53f5f4433eb473e406dfe6eb10090c12e8dba60b08e1109b2502",
       "mode": "100644"
     },
     {
@@ -7769,7 +7774,7 @@
     },
     {
       "path": "convex/http.ts",
-      "sha256": "cabaf1f2693d1af79ebb1141251aae54287267d4ba095198ab8f77a497d830e7",
+      "sha256": "60344ffae3216e3ca63739bd7f396a0bef7c68bb061876db000738b3bb51f621",
       "mode": "100644"
     },
     {
@@ -8684,7 +8689,7 @@
     },
     {
       "path": "convex/lib/botTools.ts",
-      "sha256": "9918e3d27a5163c87c692b5abab72d97d846ffa96b0f591ab5057ad44a9eedad",
+      "sha256": "4c4a7024d0161292a02f0b40ae20d731c7009e2272e5a3e59d8bb3a508310b55",
       "mode": "100644"
     },
     {
@@ -8774,7 +8779,7 @@
     },
     {
       "path": "convex/lib/curriculumJudge.ts",
-      "sha256": "6c3d789f9adabb3f16d9213aa2c63d7d9dacc1f51eff0a9eb98ec6ebc52884b9",
+      "sha256": "a4a635bac8de1bd8bee57bec5709f136dd6310b93832925b5a4118483a5a2e27",
       "mode": "100644"
     },
     {
@@ -8799,7 +8804,7 @@
     },
     {
       "path": "convex/lib/curriculumSimShared.ts",
-      "sha256": "c2b7f0a3a0f5843ac3542a029598b2223641a7b5bbe0a1f5c1dbc9272865d6b4",
+      "sha256": "1bab22b6f2cfe2fc6c77193c04dc0cbbb131c48bfb716cdcfe28c843f2afe2c8",
       "mode": "100644"
     },
     {
@@ -9649,7 +9654,7 @@
     },
     {
       "path": "convex/lib/practice/handoff.ts",
-      "sha256": "9202f0dc14185e17f2757a24e34eba0c30adf12cccda2082e80036a46c4b2245",
+      "sha256": "798befbf1fe6417b04828e6070b7f01aad12967bc864e10287f2e5fcbc24d748",
       "mode": "100644"
     },
     {
@@ -9809,7 +9814,7 @@
     },
     {
       "path": "convex/lib/practice/storyOpen.ts",
-      "sha256": "00a8224b2d465e132ef7e278336d85c9752a4b1c8a52b4ff1fce1aea8cb88c67",
+      "sha256": "182519b0344bec69ea3d57af9e772c65ecd4e4ef27c3357da4359da14c97f2b1",
       "mode": "100644"
     },
     {
@@ -9969,7 +9974,7 @@
     },
     {
       "path": "convex/lib/readingLevels.ts",
-      "sha256": "1e0dca75ec832d5c637e2b6d7da10335e8d03800e3a62a86cea1f39de10b3064",
+      "sha256": "805735fa517da688c5b503439f7ee718c517b64d857758aaa9ee143d01238007",
       "mode": "100644"
     },
     {
@@ -10004,7 +10009,7 @@
     },
     {
       "path": "convex/lib/rubricCheckPrompt.ts",
-      "sha256": "995c6faad21da4eb2e533c0b23aece3f5a3e515dee273b3ca5cd36b21f5e0b7d",
+      "sha256": "5438b99fc9ce2a90486496103484023f64b99dcf7ae49cd9df9af8be84358d9a",
       "mode": "100644"
     },
     {
@@ -10079,7 +10084,7 @@
     },
     {
       "path": "convex/lib/scholarReadTools.ts",
-      "sha256": "1423bf7998067583ffcb2da3073f0a86c5c3842bd7275695681129f39ca27d27",
+      "sha256": "9b29fe7bace335d7abc532f4fea786bc97197f4e3c288bc00d93ee3eba467b66",
       "mode": "100644"
     },
     {
@@ -10444,7 +10449,7 @@
     },
     {
       "path": "convex/lib/writingMechanicsPolicy.ts",
-      "sha256": "b4d3c4b5829fb49638c9f69293cdd74593312746f101528e1309e14eb5110169",
+      "sha256": "cac6c10c62df5c3b8a321718c40bea8a6ed3d8d7ddf33b80f2795b291de8bdcb",
       "mode": "100644"
     },
     {
@@ -10579,7 +10584,7 @@
     },
     {
       "path": "convex/metaPrompts.ts",
-      "sha256": "996331272aeb3a25bbd69ec19079eb84ff9cd6c5484089616e8f93a13660ae97",
+      "sha256": "24d3d2cbff3ba41a82236f6d5b0c05f2c9363547f224ffa65e6b3e174a2c74dd",
       "mode": "100644"
     },
     {
@@ -10624,7 +10629,7 @@
     },
     {
       "path": "convex/onboardingData.ts",
-      "sha256": "c14f3aefcc2be91adfa38f624ce8e5e390dde0ad4eb340f04ac28b0d5b911d60",
+      "sha256": "30e9bd18458a9234f28efa670614f9247dabe5cd3aa3e4fdd118f375526ec704",
       "mode": "100644"
     },
     {
@@ -10824,7 +10829,7 @@
     },
     {
       "path": "convex/prompts.ts",
-      "sha256": "b1e67795e65626a6a9890a465a05e53c9c230be44d0768e2129dac57c6f46158",
+      "sha256": "0af873301ba3c62b905a2d6cab160a98deb134c8801b55b25e929f2fc264117a",
       "mode": "100644"
     },
     {
@@ -10884,7 +10889,7 @@
     },
     {
       "path": "convex/schema.ts",
-      "sha256": "5d818a212750b9ca0f5b82547ef337b4500e324ad4bf26e56dd303ea50dd8efe",
+      "sha256": "9ed512af65919e2b4fa3541c060cdb56a0a4ffa8581c4cbda45c6de26143280b",
       "mode": "100644"
     },
     {
@@ -10959,7 +10964,7 @@
     },
     {
       "path": "convex/scholars.ts",
-      "sha256": "dd34cbd771394310f0b5df97206d51d1d8f25285a2ffe14046044975979da576",
+      "sha256": "1c466bcba4d9f870fb1ff86c85f4add5d34a754fb248f746737bf5e5a26051ae",
       "mode": "100644"
     },
     {
@@ -11299,7 +11304,7 @@
     },
     {
       "path": "convex/sessionHelpers.ts",
-      "sha256": "3790f8e1ab327b6fbde069c1532991ba570727e022f97adef6e50cc300e76bb2",
+      "sha256": "ba27a6702d0cbef0db2e1e769cc37e6daf5dafabcffe82dc5b959b3e710ee80b",
       "mode": "100644"
     },
     {
@@ -11319,7 +11324,7 @@
     },
     {
       "path": "convex/sessions.ts",
-      "sha256": "d81fbf21b0d90dfce75be1a36745ba7ac1c7e0d2ead3b9847a428ba5cb86f13e",
+      "sha256": "2dd21f611942efafaf1d6b3f87499bf608098a2b67e82f8fdd29cd4f0ed004a4",
       "mode": "100644"
     },
     {
@@ -11449,7 +11454,7 @@
     },
     {
       "path": "convex/standardsMapper.ts",
-      "sha256": "9a69ae3a856ddd465b7fafea00acd309d0c2208a497061a34d5319c4f601b61d",
+      "sha256": "22737c5eb6cd5a26773ff3a97327f8a962c33ffbed2f33c62195c81f4b341ce9",
       "mode": "100644"
     },
     {
@@ -11584,7 +11589,7 @@
     },
     {
       "path": "convex/users.ts",
-      "sha256": "814a8c61d16e799f8abeb2206081bf73a6fcaa6c15b21ad139f6fbf6f17f6443",
+      "sha256": "43e8fdbd56f9dd56225ecc4e5bb36af0d9d182cb511e2b3045e5c7b7e6b357ec",
       "mode": "100644"
     },
     {
@@ -11624,7 +11629,7 @@
     },
     {
       "path": "convex/workingLevel.ts",
-      "sha256": "1601e1d6f716ae7ae92365a3bdf99175abb429bf025b464d4f7733be23186638",
+      "sha256": "da99720e26bf24d5b9188ac04b43fb9b7d0b7b6d00336d62481816132de90eb2",
       "mode": "100644"
     },
     {
@@ -12958,6 +12963,11 @@
       "mode": "100644"
     },
     {
+      "path": "evals/spot-eval/talk-level-wording.ts",
+      "sha256": "a0cc2626dcbb69cba956f6ac77cb03f185573bb4649914ba114dbd08a77c026e",
+      "mode": "100644"
+    },
+    {
       "path": "evals/spot-eval/voice-offer-FINDINGS.md",
       "sha256": "1e9eadc011a140d8e05cd1473c2c993db6abc5c40693f4b9010c8ce96b00b3c6",
       "mode": "100644"
@@ -13734,7 +13744,7 @@
     },
     {
       "path": "hooks/useTTSQueue.ts",
-      "sha256": "022aaf86f322e43359c729191cc1709302789c26a087cd31f086a0984e3e20af",
+      "sha256": "a3957f8bc2949cb02c7a1f56203ff842567cafee8dec3752621265235a1370fb",
       "mode": "100644"
     },
     {
@@ -13799,7 +13809,7 @@
     },
     {
       "path": "lib/__tests__/kidSafePrinciples.test.ts",
-      "sha256": "e54023d189c0987de54fcdf3ac14ebb4ad322b0cc6c40e97c21238480d8a18ca",
+      "sha256": "e03df7d71a76c07eb0ba0ea5eab6984e23bf4c762626dc1757bd5dd171cf4879",
       "mode": "100644"
     },
     {
@@ -13929,7 +13939,7 @@
     },
     {
       "path": "lib/__tests__/ttsEngine.test.ts",
-      "sha256": "1d5f552c7dcbf8e69b4233d77e1d355b88dbbcf8723eafead1f2fd05cf4ccb07",
+      "sha256": "14377b7a0570585bcb1351b43d9286d49f30202861cd496fdb92de46e0a99985",
       "mode": "100644"
     },
     {
@@ -16039,7 +16049,7 @@
     },
     {
       "path": "native/src/app/practice.tsx",
-      "sha256": "4dd4bd9eec00c05739eb6e921ea033afafadd3ab31801e265b780f9e89d4fecf",
+      "sha256": "a87a5f97b81c0012a8fe3c5dc7fbb792a466951daae033906720254690dc955e",
       "mode": "100644"
     },
     {
@@ -16274,12 +16284,12 @@
     },
     {
       "path": "native/src/components/FractionText.test.ts",
-      "sha256": "ad41c70b8b411ce17706e0a264b851b23adb0bddcbad43292638f0a28f2e6c31",
+      "sha256": "21df06913d304e32ba10658ace20bc2b52fa93fa0b9b78e7ed8fed6d4e0fca0d",
       "mode": "100644"
     },
     {
       "path": "native/src/components/FractionText.tsx",
-      "sha256": "52f3a5537b29f3277c5f7da6b7d39ff83e8718ff58985847d3a858c68cd872d6",
+      "sha256": "f12d699aa7a7f1e91d76df1d333b90cf5b62be05efa10d4c8721233e0506ce06",
       "mode": "100644"
     },
     {
@@ -16474,7 +16484,7 @@
     },
     {
       "path": "native/src/components/SpeakableLabel.tsx",
-      "sha256": "7c5318be16138845a9e7c9acbb9cd47e38e493df39c5f69681ed50568e2e3afc",
+      "sha256": "bf803db324a7fe072d812ae20b68a0de92ecc75681968e70ddb8c46cd44f289b",
       "mode": "100644"
     },
     {
@@ -16669,7 +16679,7 @@
     },
     {
       "path": "native/src/components/manipulatives/NativeManipulativeItem.tsx",
-      "sha256": "b610424557dff57d9d160944663d20f0d259a13e179af5ce772103c6bfc7156e",
+      "sha256": "cde0f77046ea8b503dd0c15cf5cbdbf8de08ecd6da8fb89ae3bc38da22423663",
       "mode": "100644"
     },
     {
@@ -16714,17 +16724,17 @@
     },
     {
       "path": "native/src/components/manipulatives/__tests__/NativeManipulativeItem.test.ts",
-      "sha256": "2904ebaa5493b9bcc2525738daec23b700feedf303f47591e6e3c8b89884e3bc",
+      "sha256": "e572ed991d8a8d47cafc7aa23fb58f77c57e8fe301c620d5023834416815529f",
       "mode": "100644"
     },
     {
       "path": "native/src/components/manipulatives/__tests__/NativeManipulativeItemQuestionFirst.test.ts",
-      "sha256": "19203267653c481f124d7f019f6197eb38afcf565a2c8136b88002857a38c759",
+      "sha256": "888d7dbed05bdb43f4505208acc7044a6a883e467c22a06ac5620d9a86e599aa",
       "mode": "100644"
     },
     {
       "path": "native/src/components/manipulatives/__tests__/NativeManipulativeItemQueuedSubmission.test.ts",
-      "sha256": "76c864ab371ce1f82b39f728437a3ba7a9071113b30d3ccc43c32ace0a038e33",
+      "sha256": "d764ed6bcdd5513f29c4873757672190f10c8a21e04aa0afd9e46634dd3a44cf",
       "mode": "100644"
     },
     {
@@ -16854,7 +16864,7 @@
     },
     {
       "path": "native/src/components/practice/NativePlacement.tsx",
-      "sha256": "ebfbfa8e3235a4a5c4f101a09e2941eaa2cf6327d742652d1760b64521ed0634",
+      "sha256": "5526b846d255ff5ab95571f3887ccae816f4591cb4ce1d4835b1f7acb7fa29c3",
       "mode": "100644"
     },
     {
@@ -16904,12 +16914,12 @@
     },
     {
       "path": "native/src/components/practice/StemCard.tsx",
-      "sha256": "2bb91bedde590e239944cdb701a5d3d41988b031a388d57c3544e0095e50f4b9",
+      "sha256": "8cc76aa4bbc444a48dfa61b93a44f949d90a26a32e0d7ec064117f2fb53f8d76",
       "mode": "100644"
     },
     {
       "path": "native/src/components/practice/StemText.tsx",
-      "sha256": "259997ad5b49468454f1468138a9a2a99a99ef3f1aa95c300e376c2ae2cb4294",
+      "sha256": "895ebcd20750781a860aa69ae87459c8117a51c195170ea5849008c664a58c72",
       "mode": "100644"
     },
     {
@@ -18259,7 +18269,7 @@
     },
     {
       "path": "native/src/lib/nativeTTS.ts",
-      "sha256": "00a13342f818f32538118873907f148a8eddb519fc18559096b2ac5a28a96788",
+      "sha256": "19ad2a73dcf743377a928f7e06540531acb311d5bdec5391e8e3258ee273be94",
       "mode": "100644"
     },
     {
@@ -18674,7 +18684,7 @@
     },
     {
       "path": "native/vendor/shared/beginnerReading.ts",
-      "sha256": "fcb619cdfbe6392801e52b752c68f7d8fbd8b31fe3a374bcc18c9a928fac85a5",
+      "sha256": "49c634dfe6a4878ccc3217929706bd0fb9081c0c92b0ceb85828ffab2d59066a",
       "mode": "100644"
     },
     {
@@ -18939,7 +18949,7 @@
     },
     {
       "path": "native/vendor/shared/practiceLoop.ts",
-      "sha256": "dc42e884dad3f394d9723bbefcdb7911e5f5909d430b0bbaaa06594866368ca2",
+      "sha256": "d47711698e5b88a60f017154e5972aed643e95d1d22e567dfc9e8df847385f2b",
       "mode": "100644"
     },
     {
@@ -19639,7 +19649,7 @@
     },
     {
       "path": "shared/__tests__/beginnerReading.test.ts",
-      "sha256": "419a2ce2cc04bc475b1372bc87feaaa354882a056178055f4830864e3a0d3f27",
+      "sha256": "96c75959b95c37455994e05b88bdfca2048c8b0f89f086e2d11af80d75e273df",
       "mode": "100644"
     },
     {
@@ -19829,7 +19839,7 @@
     },
     {
       "path": "shared/beginnerReading.ts",
-      "sha256": "fcb619cdfbe6392801e52b752c68f7d8fbd8b31fe3a374bcc18c9a928fac85a5",
+      "sha256": "49c634dfe6a4878ccc3217929706bd0fb9081c0c92b0ceb85828ffab2d59066a",
       "mode": "100644"
     },
     {
@@ -20449,12 +20459,12 @@
     },
     {
       "path": "shared/practiceLoop.test.ts",
-      "sha256": "fdabeb236b2beb316c07d19d90d1e16fbda0c2818f04792bac66bc60edd5fccb",
+      "sha256": "f78d5ce9fcf7039f1cf3036d2b8bb2a45640663bf2ebae5b1e6a6e8d4f44c746",
       "mode": "100644"
     },
     {
       "path": "shared/practiceLoop.ts",
-      "sha256": "dc42e884dad3f394d9723bbefcdb7911e5f5909d430b0bbaaa06594866368ca2",
+      "sha256": "d47711698e5b88a60f017154e5972aed643e95d1d22e567dfc9e8df847385f2b",
       "mode": "100644"
     },
     {
@@ -21318,5 +21328,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "d466123da5899fd41b72e4334a360703926c9e164836da6f334fe7ada8e52c36"
+  "treeHash": "4ecc5081659cdf29bf97f2ee651bb59af4b1fa1a9cbbb70fd12b7df992ebf3ab"
 }

@@ -12,7 +12,54 @@ import {
   talkLevelToNumber,
   writeModeOf,
   describeLevelsForPrompt,
+  levelsPromptLabel,
+  levelsPromptLine,
 } from "../lib/readingLevels";
+import { levelComponents } from "../workingLevel";
+
+describe("levelsPromptLabel — what a described level is called (TRA-514)", () => {
+  test("a bare grade band is a talk level, never a reading level", () => {
+    for (const talk of ["K", "3", "7.4", "college"]) {
+      expect(levelsPromptLabel(describeLevelsForPrompt({ readingLevel: talk })!)).toBe(
+        "Talk level",
+      );
+    }
+  });
+
+  test("the three-level shape is labelled as all three", () => {
+    const described = describeLevelsForPrompt({ readingLevel: "7", writeMode: "voice" })!;
+    expect(levelsPromptLabel(described)).toBe("Talk, read and write levels");
+    expect(levelsPromptLine(described)).toBe(`Talk, read and write levels: ${described}`);
+    expect(levelsPromptLine(null)).toBeNull();
+  });
+});
+
+describe("Working Level levels (TRA-514)", () => {
+  test("talk, read and write, each under its own name", () => {
+    const rows = levelComponents({ readingLevel: "7", readLevel: "listener", writeMode: "voice" });
+    expect(rows.map((r) => [r.domain, r.level])).toEqual([
+      ["Talk", "Grade 7"],
+      ["Read", "Listener"],
+      ["Write", "By voice"],
+    ]);
+  });
+
+  test("never labels the talk level 'Reading'; default read and write add no rows", () => {
+    expect(levelComponents({ readingLevel: "3" }).map((r) => r.domain)).toEqual(["Talk"]);
+    expect(
+      levelComponents({ readingLevel: "3", readLevel: "reader", writeMode: "own" }).map(
+        (r) => r.domain,
+      ),
+    ).toEqual(["Talk"]);
+    expect(levelComponents({})).toEqual([]);
+    expect(levelComponents(null)).toEqual([]);
+    // A legacy pre-reader is talk K, read listener.
+    expect(levelComponents({ readingLevel: "pre-reader" }).map((r) => r.level)).toEqual([
+      "K",
+      "Listener",
+    ]);
+  });
+});
 
 describe("describeLevelsForPrompt — one phrase for every model-facing consumer", () => {
   test("a default reader-writer is the bare talk level (prompts unchanged)", () => {

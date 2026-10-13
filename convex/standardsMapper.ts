@@ -7,6 +7,7 @@ import { Id } from "./_generated/dataModel";
 import { MODELS } from "./lib/models";
 import { recordAnthropicUsage } from "./usage";
 import { cachedSystem } from "./lib/aideStream";
+import { talkLevelOf } from "./lib/readingLevels";
 
 // ─── System Prompt ──────────────────────────────────────────────────
 
@@ -61,9 +62,20 @@ const MAPPER_TOOL = {
 
 const ALL_GRADES = ["K", "1", "2", "3", "4", "5", "6", "7", "8"];
 
-function getGradeRange(readingLevel: string | undefined): string[] {
-  if (!readingLevel) return ["K", "1", "2", "3", "4", "5"];
-  const idx = ALL_GRADES.indexOf(readingLevel);
+/**
+ * Standards grades to search around a scholar's TALK level (the grade band of
+ * ideas they work at). A tenth-of-a-grade level ("3.4") centres on its whole
+ * grade; a legacy "pre-reader" reads as K; grades 9–12 and college cap at 8.
+ */
+export function getGradeRange(stored: string | undefined): string[] {
+  const talk = talkLevelOf(stored);
+  const whole = talk === null ? undefined : talk.split(".")[0];
+  // The standards here stop at grade 8: a high-school or college talk level
+  // centres on the top of the range, never falls back to K–5.
+  const talkLevel =
+    whole === "college" || (whole !== undefined && Number(whole) > 8) ? "8" : whole;
+  if (!talkLevel) return ["K", "1", "2", "3", "4", "5"];
+  const idx = ALL_GRADES.indexOf(talkLevel);
   if (idx === -1) return ["K", "1", "2", "3", "4", "5"];
   const low = Math.max(0, idx - 3);
   const high = Math.min(ALL_GRADES.length - 1, idx + 2);
@@ -155,7 +167,7 @@ export const mapToStandards = internalAction({
       `[StandardsMapper] Starting for ${args.observationIds.length} observations`
     );
 
-    // 1. Get scholar's reading level for grade filtering
+    // 1. Get scholar's talk level for grade filtering
     const scholar = await ctx.runQuery(internal.scholars.getInternal, {
       scholarId: args.scholarId,
     });
@@ -165,7 +177,7 @@ export const mapToStandards = internalAction({
     );
     const grades = getGradeRange(scholar?.readingLevel ?? undefined);
     console.log(
-      `[StandardsMapper] Scholar reading level: ${scholar?.readingLevel ?? "unset"}, grade range: ${grades.join(", ")}`
+      `[StandardsMapper] Scholar talk level: ${scholar?.readingLevel ?? "unset"}, grade range: ${grades.join(", ")}`
     );
 
     // 2. Get leaf standards for the grade range

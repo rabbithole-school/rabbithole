@@ -242,6 +242,36 @@ describe("the three level instruments", () => {
     expect(line.caption).toContain("voice first");
   });
 
+  it("names a beginner reader and a by-voice writer beside the talk level", () => {
+    const beginner = confirmedLevelLine(
+      levels({ confirmed: { level: "3", readLevel: "beginner", setAt: 1, setBy: "teacher" } }),
+    );
+    expect(beginner.headline).toBe("Beginner · talk level grade 3");
+
+    const voice = confirmedLevelLine(
+      levels({
+        confirmed: { level: "5", readLevel: "reader", writeMode: "voice", setAt: 1, setBy: "teacher" },
+      }),
+    );
+    expect(voice.headline).toBe("By voice · talk level grade 5");
+
+    const both = confirmedLevelLine(
+      levels({
+        confirmed: { level: "K", readLevel: "listener", writeMode: "voice", setAt: null, setBy: null },
+      }),
+    );
+    expect(both.headline).toBe("Listener · By voice · talk level K");
+  });
+
+  it("keeps the plain talk-level line for a reader who writes on their own", () => {
+    const line = confirmedLevelLine(
+      levels({
+        confirmed: { level: "5", readLevel: "reader", writeMode: "own", setAt: 1, setBy: "teacher" },
+      }),
+    );
+    expect(line.headline).toBe("Talk level · Grade 5");
+  });
+
   it("keeps a named band a name inside a sentence", () => {
     expect(levelPhrase("5")).toBe("grade 5");
     expect(levelPhrase("K")).toBe("K");

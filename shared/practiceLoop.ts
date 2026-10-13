@@ -689,6 +689,14 @@ export type TimingInput = {
    * (TRA-221) — or null if none was observed.
    */
   firstKeyAtMs: number | null;
+  /**
+   * The question was read aloud to the scholar on its own (a listener,
+   * TRA-514). Render→first-key then measures the voice as much as the child,
+   * so `firstKeyMs` is omitted: it would poison the per-skill latency median
+   * and the latency baseline that gate fluency (`isFluent`'s latency leg is
+   * skipped when there is no median). `elapsedMs` stays — it is wall time.
+   */
+  readAloud?: boolean;
 };
 
 /** Optional timing reading sent to `submitAnswer`; keys are omitted when not
@@ -709,11 +717,12 @@ export function computeTiming({
   nowMs,
   renderAtMs,
   firstKeyAtMs,
+  readAloud = false,
 }: TimingInput): TimingReading {
   const reading: TimingReading = {};
   if (firstAttempt) {
     reading.elapsedMs = nowMs - renderAtMs;
-    if (firstKeyAtMs !== null) reading.firstKeyMs = firstKeyAtMs - renderAtMs;
+    if (firstKeyAtMs !== null && !readAloud) reading.firstKeyMs = firstKeyAtMs - renderAtMs;
   }
   return reading;
 }

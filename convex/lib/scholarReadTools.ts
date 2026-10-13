@@ -231,7 +231,7 @@ export async function makeScholarReadTools(
     description:
       (isOperationsStaff
         ? "List all scholars with their basic info: name and project count."
-        : "List all scholars with their authoritative profile chronology (dateOfBirth, server-derived currentAge, currentAgeAsOf), reading level, project count, and observation count. Use currentAge only for present-day age; never treat an age found in a dossier or assessment summary as current.") +
+        : "List all scholars with their authoritative profile chronology (dateOfBirth, server-derived currentAge, currentAgeAsOf), readingLevel (the talk level alone, or 'talk …; reads: …; writes: …' when reading or writing differs from the default), project count, and observation count. Use currentAge only for present-day age; never treat an age found in a dossier or assessment summary as current.") +
       " By default the list covers ENROLLED scholars only; pass includeExtendedEducation: true to also include Extended Education (program-guest) scholars." +
       (allowedScholarIds && lensLabel
         ? ` Results are limited to your active institution view (${lensLabel}); scholars at other schools are not listed until you switch the institution lens.`

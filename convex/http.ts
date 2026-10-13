@@ -12,6 +12,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import { canAccessSession, READ_ONLY_ACCOUNT_ERROR } from "./lib/auth";
 import { llmBudgetExceeded, llmBudgetMessage } from "./llmBudget";
 import { acquireLlmLease } from "./lib/llmLease";
+import { levelsPromptLine } from "./lib/readingLevels";
 import { APP_UPDATE_LLM_SURFACE, LLM_BUSY_MESSAGE } from "./lib/llmLimiter";
 import {
   sseEvent,
@@ -3314,7 +3315,7 @@ http.route({
       );
       lines.push("");
       if (sc.readingLevel) {
-        lines.push(`Reading level: ${sc.readingLevel}`);
+        lines.push(levelsPromptLine(sc.readingLevel) ?? "");
         lines.push("");
       }
       lines.push(`Date of birth: ${sc.dateOfBirth ?? "(not recorded)"}`);
@@ -3411,7 +3412,7 @@ http.route({
         }
         lines.push("");
         if (focus.readingLevel) {
-          lines.push(`Reading level: ${focus.readingLevel}`);
+          lines.push(levelsPromptLine(focus.readingLevel) ?? "");
           lines.push("");
         }
         lines.push(`Date of birth: ${focus.dateOfBirth ?? "(not recorded)"}`);

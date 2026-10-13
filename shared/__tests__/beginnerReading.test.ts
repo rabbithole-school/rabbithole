@@ -15,8 +15,10 @@ import {
   isDecodableWord,
   locateUtterance,
   partSpans,
+  practiceQuestionVoice,
   splitYourTurn,
   spokenWordInMessage,
+  spokenWordInText,
   stripYourTurnMarkers,
   withoutYourTurn,
   wordIndexAt,
@@ -414,5 +416,50 @@ describe("who gets read-along and bigger text", () => {
     expect(conversationTextSteps("beginner")).toBe(1);
     expect(conversationTextSteps("reader")).toBe(0);
     expect(conversationTextSteps(undefined)).toBe(0);
+  });
+});
+
+describe("practiceQuestionVoice", () => {
+  it("reads to a listener, offers a speaker to a beginner, leaves a reader alone", () => {
+    expect(practiceQuestionVoice("listener", false)).toBe("auto");
+    expect(practiceQuestionVoice("listener", true)).toBe("auto");
+    expect(practiceQuestionVoice("beginner", false)).toBe("tap");
+    expect(practiceQuestionVoice("reader", false)).toBe("none");
+    expect(practiceQuestionVoice(undefined, false)).toBe("none");
+  });
+
+  it("keeps the kindergarten-item speaker for a reader", () => {
+    expect(practiceQuestionVoice("reader", true)).toBe("tap");
+  });
+});
+
+describe("spokenWordInText (a read-aloud practice question)", () => {
+  // The voice is at a point `fraction` of the way through its words.
+  const at = (utterance: string, word: number, duration = 3) =>
+    0.12 + wordStartFractions(utterance)[word] * (duration - 0.32) + 0.01;
+
+  it("lights the shown word when speech matches the screen word for word", () => {
+    const q = "How many apples are there?";
+    expect(spokenWordInText(q, q, at(q, 2), 3)).toBe(2);
+    expect(spokenWordInText(q, q, 0.05, 3)).toBeNull(); // lead-in silence
+  });
+
+  it("skips spoken-only words: a stacked 4/9 is said '4 over 9'", () => {
+    // The prose a stem renders as text; the fraction and blank are drawn.
+    const shown = "Write as";
+    const spoken = "Write 9 and 4 over 9 as blank over 9";
+    expect(spokenWordInText(shown, spoken, at(spoken, 0), 3)).toBe(0);
+    expect(spokenWordInText(shown, spoken, at(spoken, 4), 3)).toBeNull(); // "over"
+  });
+
+  it("finds the shown words in a spoken question with extra symbols", () => {
+    const shown = "3 + 4 =";
+    const spoken = "3 + 4 = ?";
+    expect(spokenWordInText(shown, spoken, at(spoken, 1), 3)).toBe(1);
+  });
+
+  it("never lights another text's words", () => {
+    const other = "Tap the green button to go on";
+    expect(spokenWordInText("How many apples?", other, at(other, 3), 3)).toBeNull();
   });
 });

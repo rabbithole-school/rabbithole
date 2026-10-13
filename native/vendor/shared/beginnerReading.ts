@@ -50,6 +50,23 @@ export function conversationTextSteps(readLevel: string | null | undefined): 0 |
   return readLevel === "listener" ? 2 : readLevel === "beginner" ? 1 : 0;
 }
 
+/**
+ * How a practice question reaches the scholar (TRA-514), on both clients:
+ *  - `auto`: read aloud on its own as it appears, words lit as they're said
+ *    (iPad) — a `listener`, who can't read it;
+ *  - `tap`: a speaker to tap — a `beginner`, or any scholar on a
+ *    kindergarten item (the old grade-K rule, kept for readers);
+ *  - `none`: unchanged, a reader on any other item.
+ */
+export function practiceQuestionVoice(
+  readLevel: string | null | undefined,
+  kindergartenItem: boolean,
+): "auto" | "tap" | "none" {
+  if (readLevel === "listener") return "auto";
+  if (readLevel === "beginner" || kindergartenItem) return "tap";
+  return "none";
+}
+
 // ── 1. The your-turn marker ──────────────────────────────────────────────────
 
 export const YOUR_TURN_OPEN = "<your-turn>";
@@ -516,6 +533,47 @@ export function spokenWordInMessage(
   if (!at) return null;
   const k = wordIndexAt(utterance, currentTime, duration);
   return k === null ? null : { index: at[k], end: at[at.length - 1] + 1 };
+}
+
+/** How far ahead a spoken word may find its shown word (skipped symbols). */
+const SHOWN_LOOKAHEAD = 3;
+
+/**
+ * The shown word to light while `utterance` plays, for a text whose spoken
+ * form isn't word for word what's on screen: a practice question read through
+ * `stemToSpeech` says "4 over 9" for a stacked 4/9 and "blank" for a `?` box
+ * (TRA-514, listener practice). Each spoken word is matched forward against
+ * the shown words within a short look-ahead; a spoken-only word ("over")
+ * lights nothing. An index into `wordTokens(shown)`, or null — also null when
+ * fewer than half the shown words are heard, so another text's audio
+ * never lights stray words here.
+ */
+export function spokenWordInText(
+  shown: string,
+  utterance: string,
+  currentTime: number,
+  duration: number,
+): number | null {
+  const shownKeys = wordTokens(shown).map((t) => t.key);
+  const spokenKeys = wordTokens(utterance).map((t) => t.key);
+  if (shownKeys.length === 0 || spokenKeys.length === 0) return null;
+  const at: (number | null)[] = [];
+  let next = 0;
+  for (const key of spokenKeys) {
+    let hit: number | null = null;
+    for (let m = next; m < Math.min(shownKeys.length, next + SHOWN_LOOKAHEAD); m++) {
+      if (shownKeys[m] === key) {
+        hit = m;
+        break;
+      }
+    }
+    at.push(hit);
+    if (hit !== null) next = hit + 1;
+  }
+  const matched = at.filter((x) => x !== null).length;
+  if (matched * 2 < shownKeys.length) return null;
+  const k = wordIndexAt(utterance, currentTime, duration);
+  return k === null ? null : at[k];
 }
 
 /** A colored (or plain) run of text, as `toSegments` (shared/graphemeSegments)

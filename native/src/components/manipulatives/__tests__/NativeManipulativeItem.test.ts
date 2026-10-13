@@ -17,6 +17,7 @@ const { items, NativeManipulative, Pressable, passthrough } = vi.hoisted(() => {
   };
 });
 
+vi.mock("@/components/SpeakableLabel", () => ({ SpeakableLabel: passthrough }));
 vi.mock("react-native", () => ({
   ActivityIndicator: passthrough,
   Keyboard: { dismiss: vi.fn() },

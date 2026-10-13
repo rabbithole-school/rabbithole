@@ -33,6 +33,7 @@ import {
 } from "@/components/practice/NativePracticeControls";
 import { PracticeProgressHeader } from "@/components/practice/PracticeProgressHeader";
 import { StemCard } from "@/components/practice/StemCard";
+import { SpeakableLabel } from "@/components/SpeakableLabel";
 import { api, type Id } from "@/lib/convex";
 import { makePracticeShellStyles } from "@/lib/practiceShell";
 import {
@@ -49,6 +50,7 @@ import {
 } from "@/lib/practicePad";
 import { hasUnitToken, rawAnswersEqual } from "../../../vendor/practice/answers";
 import { hasPracticeMath } from "../../../vendor/shared/fractions";
+import { practiceQuestionVoice } from "../../../vendor/shared/beginnerReading";
 import { practiceDomainLabel } from "../../../vendor/shared/practiceDomainLabels";
 import type { PracticePromptVisual } from "../../../vendor/shared/practicePromptVisual";
 import { FractionText } from "@/components/FractionText";
@@ -252,6 +254,11 @@ export function NativePlacement({
   // "Okay — here we go." line instead of the generic "Getting ready…".
   const [handoff, setHandoff] = useState(false);
 
+  // The placement question reaches the scholar by their READ level, as in the
+  // drill (TRA-514, `practiceQuestionVoice`); grade-"K" probes keep a speaker.
+  const viewer = useQuery(api.users.currentUser, {});
+  const viewerReadLevel =
+    viewer?._id === scholarId ? viewer.effectiveReadLevel : "reader";
   // Resume: a mid-placement reload lands directly back on the SAME served item
   // (the server persisted it), skipping the intro — the intro is for genuinely
   // fresh placements only. One-shot read; the loop itself is mutation-driven.
@@ -1018,12 +1025,17 @@ export function NativePlacement({
               Neutral (no verdict) here — the quiz phase never carries a stamp. */}
           {!isManipulativeProbe || !manipSpec ? (
             <StemCard
+              // Keyed by probe so two consecutive probes with the same text
+              // still re-read for a listener (the auto-read fires on mount).
+              key={current?.itemId}
               stem={current?.stem}
               promptVisual={current?.promptVisual}
               feedback={null}
               reduceMotion={reduceMotion}
               styles={styles}
-              speakable={current?.grade === "K"}
+              speakable={practiceQuestionVoice(viewerReadLevel, current?.grade === "K") !== "none"}
+              readAlong={practiceQuestionVoice(viewerReadLevel, current?.grade === "K") !== "none"}
+              autoRead={practiceQuestionVoice(viewerReadLevel, false) === "auto"}
             />
           ) : null}
 
@@ -1046,7 +1058,19 @@ export function NativePlacement({
                 {manipSpec.concept ? (
                   <Text style={styles.manipConcept}>{manipSpec.concept.toUpperCase()}</Text>
                 ) : null}
-                <Text style={styles.manipPrompt}>{manipSpec.prompt}</Text>
+                {/* A listener hears it, a beginner can tap to hear it (TRA-514). */}
+                {practiceQuestionVoice(viewerReadLevel, current?.grade === "K") === "none" ? (
+                  <Text style={styles.manipPrompt}>{manipSpec.prompt}</Text>
+                ) : (
+                  <SpeakableLabel
+                    key={current?.itemId}
+                    text={manipSpec.prompt}
+                    accessibilityLabel="Hear the question"
+                    autoPlay={practiceQuestionVoice(viewerReadLevel, false) === "auto"}
+                  >
+                    <Text style={styles.manipPrompt}>{manipSpec.prompt}</Text>
+                  </SpeakableLabel>
+                )}
               </View>
             ) : null}
             {supportedManip && manipSpec ? (

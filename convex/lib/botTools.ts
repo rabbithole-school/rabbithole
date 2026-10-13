@@ -225,7 +225,7 @@ export function deliverableSchemaFragment() {
   return {
     type: "object" as const,
     description:
-      "Private quality map for the tutor. It does not gate activity completion. When a scholar fully demonstrates a criterion, it becomes permanent scholar-visible flair with its label and description shown together; half/not-full verdicts remain private. Two modes: 'manual' (you author the criteria array, same for every scholar) or 'auto' (the system generates criteria per-scholar at project creation, calibrated to their reading level — pass `notes` describing intent). Prefer 'auto' when the activity will be done by a wide age/reading-level range; prefer 'manual' for a tight grade band.",
+      "Private quality map for the tutor. It does not gate activity completion. When a scholar fully demonstrates a criterion, it becomes permanent scholar-visible flair with its label and description shown together; half/not-full verdicts remain private. Two modes: 'manual' (you author the criteria array, same for every scholar) or 'auto' (the system generates criteria per-scholar at project creation, calibrated to their talk level — pass `notes` describing intent). Prefer 'auto' when the activity will be done by a wide age/reading-level range; prefer 'manual' for a tight grade band.",
     properties: {
       kind: {
         type: "string" as const,
@@ -242,12 +242,12 @@ export function deliverableSchemaFragment() {
         type: "string" as const,
         enum: ["manual", "auto"] as const,
         description:
-          "'manual' = you provide the criteria array. 'auto' = the AI generates criteria per scholar at project start (using `notes` + reading level).",
+          "'manual' = you provide the criteria array. 'auto' = the AI generates criteria per scholar at project start (using `notes` + the talk level).",
       },
       notes: {
         type: "string" as const,
         description:
-          "Auto-mode only: prose describing the quality bar, dimensions that matter, pitfalls to flag. The AI uses this + the scholar's reading level to generate calibrated criteria.",
+          "Auto-mode only: prose describing the quality bar, dimensions that matter, pitfalls to flag. The AI uses this + the scholar's talk level to generate calibrated criteria.",
       },
       criteria: {
         type: "array" as const,

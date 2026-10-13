@@ -12,7 +12,7 @@
 //   • The CONFIRMED level (`users.readingLevel`, appended to
 //     `readingLevelHistory` when a teacher sets or accepts it) is a
 //     HUMAN-RATIFIED SETTING that the system ACTS ON. It is rendered verbatim
-//     into the tutor's READING LEVEL prompt section (`sessionHelpers`). It is
+//     into the tutor's TALK LEVEL prompt section (`buildLevelsSection`). It is
 //     the TALK level (see "Talk, read, write" below). A teacher owns it.
 //
 //   • The COMPUTED estimate (`users.readingLevelSuggestion`) is current
@@ -43,8 +43,8 @@
 //
 // Consumed by the teacher setter/validator (`scholars.updateReadingLevel`), the
 // writing-derived estimator (`readingLevelAnalysis`), and rendered verbatim into
-// the tutor's READING LEVEL prompt section (`sessionHelpers`) — so any string
-// here must read naturally after "the scholar's reading level is set to …".
+// the tutor's TALK LEVEL prompt section (`buildLevelsSection`) — so any string
+// here must read naturally after "the scholar's talk level is …".
 //
 // ── Talk, read, write (TRA-503) ─────────────────────────────────────────
 //
@@ -559,4 +559,24 @@ export function describeEffectiveLevelsForPrompt({
 }: EffectiveLevels): string | null {
   if (read === DEFAULT_READ_LEVEL && write === DEFAULT_WRITE_MODE) return talk;
   return `talk ${talk ?? "unset"}; reads: ${READ_LEVEL_PROMPT_PHRASES[read]}; writes: ${WRITE_MODE_PROMPT_PHRASES[write]}`;
+}
+
+/**
+ * The label a model-facing prompt puts in front of a `describe…ForPrompt`
+ * string. That string has two shapes: the bare talk level ("3") for a reader
+ * who writes on their own, or "talk K; reads: …; writes: …" otherwise. The
+ * first is a TALK level (ideas and vocabulary), never a reading level; the
+ * second names all three itself. A grade band never starts with "talk ".
+ */
+export function levelsPromptLabel(described: string): string {
+  return described.startsWith("talk ")
+    ? "Talk, read and write levels"
+    : "Talk level";
+}
+
+/** `<label>: <described>`, e.g. "Talk level: 3"; null when nothing is set. */
+export function levelsPromptLine(
+  described: string | null | undefined,
+): string | null {
+  return described ? `${levelsPromptLabel(described)}: ${described}` : null;
 }

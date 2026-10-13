@@ -33,6 +33,8 @@ import {
   type StaticRadicalNode,
 } from "../../vendor/shared/fractions";
 import { MathView } from "../../modules/expo-math-view";
+import { wordTokens } from "../../vendor/shared/beginnerReading";
+import { useSpokenWordIn } from "@/lib/nativeTTS";
 
 type Props = {
   /** A plain-ASCII string, e.g. "Write 9 4/9 as ?/9". */
@@ -57,17 +59,40 @@ type Props = {
    *  default roomy 1.45; block call sites that used a plain <Text> pass their
    *  original value. */
   lineHeight?: number;
+  /** Light each prose word while the read-aloud voice says it — the same
+   *  violet word highlight a listener's tutor replies get (TRA-514). Spoken-
+   *  only words ("4 over 9" for a stacked fraction) light nothing. */
+  readAlong?: boolean;
 };
 
 // Numerator/denominator sit a step smaller than the base — the standard display
 // proportion (keeps a mixed number's whole part visually dominant).
 const FRAC_SCALE = 0.82;
 
-export function FractionText({ value, fontSize = 28, color, align = "center", accessibilityLabel, inline = false, weight = "semibold", lineHeight }: Props) {
+/** A bare-digits text node that is the whole part of the next mixed number. */
+function isMixedWhole(nodes: ReturnType<typeof parsePracticeText>, i: number): boolean {
+  const n = nodes[i];
+  return n.type === "text" && nodes[i + 1]?.type === "frac" && /^\d+$/.test(n.value);
+}
+
+/** The prose a FractionText draws as words, in order (what read-along lights). */
+export function proseWords(value: string): string {
+  const nodes = parsePracticeText(value);
+  const out: string[] = [];
+  nodes.forEach((n, i) => {
+    if (n.type !== "text" || isMixedWhole(nodes, i)) return;
+    for (const tok of wrapTokens(n.value)) if (tok.type === "text") out.push(tok.value);
+  });
+  return out.join(" ");
+}
+
+export function FractionText({ value, fontSize = 28, color, align = "center", accessibilityLabel, inline = false, weight = "semibold", lineHeight, readAlong = false }: Props) {
   const colors = useColors();
   const resolved = color ?? colors.fg;
   const tokenFont = weight === "regular" ? fonts.regular : fonts.semibold;
   const nodes = useMemo(() => parsePracticeText(value), [value]);
+  const shown = useMemo(() => (readAlong ? proseWords(value) : ""), [readAlong, value]);
+  const lit = useSpokenWordIn(shown);
   // Only claim image/collapsed semantics when the rendering actually diverges
   // from the text — i.e. a stacked fraction whose spoken form ("3 over 4")
   // differs from the raw glyphs. For ordinary text the label adds nothing and
@@ -82,10 +107,16 @@ export function FractionText({ value, fontSize = 28, color, align = "center", ac
       style={[styles.row, align === "center" ? styles.center : styles.left, inline ? null : styles.block]}
       {...(label != null ? { accessible: true, accessibilityLabel: label } : null)}
     >
-      {renderNodes(nodes, fontSize, resolved, colors.cyanSubtle, colors.cyan, tokenFont, lineHeight)}
+      {renderNodes(nodes, fontSize, resolved, colors.cyanSubtle, colors.cyan, tokenFont, lineHeight, {
+        lit,
+        bg: colors.violetMuted,
+      })}
     </View>
   );
 }
+
+/** The word to light (an index into `wordTokens(proseWords(value))`) + its tint. */
+type ReadAlongLight = { lit: number | null; bg: string };
 
 /**
  * Parsed nodes → row children. The one non-obvious step: a mixed number
@@ -101,8 +132,11 @@ function renderNodes(
   blankBorder: string,
   tokenFont: string,
   lineHeight?: number,
+  light?: ReadAlongLight,
 ): ReactNode[] {
   const out: ReactNode[] = [];
+  // Running word count over the prose tokens, in `proseWords` order.
+  let wordAt = 0;
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i];
     if (n.type === "frac") {
@@ -134,7 +168,7 @@ function renderNodes(
       out.push(<BlankSlot key={i} fontSize={fontSize} bg={blankBg} border={blankBorder} />);
     } else {
       const next = nodes[i + 1];
-      if (next?.type === "frac" && /^\d+$/.test(n.value)) {
+      if (next?.type === "frac" && isMixedWhole(nodes, i)) {
         out.push(
           <Frac
             key={i}
@@ -160,9 +194,22 @@ function renderNodes(
             // scrambled-table bug.)
             out.push(<View key={`${i}-${ti}`} style={styles.lineBreak} />);
           } else {
+            const words = wordTokens(tok.value).length;
+            const isLit =
+              light?.lit != null && light.lit >= wordAt && light.lit < wordAt + words;
+            wordAt += words;
+            // The lit word carries the tint; its trailing space doesn't.
+            const body = tok.value.trimEnd();
             out.push(
               <Text key={`${i}-${ti}`} style={[textStyle(fontSize, true, tokenFont, lineHeight), { color }]}>
-                {tok.value}
+                {isLit && light ? (
+                  <>
+                    <Text style={{ backgroundColor: light.bg, borderRadius: 4 }}>{body}</Text>
+                    {tok.value.slice(body.length)}
+                  </>
+                ) : (
+                  tok.value
+                )}
               </Text>,
             );
           }

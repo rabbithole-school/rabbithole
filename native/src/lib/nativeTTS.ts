@@ -32,6 +32,7 @@ import {
 import { convexSiteUrl } from "@/lib/convex";
 import { bytesToBase64, prepareSpeech, ttsFileName } from "@/lib/ttsAudio";
 import { voiceMark } from "@/lib/voicePerf";
+import { spokenWordInText } from "../../vendor/shared/beginnerReading";
 
 export type TTSState = "idle" | "loading" | "speaking" | "paused";
 
@@ -475,6 +476,29 @@ export function speakUnowned(text: string): Promise<void> {
 }
 
 /**
+ * Which word of `shown` the voice is saying right now (an index into
+ * `wordTokens(shown)`), or null — the read-along highlight for text whose
+ * spoken form differs from what's on screen, like a practice question read
+ * through `stemToSpeech` (TRA-514). Same playback clock as the tutor reply's
+ * highlight (BeginnerReplyText); re-renders only when the lit word changes.
+ * An empty `shown` turns it off.
+ */
+export function useSpokenWordIn(shown: string): number | null {
+  const engine = getNativeTTS();
+  const get = useCallback((): number => {
+    const pb = engine.playback;
+    if (!shown || !pb) return -1;
+    return spokenWordInText(shown, pb.text, pb.currentTime, pb.duration) ?? -1;
+  }, [engine, shown]);
+  const lit = useSyncExternalStore(
+    (fn) => engine.subscribePlayback(fn),
+    get,
+    () => -1,
+  );
+  return lit < 0 ? null : lit;
+}
+
+/**
  * React view of the engine for a single SpeakableLabel. Returns whether THIS
  * instance is the one speaking/loading, plus a `toggle` that speaks the text
  * (stealing playback from any other label) or stops if it's already speaking.
@@ -539,5 +563,23 @@ export function useNativeSpeaker(text: string) {
     void engine.speak(text);
   }, [engine, mine, state, text, token]);
 
-  return { speaking, loading, paused, toggle };
+  /** Speak the text from the top, whatever is playing — an auto-read
+   *  (a listener's practice question, TRA-514). */
+  const play = useCallback(() => {
+    if (!text) return;
+    claimOwner(token);
+    void engine.speak(text);
+  }, [engine, text, token]);
+
+  /** Stop this label's speech, if it is still this label's (an auto-read
+   *  whose question was answered, or that unmounted). */
+  const stopIfMine = useCallback(() => {
+    // Owner token only (no text match): a next question with the same words
+    // has claimed the voice by now and must keep it.
+    if (ownerToken !== token) return;
+    engine.stop();
+    releaseOwner(token);
+  }, [engine, token]);
+
+  return { speaking, loading, paused, toggle, play, stopIfMine };
 }

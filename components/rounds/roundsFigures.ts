@@ -37,7 +37,11 @@
  * stored). Do not approximate any of them here.
  */
 
-import { talkLevelLabel } from "@/convex/lib/readingLevels";
+import {
+  READ_LEVEL_LABELS,
+  WRITE_MODE_LABELS,
+  talkLevelLabel,
+} from "@/convex/lib/readingLevels";
 
 /** The friction floor is applied server-side; this is only for the caption. */
 export const FRICTION_MISS_FLOOR = 3;
@@ -285,6 +289,8 @@ export interface RoundsLevelSignals {
     level: string | null;
     /** The READ level (TRA-503); `listener` runs the tutor voice first. */
     readLevel: "listener" | "beginner" | "reader";
+    /** The WRITE mode (TRA-514); `voice` means they dictate. Absent = own. */
+    writeMode?: "own" | "voice";
     setAt: number | null;
     setBy: "teacher" | "observer" | null;
   };
@@ -310,18 +316,33 @@ export function levelPhrase(level: string | null): string {
 
 /**
  * The confirmed setting, said plainly: the TALK level the tutor adapts its
- * language to, which a human ratified — and, for a listener, that the tutor
- * speaks first (TRA-503).
+ * language to, which a human ratified — and, when they differ from the
+ * default, how the scholar reads (listener / beginner, TRA-503) and writes
+ * (by voice, TRA-514), in the app's own level labels.
  */
 export function confirmedLevelLine(signals: RoundsLevelSignals): {
   headline: string;
   caption: string | null;
 } {
   const { confirmed } = signals;
-  if (confirmed.readLevel === "listener") {
+  const read = confirmed.readLevel;
+  const voice = confirmed.writeMode === "voice";
+  if (read !== "reader" || voice) {
+    const tags = [
+      read !== "reader" ? READ_LEVEL_LABELS[read] : null,
+      voice ? WRITE_MODE_LABELS.voice : null,
+    ].filter((t): t is string => t !== null);
+    const captions = [
+      read === "listener"
+        ? "The tutor speaks its turns, voice first"
+        : read === "beginner"
+          ? "The tutor reads its turns aloud, word by word"
+          : null,
+      voice ? "Gets their words in by talking, not typing" : null,
+    ].filter((c): c is string => c !== null);
     return {
-      headline: `Listener · talk level ${levelPhrase(confirmed.level)}`,
-      caption: "The tutor speaks its turns, voice first",
+      headline: `${tags.join(" · ")} · talk level ${levelPhrase(confirmed.level)}`,
+      caption: captions.join(". "),
     };
   }
   if (!confirmed.level) {

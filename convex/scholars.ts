@@ -24,6 +24,7 @@ import {
   writeModeValidator,
   type EstimateWriteDecision,
   type ReadLevel,
+  type WriteMode,
 } from "./lib/readingLevels";
 import { scholarHasPasswordCredential } from "./lib/scholarCredential";
 import { underscoreUsername } from "./lib/username";
@@ -450,6 +451,8 @@ export interface LevelSignalRow {
     level: string | null;
     /** The READ level; `listener` runs the tutor voice first. */
     readLevel: ReadLevel;
+    /** The WRITE mode; `voice` means they dictate (TRA-514). */
+    writeMode: WriteMode;
     /** When a human last ratified this exact value; null if unrecorded. */
     setAt: number | null;
     setBy: "teacher" | "observer" | null;
@@ -648,6 +651,7 @@ export const levelSignalsForScholars = teacherQuery({
         confirmed: {
           level: talkLevelOf(confirmedLevel),
           readLevel: readLevelOf(scholar),
+          writeMode: writeModeOf(scholar),
           // Only meaningful when the latest history row matches the live value;
           // a level set before this table existed has no ratification record.
           // Compared as TALK levels, so a migrated scholar (live "K") keeps the

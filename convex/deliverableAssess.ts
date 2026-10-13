@@ -30,6 +30,7 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { MODELS } from "./lib/models";
 import { writingMechanicsPolicy } from "./lib/writingMechanicsPolicy";
+import { levelsPromptLine } from "./lib/readingLevels";
 import { recordAnthropicUsage } from "./usage";
 import { ROLES, isTeacherRole } from "./lib/roles";
 import { imageMediaType } from "./lib/ingestMimes";
@@ -84,7 +85,7 @@ export function buildScanAssessInstructions(input: {
       ? `Deliverable prompt: ${activity.deliverable.prompt}`
       : null,
     readingLevel
-      ? `Scholar reading level: ${readingLevel}. Calibrate level-dependent expectations (length, ${activity.assessesWritingMechanics === true ? "mechanics, " : ""}vocabulary) to this level; hold level-independent ones (specificity, structure, reasoning) at the same bar.`
+      ? `${levelsPromptLine(readingLevel)}. Calibrate level-dependent expectations (length, vocabulary) to the talk level${activity.assessesWritingMechanics === true ? ", and mechanics to how they read and write (the read and write levels), never to the talk level" : ""}; hold level-independent ones (specificity, structure, reasoning) at the same bar.`
       : null,
     writingMechanicsPolicy(activity.assessesWritingMechanics),
     input.aiCaption

@@ -858,7 +858,7 @@ export const getSessionContext = internalQuery({
     const isFirstTurn = !chatHistory.some((m) => m.role === "assistant");
 
     // Resolve the "context identity" — the user whose dossier, mastery,
-    // signals, seeds, directives, and reading level the AI tutor should see.
+    // signals, seeds, directives, and talk/read/write levels the AI tutor should see.
     // Normally that's project.userId (the scholar). In a test-drive project
     // the teacher can override this:
     //   - testDriveAsScholarId set → render as that real scholar (read-only,

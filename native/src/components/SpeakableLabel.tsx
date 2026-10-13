@@ -10,7 +10,7 @@
  * When TTS is disabled for the scholar the children render completely unadorned.
  */
 
-import { useMemo, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -42,6 +42,10 @@ export type SpeakableLabelProps = {
   color?: string;
   /** aria/accessibility label for the speak control. */
   accessibilityLabel?: string;
+  /** Speak the text on its own when this turns true (and again whenever the
+   *  text changes while it stays true) — a listener's practice question
+   *  (TRA-514). Same engine and owner token, so the speaker shows it. */
+  autoPlay?: boolean;
 };
 
 function stringFromChildren(children: ReactNode): string {
@@ -59,6 +63,7 @@ export function SpeakableLabel({
   iconSize = 16,
   color,
   accessibilityLabel,
+  autoPlay = false,
 }: SpeakableLabelProps) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -67,7 +72,22 @@ export function SpeakableLabel({
   const ttsEnabled = me?.ttsEnabled !== false;
 
   const spokenText = (text ?? stringFromChildren(children)).trim();
-  const { speaking, loading, paused, toggle } = useNativeSpeaker(spokenText);
+  const { speaking, loading, paused, toggle, play, stopIfMine } = useNativeSpeaker(spokenText);
+
+  // Auto-play once per (on, text); `play` is read through a ref so a
+  // re-render (its identity follows the engine state) never re-fires it.
+  const playRef = useRef(play);
+  const stopRef = useRef(stopIfMine);
+  useEffect(() => {
+    playRef.current = play;
+    stopRef.current = stopIfMine;
+  }, [play, stopIfMine]);
+  useEffect(() => {
+    if (!autoPlay || !ttsEnabled || !spokenText) return;
+    playRef.current();
+    // Answered (auto-play turns off) or gone (unmount): stop reading it.
+    return () => stopRef.current();
+  }, [autoPlay, ttsEnabled, spokenText]);
 
   const visible = children ?? (text ? <Text style={styles.fallback}>{text}</Text> : null);
 
