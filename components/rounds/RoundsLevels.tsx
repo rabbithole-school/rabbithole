@@ -9,7 +9,8 @@
  *   confirmed          a teacher-ratified SETTING the tutor adapts to. `setAt`
  *                      is when a human ratified, not when anything was measured.
  *   writing complexity Flesch–Kincaid over typed messages. Mechanical. Its
- *                      canonical rendering is the profile chart; we state the
+ *                      canonical rendering is the profile growth chart (Write
+ *                      lane); we state the
  *                      latest value and point there instead of drawing a second.
  *
  * The AI's writing estimate is a third thing, and it is deliberately NOT here:

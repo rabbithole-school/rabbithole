@@ -5,7 +5,7 @@
  * institution's SimpleMDM tenant. Other institutions get a legible refusal
  * until they have a real tenant and contract of their own.
  */
-import { ConvexError, v } from "convex/values";
+import { ConvexError, v, type Infer } from "convex/values";
 import {
   action,
   internalAction,
@@ -22,6 +22,7 @@ import {
   assertCanWrite,
   requireUser,
   assertWritableAction,
+  READ_ONLY_ACCOUNT_ERROR,
 } from "./lib/auth";
 import { primaryInstitutionId } from "./institutions";
 import {
@@ -168,7 +169,23 @@ type DbCtx = QueryCtx | MutationCtx;
 async function requireSimpleMdmAccess(
   ctx: DbCtx,
 ): Promise<{ user: Doc<"users">; institutionId: Id<"institutions"> }> {
-  const user = await requireUser(ctx);
+  return await requireSimpleMdmAccessForUser(ctx, await requireUser(ctx));
+}
+
+/**
+ * `requireSimpleMdmAccess` for a caller resolved some other way than the
+ * browser session — the agent transports, which name their caller explicitly.
+ * One body for both, so a device command reached from Slack or MCP faces the
+ * exact gate the devices console does: school operations at the PRIMARY
+ * institution (the SimpleMDM tenant), with
+ * `hasSchoolOperationsAccessAtInstitution` refusing a disabled institution —
+ * the same live-institution answer `liveSchoolOperationsInstitutionIds`
+ * gives, never the raw "all".
+ */
+async function requireSimpleMdmAccessForUser(
+  ctx: DbCtx,
+  user: Doc<"users">,
+): Promise<{ user: Doc<"users">; institutionId: Id<"institutions"> }> {
   const institutionId = await primaryInstitutionId(ctx);
   if (!institutionId) {
     throw new Error(SIMPLEMDM_NOT_CONFIGURED_FOR_SCHOOL);
@@ -1707,6 +1724,42 @@ export const primaryInstitutionForSnapshots = internalQuery({
 // (`lostModeStatus`) rather than tracking a second, possibly-stale copy.
 
 /**
+ * An agent transport (the in-app staff aide, Slack bot, OAuth MCP connector)
+ * commanding a device on a named staff member's behalf. Absent means the
+ * browser session is the caller.
+ * `source` lands in the audit line, so it is required rather than defaulted —
+ * the same rule `deviceLock.setFromAgent` follows.
+ */
+const deviceCommandAgentCallerValidator = v.object({
+  userId: v.id("users"),
+  source: v.union(v.literal("slack"), v.literal("mcp"), v.literal("app")),
+});
+type DeviceCommandAgentCaller = Infer<typeof deviceCommandAgentCallerValidator>;
+
+/**
+ * The caller of a mutating device command, plus the institution it may
+ * command. A session caller is read from auth; an agent caller is the row its
+ * transport resolved (a Slack identity link, an OAuth grant), re-read here
+ * from CURRENT state on every call, so a revoked grant or a deleted user stops
+ * an agent exactly as it stops the console.
+ *
+ * The agent branch checks `readOnly` itself because `assertCanWrite` reads
+ * the browser session owner, which an agent call does not have.
+ */
+async function requireDeviceCommandCaller(
+  ctx: DbCtx,
+  agentCaller: DeviceCommandAgentCaller | undefined,
+): Promise<{ user: Doc<"users">; institutionId: Id<"institutions"> }> {
+  if (!agentCaller) return await requireSimpleMdmAccess(ctx);
+  const user = await ctx.db.get(agentCaller.userId);
+  if (!user) {
+    throw new ConvexError("Forbidden: school staff role required");
+  }
+  if (user.readOnly) throw new ConvexError(READ_ONLY_ACCOUNT_ERROR);
+  return await requireSimpleMdmAccessForUser(ctx, user);
+}
+
+/**
  * Resolve a `pairedDeviceId` to the SimpleMDM-enrolled serial (if any) for a
  * MUTATING device command, after confirming the caller may administer that
  * scholar. Shared by every such command — Lost Mode enable/disable and
@@ -1715,7 +1768,11 @@ export const primaryInstitutionForSnapshots = internalQuery({
  * has its own twin, `pairedDeviceForLostModeStatus`, with a softer gate.)
  */
 export const pairedDeviceForDeviceCommand = internalQuery({
-  args: { pairedDeviceId: v.id("pairedDevices") },
+  args: {
+    pairedDeviceId: v.id("pairedDevices"),
+    /** Set only by an agent transport; absent = the browser session. */
+    agentCaller: v.optional(deviceCommandAgentCallerValidator),
+  },
   handler: async (
     ctx,
     args,
@@ -1724,7 +1781,10 @@ export const pairedDeviceForDeviceCommand = internalQuery({
     serial: string | null;
     institutionId: Id<"institutions">;
   }> => {
-    const { institutionId } = await requireSimpleMdmAccess(ctx);
+    const { institutionId } = await requireDeviceCommandCaller(
+      ctx,
+      args.agentCaller,
+    );
     const row = await ctx.db.get(args.pairedDeviceId);
     if (!row || row.institutionId !== institutionId) {
       // ConvexError so the reason survives to the console: remote commands are
@@ -2088,9 +2148,14 @@ export const recordDeviceRestartIntent = internalMutation({
     pairedDeviceId: v.id("pairedDevices"),
     expectedSerial: v.string(),
     expectedScholarId: v.id("users"),
+    /** Set only by an agent transport; absent = the browser session. */
+    agentCaller: v.optional(deviceCommandAgentCallerValidator),
   },
   handler: async (ctx, args) => {
-    const { user, institutionId } = await requireSimpleMdmAccess(ctx);
+    const { user, institutionId } = await requireDeviceCommandCaller(
+      ctx,
+      args.agentCaller,
+    );
     const row = await ctx.db.get(args.pairedDeviceId);
     if (!row || row.institutionId !== institutionId) {
       throw new ConvexError("This iPad isn't available for remote commands.");
@@ -2120,6 +2185,11 @@ export const recordDeviceRestartIntent = internalMutation({
       );
     }
 
+    // Recheck impersonation + read-only here, for every caller (see
+    // `runDeviceRestart`): an overlay started mid-flight on the in-app aide's
+    // session must stop the restart exactly as it stops the console. A no-op
+    // for Slack (no session); `requireDeviceCommandCaller` already refused a
+    // read-only agent caller from its live row.
     await assertCanWrite(ctx);
 
     await writeAuditLog(ctx, {
@@ -2130,8 +2200,11 @@ export const recordDeviceRestartIntent = internalMutation({
       at: Date.now(),
       // "Requested" — this runs BEFORE the SimpleMDM request is sent, so it
       // records only that an authorized staff member asked for the restart,
-      // never that the iPad rebooted.
-      detail: `Requested a restart via SimpleMDM; serial ${args.expectedSerial}`,
+      // never that the iPad rebooted. An agent request names its transport,
+      // so "who restarted this, from where?" has an answer.
+      detail: `Requested a restart via SimpleMDM${
+        args.agentCaller ? ` (from ${args.agentCaller.source})` : ""
+      }; serial ${args.expectedSerial}`,
     });
   },
 });
@@ -2146,68 +2219,129 @@ export const recordDeviceRestartIntent = internalMutation({
  * staff follow-up. A restart costs neither and needs no cooperation from the
  * app, which is the whole point when the app is what's wedged.
  *
- * The guard sequence mirrors `setLostMode` exactly — impersonation before any
- * SimpleMDM traffic, supervision checked against a live read, then full
- * re-authorization + audit immediately before the write.
+ * This is the ONE guard sequence for every restart, whoever asks: the devices
+ * console (`restartDevice`) and the agent transports
+ * (`restartDeviceFromAgent`) both run exactly this. It mirrors `setLostMode`
+ * — impersonation before any SimpleMDM traffic, supervision checked against
+ * a live read, then full re-authorization + audit immediately before the
+ * write.
+ *
+ * The impersonation guard runs for EVERY caller, agent included. It exists
+ * for a browser admin viewing the app AS someone else, and the in-app aide
+ * (source "app") runs inside exactly that browser session: its stream
+ * authenticates the REAL owner (getAuthUserId ignores the overlay), so the
+ * named agent caller would otherwise be the admin, free to reboot a real iPad
+ * from a session that is supposed to be read-only. Slack has no session at
+ * all and an MCP session cannot carry an overlay, so for them the guard is a
+ * no-op. The agent path also refuses a read-only account in
+ * `requireDeviceCommandCaller`, from the caller's live row.
  */
+async function runDeviceRestart(
+  ctx: ActionCtx,
+  pairedDeviceId: Id<"pairedDevices">,
+  agentCaller?: DeviceCommandAgentCaller,
+): Promise<RestartDeviceResult> {
+  // Enforced BEFORE any request reaches SimpleMDM — an admin viewing-as
+  // another user must never be able to reboot a real device, from the
+  // console or through the in-app aide on that same session.
+  await ctx.runMutation(
+    internal.simplemdm.assertDeviceCommandCallerNotImpersonating,
+    {},
+  );
+
+  const resolved = await ctx.runQuery(
+    internal.simplemdm.pairedDeviceForDeviceCommand,
+    { pairedDeviceId, agentCaller },
+  );
+  // ConvexError, not Error, for all three refusals below: Convex replaces a
+  // plain Error's message with an opaque "Server Error" in prod (see
+  // `lib/simpleMdmClient.ts`). Lost Mode can afford plain throws because its
+  // UI only offers the button once the snapshot proves the device eligible;
+  // Restart is deliberately offered on an unknown snapshot, so a refusal IS
+  // the normal way staff learn why — it has to reach the toast intact.
+  if (!resolved.serial) {
+    throw new ConvexError("This iPad isn't enrolled in SimpleMDM yet.");
+  }
+  const apiKey = simpleMdmApiKey();
+  const attributes = await readDeviceAttributes(
+    ctx,
+    apiKey,
+    resolved.institutionId,
+    resolved.serial,
+  );
+  if (!attributes) {
+    throw new ConvexError(
+      "SimpleMDM has no enrolled record for this iPad's serial.",
+    );
+  }
+  // Apple lists RestartDevice as iOS/iPadOS (Supervised). An unreported
+  // (null) supervision state refuses too — the same posture Lost Mode
+  // takes, so an unverifiable device never receives a doomed command.
+  if (attributes.isSupervised !== true) {
+    throw new ConvexError(
+      "Restarting requires a supervised iPad, and SimpleMDM did not report this device as supervised.",
+    );
+  }
+
+  await ctx.runMutation(internal.simplemdm.recordDeviceRestartIntent, {
+    pairedDeviceId,
+    expectedSerial: resolved.serial,
+    expectedScholarId: resolved.scholarId,
+    agentCaller,
+  });
+
+  const { queued } = await restartSimpleMdmDevice(apiKey, attributes.id);
+
+  return {
+    queued,
+    message: queued
+      ? "Restart command sent to SimpleMDM. It's queued and will apply once the iPad is next online."
+      : "Restart command sent to SimpleMDM. SimpleMDM accepted it immediately.",
+  };
+}
+
+/** The devices console's Restart button (`/school/devices` drawer). */
 export const restartDevice = action({
   args: { pairedDeviceId: v.id("pairedDevices") },
-  handler: async (ctx, args): Promise<RestartDeviceResult> => {
-    // Enforced BEFORE any request reaches SimpleMDM — an admin viewing-as
-    // another user must never be able to reboot a real device.
-    await ctx.runMutation(
-      internal.simplemdm.assertDeviceCommandCallerNotImpersonating,
-      {},
-    );
+  handler: async (ctx, args): Promise<RestartDeviceResult> =>
+    await runDeviceRestart(ctx, args.pairedDeviceId),
+});
 
-    const resolved = await ctx.runQuery(
-      internal.simplemdm.pairedDeviceForDeviceCommand,
-      { pairedDeviceId: args.pairedDeviceId },
-    );
-    // ConvexError, not Error, for all three refusals below: Convex replaces a
-    // plain Error's message with an opaque "Server Error" in prod (see
-    // `lib/simpleMdmClient.ts`). Lost Mode can afford plain throws because its
-    // UI only offers the button once the snapshot proves the device eligible;
-    // Restart is deliberately offered on an unknown snapshot, so a refusal IS
-    // the normal way staff learn why — it has to reach the toast intact.
-    if (!resolved.serial) {
-      throw new ConvexError("This iPad isn't enrolled in SimpleMDM yet.");
+export type AgentRestartDeviceResult =
+  | ({ ok: true } & RestartDeviceResult)
+  | { ok: false; message: string };
+
+/**
+ * The agent transports' restart (`restart_managed_device`,
+ * `lib/deviceOpsTools.ts`). This, not the tool prose, is the authorization
+ * boundary: it runs `runDeviceRestart` with the transport's named caller, so
+ * every refusal the console gets — another school, no school:operations, a
+ * read-only account, not enrolled, not supervised, mid-flight drift —
+ * applies here unchanged, before any restart request is sent.
+ *
+ * Refusals come back as `{ ok: false, message }` rather than a throw, so the
+ * model can relay the reason to the staff member verbatim.
+ */
+export const restartDeviceFromAgent = internalAction({
+  args: {
+    callerUserId: v.id("users"),
+    /** Which agent transport is asking — recorded in the audit line. */
+    source: v.union(v.literal("slack"), v.literal("mcp"), v.literal("app")),
+    pairedDeviceId: v.id("pairedDevices"),
+  },
+  handler: async (ctx, args): Promise<AgentRestartDeviceResult> => {
+    try {
+      const result = await runDeviceRestart(ctx, args.pairedDeviceId, {
+        userId: args.callerUserId,
+        source: args.source,
+      });
+      return { ok: true, ...result };
+    } catch (error) {
+      return {
+        ok: false,
+        message: simpleMdmErrorMessage(error, "Couldn't restart this iPad."),
+      };
     }
-    const apiKey = simpleMdmApiKey();
-    const attributes = await readDeviceAttributes(
-      ctx,
-      apiKey,
-      resolved.institutionId,
-      resolved.serial,
-    );
-    if (!attributes) {
-      throw new ConvexError(
-        "SimpleMDM has no enrolled record for this iPad's serial.",
-      );
-    }
-    // Apple lists RestartDevice as iOS/iPadOS (Supervised). An unreported
-    // (null) supervision state refuses too — the same posture Lost Mode
-    // takes, so an unverifiable device never receives a doomed command.
-    if (attributes.isSupervised !== true) {
-      throw new ConvexError(
-        "Restarting requires a supervised iPad, and SimpleMDM did not report this device as supervised.",
-      );
-    }
-
-    await ctx.runMutation(internal.simplemdm.recordDeviceRestartIntent, {
-      pairedDeviceId: args.pairedDeviceId,
-      expectedSerial: resolved.serial,
-      expectedScholarId: resolved.scholarId,
-    });
-
-    const { queued } = await restartSimpleMdmDevice(apiKey, attributes.id);
-
-    return {
-      queued,
-      message: queued
-        ? "Restart command sent to SimpleMDM. It's queued and will apply once the iPad is next online."
-        : "Restart command sent to SimpleMDM. SimpleMDM accepted it immediately.",
-    };
   },
 });
 

@@ -15,7 +15,7 @@ import { convexTest } from "convex-test";
 import { ConvexError } from "convex/values";
 import { afterEach, beforeAll, describe, expect, test } from "vitest";
 
-import { api } from "../_generated/api";
+import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import schema from "../schema";
 import { simpleMdmRetryPolicy } from "../lib/simpleMdmClient";
@@ -702,5 +702,196 @@ describe("restartDevice", () => {
       scholar.action(api.simplemdm.restartDevice, { pairedDeviceId }),
     ).rejects.toThrow();
     expect(fetchCalled).toBe(false);
+  });
+});
+
+/**
+ * `simplemdm.restartDeviceFromAgent` — the same restart reached from Slack or
+ * the MCP connector (`restart_managed_device`). It runs `runDeviceRestart`,
+ * the console's own guard sequence, with the transport's named caller; these
+ * pin that the agent path reaches SimpleMDM only through those guards.
+ */
+describe("restartDeviceFromAgent", () => {
+  /** A SimpleMDM stub that answers the serial lookup + detail read and counts
+   *  restart POSTs. Every other URL is an unexpected request. */
+  function stubSimpleMdm(opts: { supervised?: boolean; known?: boolean } = {}) {
+    const { supervised = true, known = true } = opts;
+    let restarts = 0;
+    const calls = stubFetch((url) => {
+      if (url.includes("/devices?search=SERIAL123")) {
+        return deviceListPage(known ? [{ id: 42, serial: "SERIAL123" }] : []);
+      }
+      if (url.endsWith("/devices/42")) {
+        return deviceDetail({ is_supervised: supervised });
+      }
+      if (url.endsWith("/devices/42/restart")) {
+        restarts += 1;
+        return new Response(null, { status: 202 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    return { calls, restarts: () => restarts };
+  }
+
+  async function seedPrimaryDevice(t: TestHarness) {
+    const institutionId = await seedPrimaryInstitution(t);
+    const teacher = await seedTeacher(t, institutionId);
+    const scholarId = await seedScholar(t, institutionId);
+    const pairedDeviceId = await seedPairedDeviceWithClaim(
+      t,
+      institutionId,
+      scholarId,
+      teacher.userId,
+      "SERIAL123",
+    );
+    return { institutionId, teacher, scholarId, pairedDeviceId };
+  }
+
+  async function seedOtherSchool(t: TestHarness) {
+    return await t.run((ctx) =>
+      ctx.db.insert("institutions", {
+        name: "other",
+        slug: "other",
+        kind: "school" as const,
+        timeZone: "Pacific/Honolulu",
+      }),
+    );
+  }
+
+  test("an eligible school-ops caller restarts a supervised iPad once, audited as the agent caller", async () => {
+    process.env.SIMPLEMDM_API_KEY = "test-key";
+    const t = convexTest(schema, modules);
+    const { teacher, scholarId, pairedDeviceId } = await seedPrimaryDevice(t);
+    const simpleMdm = stubSimpleMdm();
+
+    const result = await t.action(internal.simplemdm.restartDeviceFromAgent, {
+      callerUserId: teacher.userId,
+      source: "slack",
+      pairedDeviceId,
+    });
+    expect(result).toMatchObject({ ok: true, queued: true });
+    expect(simpleMdm.restarts()).toBe(1);
+
+    const auditRows = await t.run((ctx) => ctx.db.query("auditLog").collect());
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]).toMatchObject({
+      action: "device.restart.requested",
+      actorUserId: teacher.userId,
+      targetUserId: scholarId,
+    });
+    expect(auditRows[0].detail).toContain("slack");
+  });
+
+  test("an unsupervised iPad is refused with no restart request and no audit row", async () => {
+    process.env.SIMPLEMDM_API_KEY = "test-key";
+    const t = convexTest(schema, modules);
+    const { teacher, pairedDeviceId } = await seedPrimaryDevice(t);
+    const simpleMdm = stubSimpleMdm({ supervised: false });
+
+    const result = await t.action(internal.simplemdm.restartDeviceFromAgent, {
+      callerUserId: teacher.userId,
+      source: "mcp",
+      pairedDeviceId,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.message).toMatch(/supervised/i);
+    expect(simpleMdm.restarts()).toBe(0);
+    expect(
+      await t.run((ctx) => ctx.db.query("auditLog").collect()),
+    ).toHaveLength(0);
+  });
+
+  test("a serial SimpleMDM doesn't know is refused with no restart request", async () => {
+    process.env.SIMPLEMDM_API_KEY = "test-key";
+    const t = convexTest(schema, modules);
+    const { teacher, pairedDeviceId } = await seedPrimaryDevice(t);
+    const simpleMdm = stubSimpleMdm({ known: false });
+
+    const result = await t.action(internal.simplemdm.restartDeviceFromAgent, {
+      callerUserId: teacher.userId,
+      source: "mcp",
+      pairedDeviceId,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.message).toMatch(/no enrolled record/i);
+    expect(simpleMdm.restarts()).toBe(0);
+    expect(
+      await t.run((ctx) => ctx.db.query("auditLog").collect()),
+    ).toHaveLength(0);
+  });
+
+  test("a caller from another institution is refused before any SimpleMDM request", async () => {
+    process.env.SIMPLEMDM_API_KEY = "test-key";
+    const t = convexTest(schema, modules);
+    const { pairedDeviceId } = await seedPrimaryDevice(t);
+    const otherSchool = await seedOtherSchool(t);
+    const outsider = await t.run((ctx) =>
+      ctx.db.insert("users", {
+        name: "Other Teacher",
+        username: "other-teacher-restart",
+        role: "teacher",
+      }),
+    );
+    await t.run((ctx) =>
+      ctx.db.insert("memberships", {
+        userId: outsider,
+        role: "teacher",
+        institutionId: otherSchool,
+      }),
+    );
+    const simpleMdm = stubSimpleMdm();
+
+    const result = await t.action(internal.simplemdm.restartDeviceFromAgent, {
+      callerUserId: outsider,
+      source: "mcp",
+      pairedDeviceId,
+    });
+    expect(result.ok).toBe(false);
+    expect(simpleMdm.calls).toHaveLength(0);
+    expect(
+      await t.run((ctx) => ctx.db.query("auditLog").collect()),
+    ).toHaveLength(0);
+  });
+
+  test("an iPad outside the SimpleMDM school is refused before any request, even for an eligible caller", async () => {
+    process.env.SIMPLEMDM_API_KEY = "test-key";
+    const t = convexTest(schema, modules);
+    const { teacher, scholarId } = await seedPrimaryDevice(t);
+    const otherSchool = await seedOtherSchool(t);
+    const foreignDevice = await seedPairedDeviceWithClaim(
+      t,
+      otherSchool,
+      scholarId,
+      teacher.userId,
+      "SERIAL123",
+      "device-other",
+    );
+    const simpleMdm = stubSimpleMdm();
+
+    const result = await t.action(internal.simplemdm.restartDeviceFromAgent, {
+      callerUserId: teacher.userId,
+      source: "slack",
+      pairedDeviceId: foreignDevice,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.message).toMatch(/isn't available for remote commands/i);
+    expect(simpleMdm.calls).toHaveLength(0);
+  });
+
+  test("a read-only account is refused before any SimpleMDM request", async () => {
+    process.env.SIMPLEMDM_API_KEY = "test-key";
+    const t = convexTest(schema, modules);
+    const { teacher, pairedDeviceId } = await seedPrimaryDevice(t);
+    await t.run((ctx) => ctx.db.patch(teacher.userId, { readOnly: true }));
+    const simpleMdm = stubSimpleMdm();
+
+    const result = await t.action(internal.simplemdm.restartDeviceFromAgent, {
+      callerUserId: teacher.userId,
+      source: "mcp",
+      pairedDeviceId,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.message).toMatch(/read-only/i);
+    expect(simpleMdm.calls).toHaveLength(0);
   });
 });

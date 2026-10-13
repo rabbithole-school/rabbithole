@@ -27,6 +27,12 @@ import { sha256Hex } from "./lib/oauthCrypto";
 import { emptyHealthRecordFields } from "./lib/healthRecord";
 import { SCHOLAR_GROUP_PARTICIPATION } from "../shared/scholarGroupRouting";
 import { reconcilePlacementById } from "./masterSchedule";
+import { deleteSessionCascade } from "./lib/cascade";
+import {
+  LEVEL_EVIDENCE_SCHOLAR,
+  levelEvidenceReadAlouds,
+  levelEvidenceSessions,
+} from "./seed/rich/levelEvidence";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MIN_MS = 60 * 1000;
@@ -989,11 +995,126 @@ function mustGet<V>(map: Map<Key, V>, key: Key, label: string): V {
   return v;
 }
 
+/**
+ * The Talk / Read / Write evidence fixture (TRA-515) for one dev-cast scholar.
+ * Runs on EVERY seed, outside `insertRichCohort`'s skip-guard, so a deployment
+ * seeded before the fixture existed is reconciled too (engineering-principles:
+ * "a skip-if-exists seed is a stale-data trap").
+ *
+ * It REFRESHES rather than skips: the evidence lines read "the last 7 days" /
+ * "the last 2 weeks", so a fixture written weeks ago would show nothing. Each
+ * seed deletes the fixture's own sessions (by title, with their messages,
+ * analyses and read-alouds via `deleteSessionCascade`) and writes them again.
+ * A mutation cannot backdate `_creationTime`, so every fixture row — sessions'
+ * `lastMessageAt` included — is stamped now: the chart shows the fixture in
+ * the current week, and the lines all read as recent. Level-history rows are
+ * written once. Does nothing if the scholar isn't seeded.
+ */
+export async function reconcileLevelEvidenceFixture(
+  ctx: MutationCtx,
+  now: number = Date.now(),
+): Promise<boolean> {
+  const scholar = await ctx.db
+    .query("users")
+    .withIndex("by_username", (q) => q.eq("username", LEVEL_EVIDENCE_SCHOLAR))
+    .first();
+  if (!scholar) return false;
+  const teacher = await ctx.db
+    .query("users")
+    .withIndex("by_username", (q) => q.eq("username", "kawena"))
+    .first();
+
+  const fixtureTitles = new Set(levelEvidenceSessions.map((s) => s.title));
+  const previous = (
+    await ctx.db
+      .query("sessions")
+      .withIndex("by_user", (q) => q.eq("userId", scholar._id))
+      .collect()
+  ).filter((s) => s.seedExemplar && fixtureTitles.has(s.title));
+  for (const s of previous) await deleteSessionCascade(ctx, {}, s._id);
+
+  await ctx.db.patch(scholar._id, { readLevel: "beginner", writeMode: "voice" });
+  const history = await ctx.db
+    .query("readingLevelHistory")
+    .withIndex("by_scholar", (q) => q.eq("scholarId", scholar._id))
+    .collect();
+  for (const dimension of ["read", "write"] as const) {
+    if (history.some((h) => h.dimension === dimension)) continue;
+    await ctx.db.insert("readingLevelHistory", {
+      scholarId: scholar._id,
+      dimension,
+      level: dimension === "read" ? "beginner" : "voice",
+      source: "teacher",
+      changedBy: teacher?._id,
+    });
+  }
+
+  let latestSession: Id<"sessions"> | null = null;
+  for (const s of levelEvidenceSessions) {
+    const sessionId = await ctx.db.insert("sessions", {
+      userId: scholar._id,
+      title: s.title,
+      isArchived: false,
+      seedExemplar: true,
+      lastMessageAt: now,
+      lastMessageRole: "user",
+      lastMessagePreview: s.turns[s.turns.length - 1].content,
+    });
+    for (const turn of s.turns) {
+      await ctx.db.insert("messages", {
+        sessionId,
+        role: "user",
+        content: turn.content,
+        flagged: false,
+        inputModality: turn.spoken ? "spoken" : "typed",
+      });
+    }
+    await ctx.db.insert("analyses", {
+      sessionId,
+      engagementScore: 0.8,
+      complexityLevel: 0.6,
+      onTaskScore: 0.85,
+      topics: [],
+      learningIndicators: [],
+      concernFlags: [],
+      summary: "Curious and talkative; most turns dictated.",
+      talkLevel: s.talkLevel,
+      talkWords: 120,
+    });
+    latestSession = sessionId;
+  }
+  if (latestSession) {
+    for (const r of levelEvidenceReadAlouds) {
+      const messageId = await ctx.db.insert("messages", {
+        sessionId: latestSession,
+        role: "user",
+        content: r.heard,
+        flagged: false,
+        inputModality: "spoken",
+        readAloudOf: r.line,
+      });
+      await ctx.db.insert("readAloudAttempts", {
+        scholarId: scholar._id,
+        sessionId: latestSession,
+        messageId,
+        words: r.words,
+        matched: r.matched,
+        attempted: r.attempted,
+        missedUnits: r.missedUnits,
+      });
+    }
+  }
+  return true;
+}
+
 export const seedAll = internalMutation({
   args: {},
   handler: async (ctx) => {
     const { inserted, counts, captureStationToken } =
       await insertRichCohort(ctx);
+    if (await reconcileLevelEvidenceFixture(ctx)) {
+      console.log(`Level-evidence fixture refreshed for ${LEVEL_EVIDENCE_SCHOLAR}.`);
+    }
     const total = Object.values(counts).reduce((a, b) => a + b, 0);
     console.log(
       inserted

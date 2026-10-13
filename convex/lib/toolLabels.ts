@@ -40,6 +40,8 @@ const STAFF_TOOL_LABELS: Record<string, string> = {
   get_seeds: "Loading exploration seeds",
   get_mentava_progress: "Reading Mentava progress",
   link_mentava_student: "Linking a Mentava student",
+  read_drive_link: "Reading a Google Drive file",
+  search_drive: "Searching Google Drive",
   get_scholar_seeds: "Loading exploration seeds",
   get_observations: "Reading observations",
   get_scholar_observations: "Reading observations",
@@ -56,6 +58,8 @@ const STAFF_TOOL_LABELS: Record<string, string> = {
   get_unit_details: "Reading unit details",
   list_geomap_assets: "Checking the map shelf",
   move_lesson: "Moving lesson",
+  // Managed-iPad operations (lib/deviceOpsTools.ts)
+  restart_managed_device: "Restarting an iPad",
   // Assignment / scheduling tools
   list_assignments: "Loading assignments",
   get_assignment: "Reading assignment",

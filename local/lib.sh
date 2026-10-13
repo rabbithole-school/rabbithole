@@ -15,6 +15,9 @@ WEB_PORT="${WEB_PORT:-3000}"
 # point the CLI somewhere else, so it never survives into the runner.
 export CONVEX_AGENT_MODE=anonymous
 export NEXT_TELEMETRY_DISABLED=1
+# The local Convex backend's usage beacon. The Convex CLI passes this through to
+# the backend it starts. (Its crash reporting can't be turned off this way.)
+export DISABLE_BEACON=1
 unset CONVEX_DEPLOYMENT
 
 say() { printf '%s\n' "$*"; }

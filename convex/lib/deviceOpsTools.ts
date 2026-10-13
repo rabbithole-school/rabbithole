@@ -1,6 +1,7 @@
 // Managed-iPad operations as AGENT TOOLS — the one definition shared by every
-// transport that hands them to a model: the Slack bot (lib/slackTools.ts) and
-// the OAuth MCP connector (convex/mcp.ts).
+// transport that hands them to a model. Wired in ONE place, the shared staff
+// aide registry (`assembleCurriculumTools`, lib/aideTools.ts), so the in-app
+// aide, the Slack bot, and the OAuth MCP connector all get the same set.
 //
 // Why shared rather than copied: these tools carry a SAFETY CONTRACT in their
 // prose — "list first, show the requester the exact resolved iPads, get
@@ -11,10 +12,12 @@
 //
 // The contract is prose, and prose is UX — the authorization boundary is the
 // internal functions these call (`deviceLock.listForAgent` /
-// `deviceLock.setFromAgent` / `managedDeviceClaims.listForAgent`), each of
-// which re-resolves the caller and refuses the whole batch if any id falls
-// outside their school:operations institutions. A model that skips the
-// confirmation step still cannot reach another school's iPad.
+// `deviceLock.setFromAgent` / `managedDeviceClaims.listForAgent` /
+// `simplemdm.restartDeviceFromAgent`), each of which re-resolves the caller
+// and refuses the whole batch if any id falls outside their school:operations
+// institutions. A model that skips the confirmation step still cannot reach
+// another school's iPad. The restart runs the SAME guard sequence as the
+// devices console's Restart button (`simplemdm.runDeviceRestart`).
 //
 // DELIBERATELY ABSENT: `deviceAppUnlock:configureDedicatedProfile`. Rebinding
 // a device's allowlist baseline resets the live SimpleMDM profile to a
@@ -28,10 +31,12 @@ import type { Id } from "../_generated/dataModel";
 import { isScholarAdminRole, ROLES, type Role } from "./roles";
 import type { AideEmit } from "./aideStream";
 
-/** Which agent transport is calling — recorded verbatim in the lock audit
+/** Which agent transport is calling — recorded verbatim in the device audit
  *  line, so an ops question ("who disarmed this, from where?") has an answer.
- *  Required rather than defaulted: a new transport must name itself. */
-export type DeviceOpsSource = "slack" | "mcp";
+ *  Required rather than defaulted: a new transport must name itself. Same
+ *  vocabulary as the admissions agent's `surface` ("app" = the in-app staff
+ *  aide). */
+export type AgentTransport = "app" | "slack" | "mcp";
 
 /**
  * The school-operations gate for TOOL VISIBILITY. Same predicate the Slack
@@ -57,7 +62,7 @@ export async function makeDeviceOpsTools(
     callerUserId: Id<"users">;
     /** Established from an active institution-scoped school:operations grant. */
     hasSchoolOperationsAccess?: boolean;
-    source: DeviceOpsSource;
+    source: AgentTransport;
   },
 ) {
   const {
@@ -193,6 +198,56 @@ export async function makeDeviceOpsTools(
             toolComplete: { name: "set_rabbithole_lock", result: result.message },
           });
         }
+        return result.message;
+      },
+    }),
+
+    // One device per call, deliberately: a restart drops whatever the scholar
+    // has not sent, so a batch would multiply the cost of one wrong match.
+    // The console's Restart button is one-device too.
+    betaTool({
+      name: "restart_managed_device",
+      description:
+        "Restart ONE managed school iPad over MDM — the fix for a frozen or wedged app. You MUST call list_managed_devices first, tell the requester the exact scholar and iPad (label and serial) you resolved, and get an explicit yes in this conversation before calling this. Never pass an id you inferred from a name without having listed it. One iPad per call; there is no bulk restart. What staff should know: the iPad must be online to receive the restart (it waits in the queue until the iPad next checks in); anything the scholar hasn't sent or saved is lost; the iPad comes back signed in as the same scholar. Never use force sign-out as a substitute for a restart: on a managed iPad that invalidates its enrollment key and needs a staff follow-up before it can sign in again. Requires a supervised, SimpleMDM-enrolled iPad; a refusal says why.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          paired_device_id: {
+            type: "string" as const,
+            description:
+              "The exact pairedDeviceId of ONE iPad, as list_managed_devices returned it.",
+          },
+        },
+        required: ["paired_device_id"] as const,
+      },
+      run: async (input) => {
+        const pairedDeviceId = input.paired_device_id?.trim();
+        if (!pairedDeviceId) {
+          return "Failed: pass the pairedDeviceId of one iPad exactly as list_managed_devices returned it.";
+        }
+        let result;
+        try {
+          result = await ctx.runAction(
+            internal.simplemdm.restartDeviceFromAgent,
+            {
+              callerUserId,
+              source,
+              pairedDeviceId: pairedDeviceId as Id<"pairedDevices">,
+            },
+          );
+        } catch (error) {
+          // Every refusal comes back as { ok: false }, so a throw here is
+          // almost always argument validation — a malformed or invented id.
+          const reason = error instanceof Error ? error.message : String(error);
+          return `Failed: the restart did not run (${reason}). Pass one pairedDeviceId exactly as list_managed_devices returned it.`;
+        }
+        if (!result.ok) return `Failed: ${result.message}`;
+        emit({
+          toolComplete: {
+            name: "restart_managed_device",
+            result: result.message,
+          },
+        });
         return result.message;
       },
     }),

@@ -826,6 +826,9 @@ export const getSessionContext = internalQuery({
         ...(m.role === "user" && m.readAloudOf
           ? { readAloudOf: m.readAloudOf }
           : {}),
+        // A staff member typed this "user" turn (TRA-515): not the
+        // scholar's own language for the observer's talk word floor.
+        ...(m.role === "user" && m.byStaff ? { byStaff: true } : {}),
       }));
     let latestInstructionCompletionIndex = -1;
     for (let index = messages.length - 1; index >= 0; index--) {
@@ -3214,6 +3217,10 @@ export type AppStateContext = AppStateSnapshot & {
  */
 export function buildAppStateSection(
   appState: AppStateContext | null,
+  // run_app_action is offered only in app-builder and Workbench sessions
+  // (tutorSessionTools canRunAppAction); elsewhere a registered action is not
+  // something the tutor can invoke, so it is not listed.
+  canRunAppActions: boolean = true,
 ): string {
   if (!appState) return "";
   const hasDoc =
@@ -3222,7 +3229,7 @@ export function buildAppStateSection(
     (typeof appState.doc !== "object" ||
       Array.isArray(appState.doc) ||
       Object.keys(appState.doc).length > 0);
-  const actions = appState.actions ?? [];
+  const actions = canRunAppActions ? (appState.actions ?? []) : [];
   if (!hasDoc && appState.log.length === 0 && actions.length === 0) return "";
 
   const suffixBytes = crypto.getRandomValues(new Uint8Array(4));
@@ -3355,6 +3362,11 @@ export function buildCharacterOnStageSection(
       : `You have given it no standing direction.`,
     ...(notes ? [buildAuthorNotesBlock(notes)] : []),
     `You are its director. Every exchange appears in the conversation as an IN-APP block. direct_character sets or clears its standing direction; speak_as_character says one line through it, and can overrule a verdict it got wrong. The scholar never sees your directions.`,
+    // The layout. The scholar sees two text boxes, the app's and this chat's;
+    // a tutor that does not know says "the box at the bottom" and invites
+    // the character's question into its own chat (2026-10-12).
+    `The scholar has two boxes: ${name}'s box in the app, where they talk to ${name}, and this chat, where they talk to you. Never say "the box" or "the box at the bottom"; name it by who it reaches ("ask ${name} in ${name}'s box", "tell me here"). If they write here something meant for ${name} (a question or a line to it), do not answer it, relay it, or use speak_as_character for it: say in one short line to ask ${name} in ${name}'s box, then stop.`,
+    `When their next move is in the app (asking ${name} something, trying a step), say where to do it and stop. End with a pointer ("Ask ${name} your first question in ${name}'s box."), never a question they could answer in this chat ("What will you ask ${name} first?").`,
     // The restraint. A tutor updated after every exchange otherwise narrates
     // the play and hands over the discovery the app exists to stage.
     `The scholar is in the middle of working something out with ${name}, and that struggle is the lesson: what they notice for themselves stays with them, and whatever you name for them is lost. So while they play, your default on every app update is to say nothing.`,
@@ -4208,7 +4220,12 @@ export function buildSystemPromptParts(
       ? buildOpenExplorationWrapUpSection()
       : null,
     priorActivities: buildPriorActivitiesSection(priorActivityContext),
-    tools: playMode ? null : buildToolsSection(),
+    tools: playMode
+      ? null
+      : buildToolsSection({
+          appBuilder: isVibecode,
+          appActions: isVibecode || isWorkbench,
+        }),
     seedOrigin: buildSeedOriginSection(seedOriginContext),
     storyThread: buildStoryThreadSection(
       seedOriginContext?.storyThreadContext ?? null,
@@ -4270,7 +4287,7 @@ export function buildSystemPromptParts(
     ),
     map: buildMapSection(artifactData),
     slides: buildSlidesSection(artifactData),
-    appState: buildAppStateSection(appStateContext),
+    appState: buildAppStateSection(appStateContext, isVibecode || isWorkbench),
     seeds: buildSeedsSection(seedsData),
     whisper: buildWhisperSection(teacherWhisper),
     // One-time non-human introduction, only on the opening message of the

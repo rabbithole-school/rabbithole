@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "2d2f4c99c5f397d407a4753bfe0160d35e87d8e1",
+  "sourceCommit": "94aa024439ff39735c4c74c784879eb29cd964e3",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -124,7 +124,7 @@
     },
     {
       "path": "app/api/mcp/route.ts",
-      "sha256": "c7c4ffea000304fd648ca0732cb897fe6aef0d354fab4a59e41747621e2dff8e",
+      "sha256": "1da89e060be17dd77b720b72f3d9b419893bdf7ef4d1427bd00adb91cca03ddb",
       "mode": "100644"
     },
     {
@@ -1274,7 +1274,7 @@
     },
     {
       "path": "components/CurriculumAssistant.tsx",
-      "sha256": "c2067e2f4b656ce04aabca4961a8f470aba5b732d582861a42387df851998c48",
+      "sha256": "8b3edb195933a376131dcff45a2eb35d732384d463413b2c21f4c2bbe4bcba07",
       "mode": "100644"
     },
     {
@@ -1979,7 +1979,7 @@
     },
     {
       "path": "components/ScholarProfile.tsx",
-      "sha256": "2d9eca37d437eb1169a49afa10f05249629066f648dfa8fcf47ca2aaa37859d7",
+      "sha256": "be0bdb2fef6112e33fa4535e4e62ec9269bd3c3d649fd17e62d00937bd934924",
       "mode": "100644"
     },
     {
@@ -2044,7 +2044,7 @@
     },
     {
       "path": "components/SessionInterface.tsx",
-      "sha256": "5eed39df2cfc0043b1de13f4b83933d93ec338c255cf436783a4adad12bb3dd5",
+      "sha256": "86172084c97d7824a6d97cbbffa09d0e43e66a66b6bad1943f24468c370a7a9c",
       "mode": "100644"
     },
     {
@@ -2140,6 +2140,11 @@
     {
       "path": "components/SuspendedInstitutionGate.tsx",
       "sha256": "f0781e8cf6ae03a8ab92196e59440ab24563d317f45241be32b08c7db100ed2b",
+      "mode": "100644"
+    },
+    {
+      "path": "components/TalkReadWriteEvidence.tsx",
+      "sha256": "650abdb8dfc86f1e8dfae553b74da52160db70f143cd288484228f02889db883",
       "mode": "100644"
     },
     {
@@ -2300,6 +2305,11 @@
     {
       "path": "components/checkInSurfacesPlacement.test.ts",
       "sha256": "21d396883e8b9b7c4b33cf322aabef3d3aba846f3703a56742f82cb3a2ad6abb",
+      "mode": "100644"
+    },
+    {
+      "path": "components/composerMicStyles.ts",
+      "sha256": "fbb3b65b027727d54768828c49dfee517cb8af2c0ab8e4a837412aaa3c7a0848",
       "mode": "100644"
     },
     {
@@ -3794,7 +3804,7 @@
     },
     {
       "path": "components/rounds/RoundsLevels.tsx",
-      "sha256": "8535380eea87aa3c8c433d0a7f55f234bc3c4f8650afc91357145e04b099b8d6",
+      "sha256": "12a9ba73a4287330b5efadc1e4607548df0a40ab0f4235b6c7802ad914f5ef6a",
       "mode": "100644"
     },
     {
@@ -3879,7 +3889,7 @@
     },
     {
       "path": "components/rounds/roundsFigures.ts",
-      "sha256": "346ffeab5220dc2efcda63f6dbee1f62c51e9c09a8ee626e615851071171cd31",
+      "sha256": "988d94d51f31f162f8dd80e0c5dca9dfffa2248dacbe26bd47f837dd0d704274",
       "mode": "100644"
     },
     {
@@ -4454,7 +4464,7 @@
     },
     {
       "path": "components/vibecode/VibecodeWorkshop.tsx",
-      "sha256": "91f9c3e5e8b2ca1a526c63a923baa2663cc86e22efa03b6bc669759c7cd46338",
+      "sha256": "d7453d49eafd9a8ac1a8e366cc58df1e23f9747d3aab579a83ed2e1062b90d35",
       "mode": "100644"
     },
     {
@@ -4779,12 +4789,12 @@
     },
     {
       "path": "convex/__tests__/appStates.test.ts",
-      "sha256": "eec971257f577c9ce56dba635c247d71d96d2f9a1ea5ab73c12f3a3e7f2b4acc",
+      "sha256": "d79c08d1ab5ba2f24b2c057bee5ec66ad34c1e92e32235494a644aac7cebf8d8",
       "mode": "100644"
     },
     {
       "path": "convex/__tests__/appUpdateTools.test.ts",
-      "sha256": "fe7ae55f06be7c9d0a0c9d82c1e0c7a85d9b46c7dd4bffc9a13ca33bfeb61b12",
+      "sha256": "e26503a4b1c32e05d8e38468cee630e63a94fe1eb2a133326242852822ccf216",
       "mode": "100644"
     },
     {
@@ -5269,7 +5279,7 @@
     },
     {
       "path": "convex/__tests__/externalAppsTools.test.ts",
-      "sha256": "1b9070f537fc25e346c03c46242f750a1e96da00dd5f6c7eefa0839470a24135",
+      "sha256": "def2a27c9a97ccbc40254661abe95ad68249bc9e2d451fb619a3d43f69c7e209",
       "mode": "100644"
     },
     {
@@ -5454,7 +5464,7 @@
     },
     {
       "path": "convex/__tests__/impersonation.test.ts",
-      "sha256": "9091e0ce7af42df496aeb811e933df7042f03f281ceba96a341e9c85d195c352",
+      "sha256": "8fdf19e77154d6aa36f0291f084d466b7db694df0522dc1f9dac297f0b692cd8",
       "mode": "100644"
     },
     {
@@ -5749,7 +5759,7 @@
     },
     {
       "path": "convex/__tests__/mcpDeviceTools.test.ts",
-      "sha256": "5b5ac5dbd8ef126213ce11ab6eb8545936be0c0a7a856f845c69aa0abdead670",
+      "sha256": "b5ec20cc1fccc3b668f9832f5586df0becc289f98c7c2478327c1e8a1075b8fd",
       "mode": "100644"
     },
     {
@@ -6339,7 +6349,7 @@
     },
     {
       "path": "convex/__tests__/richSeed.test.ts",
-      "sha256": "6a3fa227859455a10ae536e1259b6c1b146afe8df3b5368c8c13a944498b520d",
+      "sha256": "99096bd011a9956463a37da985cba7e3587e19dd042b47017cd3da4458aadb45",
       "mode": "100644"
     },
     {
@@ -6639,7 +6649,7 @@
     },
     {
       "path": "convex/__tests__/simplemdmRestart.test.ts",
-      "sha256": "21da82c5383a1d9be2b2655e395b9a2bbc69fbadab01793a18cf8fb09be243cb",
+      "sha256": "b11630e53e3db2e0d7c0bff18ca52914a466b2d00553be45010997c3aadc48d7",
       "mode": "100644"
     },
     {
@@ -6724,7 +6734,7 @@
     },
     {
       "path": "convex/__tests__/slackBot.test.ts",
-      "sha256": "dd0e97c81d8cc80fa61d4f05e0d5e314edbbb20169b942dde8a272e314d6e20b",
+      "sha256": "78d45906ae47a1815c8b4888d2a3e3d3a88fc192f4bf49d6add5630a80cb9917",
       "mode": "100644"
     },
     {
@@ -7179,7 +7189,7 @@
     },
     {
       "path": "convex/_generated/api.d.ts",
-      "sha256": "589b90fe80017258092d2189c030bed829db5b52528ddc5f6a0a59e4fdb165e3",
+      "sha256": "9817ecb96a93b90b1bfc982609585f2bc894c82a030ae3b0b268cd676f1799d5",
       "mode": "100644"
     },
     {
@@ -7254,7 +7264,7 @@
     },
     {
       "path": "convex/adminCloneScholar.ts",
-      "sha256": "5889f90384cf46fa9c9773fc79ed21c341b7c419ad63517f01ad58e2463b1c72",
+      "sha256": "f37f27f88c8dd8cef662857915bf3bf4d17b192ffeccdca878ac2049cf576647",
       "mode": "100644"
     },
     {
@@ -7274,7 +7284,7 @@
     },
     {
       "path": "convex/analysisHelpers.ts",
-      "sha256": "d8e226a776c5f998cf8edb2f1d84abed66c6886f5b2de54c3b0da39dc833ce2e",
+      "sha256": "4c1b7c1e8c6b937abf3db2f567bf34921b23cbee9e82fa4dc964391e2a0d8991",
       "mode": "100644"
     },
     {
@@ -7594,7 +7604,7 @@
     },
     {
       "path": "convex/devPurge.ts",
-      "sha256": "6bb65f8d7137fa2f8c6e9c4e01297e2910fd0776793f889d9852cb6526fff224",
+      "sha256": "8e0658cc5bc89ffbda2d0539dc69630846207105a1522c98c7fdbe0024cc3f76",
       "mode": "100644"
     },
     {
@@ -7614,7 +7624,7 @@
     },
     {
       "path": "convex/deviceLock.ts",
-      "sha256": "6d39293a6d292a5be8d71d1ed246d3632f9eb3d44e165253f8c54c055a1ff3f0",
+      "sha256": "a6eb7ddd9b434c39e4ec11a1b07e58af87c52657c62e475a6e4d74121d3c8a21",
       "mode": "100644"
     },
     {
@@ -7774,7 +7784,7 @@
     },
     {
       "path": "convex/http.ts",
-      "sha256": "60344ffae3216e3ca63739bd7f396a0bef7c68bb061876db000738b3bb51f621",
+      "sha256": "1741945219966bf3ee62353fbddaba1d115e5a4f788e5d8807fcb4fd0a0107d5",
       "mode": "100644"
     },
     {
@@ -7868,6 +7878,11 @@
       "mode": "100644"
     },
     {
+      "path": "convex/levelEvidence.ts",
+      "sha256": "3d4e15d1f40da198a7aa11e4ac0b0d724adb9703823bc624dc52bcc64fa46517",
+      "mode": "100644"
+    },
+    {
       "path": "convex/lib/__tests__/access.test.ts",
       "sha256": "2cd3c3d2811653b981ebd30e0a65d96ea1b633f87abf762dab528f120ef28252",
       "mode": "100644"
@@ -7953,6 +7968,11 @@
       "mode": "100644"
     },
     {
+      "path": "convex/lib/__tests__/classFocusTools.test.ts",
+      "sha256": "bdf2d8ca603b4095052a2fd45acb50dc5d470189d3d99ff7c8c68fbaaf9eac62",
+      "mode": "100644"
+    },
+    {
       "path": "convex/lib/__tests__/conceptLabels.test.ts",
       "sha256": "e4bb7bad5c9a147b4891e4a5f0f99170ebacc174573f3ae95e99bb115f9926be",
       "mode": "100644"
@@ -7998,13 +8018,23 @@
       "mode": "100644"
     },
     {
+      "path": "convex/lib/__tests__/deviceOpsTools.test.ts",
+      "sha256": "846fae2887155230c0caa59511016f448e8f206e285280762608951ec666407c",
+      "mode": "100644"
+    },
+    {
       "path": "convex/lib/__tests__/domainTaxonomy.test.ts",
       "sha256": "70f460f20e7a26c5cb75643ae066b1f452f7c40b6c1116ecb13196749fbae82c",
       "mode": "100644"
     },
     {
       "path": "convex/lib/__tests__/driveAccess.test.ts",
-      "sha256": "4cb46fbafc4a8bd65e94090fc3879eb606663cd67915f71e1f08b6ce79d41ffb",
+      "sha256": "96532ddea5c7bd43fcd723529f31697a0d01822f71e0374af1ed75ae3c756568",
+      "mode": "100644"
+    },
+    {
+      "path": "convex/lib/__tests__/driveTools.test.ts",
+      "sha256": "e5605e9161144e2bc34d37fb718525ae266d606531b9ab9b24b6437e9e58409d",
       "mode": "100644"
     },
     {
@@ -8183,6 +8213,11 @@
       "mode": "100644"
     },
     {
+      "path": "convex/lib/__tests__/levelEvidence.test.ts",
+      "sha256": "6097931102829309a05badf0aab42e14e568de5d58792a4e9cb2c1e22c799298",
+      "mode": "100644"
+    },
+    {
       "path": "convex/lib/__tests__/llmLimiterDecision.test.ts",
       "sha256": "da7a22f1f8f9ba8708e8feabcd649ed4547986f4b17f66b4d49f0e7950eb295a",
       "mode": "100644"
@@ -8219,7 +8254,7 @@
     },
     {
       "path": "convex/lib/__tests__/observerShared.test.ts",
-      "sha256": "193a93977e75c4232cfa359a91dae6b9baa95ab72acc94eea9163351b7ca4645",
+      "sha256": "e88210cbfd67fe0164777e33ed21aad43b8d412aff3fc145e28e8a1528ffaf25",
       "mode": "100644"
     },
     {
@@ -8579,7 +8614,7 @@
     },
     {
       "path": "convex/lib/aideTools.ts",
-      "sha256": "f90cab789968a5cb584850b1b3aa68b8f31c97b5657afc33be4c350244dc7379",
+      "sha256": "61e206890b763bd6f7b0864ec9ac6804106dddf9904ecc89df2be467489790e0",
       "mode": "100644"
     },
     {
@@ -8654,7 +8689,7 @@
     },
     {
       "path": "convex/lib/auth.ts",
-      "sha256": "17d271d39c49e086617d29d6aa59651ff70bb5233d8554a8adad3e74a6a1e01b",
+      "sha256": "7d2c6d68233eda0f353a98637fc2704c615927c278296ca1ef0602142864a119",
       "mode": "100644"
     },
     {
@@ -8704,7 +8739,7 @@
     },
     {
       "path": "convex/lib/cascade.ts",
-      "sha256": "c57476499a716c5b914c2e7c26673bd108ffb1070683b09920dcd5e7e7e29307",
+      "sha256": "55b96e30c6c60af8e79e6bcd3c36877751ec544786bd607976206ae1522d701e",
       "mode": "100644"
     },
     {
@@ -8715,6 +8750,11 @@
     {
       "path": "convex/lib/claimInviteEmail.ts",
       "sha256": "6703b3d9f3cee794a6c459360ba26f93963cf70523476ae219966b770ad854e8",
+      "mode": "100644"
+    },
+    {
+      "path": "convex/lib/classFocusTools.ts",
+      "sha256": "3e4e20c4f43eb16d34b904bb082533f9a804f5fbfe83a24649ccc6f0d9ffd50f",
       "mode": "100644"
     },
     {
@@ -8864,7 +8904,7 @@
     },
     {
       "path": "convex/lib/deviceOpsTools.ts",
-      "sha256": "04ed14fa239b8549298ce8ea14f128f33851474ff173869413b6a7587fae4224",
+      "sha256": "449661b4764324e2086f3125b1cf638eb99ff7409fef06cdc86a20c0942c09e1",
       "mode": "100644"
     },
     {
@@ -8884,7 +8924,12 @@
     },
     {
       "path": "convex/lib/driveAccess.ts",
-      "sha256": "b99d41abdb9d1c1916116e2c41c404b23dcd1114919127fdada0c4e0cfd0ea92",
+      "sha256": "1e869cbf9feebafc25cbc562e368e25459f44d0383815f63460a52827f99161a",
+      "mode": "100644"
+    },
+    {
+      "path": "convex/lib/driveTools.ts",
+      "sha256": "421c6f3b7739437c282bc4c90ba9557e72ecc7b69da2aa36e905d4a8a5db43a8",
       "mode": "100644"
     },
     {
@@ -9213,6 +9258,11 @@
       "mode": "100644"
     },
     {
+      "path": "convex/lib/levelEvidence.ts",
+      "sha256": "2344d722206400a79ff8753332f3bf335dc01384db15ce13494e56c9d208ad1e",
+      "mode": "100644"
+    },
+    {
       "path": "convex/lib/llmLease.ts",
       "sha256": "42b02bc339ad3c96dd7d2877793f9b87deba2f921a84c5b19a760dc0d0bcf082",
       "mode": "100644"
@@ -9314,7 +9364,7 @@
     },
     {
       "path": "convex/lib/observerShared.ts",
-      "sha256": "e307c27d61951bcc36dc1777a3a7eae7e2fa911e5d519e346caae0b11feb0af3",
+      "sha256": "3057e95a23f96c934da2cc6646389871d1e6fc65ae818cd65a9ccd0264d305a4",
       "mode": "100644"
     },
     {
@@ -9939,7 +9989,7 @@
     },
     {
       "path": "convex/lib/promptVersion.ts",
-      "sha256": "eb7a4900ca43168f967e948eb390aa9faba9b12cd818f2a83aab3ecdf23582bd",
+      "sha256": "d9037dbed549fe4cc5c0f9d7cb71a1710b2017bc020e3274efda069ad194f131",
       "mode": "100644"
     },
     {
@@ -10159,7 +10209,7 @@
     },
     {
       "path": "convex/lib/sessionSurface.ts",
-      "sha256": "fcad32069e5e41c906e34e0d3c6a48d7b2a13d1e7b6042ccc9f835d1af0f88c8",
+      "sha256": "de7616ed3728cfcb76622dde0955235cb6fe9491eac1ca7f866d68e254b59f7b",
       "mode": "100644"
     },
     {
@@ -10244,7 +10294,7 @@
     },
     {
       "path": "convex/lib/slackTools.ts",
-      "sha256": "21673b4720cebc6cb0d6784298fb44a69d1d355ce898bbad8c70f8ed80ceb273",
+      "sha256": "ad96524a9c83b60eb42a5987508186b6910968d32d6e73c7c6e92e7df64bbd9d",
       "mode": "100644"
     },
     {
@@ -10364,7 +10414,7 @@
     },
     {
       "path": "convex/lib/toolLabels.ts",
-      "sha256": "ac3b04e338e0758422863eea6d33ef9b3ede62c3729ace6aa3080c6bdbea21cc",
+      "sha256": "7e5652b3598586af3eeb6c9a48418ce0af4d38f8a757baa3a54f2aa3c9ad899d",
       "mode": "100644"
     },
     {
@@ -10529,7 +10579,7 @@
     },
     {
       "path": "convex/mcp.ts",
-      "sha256": "24c717661f199d40cb78746ef77bbddbc4d10adbc4327d3a12505f8d8d17f6f1",
+      "sha256": "5aad704536a588f8a374e70dcec33ed3b1ee59341a3c70a7efec01b6a8500877",
       "mode": "100644"
     },
     {
@@ -10619,7 +10669,7 @@
     },
     {
       "path": "convex/observer.ts",
-      "sha256": "5a9a94bc642642fd6006a9977afb5bb49a4dcb1cbb813d28fe12cfd13be88175",
+      "sha256": "63974babcacd3afd6202d6bce5de63ef48800a50c9889ce56bb14964c28ef672",
       "mode": "100644"
     },
     {
@@ -10779,7 +10829,7 @@
     },
     {
       "path": "convex/practiceItemPool.ts",
-      "sha256": "434d8c2f4ed27acac6c51d2809f74800b7d3c9e3d1a3d8c232eca76b58ae9437",
+      "sha256": "1e8be65911d78b30513aaa871ce22c23c3eebeb90c9c95180e6ea6fa7065f3ec",
       "mode": "100644"
     },
     {
@@ -10829,12 +10879,12 @@
     },
     {
       "path": "convex/prompts.ts",
-      "sha256": "0af873301ba3c62b905a2d6cab160a98deb134c8801b55b25e929f2fc264117a",
+      "sha256": "362c4effa610711f3adbcfa041a9e6e25464f923fa7b42425d30c9116fef3e65",
       "mode": "100644"
     },
     {
       "path": "convex/pushes.ts",
-      "sha256": "8b380994bb3df09ffb44a21fab2ca09a26a13777e7795470eac9ad09a6a010b3",
+      "sha256": "0fff9e5557d9646de13f4d4d35cb1913672c1d630e2e0fddf45a1520f473a267",
       "mode": "100644"
     },
     {
@@ -10889,7 +10939,7 @@
     },
     {
       "path": "convex/schema.ts",
-      "sha256": "9ed512af65919e2b4fa3541c060cdb56a0a4ffa8581c4cbda45c6de26143280b",
+      "sha256": "8e398e936c93921b78653dbfb3159c8d8600f03b3ce27acf54c6cb2227650c33",
       "mode": "100644"
     },
     {
@@ -11133,6 +11183,11 @@
       "mode": "100644"
     },
     {
+      "path": "convex/seed/rich/levelEvidence.ts",
+      "sha256": "70a814aafe5cceecd23526b0199b05b7184f94e2fffa80535997ad1be35bdaec",
+      "mode": "100644"
+    },
+    {
       "path": "convex/seed/rich/observation.ts",
       "sha256": "c703d452d3b9f0daa68c05867d309a4f82019350133b269e2048b304f36dab96",
       "mode": "100644"
@@ -11259,7 +11314,7 @@
     },
     {
       "path": "convex/seedRichCohort.ts",
-      "sha256": "a7949c5625fd4145ea80b5690f405155532e4e6ea6ba672b5bce44dd19dedad3",
+      "sha256": "7fb7440cc736780a9654b1c759bab0838c15ef340b5632c8c912dd85d7f1cc1d",
       "mode": "100644"
     },
     {
@@ -11304,7 +11359,7 @@
     },
     {
       "path": "convex/sessionHelpers.ts",
-      "sha256": "ba27a6702d0cbef0db2e1e769cc37e6daf5dafabcffe82dc5b959b3e710ee80b",
+      "sha256": "c7dff954031c99111064f23274e206fbc12171907d839cbd164ec4205fa7c541",
       "mode": "100644"
     },
     {
@@ -11324,7 +11379,7 @@
     },
     {
       "path": "convex/sessions.ts",
-      "sha256": "2dd21f611942efafaf1d6b3f87499bf608098a2b67e82f8fdd29cd4f0ed004a4",
+      "sha256": "3b1fa72b6387b2ae336eca19606adad499783ba45cc31731c4841f1e24cbc7c6",
       "mode": "100644"
     },
     {
@@ -11339,7 +11394,7 @@
     },
     {
       "path": "convex/simplemdm.ts",
-      "sha256": "361cffe4e51eb75c0019fa38cf4f43e9fa379591d315908b72a5513122932d17",
+      "sha256": "9af371bf05620ce67c615ab1d5413aa82e6ac787dec13000b3712fac65ab98a0",
       "mode": "100644"
     },
     {
@@ -11394,7 +11449,7 @@
     },
     {
       "path": "convex/slackBot.ts",
-      "sha256": "6067507c246bbac0f72de07080028d4439ab4d5d0062e060246377f69868cd1d",
+      "sha256": "0072fdb252723e3b8c236f4e29c27de9243c36d905766ef824c73ab11f590fe5",
       "mode": "100644"
     },
     {
@@ -11589,7 +11644,7 @@
     },
     {
       "path": "convex/users.ts",
-      "sha256": "43e8fdbd56f9dd56225ecc4e5bb36af0d9d182cb511e2b3045e5c7b7e6b357ec",
+      "sha256": "c27b3ae1e32c9f06c21cfe9ce75267160b350935688e76f2eb3537fd0b224655",
       "mode": "100644"
     },
     {
@@ -12960,6 +13015,16 @@
     {
       "path": "evals/spot-eval/stretch-dialogue.ts",
       "sha256": "824de62b7b8578637a85c4ab62e91ca1b690b91c1d92d152def6ded52bf0137a",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/spot-eval/talk-judgment-FINDINGS.md",
+      "sha256": "5496711c01fe1dbaf6f19316ff87d8ed434a36a5714ad552559ffa5e24425a94",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/spot-eval/talk-judgment.ts",
+      "sha256": "f72ed454287d69ab9abf661cd2f6ce4986b9afaad53917487afdae8b68f277d7",
       "mode": "100644"
     },
     {
@@ -14644,7 +14709,7 @@
     },
     {
       "path": "lib/readingTrend.ts",
-      "sha256": "b77de2a1c85792a2ab7b81c5a275f21d1e726df4b727ba57f1c656bcf1a7eaa3",
+      "sha256": "6caedd8712f2f36f7ac3d63dec387a1913f9da80bed80e1574855afe4a037f92",
       "mode": "100644"
     },
     {
@@ -15049,12 +15114,12 @@
     },
     {
       "path": "local/lib.sh",
-      "sha256": "5547a2e39ad636cf6116425d029c06906c70301a015fde74f7266c116ceda2da",
+      "sha256": "d0561805e7293cecd995dfa30cd70f26959edbc3cca0b48dd66957fcb81d5bfb",
       "mode": "100755"
     },
     {
       "path": "local/setup.sh",
-      "sha256": "ec106ac5ca78f80111811742cb58163047d38993d675f6a6116587c1acdcff14",
+      "sha256": "6d47a92ca6dfd058b56689809cee2cedc086d707aeb000aebeb787d744e566f7",
       "mode": "100755"
     },
     {
@@ -17179,7 +17244,7 @@
     },
     {
       "path": "native/src/components/vibecode/VibecodeScreen.tsx",
-      "sha256": "bc22e62d7fc4b3b29ba6930eb6cc1900035b1559d27ca55ff547462ffc926e19",
+      "sha256": "c75ab67bb59c7e6e14db1932fbb66109210a8fea420de24ab4e334dac5064290",
       "mode": "100644"
     },
     {
@@ -18504,7 +18569,7 @@
     },
     {
       "path": "native/vendor/convex_generated/api.d.ts",
-      "sha256": "589b90fe80017258092d2189c030bed829db5b52528ddc5f6a0a59e4fdb165e3",
+      "sha256": "9817ecb96a93b90b1bfc982609585f2bc894c82a030ae3b0b268cd676f1799d5",
       "mode": "100644"
     },
     {
@@ -21328,5 +21393,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "4ecc5081659cdf29bf97f2ee651bb59af4b1fa1a9cbbb70fd12b7df992ebf3ab"
+  "treeHash": "6e07dbb5774e67539e5b6f3fb903f6507d03c46687799b40326fc257118fe1be"
 }

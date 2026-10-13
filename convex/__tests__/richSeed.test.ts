@@ -6,6 +6,12 @@ import type { Id } from "../_generated/dataModel";
 import { richSeed } from "../seed/rich";
 import { normalizeGranules } from "../lib/granules";
 import { deriveHomeTabs } from "../../shared/scholarHomeNow";
+import {
+  LEVEL_EVIDENCE_SCHOLAR,
+  levelEvidenceReadAlouds,
+  levelEvidenceSessions,
+} from "../seed/rich/levelEvidence";
+import { readAloudText, tallyReadAloud } from "../lib/levelEvidence";
 
 // Why this file: the rich-cohort inserter (convex/seedRichCohort.ts) is run
 // through the LIVE schema validators here — convexTest validates every inserted
@@ -812,5 +818,56 @@ describe("rich cohort seed — schema drift + invariants", () => {
     expect(teachersWithChat.size).toBe(
       new Set(richSeed.chats.map((chat) => chat.teacherKey)).size,
     );
+  });
+});
+
+describe("rich seed — Talk / Read / Write evidence fixture (TRA-515)", () => {
+  test("gives one beginner every evidence line, refreshed (not doubled) on a re-seed", async () => {
+    const t = convexTest(schema, modules);
+    await t.run((ctx) => ctx.runMutation(internal.seedRichCohort.seedAll, {}));
+    await t.run((ctx) => ctx.runMutation(internal.seedRichCohort.seedAll, {}));
+    const byUsername = (username: string) =>
+      t.run((ctx) =>
+        ctx.db
+          .query("users")
+          .withIndex("by_username", (q) => q.eq("username", username))
+          .first(),
+      );
+    const scholar = (await byUsername(LEVEL_EVIDENCE_SCHOLAR))!;
+    expect(scholar).toMatchObject({ readLevel: "beginner", writeMode: "voice" });
+    const { attempts, judged, fixtureSessions, history } = await t.run(async (ctx) => {
+      const attempts = await ctx.db
+        .query("readAloudAttempts")
+        .withIndex("by_scholar", (q) => q.eq("scholarId", scholar._id))
+        .collect();
+      const titles = new Set(levelEvidenceSessions.map((s) => s.title));
+      const fixtureSessions = (
+        await ctx.db
+          .query("sessions")
+          .withIndex("by_user", (q) => q.eq("userId", scholar._id))
+          .collect()
+      ).filter((s) => titles.has(s.title));
+      let judged = 0;
+      for (const s of fixtureSessions) {
+        const a = await ctx.db
+          .query("analyses")
+          .withIndex("by_session", (q) => q.eq("sessionId", s._id))
+          .first();
+        if (a?.talkLevel) judged += 1;
+      }
+      const history = await ctx.db
+        .query("readingLevelHistory")
+        .withIndex("by_scholar", (q) => q.eq("scholarId", scholar._id))
+        .collect();
+      return { attempts, judged, fixtureSessions, history };
+    });
+    // The second seed REFRESHED the fixture rather than doubling it.
+    expect(fixtureSessions).toHaveLength(levelEvidenceSessions.length);
+    expect(judged).toBe(levelEvidenceSessions.length);
+    expect(attempts).toHaveLength(levelEvidenceReadAlouds.length);
+    expect(history.filter((h) => h.dimension === "read" || h.dimension === "write")).toHaveLength(2);
+    expect(
+      readAloudText(tallyReadAloud(attempts.map((a) => ({ ...a, at: a._creationTime })))),
+    ).toContain("often misses sh");
   });
 });

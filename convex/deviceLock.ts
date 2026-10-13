@@ -37,6 +37,7 @@ import {
 } from "../shared/institutionDay";
 import { siteUrl, withBase } from "./lib/channels";
 import { writeAuditLog } from "./lib/auditLog";
+import { assertNotImpersonating } from "./lib/auth";
 
 export type RabbitholeLockState = "armed" | "disarmed";
 export type RabbitholeLockDisarmMode =
@@ -84,12 +85,24 @@ type LockCommand = {
   disarmMinutes?: number;
 };
 
-type LockTransitionSource = "web" | "slack" | "mcp" | "midnight" | "timed" | "device";
+type LockTransitionSource =
+  | "web"
+  | "app"
+  | "slack"
+  | "mcp"
+  | "midnight"
+  | "timed"
+  | "device";
 
-/** The agent transports that share listForAgent/setFromAgent. Required, not
- *  defaulted: the value lands verbatim in the audit line, so a new caller
- *  must say which surface it is rather than inheriting "slack". */
-const agentSourceValidator = v.union(v.literal("slack"), v.literal("mcp"));
+/** The agent transports that share listForAgent/setFromAgent ("app" = the
+ *  in-app staff aide). Required, not defaulted: the value lands verbatim in
+ *  the audit line, so a new caller must say which surface it is rather than
+ *  inheriting "slack". */
+const agentSourceValidator = v.union(
+  v.literal("slack"),
+  v.literal("mcp"),
+  v.literal("app"),
+);
 
 function desiredState(row: Doc<"pairedDevices">): RabbitholeLockState {
   return row.rabbitholeLockDesiredState ?? "armed";
@@ -592,7 +605,7 @@ export const rearmTimed = internalMutation({
 
 /**
  * The read half of the agent read-before-write contract, shared by every
- * agent transport (Slack bot, MCP connector) through
+ * agent transport (in-app aide, Slack bot, MCP connector) through
  * `lib/deviceOpsTools.ts`. Institution-scoped to the caller's
  * `school:operations` grants, so a fuzzy search can only ever surface iPads
  * the caller may already command.
@@ -696,6 +709,15 @@ export const setFromAgent = internalMutation({
     disarmMinutes: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // A view-as session is read-only, and the in-app aide ("app") runs as the
+    // REAL owner of that browser session — so refuse here, as the console's
+    // own write wrapper does. A no-op for Slack (no session) and MCP (an
+    // OAuth session carries no overlay).
+    try {
+      await assertNotImpersonating(ctx);
+    } catch (error) {
+      return { ok: false as const, message: (error as Error).message };
+    }
     const caller = await ctx.db.get(args.callerUserId);
     if (!caller) {
       return { ok: false as const, message: "Forbidden: school staff role required" };

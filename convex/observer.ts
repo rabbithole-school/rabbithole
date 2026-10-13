@@ -21,6 +21,7 @@ import {
   resolveChatAlertRecency,
   resolveChatAlerts,
   resolveObservationEvidenceTime,
+  scholarWordCount,
   typedScholarWordCount,
   type ObserverHistoryMessage,
   type ParsedObserverResponse,
@@ -570,6 +571,15 @@ export const analyzeSession = internalAction({
           summary: result.pulse.summary,
           pulseScore: result.pulse.pulseScore,
           promptVersion,
+          // Talk judgment (TRA-515): the grade of the language used, spoken turns
+          // included, counted over the window the model actually read.
+          // saveAnalysis drops it below the word floor or if it isn't a grade.
+          ...(result.talkLevel
+            ? {
+                talkLevel: result.talkLevel,
+                scholarWords: scholarWordCount(recentHistory),
+              }
+            : {}),
         });
         console.log(`[Observer] Pulse written OK`);
       }

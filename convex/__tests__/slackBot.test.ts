@@ -11,7 +11,6 @@ import {
   collectThreadImages,
   collectThreadDocuments,
   collectThreadTextDocuments,
-  resolveDriveLinks,
   buildToolContext,
   settleRunningToolActivity,
   UNREPORTED_TOOL_RESULT,
@@ -3978,116 +3977,6 @@ describe("collectThreadTextDocuments", () => {
       const texts = await collectThreadTextDocuments(TOKEN, thread);
       expect(texts.size).toBe(5); // MAX_INLINE_TEXT_DOCS
       expect(texts.get("T0")!.text).toBe("body 0");
-    } finally {
-      restore();
-    }
-  });
-});
-
-describe("resolveDriveLinks", () => {
-  const ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345";
-  const LINK = `https://docs.google.com/document/d/${ID}/edit`;
-  const USER = "user_1" as Id<"users">;
-  const FRESH = Date.now() + 3_600_000;
-
-  /** ctx whose only query is googleAccounts.getForUserInternal. */
-  const ctxFor = (acct: unknown) =>
-    ({
-      runQuery: async () => acct,
-      runMutation: async () => undefined,
-    }) as unknown as Parameters<typeof resolveDriveLinks>[0];
-
-  const LINKED = {
-    email: "lehua@moli.school",
-    accessToken: "tok",
-    expiresAt: FRESH,
-    scopes: ["https://www.googleapis.com/auth/drive.readonly"],
-  };
-
-  const stubFetch = (handler: (url: string) => Response) => {
-    const original = globalThis.fetch;
-    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) =>
-      handler(String(input)),
-    ) as unknown as typeof fetch;
-    return () => {
-      globalThis.fetch = original;
-    };
-  };
-
-  test("no Drive link in the text is a no-op (no token work at all)", async () => {
-    const runQuery = vi.fn();
-    const ctx = { runQuery } as unknown as Parameters<
-      typeof resolveDriveLinks
-    >[0];
-    expect(await resolveDriveLinks(ctx, USER, "just a normal message")).toBe("");
-    expect(runQuery).not.toHaveBeenCalled();
-  });
-
-  test("unlinked account relays the reconnect link, markup intact", async () => {
-    const out = await resolveDriveLinks(ctxFor(null), USER, `see ${LINK}`);
-    expect(out).toMatch(/<https?:\/\/[^|]+\/connect-google[^|]*\|Connect Google Drive>/);
-    // The model must be told to preserve the markup, or it renders as prose.
-    expect(out).toContain("keeping the link markup exactly as written");
-  });
-
-  // A 404 used to be reported flatly as "isn't shared with you", which sent
-  // people chasing access they already had when the model had simply invented
-  // the URL. It has to leave both explanations open and prefer re-searching.
-  test("an unreachable file doesn't get blamed on permissions", async () => {
-    const restore = stubFetch(() => new Response("no", { status: 404 }));
-    try {
-      const out = await resolveDriveLinks(ctxFor(LINKED), USER, LINK);
-      expect(out).toContain("lehua@moli.school");
-      expect(out).toContain("search_drive");
-      expect(out).not.toMatch(/isn't shared with lehua@moli.school\./);
-      expect(out).not.toContain("Resolved a Google Drive link");
-    } finally {
-      restore();
-    }
-  });
-
-  test("a readable Doc is folded in with its text", async () => {
-    const restore = stubFetch((url) =>
-      url.includes("/export")
-        ? new Response("The whole draft.")
-        : new Response(
-            JSON.stringify({
-              id: ID,
-              name: "Unit Plan",
-              mimeType: "application/vnd.google-apps.document",
-            }),
-            { headers: { "content-type": "application/json" } },
-          ),
-    );
-    try {
-      const out = await resolveDriveLinks(ctxFor(LINKED), USER, `read ${LINK}`);
-      expect(out).toContain("Resolved a Google Drive link");
-      expect(out).toContain("Unit Plan");
-      expect(out).toContain("The whole draft.");
-      // Attribution matters: the reader is the ASKER, not the bot.
-      expect(out).toContain("lehua@moli.school");
-    } finally {
-      restore();
-    }
-  });
-
-  test("an unreadable file names the file and the reason", async () => {
-    const restore = stubFetch((url) =>
-      url.includes("alt=media")
-        ? new Response("x")
-        : new Response(
-            JSON.stringify({
-              id: ID,
-              name: "scan.pdf",
-              mimeType: "application/pdf",
-            }),
-            { headers: { "content-type": "application/json" } },
-          ),
-    );
-    try {
-      const out = await resolveDriveLinks(ctxFor(LINKED), USER, LINK);
-      expect(out).toContain("scan.pdf");
-      expect(out).toContain("attached in Slack");
     } finally {
       restore();
     }

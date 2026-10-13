@@ -35,7 +35,7 @@ export interface ReadingTrendOptions {
 
 const DEFAULT_WINDOW_DAYS = 90;
 const DEFAULT_BUCKET_DAYS = 7;
-const DEFAULT_MIN_WORDS_PER_MESSAGE = 3;
+export const DEFAULT_MIN_WORDS_PER_MESSAGE = 3;
 
 function roundOneDecimal(value: number): number {
   return Math.round((value + Number.EPSILON) * 10) / 10;

@@ -34,7 +34,7 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { curriculumMutation, curriculumQuery } from "./lib/customFunctions";
-import { getActiveOverlay, requireCurriculumAccessAction } from "./lib/auth";
+import { requireCurriculumAccessAction, VIEWING_AS_READ_ONLY_ERROR } from "./lib/auth";
 import type { Doc, Id } from "./_generated/dataModel";
 import { generateItem, hasTemplate } from "./lib/practice/templates";
 import {
@@ -851,13 +851,11 @@ export const generateForNode = action({
     // wrappers enforce it but an action gate doesn't — check explicitly so a
     // platform-admin browsing as a teacher can't trigger stored-item writes.
     const impersonating: boolean = await ctx.runQuery(
-      internal.practiceItemPool.isImpersonatingInternal,
+      internal.users.isSessionImpersonating,
       {},
     );
     if (impersonating) {
-      throw new Error(
-        "Read-only while viewing as another user — exit impersonation to act as yourself.",
-      );
+      throw new Error(VIEWING_AS_READ_ONLY_ERROR);
     }
     if (args.replace) {
       // storeGeneratedItems's replace deletes EVERY practiceItems row for the
@@ -887,13 +885,6 @@ export const generateForNode = action({
 // canDesignCurriculum), same as create_problem_set — these are not reachable
 // from any client.
 
-/** Action-side impersonation probe for generateForNode (actions have no db,
- *  so the overlay check runs here). Annotated to avoid the same-module
- *  circular-inference trap documented on generateForNode. */
-export const isImpersonatingInternal = internalQuery({
-  args: {},
-  handler: async (ctx): Promise<boolean> => (await getActiveOverlay(ctx)) !== null,
-});
 
 export const poolForNodeInternal = internalQuery({
   args: { nodeKey: v.string() },
