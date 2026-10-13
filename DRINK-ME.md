@@ -24,11 +24,14 @@ report it (step 7).
 
 ## Rules
 
-1. **Ask before you act.** Assume the person has never used a terminal and
-   that git and Node mean nothing to them. Show each command, say in plain
-   words what it does, and run it yourself once they say yes. Install nothing
-   without a yes. If your safety settings pause a step, say what it was and
-   why in plain words, and let the person decide. Never work around the check.
+1. **Ask before you act, one step at a time.** Assume the person has never
+   used a terminal and that git and Node mean nothing to them. Show the next
+   command, say in plain words what it does, then end your message and wait
+   for their yes. Run it yourself once they say yes. One step per yes, even
+   if your tools would let you run several at once, and never skip ahead of
+   step 2's questions. Install nothing without a yes. If your safety settings
+   pause a step, say what it was and why in plain words, and let the person
+   decide. Never work around the check.
 2. **Pretend people only.** Never ask for, type, or store a real child's name
    or details. The school in this kit is fictional, and it stays that way.
 3. **Keys stay out of the chat.** Never ask the person to paste an API key or
@@ -38,8 +41,10 @@ report it (step 7).
    person wants Rabbithole online for real students, tell them that's a later
    step of the pilot and isn't in this kit.
 5. **Use the scripts.** Run the `bin/` scripts instead of improvising what they
-   do. If one fails, read its message and the log it names, fix the cause, and
-   run it again. Don't edit files under `rabbithole/`.
+   do. Never start, stop, or restart its parts by hand, even to apply a
+   setting; if the person asks for something no script does, say so plainly.
+   If a script fails, read its message and the log it names, fix the cause,
+   and run it again. Don't edit files under `rabbithole/`.
 6. **Stop means stop.** If the person wants out, run `bin/stop.sh` and tell
    them that `bin/uninstall.sh` removes everything.
 
