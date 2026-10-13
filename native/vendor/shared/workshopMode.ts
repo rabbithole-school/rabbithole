@@ -113,6 +113,33 @@ export function defaultWorkshopMode(session: WorkshopModeSession): WorkshopMode 
 }
 
 /**
+ * Whether the tutor chat opens beside the app by default (Andy, 2026-10-12).
+ * The chat pane is otherwise a toggle that starts closed (F14b); the one
+ * exception is a scholar PLAYING their own session of a Play-only app that has
+ * a character (the witness lesson: the character plays, the tutor teaches), so
+ * the tutor's questions are on screen instead of behind the Chat button.
+ *
+ * Play-only is the server's `hidden` verdict (`editAccess: "never"`); staff
+ * always get `allowed`, so a teacher's rehearsal never qualifies, and a Build
+ * (`always`) or not-yet-unlocked (`locked`) app keeps the closed default.
+ * Callers apply this once, as the initial value, and only where the chat is a
+ * side column: a narrow screen's bottom drawer would cover the app.
+ */
+export function defaultChatOpen({
+  access,
+  hasAppCharacter,
+  isSessionOwner,
+  isTestDrive,
+}: {
+  access: EffectiveEditAccess;
+  hasAppCharacter: boolean;
+  isSessionOwner: boolean;
+  isTestDrive: boolean;
+}): boolean {
+  return access === "hidden" && hasAppCharacter && isSessionOwner && !isTestDrive;
+}
+
+/**
  * Project the server's verdict onto the two rendering booleans the Workshop
  * uses: whether the Edit | Play control renders at all, and whether the Edit
  * segment is live (vs. the locked lock-icon segment).
