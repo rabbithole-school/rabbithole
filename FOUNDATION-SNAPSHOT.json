@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "dd9e44cc9f16c53f376686aab7b6afdaff5da7d2",
+  "sourceCommit": "431891f39c8d7c46a2aa5c06a499f22e37455659",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -3124,7 +3124,7 @@
     },
     {
       "path": "components/practice/CalculatorLicenseCard.tsx",
-      "sha256": "6f20f2ad694c9e50944376aa09d0c75878a51ebafe765646bd4e6d5e2e085bb5",
+      "sha256": "a2338819063de10bcdfaf6ee587274b15322aeb9d89bcd90da576195314cb082",
       "mode": "100644"
     },
     {
@@ -4869,7 +4869,7 @@
     },
     {
       "path": "convex/__tests__/calculatorLicense.test.ts",
-      "sha256": "46ba879667714028e8dfa5f6a725981e1e6d0bfa51d163a60b82a6674c508092",
+      "sha256": "62c2e46f6c53a9b1c615cf991131cb1a52fd0b1200c92dfbbe21437aa0acadae",
       "mode": "100644"
     },
     {
@@ -7434,7 +7434,7 @@
     },
     {
       "path": "convex/calculatorLicenses.ts",
-      "sha256": "98584cc2e45e82daac1d032e1402837e473e6c662ca51f1a985e07c3ac7ffbf6",
+      "sha256": "a098e430a64bbd05c03c8fef65b30c7cfd289dc01d371a253823746560fc8c30",
       "mode": "100644"
     },
     {
@@ -7489,7 +7489,7 @@
     },
     {
       "path": "convex/cohortPractice.ts",
-      "sha256": "1802c31679f924bac7828dd9a6d90b32b4d701fd4f20c34f4318cc3702ae5da6",
+      "sha256": "f213f054d3ddef5f9c503b9fbb287195ca736b658fe76a67c1cce6100b2d853d",
       "mode": "100644"
     },
     {
@@ -10079,7 +10079,7 @@
     },
     {
       "path": "convex/lib/scholarWriteTools.ts",
-      "sha256": "32f07a2fa51a9d752ca9acf2bdebad52aa0b07d31f6bd8f67813c138e1432e95",
+      "sha256": "6a496fbb57f4fb2c885f0c2f9a4dec77ade776b1f193bcc32e5bafe034efb542",
       "mode": "100644"
     },
     {
@@ -10859,7 +10859,7 @@
     },
     {
       "path": "convex/schema.ts",
-      "sha256": "1b68d0b64b15a8097097b1e4dd1d1b4a7e8b61e3e58bc1ce1716be927f819311",
+      "sha256": "9fc94a0d26cf675da2a13b9d050fbd049ca91268244d83d4d5a9179651017b4d",
       "mode": "100644"
     },
     {
@@ -11364,7 +11364,7 @@
     },
     {
       "path": "convex/slackBot.ts",
-      "sha256": "4fffcbd99875cb540cc1b9175628e3da5f777110f9d32e6fad2d8208afb9b5dd",
+      "sha256": "6067507c246bbac0f72de07080028d4439ab4d5d0062e060246377f69868cd1d",
       "mode": "100644"
     },
     {
@@ -21293,5 +21293,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "49fca0e3bf63664a93151a86607dec2fc253bf4c124153eb080b6f13de8230f8"
+  "treeHash": "b0f878455b14aea06f4e2f757844d701d1eeec975b6c322ea5409931e469d880"
 }
