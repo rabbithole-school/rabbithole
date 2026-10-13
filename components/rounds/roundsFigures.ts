@@ -288,12 +288,6 @@ export interface RoundsLevelSignals {
     setAt: number | null;
     setBy: "teacher" | "observer" | null;
   };
-  estimate: {
-    level: string | null;
-    computedAt: number | null;
-    ageDays: number | null;
-    disagreesWithConfirmed: boolean;
-  };
 }
 
 /**
@@ -344,54 +338,6 @@ export function confirmedLevelLine(signals: RoundsLevelSignals): {
         : confirmed.setBy === "observer"
           ? "Set by the observer — no teacher has ratified it"
           : "Set before ratification was recorded",
-  };
-}
-
-/**
- * The writing-derived estimate — present ONLY while it disagrees with the
- * confirmed setting, because agreement clears it server-side. So a returned
- * estimate always means "current evidence disagrees with the setting", and that
- * is what this says out loud.
- *
- * It is never called a reading level. Nothing in its evidence chain observes
- * what the child can read.
- */
-export function writingEstimateLine(
-  signals: RoundsLevelSignals,
-  scholarName: string,
-): {
-  headline: string;
-  /** The full sentence, for the pane. */
-  caption: string;
-  /** The board's line — same claim, short enough to read across a room. */
-  shortCaption: string;
-  dismissLabel: string;
-} | null {
-  const { estimate, confirmed } = signals;
-  if (!estimate.level) return null;
-
-  const age =
-    estimate.ageDays === null
-      ? "computed date not recorded"
-      : estimate.ageDays <= 0
-        ? "computed today"
-        : `computed ${plural(estimate.ageDays, "day", "days")} ago`;
-
-  const against = confirmed.level
-    ? `Nobody has settled it against ${levelPhrase(confirmed.level)}.`
-    : "No confirmed level has been set against it.";
-
-  return {
-    headline: `Writing suggests ${levelText(estimate.level)}`,
-    caption: `Estimated from ${scholarName}'s own writing — typed chat and scanned work, ${age}. ${against}`,
-    shortCaption: confirmed.level
-      ? `From their own writing. Not settled against ${levelPhrase(confirmed.level)}.`
-      : "From their own writing. No confirmed level set against it.",
-    // "Keep <the confirmed value>", never "Dismiss": the teacher is choosing
-    // their standing ruling over a machine estimate, not discarding a message.
-    dismissLabel: confirmed.level
-      ? `Keep ${levelPhrase(confirmed.level)}`
-      : "Leave the level unset",
   };
 }
 

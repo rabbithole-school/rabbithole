@@ -1248,14 +1248,17 @@ export default defineSchema({
     // WRITE mode (TRA-503): own | voice — how the scholar's words get in.
     // Unset = own. Teacher-set only.
     writeMode: v.optional(writeModeValidator),
-    // WRITING-DERIVED grade estimate pending teacher review. Every input is the
-    // scholar's own production (typed tutor chat + OCR'd handwritten work); nothing
-    // observes what they can READ. Not a Lexile measure, not a normed assessment,
-    // not a screener. Present only while it DISAGREES with `readingLevel` —
-    // agreement clears it, so a shown disagreement is always current evidence.
+    // WRITING-DERIVED grade estimate, INFO-ONLY (TRA-513): shown under the Write
+    // row of the profile, never promoted into `readingLevel`. Every input is the
+    // scholar's own TYPED tutor chat (dictated turns and handwriting are excluded);
+    // nothing observes what they can READ. Not a
+    // Lexile measure, not a normed assessment, not a screener. Stored only when
+    // drawn from >= MIN_TYPED_WORDS_FOR_ESTIMATE typed words.
     readingLevelSuggestion: v.optional(v.string()),
     /** When `readingLevelSuggestion` was computed. Without it the age is unknowable. */
     readingLevelSuggestionAt: v.optional(v.number()),
+    /** Typed words `readingLevelSuggestion` was drawn from ("from N typed words"). */
+    readingLevelSuggestionWords: v.optional(v.number()),
     dateOfBirth: v.optional(v.string()), // ISO date string, e.g. "2018-03-15"
     // Scholar's CHRONOLOGICAL grade ("K","1"…"8"). The reference notch on the
     // Acceleration view — what the calendar says, against which we celebrate how

@@ -7,7 +7,11 @@ import { isTeacherRole, ROLES } from "./lib/roles";
 import { assertWritableAction } from "./lib/auth";
 import { MODELS } from "./lib/models";
 import { recordAnthropicUsage } from "./usage";
-import { normalizeReadingLevel } from "./lib/readingLevels";
+import {
+  countWords,
+  MIN_TYPED_WORDS_FOR_ESTIMATE,
+  normalizeReadingLevel,
+} from "./lib/readingLevels";
 import { SCHOLAR_PRONOUN_GUIDANCE } from "./lib/scholarPronouns";
 
 const anthropic = new Anthropic();
@@ -17,8 +21,10 @@ export const READING_LEVEL_SYSTEM_PROMPT = SCHOLAR_PRONOUN_GUIDANCE;
  * Teacher-triggered AI **writing-derived** grade-level estimate.
  *
  * ⚠️ Naming: this writes `users.readingLevelSuggestion`, but every input is the
- * scholar's own PRODUCTION — the last 30 days of typed tutor-chat messages plus
- * OCR-transcribed handwritten portfolio prose. There is no reception evidence
+ * scholar's own TYPED production — the last 30 days of typed tutor-chat
+ * messages (spoken and app-button turns are excluded, and handwriting is not
+ * read: the profile line says "typed writing", so both writers measure that and
+ * only that). There is no reception evidence
  * here; nothing in this action observes what the scholar can READ. The output is
  * an estimate from the scholar's own writing. It is not a Lexile measure, not a
  * normed assessment, and not a screener result. Describe it that way in any
@@ -28,14 +34,9 @@ export const READING_LEVEL_SYSTEM_PROMPT = SCHOLAR_PRONOUN_GUIDANCE;
  *
  * Calls Claude Haiku, then writes to `readingLevelSuggestion` via
  * `scholars.setReadingLevelSuggestionFromAnalysis` (which also stamps the
- * estimate's age). Returns the result so the UI can show it immediately.
- *
- * The model-facing instruction below deliberately keeps its existing construct
- * ("reading/writing level"). Narrowing the model's target to writing alone would
- * shift the estimate distribution, and teachers accept these suggestions into the
- * confirmed level that drives tutor adaptation — so that is a prompt change on
- * the eval-risk path, not a copy fix. It is proposed as a separate, evaluated
- * change rather than smuggled in here.
+ * estimate's age and typed-word count). Info-only: shown under the Write row,
+ * never promoted into the talk level (TRA-513). Returns the result so the UI
+ * can show it immediately.
  */
 export const analyzeReadingLevelAI = action({
   args: { scholarId: v.id("users") },
@@ -50,23 +51,14 @@ export const analyzeReadingLevelAI = action({
     const texts = await ctx.runQuery(api.messages.getScholarUserMessages30d, {
       scholarId: args.scholarId,
     });
-    const portfolioTexts = await ctx.runQuery(api.messages.getScholarPortfolioProse30d, {
-      scholarId: args.scholarId,
-    });
-    const chatCombined = texts.join(" ").trim();
-    const portfolioCombined = portfolioTexts.join("\n\n").trim();
-    const countWords = (text: string) =>
-      text.split(/\s+/).filter((w) => /[a-zA-Z]/.test(w)).length;
-    const wordCount = countWords(chatCombined) + countWords(portfolioCombined);
+    // The sample the model actually reads (sliced below), so the stored word
+    // count is the evidence, not the 30-day total.
+    const chatCombined = texts.join(" ").trim().slice(0, 6000);
     // Chat input is typed turns only (spoken ones are filtered upstream), so a
     // scholar who mostly dictates can land here with no estimate — the honest
     // answer, rather than grading the speech-to-text engine (TRA-495).
-    if (wordCount < 10) return null;
-
-    const evidenceSections = [
-      `## Tutor chat messages (typed by the student)\n${chatCombined.slice(0, 6000) || "(none)"}`,
-      `## Scanned written work — OCR transcription of the student's handwriting\n${portfolioCombined.slice(0, 4000) || "(none)"}`,
-    ].join("\n\n");
+    const wordCount = countWords(chatCombined);
+    if (wordCount < MIN_TYPED_WORDS_FOR_ESTIMATE) return null;
 
     const response = await anthropic.messages.create({
       model: MODELS.HAIKU,
@@ -75,14 +67,14 @@ export const analyzeReadingLevelAI = action({
       tools: [
         {
           name: "report_reading_level",
-          description: "Report estimated reading/writing grade level",
+          description: "Report the estimated grade level of the student's typed writing",
           input_schema: {
             type: "object" as const,
             properties: {
               level: {
                 type: "string",
                 description:
-                  "Reading/writing grade level with one-decimal precision: 'K', a whole grade '1'–'12', a tenth-of-a-grade like '7.3' (≈ three-tenths into grade 7), or 'college'. Use the decimal to place the scholar finely within a grade rather than rounding to the nearest whole grade.",
+                  "Typed-writing grade level with one-decimal precision: 'K', a whole grade '1'–'12', a tenth-of-a-grade like '7.3' (≈ three-tenths into grade 7), or 'college'. Use the decimal to place the scholar finely within a grade rather than rounding to the nearest whole grade.",
               },
               rationale: {
                 type: "string",
@@ -97,7 +89,7 @@ export const analyzeReadingLevelAI = action({
       messages: [
         {
           role: "user",
-          content: `Estimate the reading/writing level of the student from the evidence below. Assess vocabulary, sentence structure, and conceptual expression. Use US grade levels with **one decimal of precision** — e.g. "7.3" means roughly three-tenths of the way into grade 7. This fine granularity matters: place the scholar within the grade rather than rounding to a whole grade. Use "K" for kindergarten or "college" for college-level.\n\nYou have two kinds of evidence. Weigh both. The scanned written work is the student's composed, on-paper writing — usually a stronger signal of writing level than quick chat — but it was transcribed by OCR, so judge its vocabulary and sentence structure and do NOT judge spelling from it (transcription normalizes spelling). If one section is "(none)", rely on the other.\n\n${evidenceSections}`,
+          content: `Estimate the grade level of the student's TYPED writing from the messages below. Assess vocabulary, sentence structure, and conceptual expression. Use US grade levels with **one decimal of precision** — e.g. "7.3" means roughly three-tenths of the way into grade 7. This fine granularity matters: place the scholar within the grade rather than rounding to a whole grade. Use "K" for kindergarten or "college" for college-level.\n\n## Tutor chat messages (typed by the student)\n${chatCombined}`,
         },
       ],
     });
@@ -117,14 +109,15 @@ export const analyzeReadingLevelAI = action({
     const input = toolUse.input as { level: string; rationale: string };
 
     // Coerce the model's free-form answer to a canonical valid level (e.g.
-    // "Grade 7.3" → "7.3", "7" → "7"); bail if it can't be mapped so we never
-    // store a level the teacher's accept flow would then propagate unchecked.
+    // "Grade 7.3" → "7.3"); bail if it can't be mapped. The writer validates
+    // again, so no caller can store an unchecked model answer.
     const level = normalizeReadingLevel(input.level);
     if (!level) return null;
 
     await ctx.runMutation(api.scholars.setReadingLevelSuggestionFromAnalysis, {
       scholarId: args.scholarId,
       suggestion: level,
+      typedWords: wordCount,
     });
 
     return { level, wordCount, rationale: input.rationale };

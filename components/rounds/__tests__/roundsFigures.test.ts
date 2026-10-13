@@ -11,7 +11,6 @@ import {
   noFiguresLine,
   roundsFigureSlots,
   writingComplexityLine,
-  writingEstimateLine,
   type RoundsLevelSignals,
   type RoundsMathGrade,
   type RoundsPracticeSignals,
@@ -209,13 +208,6 @@ describe("the three level instruments", () => {
         setBy: "teacher",
         ...(over.confirmed ?? {}),
       },
-      estimate: {
-        level: null,
-        computedAt: null,
-        ageDays: null,
-        disagreesWithConfirmed: false,
-        ...(over.estimate ?? {}),
-      },
     };
   }
 
@@ -250,57 +242,10 @@ describe("the three level instruments", () => {
     expect(line.caption).toContain("voice first");
   });
 
-  it("shows no estimate while the writing agrees", () => {
-    expect(writingEstimateLine(levels(), "Scholar A")).toBeNull();
-  });
-
-  it("never calls the estimate a reading level, and names its evidence", () => {
-    const line = writingEstimateLine(
-      levels({
-        estimate: {
-          level: "6.2",
-          computedAt: 1_700_000_000_000,
-          ageDays: 4,
-          disagreesWithConfirmed: true,
-        },
-      }),
-      "Scholar A",
-    );
-    expect(line?.headline).toBe("Writing suggests Grade 6.2");
-    expect(line?.headline.toLowerCase()).not.toContain("reading");
-    expect(line?.caption).toContain("own writing");
-    expect(line?.caption).toContain("typed chat and scanned work");
-    // Staleness is visible, because a four-day-old estimate and a four-month-old
-    // one carry very different weight in the room.
-    expect(line?.caption).toContain("computed 4 days ago");
-    expect(line?.caption).toContain("Nobody has settled it against grade 5.");
-    // The board runs the same claim short enough to read across a room.
-    expect(line?.shortCaption).toBe(
-      "From their own writing. Not settled against grade 5.",
-    );
-    expect(line?.shortCaption.toLowerCase()).not.toContain("reading");
-  });
-
   it("keeps a named band a name inside a sentence", () => {
     expect(levelPhrase("5")).toBe("grade 5");
     expect(levelPhrase("K")).toBe("K");
     expect(levelPhrase("pre-reader")).toBe("K");
-  });
-
-  it("offers to KEEP the confirmed value rather than to 'dismiss'", () => {
-    const line = writingEstimateLine(
-      levels({
-        estimate: {
-          level: "6.2",
-          computedAt: 1_700_000_000_000,
-          ageDays: 0,
-          disagreesWithConfirmed: true,
-        },
-      }),
-      "Scholar A",
-    );
-    expect(line?.dismissLabel).toBe("Keep grade 5");
-    expect(line?.dismissLabel.toLowerCase()).not.toContain("dismiss");
   });
 
   it("keeps Flesch–Kincaid named as its own mechanical instrument", () => {

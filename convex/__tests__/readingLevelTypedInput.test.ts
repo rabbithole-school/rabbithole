@@ -28,6 +28,9 @@ const SPOKEN =
   "Photosynthesis is the process by which plants convert sunlight, water, and carbon dioxide into glucose and oxygen.";
 const TYPED = "i think the moon is bigger then the sun becuase it looks big at nite";
 
+// Enough typed words to clear the estimate floor (TRA-513).
+const TYPED_LONG = Array.from({ length: 100 }, () => "word").join(" ");
+
 async function setup(turns: Array<{ content: string; inputModality?: InputModality }>) {
   const t = convexTest(schema, modules);
   const { scholarId, adminId } = await t.run(async (ctx) => {
@@ -110,22 +113,35 @@ describe("reading-level estimate input (TRA-495)", () => {
     const { admin, scholarId } = await setup([
       { content: SPOKEN, inputModality: "spoken" },
       { content: TYPED, inputModality: "typed" },
+      { content: TYPED_LONG, inputModality: "typed" },
       { content: "legacy turn with no modality stamp", inputModality: undefined },
       { content: "Check my answer", inputModality: "app" },
     ]);
 
     expect(
       (await admin.query(api.messages.getScholarUserMessages30d, { scholarId })).sort(),
-    ).toEqual([TYPED, "legacy turn with no modality stamp"].sort());
+    ).toEqual([TYPED, TYPED_LONG, "legacy turn with no modality stamp"].sort());
 
     const result = await admin.action(api.readingLevelAnalysis.analyzeReadingLevelAI, {
       scholarId,
     });
     expect(result?.level).toBe("3");
+    expect(result?.wordCount).toBeGreaterThanOrEqual(100);
     const prompt = JSON.stringify(create.mock.calls[0][0].messages);
     expect(prompt).toContain("bigger then the sun");
     expect(prompt).not.toContain("Photosynthesis");
     expect(prompt).not.toContain("Check my answer");
+  });
+
+  test("too few TYPED words gets no estimate, however much was dictated (TRA-513)", async () => {
+    const { admin, scholarId } = await setup([
+      { content: SPOKEN.repeat(10), inputModality: "spoken" },
+      { content: TYPED, inputModality: "typed" },
+    ]);
+    expect(
+      await admin.action(api.readingLevelAnalysis.analyzeReadingLevelAI, { scholarId }),
+    ).toBeNull();
+    expect(create).not.toHaveBeenCalled();
   });
 
   test("the Flesch–Kincaid trend scores typed turns only", async () => {

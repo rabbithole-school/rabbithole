@@ -34,13 +34,11 @@ const VOCABULARY_WIN_LIMIT = 8;
 
 // ─── Portfolio writing samples (scanned work → writing level) ───────────
 // A scholar's scanned portfolio prose (portfolioItems.extractedText) is a
-// better sample of composed writing than short tutor-chat messages. Both the
-// AI grade estimate (readingLevelAnalysis) and the writing-over-time portrait
-// read it through this one helper so the prose gate stays in a single place.
+// better sample of composed writing than short tutor-chat messages. The
+// writing-over-time portrait reads it through this one helper so the prose
+// gate stays in a single place.
 const PORTFOLIO_ITEMS_SCAN_CAP = 200; // most-recent items to consider
 const PORTFOLIO_TREND_SAMPLE_LIMIT = 8; // portrait samples (kin to vocab wins)
-const PORTFOLIO_ANALYSIS_WINDOW_DAYS = 30; // matches getScholarUserMessages30d
-const PORTFOLIO_ANALYSIS_SAMPLE_LIMIT = 30; // pieces fed to the AI estimate
 
 /**
  * A scholar's recent scanned-work prose, gated to attributed items (matched or
@@ -304,29 +302,6 @@ export const getScholarUserMessages30d = teacherQuery({
       }
     }
     return texts;
-  },
-});
-
-/**
- * A scholar's recent scanned-work PROSE (portfolio extractedText), gated to
- * attributed items clearing the prose floor. Companion to
- * getScholarUserMessages30d — the AI reading-level estimate reads both so the
- * grade reflects the scholar's composed writing, not just tutor chat. Returns
- * the raw texts; institution-scoped like getScholarReadingTrend (empty on a
- * denied cross-institution read rather than throwing).
- */
-export const getScholarPortfolioProse30d = teacherQuery({
-  args: { scholarId: v.id("users") },
-  handler: async (ctx, args): Promise<string[]> => {
-    if (!(await canReadScholarAsTeacher(ctx, ctx.user, args.scholarId))) {
-      return [];
-    }
-    const samples = await readScholarPortfolioSamples(ctx, args.scholarId, {
-      now: Date.now(),
-      windowDays: PORTFOLIO_ANALYSIS_WINDOW_DAYS,
-      limit: PORTFOLIO_ANALYSIS_SAMPLE_LIMIT,
-    });
-    return samples.map((s) => s.text);
   },
 });
 

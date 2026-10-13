@@ -47,7 +47,7 @@ import { RoundsEvidenceList } from "@/components/rounds/RoundsEvidenceList";
 import { RoundsWeekFigures } from "@/components/rounds/RoundsWeekFigures";
 import { CalibrationLine } from "@/components/rounds/CalibrationLine";
 import { parseRoundsWeekParam } from "@/lib/roundsCadence";
-import { RoundsLevelCard, RoundsLevelRuling } from "@/components/rounds/RoundsLevels";
+import { RoundsLevelCard } from "@/components/rounds/RoundsLevels";
 import { RoundsNoteComposer } from "@/components/rounds/RoundsNoteComposer";
 import { SelSynthesisCard } from "@/components/rounds/SelSynthesisCard";
 import { SelTeacherRecord } from "@/components/rounds/SelTeacherRecord";
@@ -419,17 +419,6 @@ export function RoundsPane({
         {!sel ? (
         <Surface p={{ base: 4, lg: 5 }}>
           <SectionEyebrow>This week</SectionEyebrow>
-          {/* The one real decision on the pane, hoisted here so it is settled
-              before the room reads down the week rather than buried mid-scroll
-              in the reading card. Renders nothing unless an estimate disagrees. */}
-          <Box mt={3}>
-            <RoundsLevelRuling
-              scholarId={scholarId}
-              scholarName={scholarName}
-              signals={levels}
-              unavailable={levelBatch.failed}
-            />
-          </Box>
           <Box mt={3}>
             <RoundsWeekFigures
               signals={figures}
@@ -466,13 +455,10 @@ export function RoundsPane({
         </Surface>
         ) : null}
 
-        {/* Reading and writing — three separate instruments, named separately.
-            The confirmed level is a human ruling the tutor acts on; the
-            estimate is derived from this child's own writing and is stored
-            only while it disagrees; Flesch–Kincaid is mechanical and charted
-            elsewhere. Conflating them would misreport all three. The estimate
-            DECISION is hoisted into "This week" above; this card explains the
-            instruments. Academic only. */}
+        {/* Reading and writing — two separate instruments, named separately.
+            The confirmed level is a human ruling the tutor acts on;
+            Flesch–Kincaid is mechanical and charted elsewhere. Conflating
+            them would misreport both. Academic only. */}
         {!sel ? (
         <Surface p={{ base: 4, lg: 5 }}>
           <SectionEyebrow>Reading and writing</SectionEyebrow>

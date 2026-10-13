@@ -105,6 +105,7 @@ export async function insertRichCohort(
       role: ROLES.SCHOLAR,
       readingLevel: sc.readingLevel,
       readingLevelSuggestion: sc.readingLevelSuggestion,
+      readingLevelSuggestionWords: sc.readingLevelSuggestionWords,
       dateOfBirth: sc.dateOfBirth,
       preferredFont: sc.preferredFont,
       enrollmentStanding: sc.enrollmentStanding,
