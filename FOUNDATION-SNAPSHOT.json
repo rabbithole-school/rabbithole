@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "c3a3a6af93625cc2c129c516ca2ca99dcae4be44",
+  "sourceCommit": "b8fa8cebc084ed370943aeeee961393101ebe950",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -7088,6 +7088,11 @@
       "mode": "100644"
     },
     {
+      "path": "convex/__tests__/usersSetDisplayName.test.ts",
+      "sha256": "057cbf3ff15667fd714531877b6ca9a33067a9c8b75b48ed0f0f279714ded318",
+      "mode": "100644"
+    },
+    {
       "path": "convex/__tests__/vibecodeBuildPartner.test.ts",
       "sha256": "f7d050a4de7f10f9b84364a1c3f3ab25daec8ad2226432bec7439db8cf1eff21",
       "mode": "100644"
@@ -11569,7 +11574,7 @@
     },
     {
       "path": "convex/users.ts",
-      "sha256": "993e0d6207bd1f067db467423ea199ce67a83ba39de724817babe6808992663a",
+      "sha256": "814a8c61d16e799f8abeb2206081bf73a6fcaa6c15b21ad139f6fbf6f17f6443",
       "mode": "100644"
     },
     {
@@ -21303,5 +21308,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "373ba2b99a45964a2edc153700d10850ecf68b6e97fcf50ee02763492c8d4f85"
+  "treeHash": "02b360b3e1099d800d6f9c813d2bbb1217ccd7d35abf83bf68acc5a5adfa87d6"
 }
