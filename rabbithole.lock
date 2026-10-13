@@ -1,5 +1,5 @@
 # The Rabbithole snapshot this kit runs. bin/setup.sh checks out exactly this
 # commit of the public Foundation repo and nothing else.
 repo=https://github.com/rabbithole-school/rabbithole
-commit=cbb9fae28414ed055eae6980069777b5a802558f
-published=2026-10-12
+commit=1411d9404f894eaa3e6efba5baa7172238aaa86b
+published=2026-10-13
