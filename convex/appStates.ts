@@ -568,6 +568,13 @@ export const updateSessionState = authedMutation({
         sessionId: session._id,
         artifactId: artifact._id,
       });
+      // A second iframe instance (a remount, a reload mid-flight) can run the
+      // same request and ack it again; the first ack already recorded the
+      // result, so a repeat is a no-op rather than an error on the scholar's
+      // screen.
+      if (existing?.actionResult?.requestId === result.requestId) {
+        return snapshotFromRow(existing);
+      }
       if (
         !existing?.actionRequest ||
         existing.actionRequest.id !== result.requestId
