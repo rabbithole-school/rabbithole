@@ -131,7 +131,7 @@ export function clearPendingArtifactSaves(): void {
   clearAllArtifactDrafts();
 }
 
-type ArtifactSaveResult =
+export type ArtifactSaveResult =
   | { ok: true; revision: number }
   | {
       ok: false;
@@ -847,6 +847,58 @@ export function DeliverablePanel({
   );
 }
 
+// ─── Preview / Code toggle ───────────────────────────────────────────────────
+// The one native control for flipping a code artifact between its running app
+// and its HTML source. Shared by a tutor session's code deliverable and the
+// app builder's Edit mode, so the iPad has a single rendering of it (T1) — the
+// native twin of the web CodeArtifactViewer toolbar.
+export type CodeView = "preview" | "code";
+
+export function CodeViewToggle({
+  view,
+  onChange,
+}: {
+  view: CodeView;
+  onChange: (next: CodeView) => void;
+}) {
+  const colors = useColors();
+  const styles = useMemo(() => makeStyles(colors), [colors]);
+  return (
+    <View style={styles.codeToggle}>
+      <Pressable
+        onPress={() => onChange("preview")}
+        style={[styles.codeToggleBtn, view === "preview" && styles.codeToggleBtnActive]}
+        accessibilityRole="button"
+        accessibilityState={{ selected: view === "preview" }}
+      >
+        <SymbolView
+          name="eye"
+          size={13}
+          tintColor={view === "preview" ? colors.white : colors.charcoalSubtle}
+        />
+        <Text style={[styles.codeToggleText, view === "preview" && styles.codeToggleTextActive]}>
+          Preview
+        </Text>
+      </Pressable>
+      <Pressable
+        onPress={() => onChange("code")}
+        style={[styles.codeToggleBtn, view === "code" && styles.codeToggleBtnActive]}
+        accessibilityRole="button"
+        accessibilityState={{ selected: view === "code" }}
+      >
+        <SymbolView
+          name="chevron.left.forwardslash.chevron.right"
+          size={13}
+          tintColor={view === "code" ? colors.white : colors.charcoalSubtle}
+        />
+        <Text style={[styles.codeToggleText, view === "code" && styles.codeToggleTextActive]}>
+          Code
+        </Text>
+      </Pressable>
+    </View>
+  );
+}
+
 // ─── Code artifact: live preview + source toggle ─────────────────────────────
 // Native twin of the web CodeArtifactViewer (Preview / Code). Preview runs the
 // artifact in the canonical native HTML host (CodeArtifactWebView) so a code
@@ -871,43 +923,12 @@ function CodeArtifactDeliverable({
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
-  const [view, setView] = useState<"preview" | "code">("preview");
+  const [view, setView] = useState<CodeView>("preview");
   const isEmpty = (artifact.content ?? "").trim() === "";
 
   return (
     <View style={styles.codeDeliverableWrap}>
-      <View style={styles.codeToggle}>
-        <Pressable
-          onPress={() => setView("preview")}
-          style={[styles.codeToggleBtn, view === "preview" && styles.codeToggleBtnActive]}
-          accessibilityRole="button"
-          accessibilityState={{ selected: view === "preview" }}
-        >
-          <SymbolView
-            name="eye"
-            size={13}
-            tintColor={view === "preview" ? colors.white : colors.charcoalSubtle}
-          />
-          <Text style={[styles.codeToggleText, view === "preview" && styles.codeToggleTextActive]}>
-            Preview
-          </Text>
-        </Pressable>
-        <Pressable
-          onPress={() => setView("code")}
-          style={[styles.codeToggleBtn, view === "code" && styles.codeToggleBtnActive]}
-          accessibilityRole="button"
-          accessibilityState={{ selected: view === "code" }}
-        >
-          <SymbolView
-            name="chevron.left.forwardslash.chevron.right"
-            size={13}
-            tintColor={view === "code" ? colors.white : colors.charcoalSubtle}
-          />
-          <Text style={[styles.codeToggleText, view === "code" && styles.codeToggleTextActive]}>
-            Code
-          </Text>
-        </Pressable>
-      </View>
+      <CodeViewToggle view={view} onChange={setView} />
 
       {view === "preview" ? (
         isEmpty ? (
@@ -941,6 +962,7 @@ function CodeArtifactDeliverable({
           artifact={artifact}
           onSave={onSave}
           onFocus={onFocus}
+          code
         />
       )}
     </View>
@@ -1103,14 +1125,18 @@ function WritingToolbar({
   );
 }
 
-function ArtifactEditor({
+export function ArtifactEditor({
   artifact,
   sessionId,
   onSave,
   onFocus,
+  code = false,
 }: {
   artifact: Doc<"artifacts">;
   sessionId?: Id<"sessions">;
+  /** HTML source rather than prose: monospace, and no autocorrect,
+   *  spellcheck, or auto-capitalization rewriting the code as it is typed. */
+  code?: boolean;
   onSave: (content: string, baseRevision: number) => Promise<ArtifactSaveResult>;
   onFocus: () => void;
 }) {
@@ -1244,11 +1270,18 @@ function ArtifactEditor({
       persistDraft();
       const awaitPending = () => pending;
       pendingArtifactSaves.set(String(artifact._id), awaitPending);
-      void pending.then(() => {
+      // Drop the entry once the save settles EITHER way. A rejected save
+      // (an unresolved conflict) is already kept by persistDraft above and
+      // comes back with its banner when the editor remounts; leaving its
+      // rejected promise registered would block every later send — even in
+      // another session, since this cleanup can run after the session
+      // screen's clearPendingArtifactSaves — with no document on screen to fix.
+      const forget = () => {
         if (pendingArtifactSaves.get(String(artifact._id)) === awaitPending) {
           pendingArtifactSaves.delete(String(artifact._id));
         }
-      }).catch(() => undefined);
+      };
+      void pending.then(forget, forget);
     };
   }, [artifact._id, drainSaves, persistDraft]);
 
@@ -1322,7 +1355,9 @@ function ArtifactEditor({
       )}
       {showUpdateBanner && (
         <View style={styles.conflictBanner}>
-          <Text style={styles.conflictText}>This document changed somewhere else</Text>
+          <Text style={styles.conflictText}>
+            {code ? "This code changed somewhere else" : "This document changed somewhere else"}
+          </Text>
           <View style={styles.conflictActions}>
             <Pressable onPress={useRabbitholesVersion} style={styles.conflictSecondary} accessibilityRole="button">
               <Text style={styles.conflictSecondaryText}>Use Rabbithole’s version</Text>
@@ -1334,7 +1369,7 @@ function ArtifactEditor({
         </View>
       )}
       <AppTextInput
-        style={styles.editorInput}
+        style={[styles.editorInput, code && styles.editorInputCode]}
         value={localContent}
         onChangeText={handleChange}
         onSelectionChange={
@@ -1344,12 +1379,13 @@ function ArtifactEditor({
               }
             : undefined
         }
-        placeholder="Write your work here…"
+        placeholder={code ? "No code yet — your tutor can start this with you, or type here" : "Write your work here…"}
         placeholderTextColor={colors.charcoalSubtle}
         multiline
         textAlignVertical="top"
-        autoCorrect
-        spellCheck
+        autoCorrect={!code}
+        spellCheck={!code}
+        autoCapitalize={code ? "none" : "sentences"}
         onFocus={onFocus}
         // No `contextMenuHidden` here, unlike the chat composer: this is a prose
         // editor a scholar may well want to paste into, and it is rarely empty
@@ -1629,6 +1665,11 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     color: c.charcoal,
     padding: 14,
     minHeight: 300,
+  },
+  editorInputCode: {
+    fontFamily: fonts.mono,
+    fontSize: 13,
+    lineHeight: 19,
   },
 
   // ── Empty / start state ──
