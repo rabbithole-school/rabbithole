@@ -113,6 +113,12 @@ import {
   type HistoryRevision,
 } from "@/components/vibecode/VibecodeHistorySheet";
 import { VibecodeModeControl } from "@/components/vibecode/VibecodeModeControl";
+import {
+  ArtifactEditor,
+  CodeViewToggle,
+  flushPendingArtifactSaves,
+  type CodeView,
+} from "@/components/DeliverablePanel";
 import { ParkingLot } from "@/components/vibecode/ParkingLot";
 
 type VibecodeMessage = {
@@ -192,6 +198,10 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
   // scholar's Edit unlocks, or a teacher's access is withdrawn).
   const [modeRequest, setModeRequest] = useState<WorkshopMode | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // Edit's Preview | Code view of the app (TRA-520), the native twin of the
+  // web CodeArtifactViewer toolbar. Play never shows code, so the live view
+  // below falls back to Preview whenever the mode is not Edit.
+  const [codeViewRequest, setCodeViewRequest] = useState<CodeView>("preview");
   // The thread the in-flight reply belongs to, fixed at send time: the
   // streaming row renders only while that thread is the visible one, so a
   // designer reply never shows up as tutor output after a mid-turn flip.
@@ -358,6 +368,7 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
   const requestedMode = modeRequest ?? modeDefault;
   const mode: WorkshopMode =
     requestedMode === "edit" && !editUnlocked ? "play" : requestedMode;
+  const codeView: CodeView = mode === "edit" ? codeViewRequest : "preview";
   const savedAt = session?.starterSavedAt ?? null;
   const autosaveFailedAt = session?.appAutosaveFailedAt ?? null;
   const isSessionOwner =
@@ -571,13 +582,39 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     };
   }, []);
 
-  // Switching modes on native needs NO draft flush (the web twin flushes a
-  // pending code-editor draft before Play makes the viewer read-only): there is
-  // no code editor on iPad, so there is never an unsaved local edit to strand.
-  const handleModeChange = useCallback((next: WorkshopMode) => {
-    Haptics.selectionAsync();
-    setModeRequest(next);
+  // Leaving the Code view (to Preview, or to Play, which never shows code)
+  // unmounts the editor, so its pending hand edit is flushed first. A save
+  // that cannot land — an unresolved "changed somewhere else" conflict —
+  // keeps the scholar in the Code view, where that banner is, rather than
+  // stranding the edit (the web twin likewise stays in Edit with a notice).
+  const leaveCodeView = useCallback(async (): Promise<boolean> => {
+    try {
+      await flushPendingArtifactSaves();
+      return true;
+    } catch {
+      Alert.alert(
+        "Finish saving your code",
+        "Choose a code version in the Code view before switching.",
+      );
+      return false;
+    }
   }, []);
+  const handleModeChange = useCallback(
+    async (next: WorkshopMode): Promise<boolean> => {
+      Haptics.selectionAsync();
+      if (next !== "edit" && !(await leaveCodeView())) return false;
+      setModeRequest(next);
+      return true;
+    },
+    [leaveCodeView],
+  );
+  const handleCodeViewChange = useCallback(
+    async (next: CodeView) => {
+      if (next === "preview" && !(await leaveCodeView())) return;
+      setCodeViewRequest(next);
+    },
+    [leaveCodeView],
+  );
 
   const handleRestore = useCallback(
     async (target: { id: string; version: number }) => {
@@ -799,6 +836,21 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     // would resume after it, take the turn slot, and its cleanup would wipe the
     // typed reply mid-stream. Same claim as the session screen's (@/lib/sendLock).
     if (!appUpdate && appUpdateClaimRef.current.isLocked()) return false;
+    // A hand edit in the Code view must reach the server before the builder
+    // reads the app this turn. Flushed BEFORE any streaming state changes, so
+    // a save that cannot land leaves the composer, and any live build, exactly
+    // as they were — the session screen's order and message.
+    if (!appUpdate) {
+      try {
+        await flushPendingArtifactSaves();
+      } catch {
+        Alert.alert(
+          "Finish saving your code",
+          "Choose a code version in the Code view before sending your message.",
+        );
+        return false;
+      }
+    }
     let appUpdateTurn: Extract<
       Awaited<ReturnType<typeof startAppUpdateTurn>>,
       { status: "started" }
@@ -1426,34 +1478,77 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
         {htmlArtifact ? (
           // deriveBuildPreview returns "app" exactly when an artifact exists.
           <View style={styles.previewWrap}>
-            <CodeArtifactWebView
-              ref={codeArtifactRef}
-              // The reset nonce is the second half of "Reset app state": a new
-              // key remounts the host so the app rebuilds from a clean slate.
-              key={`${String(htmlArtifact._id)}:${resetNonce}`}
-              scope={{ kind: "session", artifactId: htmlArtifact._id }}
-              content={htmlArtifact.content}
-              onAskTutor={handleAppTutorAsk}
-              // An Edit preview is a builder trying their own character, not
-              // play the tutor should coach: only Play reports character turns.
-              onAppAiTurn={mode === "play" ? handleAppAiTurn : undefined}
-              // The character and judges answer only the session's owner;
-              // anyone else watching gets `unavailable` without a server call.
-              appAiEnabled={isSessionOwner}
-              style={styles.webView}
-            />
-            {building && mode === "edit" ? (
-              // Editing an already-rendered app: one vocabulary — the overlay
-              // reads the SAME derived stage label as the card/line (T1).
-              <View style={styles.buildingOverlay} pointerEvents="none">
-                <View style={[styles.buildingPill, { backgroundColor: colors.violetSolid }]}>
-                  <ActivityIndicator size="small" color={colors.white} />
-                  <Text style={[styles.buildingText, { color: colors.white }]}>
-                    {buildStageLabel(buildStage.stage)}
-                  </Text>
-                </View>
-              </View>
+            {mode === "edit" ? (
+              <CodeViewToggle
+                view={codeView}
+                onChange={(next) => void handleCodeViewChange(next)}
+              />
             ) : null}
+            <View style={styles.previewStage}>
+              <CodeArtifactWebView
+                ref={codeArtifactRef}
+                // The reset nonce is the second half of "Reset app state": a new
+                // key remounts the host so the app rebuilds from a clean slate.
+                key={`${String(htmlArtifact._id)}:${resetNonce}`}
+                scope={{ kind: "session", artifactId: htmlArtifact._id }}
+                content={htmlArtifact.content}
+                onAskTutor={handleAppTutorAsk}
+                // An Edit preview is a builder trying their own character, not
+                // play the tutor should coach: only Play reports character turns.
+                onAppAiTurn={mode === "play" ? handleAppAiTurn : undefined}
+                // The character and judges answer only the session's owner;
+                // anyone else watching gets `unavailable` without a server call.
+                appAiEnabled={isSessionOwner}
+                style={styles.webView}
+              />
+              {codeView === "code" ? (
+                // Laid OVER the app rather than replacing it: the WebView stays
+                // mounted, so the app keeps its state and the builder's render
+                // checks keep a live host while the scholar reads the source.
+                <ScrollView
+                  style={[styles.codeSheet, { backgroundColor: colors.bg }]}
+                  contentContainerStyle={styles.codeSheetContent}
+                  keyboardShouldPersistTaps="handled"
+                  // The soft keyboard covers the lower half of the source:
+                  // inset for it so the line being typed stays in view.
+                  automaticallyAdjustKeyboardInsets
+                >
+                  <ArtifactEditor
+                    key={`${String(htmlArtifact._id)}:code`}
+                    artifact={htmlArtifact}
+                    onSave={(content, baseRevision) =>
+                      saveArtifact({
+                        artifactId: htmlArtifact._id,
+                        content,
+                        baseRevision,
+                      })
+                    }
+                    onFocus={() => undefined}
+                    code
+                  />
+                </ScrollView>
+              ) : null}
+              {building && mode === "edit" ? (
+                // Editing an already-rendered app: one vocabulary — the overlay
+                // reads the SAME derived stage label as the card/line (T1).
+                <View
+                  style={[
+                    styles.buildingOverlay,
+                    // Over the source, sit at the bottom so the pill never
+                    // covers the editor's toolbar or its conflict banner.
+                    codeView === "code" && styles.buildingOverlayLow,
+                  ]}
+                  pointerEvents="none"
+                >
+                  <View style={[styles.buildingPill, { backgroundColor: colors.violetSolid }]}>
+                    <ActivityIndicator size="small" color={colors.white} />
+                    <Text style={[styles.buildingText, { color: colors.white }]}>
+                      {buildStageLabel(buildStage.stage)}
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
+            </View>
           </View>
         ) : buildPreview === "live" ? (
           // A build stream is live (or the teacher opened a build link whose
@@ -1726,6 +1821,9 @@ const styles = StyleSheet.create({
   headerGhostText: { fontFamily: fonts.semibold, fontSize: 13 },
 
   previewWrap: { flex: 1 },
+  previewStage: { flex: 1 },
+  codeSheet: { ...StyleSheet.absoluteFill },
+  codeSheetContent: { padding: 12 },
   previewCenter: {
     flex: 1,
     alignItems: "center",
@@ -1740,6 +1838,7 @@ const styles = StyleSheet.create({
     right: 0,
     alignItems: "center",
   },
+  buildingOverlayLow: { top: undefined, bottom: 12 },
   buildingPill: {
     flexDirection: "row",
     alignItems: "center",

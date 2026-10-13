@@ -63,7 +63,9 @@ export function VibecodeModeControl({
   /** The server's `teacherEditOverride`: scholars on this activity cannot
    *  edit (yet), so the Edit segment is named as the teacher's (TRA-477). */
   teacherEdit?: boolean;
-  onChange: (next: WorkshopMode) => void;
+  /** Resolve `false` to refuse the switch (e.g. an unsaved code edit that
+   *  cannot land): the segment then snaps back to the live mode. */
+  onChange: (next: WorkshopMode) => void | boolean | Promise<boolean>;
 }) {
   const colors = useColors();
   const [lockNoticeOpen, setLockNoticeOpen] = useState(false);
@@ -92,7 +94,12 @@ export function VibecodeModeControl({
       setLockNoticeOpen(true);
       return;
     }
-    onChange(next);
+    // The parent may refuse after an await. The Picker has already moved to
+    // the tapped segment natively, so a refusal remounts it the same way the
+    // lock above does.
+    void Promise.resolve(onChange(next)).then((accepted) => {
+      if (accepted === false) setPickerEpoch((epoch) => epoch + 1);
+    });
   };
 
   return (

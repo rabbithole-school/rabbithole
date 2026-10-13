@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "34918c4ff9100681c01ad9acf78493ffb62c4a82",
+  "sourceCommit": "4fee4d25d81f2d5385821919bed71f0a18f119b2",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -10154,7 +10154,7 @@
     },
     {
       "path": "convex/lib/sessionSurface.ts",
-      "sha256": "e35c59f787a55766e6f3ee76d074a0559e85bdbfba28029b0514023859bc79fe",
+      "sha256": "fcad32069e5e41c906e34e0d3c6a48d7b2a13d1e7b6042ccc9f835d1af0f88c8",
       "mode": "100644"
     },
     {
@@ -11299,7 +11299,7 @@
     },
     {
       "path": "convex/sessionHelpers.ts",
-      "sha256": "4bc4dfb313c6ba997aadf72ba003fdb09556fce2a9b5eea1bf22f5683bce4d15",
+      "sha256": "3790f8e1ab327b6fbde069c1532991ba570727e022f97adef6e50cc300e76bb2",
       "mode": "100644"
     },
     {
@@ -16234,7 +16234,7 @@
     },
     {
       "path": "native/src/components/DeliverablePanel.tsx",
-      "sha256": "4971a27a95c3ae0998aadc390afa9270aa478c447b7daaace7b0fc149b0a2ef6",
+      "sha256": "6d626fd4be21cbc953d5b6d6fbad04ef6ed374fb541d44b487d72a98130261d3",
       "mode": "100644"
     },
     {
@@ -17164,12 +17164,12 @@
     },
     {
       "path": "native/src/components/vibecode/VibecodeModeControl.tsx",
-      "sha256": "02295a8a6319c42a6ade184aa97882a858870253423a21f495b774b951e3e59b",
+      "sha256": "b08c25b29213c78a9bade5585ea38292812af172bb3f8c380221cbc3d67da3f7",
       "mode": "100644"
     },
     {
       "path": "native/src/components/vibecode/VibecodeScreen.tsx",
-      "sha256": "b13fd413c3f75c908b11f8cb0caa328639e6ee0a15a82b8ef86cad0096eb2589",
+      "sha256": "bc22e62d7fc4b3b29ba6930eb6cc1900035b1559d27ca55ff547462ffc926e19",
       "mode": "100644"
     },
     {
@@ -21318,5 +21318,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "9537e6172b9a56fb771a4af65ba9f67f80109a6ace8469682cfcd53fbe91bc44"
+  "treeHash": "d466123da5899fd41b72e4334a360703926c9e164836da6f334fe7ada8e52c36"
 }

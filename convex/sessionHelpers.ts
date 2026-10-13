@@ -3053,7 +3053,7 @@ WHAT A WRITING BOX IS, on the web and the iPad alike: a plain-text box, usually 
 
 A LIVE APP above is different: it runs as an interactive app the scholar can use, and you change it with edit_document str_replace or insert.${
         isVibecode
-          ? " Here it fills the screen. On the web the scholar can open a Code view of its HTML while editing; the iPad shows only the running app."
+          ? " Here it fills the screen. While editing, the scholar can switch it between Preview and a Code view of its HTML, on the web and the iPad alike."
           : " It sits in its own tab beside their writing, and on the web and the iPad alike the scholar can switch that tab between Preview (the running app) and Code (the HTML source, which they can read and edit themselves)."
       }`);
     }
