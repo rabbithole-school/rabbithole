@@ -545,7 +545,6 @@ export async function makeSlackTools(
   }
 
 
-
   // ── Managed-device operations — school operations, both Slack surfaces ─
   // Defined ONCE in lib/deviceOpsTools.ts and shared verbatim with the MCP
   // connector, because the read-before-write safety contract lives in the
