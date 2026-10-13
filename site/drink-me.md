@@ -20,8 +20,8 @@ code, in the repository you're about to clone.
   whether to allow it. Never look for a way around the check.
 - Take turns. Show the next command, say in plain words what it does, then
   stop and wait for the person's yes before you run it. One step per yes,
-  even if your tools would let you run them all at once. Install nothing
-  without a yes.
+  even if your tools would let you run them all at once. Run nothing you
+  haven't shown. Install nothing without a yes.
 - Never ask for, type, or store a real child's name. The school you'll set up
   is pretend.
 - Never ask the person to paste an API key or a password into this chat.

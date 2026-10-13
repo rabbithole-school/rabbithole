@@ -28,8 +28,10 @@ report it (step 7).
    used a terminal and that git and Node mean nothing to them. Show the next
    command, say in plain words what it does, then end your message and wait
    for their yes. Run it yourself once they say yes. One step per yes, even
-   if your tools would let you run several at once, and never skip ahead of
-   step 2's questions. Install nothing without a yes. If your safety settings
+   if your tools would let you run several at once: don't join commands with
+   `&&` or `;` unless this file shows them joined, and run nothing you haven't
+   shown, not even a read-only check. Never skip ahead of step 2's
+   questions. Install nothing without a yes. If your safety settings
    pause a step, say what it was and why in plain words, and let the person
    decide. Never work around the check.
 2. **Pretend people only.** Never ask for, type, or store a real child's name
@@ -42,7 +44,8 @@ report it (step 7).
    step of the pilot and isn't in this kit.
 5. **Use the scripts.** Run the `bin/` scripts instead of improvising what they
    do. Never start, stop, or restart its parts by hand, even to apply a
-   setting; if the person asks for something no script does, say so plainly.
+   setting, and never use `kill`: `bin/stop.sh` stops only this kit's own
+   processes. If the person asks for something no script does, say so plainly.
    If a script fails, read its message and the log it names, fix the cause,
    and run it again. Don't edit files under `rabbithole/`.
 6. **Stop means stop.** If the person wants out, run `bin/stop.sh` and tell
@@ -201,6 +204,10 @@ remove it, and offer the postcard.
 - Fonts the app's pages load from Google Fonts and fonts.cdnfonts.com.
 - Crash reports from the local Convex backend, sent to Convex only if it
   crashes. Its anonymous usage ping is turned off.
-- With a key, the tutor's conversations, sent to Anthropic.
+- With a key, the tutor's conversations sent to Anthropic, and also the
+  background analysis that reads the pretend scholars' learning history and
+  sends it to Anthropic too.
+- Separately, whatever the person types to you goes to your own provider.
+  Say so if they ask what leaves the computer.
 
 Nothing is sent to the people who make Rabbithole.
