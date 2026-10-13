@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "b8fa8cebc084ed370943aeeee961393101ebe950",
+  "sourceCommit": "05dbd295dbe08a79bd8ff17237132117a90ef7f9",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -4454,7 +4454,7 @@
     },
     {
       "path": "components/vibecode/VibecodeWorkshop.tsx",
-      "sha256": "415a7f25aa173d11b549ae96c41f52a80d1093ebaeb5b440e33fd3b89559c971",
+      "sha256": "91f9c3e5e8b2ca1a526c63a923baa2663cc86e22efa03b6bc669759c7cd46338",
       "mode": "100644"
     },
     {
@@ -19164,7 +19164,7 @@
     },
     {
       "path": "native/vendor/shared/workshopMode.ts",
-      "sha256": "8e4f634c90e50301bc1a21f43be29144be4c24c5e5ed608480e9544efcb7dd7a",
+      "sha256": "462fd30e35efde768ad0c1dd2caaca60899caffd8754afc190c95d1d5b7bd899",
       "mode": "100644"
     },
     {
@@ -20919,12 +20919,12 @@
     },
     {
       "path": "shared/workshopMode.test.ts",
-      "sha256": "fde0e7025c6022de4705245ee1ab15e4e5dd0cd8fd9dcd2478d17e0631062292",
+      "sha256": "93749ab97b3eb353ca39c1a4a9cc6897ca6c10f3148b7ee3411b80998da2da03",
       "mode": "100644"
     },
     {
       "path": "shared/workshopMode.ts",
-      "sha256": "8e4f634c90e50301bc1a21f43be29144be4c24c5e5ed608480e9544efcb7dd7a",
+      "sha256": "462fd30e35efde768ad0c1dd2caaca60899caffd8754afc190c95d1d5b7bd899",
       "mode": "100644"
     },
     {
@@ -21308,5 +21308,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "02b360b3e1099d800d6f9c813d2bbb1217ccd7d35abf83bf68acc5a5adfa87d6"
+  "treeHash": "8e63b7d4466975b99f388b9258d00757d8d48479ddb8e0f9c2e6b49b520d6aa0"
 }

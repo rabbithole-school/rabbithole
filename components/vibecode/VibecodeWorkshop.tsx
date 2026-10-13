@@ -54,6 +54,7 @@ import { useAgentStream, type StreamEvent } from "@/hooks/useAgentStream";
 import { useWorkshopMode } from "@/hooks/useWorkshopMode";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
+  defaultChatOpen,
   defaultWorkshopMode,
   editControlFor,
   formatSavedAt,
@@ -269,7 +270,8 @@ export function VibecodeWorkshop({
     fallback: modeDefault,
     editSelectable: editUnlocked,
   });
-  const { user: currentUser } = useCurrentUser();
+  const { user: currentUser, isLoading: currentUserLoading } =
+    useCurrentUser();
   const isSessionOwner =
     !!data?.session &&
     !!currentUser &&
@@ -334,7 +336,31 @@ export function VibecodeWorkshop({
   );
 
   const isNarrow = useBreakpointValue({ base: true, lg: false }) ?? false;
-  const [chatOpen, setChatOpen] = useState(false);
+  // The chat pane is a toggle that starts closed (F14b), except beside a
+  // Play-only character app the scholar is playing (`defaultChatOpen`). That
+  // default is latched ONCE, when the session, artifact, and viewer reads
+  // first resolve, so a later re-render never reopens a pane the scholar
+  // closed; any toggle is the scholar's choice and wins from then on. A narrow
+  // screen never auto-opens: its chat is a bottom drawer that covers the app.
+  const [chatChoice, setChatChoice] = useState<boolean | null>(null);
+  const [chatAutoOpen, setChatAutoOpen] = useState<boolean | null>(null);
+  if (
+    chatAutoOpen === null &&
+    data !== undefined &&
+    artifacts !== undefined &&
+    !currentUserLoading
+  ) {
+    setChatAutoOpen(
+      defaultChatOpen({
+        access: effectiveEditAccess,
+        hasAppCharacter,
+        isSessionOwner,
+        isTestDrive: data?.session?.isTestDrive === true,
+      }),
+    );
+  }
+  const chatOpen = chatChoice ?? (!isNarrow && chatAutoOpen === true);
+  const setChatOpen = setChatChoice;
   // App-designer version History (Edit) and app-state Reset (Play).
   const [historyOpen, setHistoryOpen] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -1522,14 +1548,17 @@ export function VibecodeWorkshop({
       ) : null}
       {/* The chat pane is a TOGGLE, not a consequence of the mode: closed by
           default, opened by this rightmost ghost button in EVERY state (F14b).
-          Narrow uses an icon; wide uses a labelled ghost button. */}
+          One exception to the closed default: a scholar playing their own
+          Play-only app that has a character starts with it open on wide
+          screens (`defaultChatOpen`). Narrow uses an icon; wide uses a
+          labelled ghost button. */}
       {isNarrow ? (
         <IconButton
           aria-label={chatOpen ? "Hide chat" : "Show chat"}
           size="xs"
           variant={chatOpen ? "solid" : "outline"}
           colorPalette="violet"
-          onClick={() => setChatOpen((open) => !open)}
+          onClick={() => setChatOpen(!chatOpen)}
         >
           <ChatCircle weight={chatOpen ? "fill" : "regular"} />
         </IconButton>
@@ -1539,7 +1568,7 @@ export function VibecodeWorkshop({
           variant="ghost"
           colorPalette="violet"
           fontFamily="heading"
-          onClick={() => setChatOpen((open) => !open)}
+          onClick={() => setChatOpen(!chatOpen)}
         >
           <ChatCircle
             weight={chatOpen ? "fill" : "regular"}
@@ -1676,7 +1705,12 @@ export function VibecodeWorkshop({
       ) : (
         // The chat pane is a toggle, NOT a consequence of the mode: the thread
         // sits beside the app only when the teacher/scholar opens it, so the
-        // app pane keeps its full width by default (F14b).
+        // app pane keeps its full width by default (F14b). The one exception:
+        // a scholar (session owner, not a teacher rehearsal) playing a
+        // Play-only app (`effectiveEditAccess === "hidden"`) that has a
+        // character starts with the thread open here, so the tutor's questions
+        // sit on screen beside the character (`defaultChatOpen`). It is only
+        // the initial value; the toggle still closes it and the choice sticks.
         <Flex flex={1} minH={0}>
           {appPane}
           {chatOpen && (

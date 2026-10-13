@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  defaultChatOpen,
   defaultWorkshopMode,
   editControlFor,
   effectiveWorkshopMode,
@@ -321,5 +322,45 @@ describe("isPlayOnlyApp", () => {
 
   test("no starter means nothing to play", () => {
     expect(isPlayOnlyApp({ hasStarter: false, editAccess: "never" })).toBe(false);
+  });
+});
+
+describe("defaultChatOpen", () => {
+  const playOnlyCharacter = {
+    access: "hidden" as const,
+    hasAppCharacter: true,
+    isSessionOwner: true,
+    isTestDrive: false,
+  };
+
+  test("a scholar playing their own Play-only character app opens the chat", () => {
+    expect(defaultChatOpen(playOnlyCharacter)).toBe(true);
+  });
+
+  test("an app without a character keeps the chat closed", () => {
+    expect(
+      defaultChatOpen({ ...playOnlyCharacter, hasAppCharacter: false }),
+    ).toBe(false);
+  });
+
+  test("a Build app (allowed) or a locked app keeps the chat closed", () => {
+    expect(defaultChatOpen({ ...playOnlyCharacter, access: "allowed" })).toBe(
+      false,
+    );
+    expect(defaultChatOpen({ ...playOnlyCharacter, access: "locked" })).toBe(
+      false,
+    );
+  });
+
+  test("a teacher rehearsal keeps the chat closed", () => {
+    expect(defaultChatOpen({ ...playOnlyCharacter, isTestDrive: true })).toBe(
+      false,
+    );
+  });
+
+  test("someone else viewing the scholar's session keeps the chat closed", () => {
+    expect(
+      defaultChatOpen({ ...playOnlyCharacter, isSessionOwner: false }),
+    ).toBe(false);
   });
 });
