@@ -7,7 +7,7 @@ an account or a subscription, and no real school's data is involved.
 > **Status: preview, gate 0, not yet announced.** This branch exists to test
 > the line with real agents before it's shared. It has no history in common
 > with `main`. The kit runs the public Rabbithole snapshot published on
-> September 2, 2026. No license is granted beyond testing yet.
+> October 12, 2026. No license is granted beyond testing yet.
 
 ## Try it
 
@@ -74,12 +74,6 @@ Ports default to 3000 (web), 3210 and 3211 (backend). Override them with
 - Web only. The iPad app isn't part of it.
 - Times and “today” assume Hawaii in places, because the snapshot hardcodes
   `Pacific/Honolulu`.
-- The kit adds two small files to the checkout (in `overlay/`). One is a
-  no-op stand-in for a scheduled job that the public code still references
-  but doesn't include. The other gives the pretend teachers their pretend
-  scholars, because the public snapshot has no membership backfill.
-- Slide export may fail, because the snapshot is missing a vendored
-  `image-size` build.
 
 ## The front door
 

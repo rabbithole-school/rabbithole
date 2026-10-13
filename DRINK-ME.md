@@ -80,9 +80,9 @@ it prints READY.
 
 The first run downloads about 1 GB and can take several minutes. If your
 commands time out sooner than that, run it in the background and follow
-`.kit/install.log`, then `.kit/convex.log`, telling the person what's
-happening as it goes. Later runs take seconds. If it fails or gets
-interrupted, it names a log in `.kit/`. Read it, fix the cause, and run
+`rabbithole/local/.run/install.log`, then `rabbithole/local/.run/convex.log`,
+telling the person what's happening as it goes. Later runs take seconds. If it
+fails or gets interrupted, it names a log in `rabbithole/local/.run/`. Read it, fix the cause, and run
 `bin/setup.sh` again; it picks up where it stopped.
 
 ## 5. Show them around
