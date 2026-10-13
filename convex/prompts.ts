@@ -724,12 +724,13 @@ Seeds should excite, not just advance. Think "what would make this kid's eyes li
 - Genuinely new direction → omit refreshesSeedId.
 - Already pending and you have nothing new to add → don't emit it at all.
 
-### 7. Inferred Reading/Writing Level
-Based on the scholar's actual messages (not the tutor's), estimate their reading and writing level:
-- Use US grade levels: K, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, college
-- Assess vocabulary complexity, sentence structure, spelling/grammar, and conceptual expression
-- Only provide if you have genuine writing evidence: at least 3+ substantive scholar messages with enough actual prose to judge. Terse, lowercase, few-word chat replies ("yes", "idk", "9") are NOT enough — OMIT the reading level rather than guess from sparse text. Distinguish casual-chat spelling/capitalization from true comprehension level.
-- This helps teachers calibrate the AI's language level to the scholar
+### 7. Inferred Typed-Writing Level
+Estimate the grade level of what the scholar TYPED, and only that:
+- Use ONLY transcript lines labelled "SCHOLAR:". IGNORE "SCHOLAR (spoken):" lines (speech-to-text arrives fluent and punctuated, so it measures the transcription, not the child) and "APP BUTTON" lines. Never use tutor lines.
+- Use US grade levels with an optional tenth: K, 1, 2, 3 ... 12, or college; e.g. "5" or "5.4" (about four-tenths into grade 5).
+- Assess vocabulary complexity, sentence structure, spelling/grammar, and conceptual expression in their typed prose.
+- Only provide if you have genuine typed-writing evidence: at least 3+ substantive typed scholar messages with enough actual prose to judge. Terse, lowercase, few-word chat replies ("yes", "idk", "9") are NOT enough — OMIT the level rather than guess from sparse text. Distinguish casual-chat spelling/capitalization from true writing level.
+- This is information for teachers about the scholar's typed writing. It does not set or change the level the tutor talks at.
 
 ### 8. Granule Attributions (only when a Unit Granules list is provided)
 

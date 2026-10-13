@@ -46,6 +46,8 @@ export interface SeedScholar {
   /** Reading level string (may differ from grade — mixed-level school). */
   readingLevel?: string;
   readingLevelSuggestion?: string;
+  /** Typed words the suggestion was drawn from (the profile line states it). */
+  readingLevelSuggestionWords?: number;
   /** ISO date string, e.g. "2018-03-15". */
   dateOfBirth?: string;
   preferredFont?: string;

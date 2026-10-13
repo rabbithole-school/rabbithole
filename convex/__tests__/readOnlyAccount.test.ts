@@ -17,7 +17,7 @@ const modules = (
 
 const READ_ONLY = /This account is read-only/;
 
-async function seedSchoolWithSuggestion(t: ReturnType<typeof convexTest>) {
+async function seedSchoolWithLevel(t: ReturnType<typeof convexTest>) {
   const world = await makeWorld(t, {
     schools: 1,
     scholarsPerSchool: 1,
@@ -27,7 +27,7 @@ async function seedSchoolWithSuggestion(t: ReturnType<typeof convexTest>) {
   const school: WorldSchool = world.schools[0];
   const scholarId = school.scholars[0].id;
   await t.run((ctx) =>
-    ctx.db.patch(scholarId, { readingLevel: "3", readingLevelSuggestion: "4" }),
+    ctx.db.patch(scholarId, { readingLevel: "3" }),
   );
   return { world, school, scholarId };
 }
@@ -45,7 +45,7 @@ async function markReadOnly(
 describe("read-only identity (users.readOnly)", () => {
   test("a read-only teacher can run a teacherQuery but a teacherMutation refuses it", async () => {
     const t = convexTest(schema, modules);
-    const { world, school, scholarId } = await seedSchoolWithSuggestion(t);
+    const { world, school, scholarId } = await seedSchoolWithLevel(t);
     await markReadOnly(t, school.teacher.id, true);
     const asTeacher = await world.as.staffOf(school);
 
@@ -57,22 +57,21 @@ describe("read-only identity (users.readOnly)", () => {
 
     // The exact write from the 2026-08-22 incident now refuses, loudly.
     await expect(
-      asTeacher.mutation(api.scholars.acceptReadingLevelSuggestion, { scholarId }),
+      asTeacher.mutation(api.scholars.updateReadingLevel, { scholarId, readingLevel: "4" }),
     ).rejects.toThrow(READ_ONLY);
 
     const scholar = await t.run((ctx) => ctx.db.get(scholarId));
     expect(scholar?.readingLevel).toBe("3");
-    expect(scholar?.readingLevelSuggestion).toBe("4");
     const rows = await t.run((ctx) => ctx.db.query("readingLevelHistory").collect());
     expect(rows).toHaveLength(0);
   });
 
   test("a normal teacher is unaffected", async () => {
     const t = convexTest(schema, modules);
-    const { world, school, scholarId } = await seedSchoolWithSuggestion(t);
+    const { world, school, scholarId } = await seedSchoolWithLevel(t);
     const asTeacher = await world.as.staffOf(school);
 
-    await asTeacher.mutation(api.scholars.acceptReadingLevelSuggestion, { scholarId });
+    await asTeacher.mutation(api.scholars.updateReadingLevel, { scholarId, readingLevel: "4" });
 
     const scholar = await t.run((ctx) => ctx.db.get(scholarId));
     expect(scholar?.readingLevel).toBe("4");
@@ -80,12 +79,12 @@ describe("read-only identity (users.readOnly)", () => {
 
   test("clearing the flag restores writes", async () => {
     const t = convexTest(schema, modules);
-    const { world, school, scholarId } = await seedSchoolWithSuggestion(t);
+    const { world, school, scholarId } = await seedSchoolWithLevel(t);
     await markReadOnly(t, school.teacher.id, true);
     await markReadOnly(t, school.teacher.id, false);
     const asTeacher = await world.as.staffOf(school);
 
-    await asTeacher.mutation(api.scholars.acceptReadingLevelSuggestion, { scholarId });
+    await asTeacher.mutation(api.scholars.updateReadingLevel, { scholarId, readingLevel: "4" });
 
     const teacher = await t.run((ctx) => ctx.db.get(school.teacher.id));
     expect(teacher?.readOnly).toBeUndefined();
@@ -95,7 +94,7 @@ describe("read-only identity (users.readOnly)", () => {
 
   test("raw authenticated mutations refuse it too", async () => {
     const t = convexTest(schema, modules);
-    const { world, school } = await seedSchoolWithSuggestion(t);
+    const { world, school } = await seedSchoolWithLevel(t);
     await markReadOnly(t, school.teacher.id, true);
     const asTeacher = await world.as.staffOf(school);
 
@@ -116,7 +115,7 @@ describe("read-only identity (users.readOnly)", () => {
 
   test("a writing action refuses it before doing any work", async () => {
     const t = convexTest(schema, modules);
-    const { world, school, scholarId } = await seedSchoolWithSuggestion(t);
+    const { world, school, scholarId } = await seedSchoolWithLevel(t);
     await markReadOnly(t, school.teacher.id, true);
     const asTeacher = await world.as.staffOf(school);
 

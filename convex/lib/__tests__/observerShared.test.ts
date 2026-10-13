@@ -7,6 +7,7 @@ import {
   groundAlertExcerpt,
   groundSessionSignalEvidence,
   parseObserverResponse,
+  typedScholarWordCount,
   type ObserverContentBlock,
   type ObserverHistoryMessage,
 } from "../observerShared";
@@ -850,5 +851,23 @@ describe("OBSERVER_TOOL schema — interests is a top-level output", () => {
     expect(Object.keys(props)).toContain("interests");
     expect(Object.keys(props.sessionSignals as Record<string, unknown>)).not.toContain("interests");
     expect(OBSERVER_TOOL.input_schema.required).toContain("interests");
+  });
+});
+
+describe("typedScholarWordCount (TRA-513)", () => {
+  test("counts only what the scholar typed", () => {
+    const row = (
+      over: Partial<ObserverHistoryMessage> & { content: string },
+    ): ObserverHistoryMessage => ({ role: "user", sourceRole: "user", ...over });
+    expect(
+      typedScholarWordCount([
+        row({ content: "one two three", inputModality: "typed" }),
+        row({ content: "four five", inputModality: undefined }), // legacy row counts as typed
+        row({ content: "dictated words that are not typing", inputModality: "spoken" }),
+        row({ content: "check my answer", inputModality: "app" }),
+        row({ content: "alt text of a generated image", generatedImage: true }),
+        row({ content: "the tutor said this", role: "assistant", sourceRole: "assistant" }),
+      ]),
+    ).toBe(5);
   });
 });

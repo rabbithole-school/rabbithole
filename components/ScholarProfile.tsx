@@ -1,16 +1,19 @@
 "use client";
 
+import { useNow } from "@/hooks/useNow";
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useAction } from "convex/react";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useHealthManagementAccess } from "@/hooks/useSchoolOperationsAccess";
 import { isPlatformAdminRole } from "@/convex/lib/roles";
 import {
+  MIN_TYPED_WORDS_FOR_ESTIMATE,
   READ_LEVELS,
   READ_LEVEL_LABELS,
   WRITE_MODES,
   WRITE_MODE_LABELS,
   talkLevelLabel,
+  writingEstimateText,
   talkLevelToNumber,
   type ReadLevel,
   type WriteMode,
@@ -611,6 +614,8 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
   );
   const shouldLoadReadingLevelInsights =
     !isOperationsMode && activeTab === "map" && progressSection === "reading";
+  // Ages the estimate line ("N days ago"); a minute tick is plenty.
+  const estimateNow = useNow(60_000);
   const scholarReadingTrend = useQuery(
     api.messages.getScholarReadingTrend,
     shouldLoadReadingLevelInsights ? { scholarId: scholarId as Id<"users"> } : "skip"
@@ -633,8 +638,6 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
   const updateReadLevel = useMutation(api.scholars.updateReadLevel);
   const updateWriteMode = useMutation(api.scholars.updateWriteMode);
   const updateAudioSettings = useMutation(api.scholars.updateAudioSettings);
-  const acceptReadingLevelSuggestion = useMutation(api.scholars.acceptReadingLevelSuggestion);
-  const dismissReadingLevelSuggestion = useMutation(api.scholars.dismissReadingLevelSuggestion);
   const readingLevelHistory = useQuery(
     api.scholars.getReadingLevelHistory,
     !isOperationsMode ? { scholarId: scholarId as Id<"users"> } : "skip"
@@ -798,7 +801,14 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
   const handleAIRerun = async () => {
     setAiLoading(true);
     try {
-      await runAIAnalysis({ scholarId: scholarId as Id<"users"> });
+      const result = await runAIAnalysis({ scholarId: scholarId as Id<"users"> });
+      // null = below the typed-word floor (or no usable answer): say so rather
+      // than leave the click looking like it did nothing.
+      if (!result) {
+        toaster.info({
+          title: `Not enough typed writing in the last 30 days (needs ${MIN_TYPED_WORDS_FOR_ESTIMATE} words)`,
+        });
+      }
     } finally {
       setAiLoading(false);
     }
@@ -1346,60 +1356,44 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                       ))}
                     </FieldSelect>
                   </Box>
-                  <Box py={1.5} borderTop="1px solid" borderColor="gray.50" />
+                  <Box py={1.5} borderTop="1px solid" borderColor="gray.50">
+                    {!aiLoading && (
+                      <Menu.Root positioning={{ placement: "bottom-end" }}>
+                        <Menu.Trigger asChild>
+                          <IconButton aria-label="Writing estimate actions" variant="ghost" size="2xs" color="charcoal.300" _hover={{ color: "charcoal.500" }}>
+                            <DotsThree />
+                          </IconButton>
+                        </Menu.Trigger>
+                        <Menu.Positioner>
+                          <Menu.Content minW="170px">
+                            <Menu.Item value="rerun" cursor="pointer" onClick={handleAIRerun}>
+                              {scholar?.readingLevelSuggestion ? "Re-analyze typed writing" : "Analyze typed writing"}
+                            </Menu.Item>
+                          </Menu.Content>
+                        </Menu.Positioner>
+                      </Menu.Root>
+                    )}
+                  </Box>
 
-                  {/* Observer AI row */}
+                  {/* The writing estimate — information, never a setting
+                      (TRA-513): it is not compared with the talk level and
+                      nothing here can promote it into it. */}
+                  <Box gridColumn="1 / -1" pb={1.5}>
+                    {aiLoading ? (
+                      <Spinner size="xs" color="violet.500" />
+                    ) : (
+                      <Text fontSize="2xs" fontFamily="body" color="charcoal.400">
+                        {writingEstimateText(
+                          scholar?.readingLevelSuggestion ?? null,
+                          scholar?.readingLevelSuggestionWords ?? null,
+                          scholar?.readingLevelSuggestionAt ?? null,
+                          estimateNow,
+                        )}
+                      </Text>
+                    )}
+                  </Box>
+
                   <>
-                    <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5} borderTop="1px solid" borderColor="gray.50">Observer AI</Text>
-                    <Box py={1.5} borderTop="1px solid" borderColor="gray.50">
-                      {aiLoading ? (
-                        <Spinner size="xs" color="violet.500" />
-                      ) : (
-                        <Text
-                          fontSize="xs"
-                          fontFamily="heading"
-                          fontWeight={scholar?.readingLevelSuggestion ? "600" : "400"}
-                          color={scholar?.readingLevelSuggestion ? "navy.500" : "charcoal.300"}
-                        >
-                          {scholar?.readingLevelSuggestion
-                            ? scholar.readingLevelSuggestion === "K" ? "K"
-                              : scholar.readingLevelSuggestion === "college" ? "College"
-                              : `Grade ${scholar.readingLevelSuggestion}`
-                            : "—"}
-                        </Text>
-                      )}
-                    </Box>
-                    <Box py={1.5} borderTop="1px solid" borderColor="gray.50">
-                      {!aiLoading && (
-                        <Menu.Root positioning={{ placement: "bottom-end" }}>
-                          <Menu.Trigger asChild>
-                            <IconButton aria-label="AI actions" variant="ghost" size="2xs" color="charcoal.300" _hover={{ color: "charcoal.500" }}>
-                              <DotsThree />
-                            </IconButton>
-                          </Menu.Trigger>
-                          <Menu.Positioner>
-                            <Menu.Content minW="170px">
-                              {scholar?.readingLevelSuggestion && (
-                                <>
-                                  <Menu.Item value="accept" cursor="pointer"
-                                    onClick={() => acceptReadingLevelSuggestion({ scholarId: scholarId as Id<"users"> })}>
-                                    Set as talk level
-                                  </Menu.Item>
-                                  <Menu.Item value="dismiss" cursor="pointer"
-                                    onClick={() => dismissReadingLevelSuggestion({ scholarId: scholarId as Id<"users"> })}>
-                                    Dismiss
-                                  </Menu.Item>
-                                </>
-                              )}
-                              <Menu.Item value="rerun" cursor="pointer" onClick={handleAIRerun}>
-                                {scholar?.readingLevelSuggestion ? "Re-analyze" : "Analyze"}
-                              </Menu.Item>
-                            </Menu.Content>
-                          </Menu.Positioner>
-                        </Menu.Root>
-                      )}
-                    </Box>
-
                     {/* Recent tutor-response readability row */}
                     <Text fontSize="xs" fontFamily="heading" color="charcoal.500" py={1.5} borderTop="1px solid" borderColor="gray.50">Tutor responses</Text>
                     <Box py={1.5} borderTop="1px solid" borderColor="gray.50">

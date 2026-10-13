@@ -55,6 +55,7 @@ export const scholars: SeedScholar[] = [
     grade: "K",
     readingLevel: "1",
     readingLevelSuggestion: "2",
+    readingLevelSuggestionWords: 180,
     dateOfBirth: "2020-09-04",
   },
   {
@@ -105,6 +106,7 @@ export const scholars: SeedScholar[] = [
     grade: "K",
     readingLevel: "K",
     readingLevelSuggestion: "1",
+    readingLevelSuggestionWords: 180,
     dateOfBirth: "2020-12-01",
   },
   {
@@ -138,6 +140,7 @@ export const scholars: SeedScholar[] = [
     grade: "Grade 4",
     readingLevel: "2",
     readingLevelSuggestion: "3",
+    readingLevelSuggestionWords: 180,
     dateOfBirth: "2016-06-21",
     preferredFont: "opendyslexic",
   },
@@ -340,8 +343,8 @@ export const directives: SeedDirective[] = [
 
 export const readingLevelHistory: SeedReadingLevelHistory[] = [
   { scholarKey: "s.keoni", level: "K", source: "teacher", changedByKey: "t.daniel", agoDays: 6 },
-  { scholarKey: "s.keoni", level: "1", source: "observer", agoDays: 2 },
+  { scholarKey: "s.keoni", level: "1", source: "teacher", changedByKey: "t.daniel", agoDays: 2 },
   { scholarKey: "s.makoa", level: "3", source: "teacher", changedByKey: "t.kawena", agoDays: 6 },
-  { scholarKey: "s.makoa", level: "2", source: "observer", agoDays: 1 },
+  { scholarKey: "s.makoa", level: "2", source: "teacher", changedByKey: "t.kawena", agoDays: 1 },
   { scholarKey: "s.nainoa", level: "K", source: "teacher", changedByKey: "t.kawena", agoDays: 6 },
 ];

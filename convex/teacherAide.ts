@@ -728,11 +728,6 @@ export const setScholarReadingLevel = internalMutation({
       await ctx.db.patch(args.scholarId, {
         ...(legacy ? { readLevel: legacy.readLevel } : {}),
         readingLevel: args.readingLevel ?? undefined,
-        // Mirror scholars.updateReadingLevel: the teacher has ruled, so the
-        // pending writing-derived estimate and its timestamp are superseded.
-        // DEPENDS ON pending schema addition users.readingLevelSuggestionAt.
-        readingLevelSuggestion: undefined,
-        readingLevelSuggestionAt: undefined,
       });
       if (args.readingLevel !== null) {
         await ctx.db.insert("readingLevelHistory", {

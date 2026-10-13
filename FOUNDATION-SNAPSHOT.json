@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "05dbd295dbe08a79bd8ff17237132117a90ef7f9",
+  "sourceCommit": "708ca50bfd467345c00ace25a315db458fb8098f",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -1979,7 +1979,7 @@
     },
     {
       "path": "components/ScholarProfile.tsx",
-      "sha256": "1890be8e7147e0bfd183f54cdb4b31b7a19d74ca6c10d895c38cc0ce89157919",
+      "sha256": "2d9eca37d437eb1169a49afa10f05249629066f648dfa8fcf47ca2aaa37859d7",
       "mode": "100644"
     },
     {
@@ -3794,7 +3794,7 @@
     },
     {
       "path": "components/rounds/RoundsLevels.tsx",
-      "sha256": "512bc7664448ca45a6242b824ca4992399967407a52ca518f3ae8300843cb9f1",
+      "sha256": "61f070b304b6974d28a22ad3a92fb6d925a81c7c093f5a99643bae4344c94e40",
       "mode": "100644"
     },
     {
@@ -3844,7 +3844,7 @@
     },
     {
       "path": "components/rounds/__tests__/roundsFigures.test.ts",
-      "sha256": "e42d2094c42c33e6869c01686ed3b5e1e3f6cfa61b579018e6b6263715870386",
+      "sha256": "e6aed211c543b1ebc7697a0068e3a6f7834abccd8b2410a9c7ce63c6631b14a4",
       "mode": "100644"
     },
     {
@@ -3879,7 +3879,7 @@
     },
     {
       "path": "components/rounds/roundsFigures.ts",
-      "sha256": "479af0772401304b1e2071fcbe4dd66300489c29927636ba28d94f4ea08bf717",
+      "sha256": "ab3a0abe8bc9c3ce3d33b458fc179fe6ef3675a7e33c615b66fc92f721146575",
       "mode": "100644"
     },
     {
@@ -4464,7 +4464,7 @@
     },
     {
       "path": "components/wholeChild/RoundsPane.tsx",
-      "sha256": "be5af945616a9a6043e35a18c39ad71ffaeddbd24b2ebcbe0198bdfee1b5a8a2",
+      "sha256": "65d17c35f108d4842877bd27a23f318b901b6d6d01397dfc95204493dd560201",
       "mode": "100644"
     },
     {
@@ -5883,6 +5883,11 @@
       "mode": "100644"
     },
     {
+      "path": "convex/__tests__/observerWritingEstimate.test.ts",
+      "sha256": "839d29bf1a5985609c98d8744b976f6d86a70d7f5236187d78dc6ddbb6ae048c",
+      "mode": "100644"
+    },
+    {
       "path": "convex/__tests__/offlineHomework.test.ts",
       "sha256": "b6c2cb1e480bec944cdec9fe8ae6df6e580af401d5f67661d8f865bc13a6b9b2",
       "mode": "100644"
@@ -6284,12 +6289,12 @@
     },
     {
       "path": "convex/__tests__/readOnlyAccount.test.ts",
-      "sha256": "0d3866ce8444781de28a71789196478368c887c4656e64c98fd5f97b39565ba7",
+      "sha256": "2704048fa3b4a1fdbb84366d0c5f703c98125e963ecccbed957bb0ef714914fd",
       "mode": "100644"
     },
     {
       "path": "convex/__tests__/readingLevelTypedInput.test.ts",
-      "sha256": "f68855ee822d71098f17cf33a3c429ea182c165e55ecae409de247b8e262d85c",
+      "sha256": "775c9da6992a44953436d8b871426aad9da0a00c5aab269a6a9ee9cfb2b6658e",
       "mode": "100644"
     },
     {
@@ -7145,6 +7150,11 @@
     {
       "path": "convex/__tests__/workshopPolicy.test.ts",
       "sha256": "ab6e814dc7c6396d76a645eaeb715fb4f06677111fd2125c63c3952cb34ef671",
+      "mode": "100644"
+    },
+    {
+      "path": "convex/__tests__/writingEstimateInfoOnly.test.ts",
+      "sha256": "39c3df64146498a04b6c00f7f68253a0dd1ec75d00d79bcbd568b69fd55c3df0",
       "mode": "100644"
     },
     {
@@ -8204,7 +8214,7 @@
     },
     {
       "path": "convex/lib/__tests__/observerShared.test.ts",
-      "sha256": "da83370906e6e62427f402907acd4377555e2b680cd50dc66c9595534287fb2f",
+      "sha256": "193a93977e75c4232cfa359a91dae6b9baa95ab72acc94eea9163351b7ca4645",
       "mode": "100644"
     },
     {
@@ -8284,7 +8294,7 @@
     },
     {
       "path": "convex/lib/__tests__/readingLevelEstimate.test.ts",
-      "sha256": "c0e5a6b2bcfb14ba0d5426ff42b59ff62a4b3eee81a01458f37e8cda1b1517fc",
+      "sha256": "66cb91f6bfe1a047b1f21c1e1f053d49af29ec1d597fc6d2c7fe943991e7939f",
       "mode": "100644"
     },
     {
@@ -9299,7 +9309,7 @@
     },
     {
       "path": "convex/lib/observerShared.ts",
-      "sha256": "2e928747b76d83d77b9a89d5ded5ad5883d6705314924169cbb882c2c17e7bc4",
+      "sha256": "e307c27d61951bcc36dc1777a3a7eae7e2fa911e5d519e346caae0b11feb0af3",
       "mode": "100644"
     },
     {
@@ -9959,7 +9969,7 @@
     },
     {
       "path": "convex/lib/readingLevels.ts",
-      "sha256": "3bcfefee08e8cf44e83d0910d78e1a3c0832f1a20ab17a0a1b7153935fd97b03",
+      "sha256": "1e0dca75ec832d5c637e2b6d7da10335e8d03800e3a62a86cea1f39de10b3064",
       "mode": "100644"
     },
     {
@@ -10554,7 +10564,7 @@
     },
     {
       "path": "convex/messages.ts",
-      "sha256": "dcb4cfc559a691b53ddef9e6bcec881d621fc769ec88c9f37f75a011aa8f54c0",
+      "sha256": "26023e642b32b747a1d4188a551dd003b0879b1f9c383f47c42d0e24dc7fff5e",
       "mode": "100644"
     },
     {
@@ -10604,7 +10614,7 @@
     },
     {
       "path": "convex/observer.ts",
-      "sha256": "8e6fbff19754249237d759c1a2ebbefc85df9b00cb0a6b1663d9944dd25be819",
+      "sha256": "5a9a94bc642642fd6006a9977afb5bb49a4dcb1cbb813d28fe12cfd13be88175",
       "mode": "100644"
     },
     {
@@ -10814,7 +10824,7 @@
     },
     {
       "path": "convex/prompts.ts",
-      "sha256": "c079489e1e41c8f94317d78eadb53dbdd56184a7c91970a2a5ff60e4b90d1cec",
+      "sha256": "b1e67795e65626a6a9890a465a05e53c9c230be44d0768e2129dac57c6f46158",
       "mode": "100644"
     },
     {
@@ -10839,7 +10849,7 @@
     },
     {
       "path": "convex/readingLevelAnalysis.ts",
-      "sha256": "f297c6c7494ecff018880c24db19d660a16b389f88d2861ecee4da1090fa42df",
+      "sha256": "b32c8a540af0ba55ad00b287d207f42b08ef185ab0ffd0840444083042a56560",
       "mode": "100644"
     },
     {
@@ -10874,7 +10884,7 @@
     },
     {
       "path": "convex/schema.ts",
-      "sha256": "9fc94a0d26cf675da2a13b9d050fbd049ca91268244d83d4d5a9179651017b4d",
+      "sha256": "5d818a212750b9ca0f5b82547ef337b4500e324ad4bf26e56dd303ea50dd8efe",
       "mode": "100644"
     },
     {
@@ -10949,7 +10959,7 @@
     },
     {
       "path": "convex/scholars.ts",
-      "sha256": "e8c42a677bd7bc866fc0ae6fc88eb09d82176d8dc874ec066082725dd833a323",
+      "sha256": "dd34cbd771394310f0b5df97206d51d1d8f25285a2ffe14046044975979da576",
       "mode": "100644"
     },
     {
@@ -11134,7 +11144,7 @@
     },
     {
       "path": "convex/seed/rich/roster.ts",
-      "sha256": "f80577ffe76dc4ade17c61d0f26c8940cb132ca04b3361f8a504db4302135e8a",
+      "sha256": "c116404f914b4b6746bbd66e7e942ae614fdbf2a92f67a162e44132d01a291c6",
       "mode": "100644"
     },
     {
@@ -11149,7 +11159,7 @@
     },
     {
       "path": "convex/seed/rich/types.ts",
-      "sha256": "d46a3a01f97855063a41dfbdf9ad93cfcfbc6fed889ffbcd40e770dd6dcb2fbe",
+      "sha256": "43c5d35d522603a66e65206810288ddce7ffd4f30e0ecaf2b845e17b448c1d8d",
       "mode": "100644"
     },
     {
@@ -11244,7 +11254,7 @@
     },
     {
       "path": "convex/seedRichCohort.ts",
-      "sha256": "5c977124dbbec0978d99c750166574e744ee91af02a3dd1d4726fbbd48f70f66",
+      "sha256": "a7949c5625fd4145ea80b5690f405155532e4e6ea6ba672b5bce44dd19dedad3",
       "mode": "100644"
     },
     {
@@ -11494,7 +11504,7 @@
     },
     {
       "path": "convex/teacherAide.ts",
-      "sha256": "43481c0fcd43d19deff7cb77418d3b0708b644a898eb0dde0dbd58c1af01821c",
+      "sha256": "621aa456bcba47c0a9876ac9775d988566630958bcdadcc0c9085c2a70613bb1",
       "mode": "100644"
     },
     {
@@ -21308,5 +21318,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "8e63b7d4466975b99f388b9258d00757d8d48479ddb8e0f9c2e6b49b520d6aa0"
+  "treeHash": "861a347ab520a2f2d50c337d13ccb04474bc98d9b525d266c02cec6bdba82b74"
 }

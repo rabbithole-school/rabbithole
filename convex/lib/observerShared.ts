@@ -14,7 +14,8 @@
 import { OBSERVER_ORIGIN_LABELS } from "./observerOrigin";
 import type { AppAiContextTurn } from "./appUpdateTools";
 import type { ImageContentPart } from "./imageBytes";
-import type { InputModality } from "./inputModality";
+import { isTypedScholarText, type InputModality } from "./inputModality";
+import { countWords } from "./readingLevels";
 import { scholarNamePronounHint } from "./scholarPronouns";
 import {
   SESSION_SIGNAL_TYPES,
@@ -31,7 +32,7 @@ export const OBSERVER_TOOL = {
     properties: {
       inferredReadingLevel: {
         type: "string" as const,
-        description: "Estimated reading/writing level based on scholar messages: K, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, or college. Omit if insufficient evidence.",
+        description: "Estimated grade level of the scholar's TYPED writing. Use only lines labelled SCHOLAR:; ignore SCHOLAR (spoken) and APP BUTTON lines. A grade 1-12 with an optional tenth (e.g. 7 or 7.3), K, or college. Omit if insufficient evidence.",
       },
       pulse: {
         type: "object" as const,
@@ -338,6 +339,23 @@ function isScholarAuthoredTurn(message: ObserverHistoryMessage): boolean {
     message.inputModality !== "app" &&
     !message.generatedImage
   );
+}
+
+/**
+ * Words the scholar TYPED in `history` — the only text the observer's
+ * writing-derived grade estimate may be drawn from (TRA-513). Same
+ * `isTypedScholarText` filter as the teacher-run estimator and the
+ * Flesch-Kincaid trend; a tutor row, a generated image and an app button are
+ * not the scholar's typing either.
+ */
+export function typedScholarWordCount(
+  history: Pick<ObserverHistoryMessage, "sourceRole" | "generatedImage" | "inputModality" | "content">[],
+): number {
+  return history
+    .filter(
+      (m) => m.sourceRole === "user" && !m.generatedImage && isTypedScholarText(m),
+    )
+    .reduce((sum, m) => sum + countWords(m.content), 0);
 }
 
 /**
