@@ -43,13 +43,15 @@
  * `tutorTranscripts` table comment in convex/schema.ts.
  */
 
+import { levelsPromptLine } from "../readingLevels";
+
 /**
  * Version stamp for the story-open system prompt. Bump this whenever
  * `buildStoryOpenPrompt`'s TEXT changes so persisted story-open tutor transcripts (and
  * any quality signal derived from them) are keyed to the prompt they were
  * produced under. A date+slug string is enough; it is opaque to consumers.
  */
-export const STORY_OPEN_PROMPT_VERSION = "2026-07-story-open-v1";
+export const STORY_OPEN_PROMPT_VERSION = "2026-10-story-open-v2-talk-level";
 
 /**
  * The maximum number of assistant turns in a story-open conversation. Slightly
@@ -101,7 +103,7 @@ export interface StoryOpenPacket {
   toLabel?: string;
   /** The world thing's domain (e.g. "biology") — a light framing hint. */
   toDomain?: string;
-  /** The scholar's reading level, if a teacher/observer has set one. */
+  /** The scholar's levels (`describeLevelsForPrompt`), if any are set. */
   readingLevel?: string;
 }
 
@@ -127,8 +129,9 @@ export function buildStoryOpenPrompt(packet: StoryOpenPacket): string {
     ? `\nWhere the story comes from (your grounding, not something to recite): ${packet.source.trim()}`
     : ``;
 
-  const readingLevelLine = packet.readingLevel?.trim()
-    ? `Match this scholar's reading level: ${packet.readingLevel.trim()}.`
+  const levels = levelsPromptLine(packet.readingLevel?.trim());
+  const readingLevelLine = levels
+    ? `Match this scholar's level (${levels}).`
     : `Write in plain, warm language a curious kid reads easily — no jargon, short sentences.`;
 
   return `You're Rabbithole's tutor at a small, happy moment. A curious kid just got

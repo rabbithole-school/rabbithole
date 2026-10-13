@@ -447,7 +447,7 @@ export function formatPairwiseForJudge(
       ? `Deliverable: ${activity.deliverablePrompt}`
       : `Deliverable: (none)`,
     ``,
-    `## Synthetic scholar: ${profile.name} — reading level ${profile.readingLevel}`,
+    `## Synthetic scholar: ${profile.name} — talk level ${profile.readingLevel}`,
     `Profile: ${profile.dossier}`,
     `Traits: ${profile.traits.join("; ") || "none"}`,
     ``,
@@ -465,7 +465,7 @@ export function formatPairwiseForJudge(
  * A small, diverse default cast used when a teacher kicks off an experiment
  * without picking profiles. Four archetypes that reliably diverge under the
  * same activity — the point of the emergent sim (see the plan's "diverse
- * cast, not one persona" guard against sim overfitting). Reading levels span
+ * cast, not one persona" guard against sim overfitting). Talk levels span
  * the elementary range; traits are the behavioral knobs.
  */
 export const DEFAULT_CAST: SimProfile[] = [

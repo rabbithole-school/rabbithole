@@ -28,6 +28,7 @@ import "./mafs-theme.css";
 import { isChallenge, type ManipulativeSpec } from "@/lib/manipulative/types";
 import { C, wash } from "./colors";
 import { answerSolved, derivedQuestion, isSolved, withTypedValue } from "@/lib/manipulative/logic";
+import { SpeakableLabel } from "@/components/SpeakableLabel";
 import { PartitionManipulative } from "./kinds/PartitionManipulative";
 import { NumberLineManipulative } from "./kinds/NumberLineManipulative";
 import { ArrayManipulative } from "./kinds/ArrayManipulative";
@@ -157,6 +158,7 @@ export function Manipulative({
   spec,
   onCommit,
   onInteractionStart,
+  questionVoice = "none",
 }: {
   spec: ManipulativeSpec;
   /**
@@ -179,12 +181,20 @@ export function Manipulative({
    * signal — only a real pointer can.
    */
   onInteractionStart?: () => void;
+  /**
+   * How the question reaches the scholar (TRA-514, `practiceQuestionVoice`):
+   * `auto` reads it aloud as the board appears (a listener), `tap` offers a
+   * speaker (a beginner), `none` leaves it as text. The board hides the stem
+   * card, so this is where a listener hears a manipulative's question.
+   */
+  questionVoice?: "auto" | "tap" | "none";
 }) {
   const challenge = isChallenge(spec);
   const practiceMode = onCommit != null;
   // The one-number question this board can answer, if any (see header).
   const question = derivedQuestion(spec);
   const strategyLine = question ? question.strategy.replace(/\.$/, "") : null;
+  const questionText = question ? question.question : spec.prompt;
   // Does the frame show a typed-answer box? Either the spec asks for one
   // (`spec.answer`) or the kind's goal derives one.
   const answerField = spec.answer
@@ -274,7 +284,16 @@ export function Manipulative({
             {spec.concept}
           </Text>
           <Text fontSize={{ base: "17px", md: "19px" }} fontWeight="700" color="brand.primary" lineHeight="1.25">
-            {question ? question.question : spec.prompt}
+            {questionVoice === "none" ? (
+              questionText
+            ) : (
+              <SpeakableLabel
+                text={questionText}
+                ariaLabel="Hear the question"
+                iconSize={18}
+                autoPlay={questionVoice === "auto"}
+              />
+            )}
           </Text>
           {/* The strategy: offered, not required — parenthesised and muted so
               it reads as a way in, never as the thing being graded. */}

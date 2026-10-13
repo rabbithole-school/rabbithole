@@ -6,7 +6,7 @@ import { internal } from "../_generated/api";
 import {
   buildBeginnerReaderSection,
   buildEarlyReaderSection,
-  buildGenericReadingLevelSection,
+  buildTalkLevelSection,
   buildLevelsSection,
   buildListenerDeliverySection,
   buildPreReaderSection,
@@ -162,13 +162,13 @@ describe("resolver → selection, end to end", () => {
 describe("buildLevelsSection", () => {
   test("register, then turn rules, then the delivery add-ons", () => {
     expect(buildLevelsSection({ talk: "7", read: "listener", write: "voice" })).toBe(
-      buildGenericReadingLevelSection("7") +
+      buildTalkLevelSection("7") +
         buildYoungReaderTurnRules() +
         buildListenerDeliverySection() +
         buildWriteByVoiceSection(),
     );
     expect(buildLevelsSection({ talk: "7", read: "beginner", write: "own" })).toBe(
-      buildGenericReadingLevelSection("7") +
+      buildTalkLevelSection("7") +
         buildYoungReaderTurnRules() +
         buildBeginnerReaderSection(beginnerAlphabet([])),
     );
@@ -179,7 +179,7 @@ describe("buildLevelsSection", () => {
       buildEarlyReaderSection("2") + buildYoungReaderTurnRules(),
     );
     expect(buildLevelsSection({ talk: "7", read: "reader", write: "own" })).toBe(
-      buildGenericReadingLevelSection("7"),
+      buildTalkLevelSection("7"),
     );
     expect(buildLevelsSection({ talk: null, read: "reader", write: "own" })).toBe("");
   });
@@ -223,11 +223,11 @@ describe("buildSystemPrompt — the levels slot", () => {
     const graded = build("5");
     const pre = build(PRE_READER_LEVEL);
     const none = build(null);
-    expect(graded.replace(buildGenericReadingLevelSection("5"), SLOT)).toBe(
+    expect(graded.replace(buildTalkLevelSection("5"), SLOT)).toBe(
       pre.replace(buildPreReaderSection() + buildYoungReaderTurnRules(), SLOT),
     );
     // An unset level contributes nothing: removing the graded slot yields it.
-    expect(graded.replace(buildGenericReadingLevelSection("5"), "")).toBe(none);
+    expect(graded.replace(buildTalkLevelSection("5"), "")).toBe(none);
   });
 });
 

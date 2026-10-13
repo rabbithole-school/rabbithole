@@ -9774,7 +9774,7 @@ export default defineSchema({
   syntheticScholarProfiles: defineTable({
     ownerId: v.id("users"),
     name: v.string(),
-    // e.g. "Grade 2", "Grade 5" — drives the tutor's READING LEVEL section.
+    // e.g. "Grade 2", "Grade 5" — drives the tutor's TALK LEVEL section.
     readingLevel: v.string(),
     // Synthetic dossier text; fed to the real tutor's buildDossierSection.
     // Teacher- or AI-authored — treat as untrusted, like a real dossier.

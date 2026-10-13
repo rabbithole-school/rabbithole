@@ -31,7 +31,7 @@ import {
  * week is theirs to read, and the meeting should not stop for a boundary
  * working as designed.
  */
-const LEVEL_UNAVAILABLE = "Reading level not available to your role";
+const LEVEL_UNAVAILABLE = "Levels not available to your role";
 
 /** The pane form: the setting and the mechanical writing trend, told apart. */
 export function RoundsLevelCard({

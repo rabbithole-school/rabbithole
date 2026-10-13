@@ -5,6 +5,7 @@ import { internal } from "../_generated/api";
 import {
   buildBeginnerReaderSection,
   buildEarlyReaderSection,
+  buildTalkLevelSection,
   buildYoungReaderTurnRules,
 } from "../prompts";
 import { buildSystemPromptParts } from "../sessionHelpers";
@@ -61,7 +62,7 @@ describe("beginner delivery rules in the reading-level slot", () => {
 
   test("a grade-5 talker keeps the grade-5 note, not a K register", () => {
     const { stable } = parts("5", { read: "beginner", write: "own" });
-    expect(stable).toContain('reading level is set to "5"');
+    expect(stable).toContain(buildTalkLevelSection("5"));
     expect(stable).not.toContain("PRE-READER MODE");
     expect(stable).toContain(section([]));
   });

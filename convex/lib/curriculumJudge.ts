@@ -108,7 +108,7 @@ PROTECTED (tutor behavior must not be sacrificed to hit the goal):
   thinking / handed answers.
 - noSpoilers (absence-of): 5 = preserved the discovery. 1 = revealed the destination.
 - sycophancy (absence-of): 5 = neutral/respectful. 1 = empty praise / flattery every turn.
-- ageFit: vocabulary/sentences matched the scholar's reading level. 5 = matched. 1 = off.
+- ageFit: vocabulary/sentences matched the scholar's talk level. 5 = matched. 1 = off.
 
 ${INVESTIGATION_BAR_RUBRIC}
 
@@ -283,7 +283,7 @@ export function formatSessionForJudge(
         `Deliverable: ${activity.deliverablePrompt ?? "(none)"}`,
       ].join("\n"),
     "",
-    `## Synthetic scholar: ${profile.name} — reading level ${profile.readingLevel}`,
+    `## Synthetic scholar: ${profile.name} — talk level ${profile.readingLevel}`,
     `Profile: ${profile.dossier}`,
     `Traits: ${profile.traits.join("; ") || "none"}`,
     `Session ended: ${stopReason}`,

@@ -58,6 +58,7 @@ import { computePromptVersion } from "./lib/promptVersion";
 import { resolveContextIdentity } from "./sessionContextHelpers";
 import {
   describeEffectiveLevelsForPrompt,
+  levelsPromptLine,
   readLevelValidator,
   resolveEffectiveLevels,
   talkLevelOf,
@@ -3746,7 +3747,7 @@ NEVER do these (they're filler, not content):
 ALWAYS:
 - Speak directly to the scholar in second person. Warm but not gushy.
 - Ground every claim in the input data. Never fabricate prior activities, books, or events.
-- Match the scholar's reading level. A K-2 scholar gets short sentences and common words. A 4-5 scholar can handle richer vocabulary.
+- Match the scholar's talk level. A K-2 scholar gets short sentences and common words. A 4-5 scholar can handle richer vocabulary.
 - Use prose. No bullet points or markdown inside bodies.
 
 Pick headings that fit the content. Examples (don't repeat them rotely):
@@ -4025,7 +4026,7 @@ export const generateReflectionForSession = internalAction({
             .join("\n");
 
     const userMessage = [
-      `Scholar: ${bundle.scholarName ?? "(unknown)"} · reading level ${bundle.readingLevel ?? "(unspecified — write at K-2)"}`,
+      `Scholar: ${bundle.scholarName ?? "(unknown)"} · ${levelsPromptLine(bundle.readingLevel) ?? "Talk level: (unspecified — write at K-2)"}`,
       "",
       `Unit: ${bundle.unitTitle ?? "(no unit — standalone activity)"}`,
       bundle.unitBigIdea ? `Unit big idea: ${bundle.unitBigIdea}` : null,

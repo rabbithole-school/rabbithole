@@ -89,7 +89,7 @@ import {
   schoolOperationsInstitutionIds,
   STAFF_CAPABILITIES,
 } from "./lib/staffCapabilities";
-import { talkLevelOf } from "./lib/readingLevels";
+import { readLevelOf, talkLevelOf } from "./lib/readingLevels";
 
 /**
  * The outcome of a successful `registerWithCode`, telling the client how to
@@ -523,6 +523,10 @@ export const currentUser = query({
       ),
       institutionSuspended: suspension.blocked,
       institutionSuspendedName: suspension.institutionName,
+      // The READ level with the legacy "pre-reader" talk value resolved
+      // (`readLevelOf`), so practice can read questions aloud by it on both
+      // clients without re-deriving the rule (TRA-514).
+      effectiveReadLevel: readLevelOf(user),
     };
   },
 });

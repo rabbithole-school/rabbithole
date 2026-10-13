@@ -3,7 +3,15 @@ import { DatabaseReader } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { teacherQuery } from "./lib/customFunctions";
 import { requireActiveScholarAccess } from "./lib/access";
-import { talkLevelLabel } from "./lib/readingLevels";
+import {
+  READ_LEVEL_LABELS,
+  WRITE_MODE_LABELS,
+  readLevelOf,
+  talkLevelLabel,
+  writeModeOf,
+  type ReadLevel,
+  type WriteMode,
+} from "./lib/readingLevels";
 import { PRACTICE_DOMAIN_LABELS } from "../shared/practiceDomainLabels";
 import {
   frontierGradeValue,
@@ -18,7 +26,8 @@ import {
  * A per-DOMAIN vector, not one invented blended number — asynchronous
  * development is the population's defining trait, so blending it away deletes
  * the signal. Two honest readouts today:
- *   • reading level      — the governed teacher-set/observer-suggested level.
+ *   • talk, read, write  — the governed teacher-set levels (talk may be
+ *                          observer-suggested).
  *   • inquiry complexity — the rolling median of analyses.complexityLevel.
  *
  * A third — a **math working level** (a grade-band + posture derived from the
@@ -44,6 +53,45 @@ export interface WorkingLevel {
   byDomain: WorkingLevelComponent[];
 }
 
+/**
+ * The level components (TRA-514): the TALK level, named for what it is (never
+ * "Reading"), plus READ and WRITE only when they differ from the default
+ * (reader, on their own) — a default row encodes nothing a reader of the
+ * report needs (T2). Pure, so the labels are testable without a database.
+ */
+export function levelComponents(
+  scholar:
+    | {
+        readingLevel?: string | null;
+        readLevel?: ReadLevel | null;
+        writeMode?: WriteMode | null;
+      }
+    | null
+    | undefined,
+): WorkingLevelComponent[] {
+  // "K", "Grade 3", "College"; a legacy "pre-reader" reads as K (TRA-503).
+  const talkLabel = talkLevelLabel(scholar?.readingLevel);
+  const read = readLevelOf(scholar);
+  const write = writeModeOf(scholar);
+  return [
+    ...(talkLabel
+      ? [
+          {
+            domain: "Talk",
+            level: talkLabel,
+            source: "talk level: ideas and vocabulary (teacher-set / observer-suggested)",
+          },
+        ]
+      : []),
+    ...(read !== "reader"
+      ? [{ domain: "Read", level: READ_LEVEL_LABELS[read], source: "read level (teacher-set)" }]
+      : []),
+    ...(write !== "own"
+      ? [{ domain: "Write", level: WRITE_MODE_LABELS[write], source: "write mode (teacher-set)" }]
+      : []),
+  ];
+}
+
 /** Median of a numeric array (0 for empty). */
 function median(xs: number[]): number {
   if (xs.length === 0) return 0;
@@ -64,18 +112,13 @@ export async function gatherWorkingLevel(
 ): Promise<WorkingLevel> {
   const byDomain: WorkingLevelComponent[] = [];
 
-  // ── Reading level (governed: teacher-set / observer-suggested) ──────
+  // ── Talk, read and write (governed: teacher-set; talk may be observer-
+  //    suggested). The stored talk field is `readingLevel`, but it is the
+  //    grade band of ideas and vocabulary, not a reading measure, so it is
+  //    never labelled "Reading" (TRA-514). Read and write show beside it, so a
+  //    talk-7 listener doesn't read as a grade-7 reader. ──
   const scholar = await db.get(scholarId);
-  // The TALK level as a label ("K", "Grade 3", "College"); a legacy
-  // "pre-reader" reads as K, never "Grade pre-reader" (TRA-503).
-  const talkLabel = talkLevelLabel(scholar?.readingLevel);
-  if (talkLabel) {
-    byDomain.push({
-      domain: "Reading",
-      level: talkLabel,
-      source: "reading level (teacher-set / observer-suggested)",
-    });
-  }
+  byDomain.push(...levelComponents(scholar));
 
   // ── Math working level — a per-DOMAIN grade band off the procedural-practice
   //    frontier (the deferral in PR #400's note is now unblocked: practiceMastery

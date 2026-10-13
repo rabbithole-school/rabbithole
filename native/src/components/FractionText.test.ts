@@ -13,8 +13,28 @@ vi.mock("@/theme", () => ({
   useColors: () => ({ fg: "#000000", cyanSubtle: "#eef6ff", cyan: "#00aaff" }),
 }));
 vi.mock("../../modules/expo-math-view", () => ({ MathView: "MathView" }));
+vi.mock("@/lib/nativeTTS", () => ({ useSpokenWordIn: () => null }));
 
-import { wrapTokens } from "./FractionText";
+import { proseWords, wrapTokens } from "./FractionText";
+import { wordTokens } from "../../vendor/shared/beginnerReading";
+
+describe("proseWords — what a listener's read-along can light", () => {
+  test("plain prose is every word", () => {
+    expect(wordTokens(proseWords("How many apples are there?")).map((t) => t.key)).toEqual([
+      "how",
+      "many",
+      "apples",
+      "are",
+      "there",
+    ]);
+  });
+
+  test("drawn math (a stacked fraction, a blank box) is not a word to light", () => {
+    const keys = wordTokens(proseWords("What is 1/2 of 8?")).map((t) => t.key);
+    expect(keys).not.toContain("1");
+    expect(keys).toEqual(expect.arrayContaining(["what", "is", "of"]));
+  });
+});
 
 describe("wrapTokens — newline handling", () => {
   test("a trailing newline becomes a hard break, never a 2-line-tall token", () => {

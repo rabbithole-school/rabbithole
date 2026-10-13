@@ -42,9 +42,12 @@ type Props = {
   /** Top-level line-height (unitless multiple) for the no-table fast path;
    *  forwarded to FractionText. Omit to keep FractionText's default. */
   lineHeight?: number;
+  /** Light each word as the read-aloud voice says it (a listener, TRA-514);
+   *  forwarded to every prose block. */
+  readAlong?: boolean;
 };
 
-export function StemText({ value, fontSize = 28, align = "center", color, accessibilityLabel, weight, lineHeight }: Props) {
+export function StemText({ value, fontSize = 28, align = "center", color, accessibilityLabel, weight, lineHeight, readAlong = false }: Props) {
   const blocks = splitStemBlocks(value);
 
   // Fast path: no table ⇒ exactly the old FractionText render.
@@ -58,6 +61,7 @@ export function StemText({ value, fontSize = 28, align = "center", color, access
         accessibilityLabel={accessibilityLabel}
         weight={weight}
         lineHeight={lineHeight}
+        readAlong={readAlong}
       />
     );
   }
@@ -72,7 +76,7 @@ export function StemText({ value, fontSize = 28, align = "center", color, access
     >
       {blocks.map((block, i) =>
         block.kind === "text" ? (
-          <FractionText key={i} value={block.text} fontSize={fontSize} align={align} color={color} />
+          <FractionText key={i} value={block.text} fontSize={fontSize} align={align} color={color} readAlong={readAlong} />
         ) : (
           <StemTable key={i} block={block} cellFont={cellFont} />
         ),

@@ -19,6 +19,7 @@ const { items, passthrough } = vi.hoisted(() => ({
   passthrough: ({ children }: { children?: unknown }) => children ?? null,
 }));
 
+vi.mock("@/components/SpeakableLabel", () => ({ SpeakableLabel: passthrough }));
 vi.mock("react-native", () => ({
   ActivityIndicator: passthrough,
   Keyboard: { dismiss: vi.fn() },

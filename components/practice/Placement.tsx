@@ -72,6 +72,8 @@ import { useFlatAnswerKeyboard } from "@/hooks/useFlatAnswerKeyboard";
 import { useExpressionTemplate } from "@/hooks/useExpressionTemplate";
 import { useExpressionTemplateKeyboard } from "@/hooks/useExpressionTemplateKeyboard";
 import { hasPracticeMath } from "@/shared/fractions";
+import { practiceQuestionVoice } from "@/shared/beginnerReading";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import type { PracticePromptVisual } from "@/shared/practicePromptVisual";
 
 type Probe = {
@@ -213,6 +215,11 @@ export function Placement({
   // "Okay — here we go." line instead of the generic "Getting ready…".
   const [handoff, setHandoff] = useState(false);
 
+  // The placement question reaches the scholar by their READ level, as in the
+  // drill (TRA-514, `practiceQuestionVoice`); grade-"K" probes keep a speaker.
+  const { user: viewer } = useCurrentUser();
+  const viewerReadLevel =
+    viewer && viewer._id === scholarId ? viewer.effectiveReadLevel : "reader";
   // Resume: a mid-placement reload lands directly back on the SAME served item
   // (the server persisted it), skipping the intro — the intro is for genuinely
   // fresh placements only. One-shot read; the loop itself is mutation-driven.
@@ -957,10 +964,14 @@ export function Placement({
 
         {cardVisible && (
           <VerdictStemCard
+            // Keyed by probe so two consecutive probes with the same text
+            // still re-read for a listener (the auto-read fires on mount).
+            key={current?.itemId}
             stem={current?.stem ?? ""}
             promptVisual={current?.promptVisual}
             tone={null}
-            speakable={current?.grade === "K"}
+            speakable={practiceQuestionVoice(viewerReadLevel, current?.grade === "K") !== "none"}
+            autoRead={practiceQuestionVoice(viewerReadLevel, false) === "auto"}
           />
         )}
 
@@ -971,7 +982,12 @@ export function Placement({
           // (onManipulativeCommit). No answer pad — a manipulative isn't typed.
           <VStack w="100%" gap={4}>
             {manipulativeSpec ? (
-              <Manipulative spec={manipulativeSpec} onCommit={onManipulativeCommit} />
+              <Manipulative
+                key={current?.itemId}
+                spec={manipulativeSpec}
+                onCommit={onManipulativeCommit}
+                questionVoice={practiceQuestionVoice(viewerReadLevel, current?.grade === "K")}
+              />
             ) : (
               <Text color="#9b1c1c" fontSize="14px">
                 This activity couldn&apos;t be loaded — try refreshing.

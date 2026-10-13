@@ -36,7 +36,15 @@
  */
 
 import { parseItemId } from "./session";
-import { talkLevelOf } from "../readingLevels";
+import {
+  describeEffectiveLevelsForPrompt,
+  levelsPromptLabel,
+  readLevelOf,
+  talkLevelOf,
+  writeModeOf,
+  type ReadLevel,
+  type WriteMode,
+} from "../readingLevels";
 import { generateItem, hasTemplate } from "./templates";
 import {
   accessProven,
@@ -51,7 +59,7 @@ import {
  * produced under — the same role `promptVersion` plays for the streaming tutor.
  * A date+slug string is enough; it is opaque to consumers.
  */
-export const HANDOFF_PROMPT_VERSION = "2026-09-context-v5-statement-close";
+export const HANDOFF_PROMPT_VERSION = "2026-10-context-v6-talk-read-write";
 
 /**
  * Version stamp for the MANIPULATIVE handoff/explain prompt
@@ -61,13 +69,18 @@ export const HANDOFF_PROMPT_VERSION = "2026-09-context-v5-statement-close";
  * are keyed to the exact prompt they were produced under.
  */
 export const MANIPULATIVE_HANDOFF_PROMPT_VERSION =
-  "2026-09-manip-context-v5-statement-close";
+  "2026-10-manip-context-v6-talk-read-write";
 
 export type HandoffEntryMode = "stuck" | "spiral" | "ladder" | "game";
 
 export type ScholarCoachContext = {
   ageBand?: "4-5" | "6-8" | "9-11" | "12-14" | "15+";
+  /** The TALK level (ideas and vocabulary). The field keeps its old name. */
   readingLevel?: string;
+  /** The READ level, only when it isn't the default `reader` (TRA-514). */
+  readLevel?: Exclude<ReadLevel, "reader">;
+  /** The WRITE mode, only when it isn't the default `own`. */
+  writeMode?: Exclude<WriteMode, "own">;
   skillStatus?:
     | "brand_new"
     | "still_building"
@@ -138,6 +151,8 @@ export function resolveScholarCoachContext(args: {
     dateOfBirth?: string;
     gradeLevel?: string;
     readingLevel?: string;
+    readLevel?: ReadLevel;
+    writeMode?: WriteMode;
   };
   mastery?: CoachMastery | null;
   skillKey?: string;
@@ -149,12 +164,19 @@ export function resolveScholarCoachContext(args: {
     args.scholar.gradeLevel,
     args.now,
   );
+  // All three levels (TRA-514), through the shared resolvers: a legacy
+  // "pre-reader" reaches the coach as talk K + read listener. Read and write
+  // are carried only when they differ from the default, so an ordinary
+  // reader's context (and prompt) is unchanged.
+  const read = readLevelOf(args.scholar);
+  const write = writeModeOf(args.scholar);
   return {
     ...(ageBand ? { ageBand } : {}),
-    // The TALK level (TRA-503): a legacy "pre-reader" reaches the coach as K.
     ...(args.scholar.readingLevel
       ? { readingLevel: talkLevelOf(args.scholar.readingLevel) ?? undefined }
       : {}),
+    ...(read !== "reader" ? { readLevel: read } : {}),
+    ...(write !== "own" ? { writeMode: write } : {}),
     ...(args.skillKey
       ? { skillStatus: resolveCoachSkillStatus(args.mastery, args.now) }
       : {}),
@@ -255,11 +277,7 @@ function privateCoachContext(
       `- Age band ${context.ageBand}: size each turn and each ask for this band. Keep the idea ambitious; shrink only the language and working-memory load.`,
     );
   }
-  if (context?.readingLevel) {
-    lines.push(
-      `- Reading level "${context.readingLevel}": match vocabulary and sentence complexity to this exact label.`,
-    );
-  }
+  lines.push(...coachLevelLines(context));
   if (context?.skillStatus === "brand_new") {
     lines.push(
       "- Skill status: our records show this is brand new. Teach from a small concrete foothold; do not frame it as forgotten.",
@@ -287,7 +305,7 @@ function privateCoachContext(
 ${controls}
 
 These controls shape the coaching silently. NEVER recite, quote, summarize, or
-hint at the age band, reading level, stored status, raw repetitions, or any other
+hint at the age band, the levels, stored status, raw repetitions, or any other
 record. Do not say "I see you're 8" or "you read at level 3." If a record
 reference is genuinely useful, attribute it honestly as "our records show…" —
 NEVER "I remember you," "last time we…," or any claim of personal continuity.
@@ -309,9 +327,40 @@ function landingGuidance(): string {
 
 function toneGuidance(context: ScholarCoachContext | undefined): string {
   return context?.readingLevel
-    ? `Warm and brief, with vocabulary and sentence complexity matched to reading
+    ? `Warm and brief, with vocabulary and sentence complexity matched to talk
 level "${context.readingLevel}" — plain sentences, no jargon.`
     : "Warm, brief, kid-level — plain sentences, no jargon.";
+}
+
+/**
+ * The coach's private level lines (TRA-514). The TALK level sizes words and
+ * ideas; READ and WRITE, when they aren't the default, say how the words
+ * travel — the same three levels the session tutor gets, through the same
+ * describer. Empty when nothing is set, so an unset scholar's prompt is
+ * unchanged.
+ */
+export function coachLevelLines(
+  context: ScholarCoachContext | undefined,
+): string[] {
+  const talk = context?.readingLevel ?? null;
+  const read: ReadLevel = context?.readLevel ?? "reader";
+  const write: WriteMode = context?.writeMode ?? "own";
+  const described = describeEffectiveLevelsForPrompt({ talk, read, write });
+  if (!described) return [];
+  const lines = [
+    `- ${levelsPromptLabel(described)} "${described}": match vocabulary and sentence complexity to the talk level (the ideas and words they follow, not how well they read).`,
+  ];
+  if (read !== "reader") {
+    lines.push(
+      `- ${read === "listener" ? "They can't read yet" : "They're just learning to sound words out"}: keep each turn to one or two short sentences that make sense heard aloud, never ask them to read something, and say numbers and symbols in words.`,
+    );
+  }
+  if (write === "voice") {
+    lines.push(
+      "- They answer by voice, so their messages are dictated: never comment on spelling, capitals or punctuation, and never ask them to type.",
+    );
+  }
+  return lines;
 }
 
 export function buildHandoffPrompt(
@@ -681,7 +730,7 @@ whiteboard.`;
  * from the typed and manipulative stamps for the same reason those two are
  * separate — transcripts stay keyed to the exact prompt that produced them.
  */
-export const GAME_HANDOFF_PROMPT_VERSION = "2026-07-game-companion-v1";
+export const GAME_HANDOFF_PROMPT_VERSION = "2026-10-game-companion-v2-talk-read-write";
 
 export interface GameHandoffPacket {
   /** Scholar-facing game title from the catalog. */

@@ -28,6 +28,7 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   useSyncExternalStore,
   type ReactNode,
@@ -65,6 +66,15 @@ function subscribeOwner(fn: () => void): () => void {
   return () => ownerListeners.delete(fn);
 }
 
+/** Has this page had a user gesture yet (so audio may start)? */
+function hasUserActivation(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const activation = (navigator as Navigator & {
+    userActivation?: { hasBeenActive: boolean };
+  }).userActivation;
+  return activation ? activation.hasBeenActive : true;
+}
+
 export interface SpeakableLabelProps {
   /** Text to speak. Falls back to `children` when it's a plain string. */
   text?: string;
@@ -80,6 +90,10 @@ export interface SpeakableLabelProps {
   iconSize?: number;
   /** aria-label for the speak control. Default "Hear <text>" / "Read aloud". */
   ariaLabel?: string;
+  /** Speak the text on its own when this turns true (and again whenever the
+   *  text changes while it stays true) — a listener's practice question
+   *  (TRA-514). Same engine, same owner token, so the speaker shows it. */
+  autoPlay?: boolean;
 }
 
 /** Extract a plain string from children when possible (for the spoken text). */
@@ -97,11 +111,12 @@ export function SpeakableLabel({
   hideIcon = false,
   iconSize = 14,
   ariaLabel,
+  autoPlay = false,
 }: SpeakableLabelProps) {
   const { user } = useCurrentUser();
   const ttsEnabled = user?.ttsEnabled !== false;
 
-  const { state, speak, pause, resume } = useTTSQueue();
+  const { state, speak, pause, resume, stop } = useTTSQueue();
 
   // Stable per-instance token; identity is what the owner registry compares.
   const [token] = useState(() => Symbol("speakable"));
@@ -124,6 +139,35 @@ export function SpeakableLabel({
 
   const spokenText = (text ?? stringFromChildren(children)).trim();
   const visible = children ?? text;
+
+  // Auto-play: claim the engine and speak, once per (on, text). No muted-volume
+  // toast here — that nudge answers a tap, and a child who didn't tap would
+  // get one per question. `speak` is read through a ref so a re-render never
+  // re-fires the read.
+  const speakRef = useRef(speak);
+  const stopRef = useRef(stop);
+  useEffect(() => {
+    speakRef.current = speak;
+    stopRef.current = stop;
+  }, [speak, stop]);
+  useEffect(() => {
+    if (!autoPlay || !ttsEnabled || !spokenText) return;
+    // Browsers only let audio start after the page has had a user gesture.
+    // Before one, an auto-read would show the playing pulse with no sound, so
+    // leave it to the tap speaker instead. (Where the API is missing, try:
+    // the engine gives up on a gesture-locked sentence by itself.)
+    if (!hasUserActivation()) return;
+    claimOwner(token);
+    speakRef.current(spokenText);
+    // The question is answered (auto-play turns off) or gone (unmount): stop
+    // reading it, unless something else has taken the voice since.
+    return () => {
+      if (ownerToken === token) {
+        stopRef.current();
+        releaseOwner(token);
+      }
+    };
+  }, [autoPlay, ttsEnabled, spokenText, token]);
 
   const handleSpeak = useCallback(async () => {
     if (!spokenText) return;

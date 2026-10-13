@@ -44,6 +44,7 @@ import {
   type RosterGroup,
   type RosterScholar,
 } from "@/hooks/useScholarRoster";
+import { talkLevelLabel } from "@/convex/lib/readingLevels";
 
 export type ScholarSortMode = "auto" | "alpha" | "group" | "mine-first";
 
@@ -690,9 +691,11 @@ function ScholarRow({
           <Text fontFamily="body" fontSize="xs" color="violet.600">
             {EXTENDED_EDUCATION_LABEL}
           </Text>
-        ) : s.readingLevel ? (
+        ) : talkLevelLabel(s.readingLevel) ? (
+          // The TALK level (the stored field keeps its old name), labelled
+          // as such and rendered like Rounds does: "Talk level · Grade 3.4".
           <Text fontFamily="body" fontSize="xs" color="charcoal.300">
-            {s.readingLevel}
+            Talk level · {talkLevelLabel(s.readingLevel)}
           </Text>
         ) : null}
       </Box>

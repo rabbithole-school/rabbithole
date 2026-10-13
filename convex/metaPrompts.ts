@@ -7,7 +7,7 @@
 // guidance is the SAME shared constant the live tutor uses
 // (prompts.ts → WELFARE_DISCLOSURE_GUIDANCE) so the two never drift.
 //
-// All CONTEXT (reading level, today's sessions + the day's actual practice/
+// All CONTEXT (the levels, today's sessions + the day's actual practice/
 // completion record, recent growth, open ideas, fresh staff responses) is
 // injected here deterministically. The only tools are the Code Explorer's
 // read-only public-repo readers (always on) and, when enabled, the idea tool.
@@ -17,6 +17,7 @@
 // the chat never disagree about what "today" was.
 
 import { WELFARE_DISCLOSURE_GUIDANCE } from "./prompts";
+import { levelsPromptLabel } from "./lib/readingLevels";
 
 export type MetaChatPurpose = "reflection" | "introspection";
 
@@ -231,13 +232,15 @@ their teachers read every one. Here you are a THINKING PARTNER, never a gate:
 }
 
 /**
- * `{readingLevelLine}` — mirrors how the tutor prompt words reading level
- * (sessionHelpers' READING LEVEL section), condensed to one inline sentence.
- * Empty when unset (the caller appends it with a leading space only when set).
+ * `{readingLevelLine}` — mirrors how the tutor prompt words the talk level
+ * (prompts.ts' TALK LEVEL section), condensed to one inline sentence. Takes a
+ * `describeLevelsForPrompt` string, so a listener or by-voice scholar's read
+ * and write levels ride along. Empty when unset (the caller appends it with a
+ * leading space only when set).
  */
 function readingLevelLine(readingLevel: string | null): string {
   if (!readingLevel) return "";
-  return `The scholar's reading level is set to "${readingLevel}" — adjust your vocabulary and sentence complexity accordingly.`;
+  return `The scholar's ${levelsPromptLabel(readingLevel).toLowerCase()}: "${readingLevel}" — pitch your vocabulary and sentence complexity to the talk level.`;
 }
 
 /**

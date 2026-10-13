@@ -18,7 +18,7 @@
 // Full design + context: review/seed-to-unit-bake-plan.md.
 
 import { v } from "convex/values";
-import { describeLevelsForPrompt } from "./lib/readingLevels";
+import { describeLevelsForPrompt, levelsPromptLine } from "./lib/readingLevels";
 import type { ActionCtx } from "./_generated/server";
 import { internalAction, internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -118,7 +118,7 @@ export function buildBakeInstruction(spec: BakeSpec): string {
     steering.length
       ? `${steering.join("\n")}\n(Private steering — calibrate to it, don't read it back to the scholar.)`
       : "",
-    `Scholar's reading level: ${spec.readingLevel ?? "(not set — pick a sensible elementary default)"}`,
+    levelsPromptLine(spec.readingLevel) ?? "Talk level: (not set — pick a sensible elementary default)",
     "",
     `STAY ON THE SCHOLAR'S ACTUAL QUESTION. The whole unit must lead them to genuinely understand the SPECIFIC thing in "${spec.topic}" — not a loosely-related neighbor. If it's a "why/how" question, the activities have to reach the real explanation (the mechanism, the cause), not stop at observing or describing something adjacent. The big idea, the lesson, and every activity should visibly build toward answering it.`,
     spec.path
