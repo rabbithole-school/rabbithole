@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "708ca50bfd467345c00ace25a315db458fb8098f",
+  "sourceCommit": "34918c4ff9100681c01ad9acf78493ffb62c4a82",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -10239,7 +10239,7 @@
     },
     {
       "path": "convex/lib/slackTools.ts",
-      "sha256": "192ad6d128a894dffef7574ec3cf80df340b70b564cad46df444b5aa0baf5109",
+      "sha256": "21673b4720cebc6cb0d6784298fb44a69d1d355ce898bbad8c70f8ed80ceb273",
       "mode": "100644"
     },
     {
@@ -21318,5 +21318,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "861a347ab520a2f2d50c337d13ccb04474bc98d9b525d266c02cec6bdba82b74"
+  "treeHash": "9537e6172b9a56fb771a4af65ba9f67f80109a6ace8469682cfcd53fbe91bc44"
 }
