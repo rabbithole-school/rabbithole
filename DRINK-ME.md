@@ -147,10 +147,16 @@ shows while they paste; that's on purpose.
 
 It checks the key with Anthropic before saving it. Then have them sign in as
 the pretend scholar and start a chat about the topic from step 2: the Quests
-tab, then “+ Custom Quest”, type the topic, Continue, choose “Endless chat”,
-“Start exploring”, then open the new quest. A banner may mention a class
-block; that's the pretend school's timetable. Point out that the tutor
-answers with a question.
+tab, then “+ Custom Quest”, type the topic, and Continue. Wait a few seconds
+for the choices to load; one of them is picked for you, so click “Endless
+chat” and check that its circle is filled. Then “Start exploring”, which goes
+straight into the chat. A banner may mention a class block; that's the
+pretend school's timetable.
+
+The tutor speaks first, with a question. Tell the person to wait for it
+before typing: a message sent while the chat is still loading can be lost.
+Then have them answer it the way a curious kid would, and point out that the
+tutor answers back with another question rather than the answer.
 
 ## 7. Postcard and problems
 
