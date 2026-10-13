@@ -1,7 +1,5 @@
 # The cloned Rabbithole app and its local database
 /rabbithole/
-# Logs and process ids from bin/setup.sh
-/.kit/
 .DS_Store
 
 # The front door build output, and the Vercel CLI's link to its project

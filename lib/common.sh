@@ -4,11 +4,14 @@
 
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="$KIT/rabbithole"   # the public Rabbithole snapshot, checked out by bin/setup.sh
-STATE="$KIT/.kit"       # logs and process ids
+RUN="$APP/local/.run"   # the snapshot's own logs and process ids (pnpm local:setup)
 
 CLOUD_PORT="${CLOUD_PORT:-3210}"
 SITE_PORT="${SITE_PORT:-3211}"
 WEB_PORT="${WEB_PORT:-3000}"
+
+# The snapshot's pnpm local:* scripts read these ports too.
+export CLOUD_PORT SITE_PORT WEB_PORT
 
 # Local only: the Convex CLI runs an anonymous local backend, with no account
 # and no cloud deployment. A CONVEX_DEPLOYMENT left over in the shell would
@@ -45,33 +48,10 @@ guard_no_cloud() {
   fi
 }
 
-pid_alive() { [ -f "$STATE/$1.pid" ] && kill -0 "$(cat "$STATE/$1.pid")" 2>/dev/null; }
+pid_alive() { [ -f "$RUN/$1.pid" ] && kill -0 "$(cat "$RUN/$1.pid")" 2>/dev/null; }
 
-# After stopping, a port can stay busy for a few seconds. Wait up to 15s.
-wait_port_free() {
-  local i
-  for i in $(seq 1 15); do port_busy "$1" || return 0; sleep 1; done
-  return 1
-}
+# Run one of the snapshot's own pnpm local:* scripts, e.g.  app_run stop
+app_run() { local s="$1"; shift; (cd "$APP" && pnpm --silent "local:$s" "$@"); }
 
-# Stop only what this kit started: its own process groups, and a backend whose
-# storage lives inside this kit's checkout.
-stop_all() {
-  local name pid
-  for name in next convex; do
-    if [ -f "$STATE/$name.pid" ]; then
-      pid="$(cat "$STATE/$name.pid")"
-      kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
-      rm -f "$STATE/$name.pid"
-    fi
-  done
-  pkill -f "convex-local-backend.*--local-storage $APP/" 2>/dev/null || true
-}
-
-# The pretend people /dev-login offers, as JSON (empty if the school isn't seeded).
-dev_users() {
-  local secret
-  secret="$(sed -n 's/^NEXT_PUBLIC_DEV_LOGIN_SECRET=//p' "$APP/.env.local" 2>/dev/null)"
-  [ -n "$secret" ] || return 0
-  (cd "$APP" && npx convex run users:listDevLoginUsers "{\"secret\":\"$secret\"}" 2>/dev/null) || true
-}
+# Stop only what this kit started; the snapshot's local:stop does exactly that.
+stop_all() { [ ! -f "$APP/local/stop.sh" ] || app_run stop >/dev/null; }

@@ -52,6 +52,6 @@ jobs:
         with:
           name: installer-test-${{ matrix.os }}
           path: |
-            .kit/*.log
+            rabbithole/local/.run/*.log
             ${{ runner.temp }}/*.png
           if-no-files-found: ignore

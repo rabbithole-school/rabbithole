@@ -63,9 +63,9 @@ if [ "${1:-}" = "--report" ]; then
   say "  snapshot commit: $(git -C "$APP" rev-parse --short HEAD 2>/dev/null || echo 'not checked out yet')"
   say "  pinned commit:   $(lock commit | cut -c1-7)"
   for log in install convex next; do
-    [ -f "$STATE/$log.log" ] || continue
-    say "  --- last lines of .kit/$log.log"
-    tail -n 12 "$STATE/$log.log" | sed -E 's/([A-Z_]*(SECRET|KEY|TOKEN))=[^[:space:]]+/\1=[hidden]/g; s/sk-ant-[A-Za-z0-9_-]+/[hidden]/g; s/^/    /'
+    [ -f "$RUN/$log.log" ] || continue
+    say "  --- last lines of rabbithole/local/.run/$log.log"
+    tail -n 12 "$RUN/$log.log" | sed -E 's/([A-Z_]*(SECRET|KEY|TOKEN))=[^[:space:]]+/\1=[hidden]/g; s/sk-ant-[A-Za-z0-9_-]+/[hidden]/g; s/^/    /'
   done
 fi
 
