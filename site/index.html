@@ -37,6 +37,7 @@
   }
   ::selection { background: var(--white); color: #031006; text-shadow: none; }
   a { color: var(--ph-hi); }
+  a:focus-visible { outline: 2px dashed var(--ph-hi); outline-offset: 3px; }
 
   /* ── the glass ─────────────────────────────────────────── */
   #rain { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; opacity: .6; pointer-events: none;
@@ -144,6 +145,37 @@
     color: var(--ph-hi); background: transparent; border: 1px solid var(--ph); border-radius: 4px; text-shadow: inherit;
   }
   .again:hover { background: rgba(140,255,170,.08); }
+  .session h2 { margin: 0; font: inherit; }
+  .session h2.in { margin-top: 3.2rem; }
+  .session .lead { max-width: 44rem; }
+
+  /* ── the brain transplant: two panes, same kid ─────────── */
+  .diff { display: grid; grid-template-columns: 1fr; gap: 14px; margin: 1.1rem 0 .4rem; max-width: 64rem; }
+  .session .diff { max-width: none; }
+  @media (min-width: 860px) { .diff { grid-template-columns: 1fr 1fr; width: min(64rem, calc(100vw - 32px)); } }
+  .pane { margin: 0; border: 1px solid var(--edge); border-radius: 6px; background: rgba(2,12,5,.9); padding: 14px 16px 12px; min-width: 0; }
+  .pane figcaption { display: flex; justify-content: space-between; gap: .6rem; flex-wrap: wrap;
+    margin: -2px 0 10px; padding-bottom: 8px; border-bottom: 1px dashed var(--edge);
+    font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+  .pane figcaption b { color: var(--ph-hi); font-weight: 700; }
+  .pane.stock { border-color: #3a4a40; }
+  .pane.stock figcaption b { color: #C9D6CD; }
+  .pane.tutor { border-color: var(--ph); box-shadow: 0 0 22px rgba(80,255,130,.14); }
+  .turn { margin: 0 0 .7rem; font-size: 15px; line-height: 1.55; }
+  .turn .who { display: block; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); }
+  .turn.kid { color: var(--white); }
+  .turn.kid .who { color: #B9E8C6; }
+  .stock .turn.bot { color: #B7C4BB; text-shadow: none; }
+  .tutor .turn.bot { color: var(--ph-hi); }
+  .pane .verdict { margin: .9rem 0 0; padding-top: 8px; border-top: 1px dashed var(--edge); font-size: 13px; color: var(--dim); }
+  .stock .verdict { color: #9FB0A5; text-shadow: none; }
+  .session .fine { color: var(--dim); font-size: 13px; margin-top: .4rem; }
+
+  /* ── people ────────────────────────────────────────────── */
+  .who-card { margin: .9rem 0 0; max-width: 44rem; }
+  .who-card .nm { color: var(--white); font-weight: 700; }
+  .who-card .nm span { color: var(--dim); font-weight: 400; }
+
   footer { margin-top: 3rem; padding-top: 12px; border-top: 1px dashed var(--edge); color: var(--dim); font-size: 13px;
     display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5rem 1rem; }
 
@@ -214,28 +246,107 @@
         <p class="copied" id="copied" role="status" aria-live="polite"></p>
       </section>
 
-      <section class="session" aria-label="The manifesto">
+      <section class="session" aria-label="The manifesto" data-run>
         <p class="in ty">cat manifesto.txt</p>
         <p class="out big ty">Nobody is selling you anything.</p>
         <p class="out big ty">You don’t subscribe. You build.</p>
 
         <p class="out gap ty">A new way for teachers and parents to build an amazing place to learn, from pieces that snap together.</p>
         <span class="snap" aria-hidden="true">[▓▓]═[▓▓▓▓]═[▓]═[▓▓▓]═[▓▓]</span>
-        <p class="out ty">The tutor answers a child’s question with a better question, and waits. The thinking stays with the kid.</p>
 
         <p class="out gap ty">It runs on your machine. Not on ours.</p>
         <p class="out ty">There is no account.</p>
         <p class="out ty">The code is yours. Read it. Break it. Change anything.</p>
 
         <p class="out gap ty">Nothing phones home to us. When the tutor speaks, it talks to the AI model you choose, on your own key.</p>
+      </section>
 
-        <p class="in ty">whoami --made-by</p>
-        <p class="out ty">A small nonprofit school. We’re giving it away.</p>
+      <section class="session" aria-labelledby="h-transplant" data-run>
+        <h2 class="in ty" id="h-transplant">diff assistant.txt tutor.txt</h2>
+        <p class="out big ty">Every AI is born an assistant.</p>
+        <p class="out big ty">Rabbithole gives it a brain transplant.</p>
+        <p class="out ty lead">Now it isn’t an assistant anymore. It’s something else: a tutor. Same kid, same question:</p>
 
-        <p class="in ty">./drink-me</p>
+        <div class="diff">
+          <figure class="pane stock">
+            <figcaption><b>A typical assistant</b><span>stock brain</span></figcaption>
+            <p class="turn kid ty"><span class="who">kid</span>do sharks ever sleep?</p>
+            <p class="turn bot ty" data-speed="4"><span class="who">assistant</span>Great question! Sharks don’t sleep the way we do. Some, like great whites, have to keep swimming to push water over their gills, so they rest on the move. Others, like nurse sharks, can lie still on the sea floor and pump water with their cheeks. Want me to make you a fun fact sheet about sharks?</p>
+            <p class="verdict ty">The answer arrives. The thinking is done. By the assistant.</p>
+          </figure>
+          <figure class="pane tutor">
+            <figcaption><b>Rabbithole</b><span>after the transplant</span></figcaption>
+            <p class="turn kid ty"><span class="who">kid</span>do sharks ever sleep?</p>
+            <p class="turn bot ty"><span class="who">tutor</span>Scientists are still working this out, so it’s a real open question. Here’s one clue: a shark breathes by getting water to flow over its gills (the slits on its sides that pull oxygen out of the water), and many sharks get that flow by swimming forward with their mouths open. If a shark like that fell asleep and stopped swimming, what do you think might happen to it?</p>
+            <p class="turn kid ty"><span class="who">kid</span>maybe they sleep with one eye open like dolphins?</p>
+            <p class="turn bot ty"><span class="who">tutor</span>You borrowed an idea from dolphins to make a guess about sharks. Scientists do that too, and here it’s worth checking, because dolphins and sharks are very different animals. Dolphins breathe air, and sharks breathe water through their gills. Before we find out, here’s something to puzzle over: what problem do you think a shark might have if it fell fast asleep and stopped moving?</p>
+            <p class="verdict ty">A better question, and a wait. The thinking stays with the kid.</p>
+          </figure>
+        </div>
+        <p class="fine ty">The tutor’s lines are real, from a test with a made-up kid. The assistant’s reply is our impression of a typical one.</p>
+
+        <p class="out gap ty lead">It works on projects too. Kids build their own games and tools here. An assistant takes the project over, or wanders off with it. The tutor keeps it the kid’s, and keeps it on course.</p>
+        <div class="diff">
+          <figure class="pane stock">
+            <figcaption><b>A typical assistant</b><span>stock brain</span></figcaption>
+            <p class="turn kid ty"><span class="who">kid</span>can you just make my volcano game for me? and add a dragon</p>
+            <p class="turn bot ty" data-speed="4"><span class="who">assistant</span>Absolutely! Here’s a complete game: a fire-breathing dragon boss, a shop with 12 power-ups, three worlds and a high-score table. I also added background music. Want me to add multiplayer next?</p>
+            <p class="verdict ty">It’s a fine game. It isn’t the kid’s, and it isn’t about volcanoes anymore.</p>
+          </figure>
+          <figure class="pane tutor">
+            <figcaption><b>Rabbithole</b><span>after the transplant</span></figcaption>
+            <p class="turn kid ty"><span class="who">kid</span>can you just make my volcano game for me? and add a dragon</p>
+            <p class="turn bot ty"><span class="who">tutor</span>It’s your game, so you’re the one who builds it. A dragon could work if it has a job to do. What’s the one thing a player should understand about volcanoes by the time they win?</p>
+            <p class="turn kid ty"><span class="who">kid</span>that lava is hotter than dragon fire</p>
+            <p class="turn bot ty"><span class="who">tutor</span>Is it? How hot do you think lava gets, and how could you check? If you’re right, that could be your boss fight. Let’s write that rule into the game first.</p>
+            <p class="verdict ty">The kid stays the builder. The volcano stays the point.</p>
+          </figure>
+        </div>
+        <p class="fine ty">Illustrative. Written to show the idea, not taken from a real session.</p>
+      </section>
+
+      <section class="session" aria-labelledby="h-why" data-run>
+        <h2 class="in ty" id="h-why">why can’t I just prompt this myself?</h2>
+        <p class="out ty lead">You can try. Tell any chatbot “don’t give answers” and see how long it lasts.</p>
+        <p class="out ty lead">Assistants are trained hard to be helpful: answer fast, do the work, agree. A kid who begs gets the answer. A kid who drifts gets a dragon.</p>
+        <p class="out big ty">So you have to unteach it.</p>
+        <p class="out ty lead">That took a school months of rewriting, checked against real conversations with real kids. It holds the answer back when a kid pleads for it. It pushes back instead of agreeing. It talks less than the kid does. It keeps a project the kid’s own.</p>
+        <p class="out ty lead">That isn’t one clever line. It’s a long, careful set of instructions, and it comes in the box.</p>
+      </section>
+
+      <section class="session" aria-labelledby="h-not" data-run>
+        <h2 class="in ty" id="h-not">cat not-included.txt</h2>
+        <p class="out ty">No streaks. No points. No leaderboards. No notifications pulling a kid back.</p>
+        <p class="out ty">No name, no face, no persona. It won’t miss you and can’t be your friend.</p>
+        <p class="out ty">When a kid is done, it’s done. Nobody here is paid by the minute of attention.</p>
+
+        <h2 class="in ty">cat instructions.txt</h2>
+        <p class="out ty lead">Every AI tutor is a set of instructions given to a model. Most companies treat those as the part you don’t get to see.</p>
+        <p class="out ty lead">Ours are one file, and in a few minutes it’s on your computer. Read every line. Change the ones you’d write differently.</p>
+      </section>
+
+      <section class="session" aria-labelledby="h-made" data-run>
+        <h2 class="in ty" id="h-made">whoami --made-by</h2>
+        <p class="out big ty">A small nonprofit school for gifted kids in Hawaiʻi.</p>
+        <p class="out ty lead">We built Rabbithole for our own classrooms, and we use it every school day. We’re giving it away.</p>
+
+        <h2 class="in ty">whois andy carl</h2>
+        <div class="who-card">
+          <p class="out nm ty">Andy <span>founder, board chair</span></p>
+          <p class="out ty">Product designer. Led the design of Google Street View, shaped product and design for Uber Eats, then co-founded Cove, an AI startup whose team went on to Microsoft AI. Computer science and art at Stanford. He designs the tutor, and leaves the teaching to people who have spent their careers on it.</p>
+        </div>
+        <div class="who-card">
+          <p class="out nm ty">Carl <span>head of school</span></p>
+          <p class="out ty">A career spent building schools for gifted kids. As head of Bridges Academy in Studio City, California, he grew it from a dentist’s office into a school with a second campus in Seattle. He knows the bright, intense, out-of-sync kids this tutor was built for.</p>
+        </div>
+
+        <h2 class="in ty">./drink-me</h2>
         <p class="out ty">Your agent reads the line and sets up the whole thing on your computer, with a make-believe school and no accounts.</p>
         <p class="note ty">Curiouser and curiouser.</p>
         <button class="again" type="button" id="copy2">Copy the line again</button>
+
+        <h2 class="in ty">less README.md</h2>
+        <p class="out ty">Want to read the code before you run it? We love you. It’s all on GitHub: <a href="https://github.com/rabbithole-school/rabbithole">github.com/rabbithole-school/rabbithole</a>. The setup kit your agent follows lives on the <a href="https://github.com/rabbithole-school/rabbithole/tree/drink-me">drink-me branch</a>.</p>
       </section>
     </main>
 
@@ -298,7 +409,7 @@
       el.classList.add("typing");
       (function step() {
         if (document.hidden) { setTimeout(step, 200); return; }
-        var n = el.classList.contains("in") ? 1 : 6; // commands type, output prints
+        var n = (el.classList.contains("in") || el.classList.contains("kid")) ? 1 : 6; // people type, machines print
         while (n-- > 0 && pi < parts.length) {
           var p = parts[pi]; ci++;
           p.lit.textContent = p.s.slice(0, ci); p.unlit.textContent = p.s.slice(ci); p.lit.after(el._k);
@@ -311,19 +422,24 @@
     function run(list, i, done) {
       if (i >= list.length) { done && done(); return; }
       var el = list[i];
-      var sp = +el.getAttribute("data-speed") || (el.classList.contains("in") ? 55 : 14);
-      var pause = el.classList.contains("in") ? 380 : (el.classList.contains("gap") ? 260 : 120);
+      var sp = +el.getAttribute("data-speed") || (el.classList.contains("in") ? 55 : el.classList.contains("kid") ? 38 : 14);
+      var pause = el.classList.contains("in") ? 380 : (el.closest(".tutor") && el.classList.contains("bot") ? 1100 : (el.classList.contains("gap") || el.classList.contains("bot")) ? 300 : 120); // the tutor waits; the assistant blurts
       setTimeout(function () { typeEl(el, sp, function () { run(list, i + 1, done); }); }, pause);
     }
     var head = [].slice.call(document.querySelectorAll(".wake .ty")).map(prep);
-    var sess = [].slice.call(document.querySelectorAll(".session .ty")).map(prep);
     run(head, 0);
-    var started = false;
-    function startSession() { if (started) return; started = true; run(sess, 0); }
+    /* each block of the session prints when it scrolls into view, so nobody
+       scrolls down onto a screen of unlit text */
+    var blocks = [].slice.call(document.querySelectorAll("[data-run]")).map(function (b) {
+      b._list = [].slice.call(b.querySelectorAll(".ty")).map(prep); return b;
+    });
+    function start(b) { if (b._go) return; b._go = true; run(b._list, 0); }
     if ("IntersectionObserver" in window) {
-      var io = new IntersectionObserver(function (es) { es.forEach(function (e) { if (e.isIntersecting) { startSession(); io.disconnect(); } }); }, { rootMargin: "0px 0px -15% 0px" });
-      io.observe(sess[0]);
-    } else startSession();
+      var io = new IntersectionObserver(function (es) {
+        es.forEach(function (e) { if (e.isIntersecting) { start(e.target); io.unobserve(e.target); } });
+      }, { rootMargin: "0px 0px -12% 0px" });
+      blocks.forEach(function (b) { io.observe(b); });
+    } else blocks.forEach(start);
 
     /* ── Rare glitch: one 160 ms jolt every 7 to 16 seconds ── */
     var tear = document.querySelector(".tear");
