@@ -1,0 +1,836 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Perspective lens</title>
+<!--
+  Perspective Lens: a plain HTTPS page dispatched as a Rabbithole WEB activity
+  (External Apps catalog). It opens the iPad's rear camera inside the native
+  app's WebView, so it needs no iPad release. Overlay: 1-, 2- and 3-point
+  perspective guides (draggable vanishing points; the horizon runs through
+  VP 1 and VP 2), pinch to zoom out to vanishing points beyond the photo, and
+  traced lines that extend to infinity so a scholar can find a scene's
+  vanishing points.
+  Tape mode: a scholar puts blue painter's tape on edges they think are
+  parallel in real life, guesses where the lines meet, then Reveal detects the
+  tape (perspective-lens-tape.js) and shows whether the lines really meet.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #1d1b26;
+    --paper: rgba(255,255,255,0.92);
+    --violet: #6d4aff;
+    --vp1: #ff5a5f;
+    --vp2: #22b8cf;
+    --vp3: #ffc531;
+    --trace: #ffffff;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; background: #000; touch-action: none;
+    font-family: 'Hanken Grotesk', system-ui, sans-serif; color: var(--ink);
+    -webkit-user-select: none; user-select: none; overscroll-behavior: none;
+  }
+  #stage { position: fixed; inset: 0; touch-action: none; background: #0d0d12; overflow: hidden; }
+  video, #fallback, canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  video, #fallback { transform-origin: 0 0; will-change: transform; }
+  video { object-fit: cover; background: #111; }
+  #fallback { display: none; background:
+    linear-gradient(#2a2838 0 0) center/100% 100%; }
+  canvas { touch-action: none; }
+
+  .bar {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    width: max-content; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: center;
+    padding: 6px; border-radius: 14px; background: var(--paper);
+    box-shadow: 0 4px 18px rgba(0,0,0,.25); max-width: calc(100vw - 32px);
+  }
+  #top { top: max(12px, env(safe-area-inset-top)); }
+  #bottom { bottom: max(12px, env(safe-area-inset-bottom)); }
+  button {
+    font: 600 15px/1 'Hanken Grotesk', system-ui, sans-serif; color: var(--ink);
+    border: 0; border-radius: 10px; padding: 10px 14px; background: transparent; min-height: 40px;
+  }
+  button[aria-pressed="true"] { background: var(--violet); color: #fff; }
+  button:active { transform: scale(.97); }
+  .sep { width: 1px; align-self: stretch; background: rgba(0,0,0,.12); margin: 4px 2px; }
+
+  #tapeBar { display: none; bottom: calc(max(12px, env(safe-area-inset-bottom)) + 62px); }
+  .tape #tapeBar { display: flex; }
+  .tape .no-tape { display: none; }
+  .tape #diag { bottom: 150px; }
+  #tapeMsg { font-weight: 600; font-size: 15px; line-height: 1.3; max-width: 360px; padding: 0 6px; }
+  #tapeSwatch { width: 22px; height: 22px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.3); display: none; }
+  button.cta { background: var(--violet); color: #fff; }
+  button:disabled { opacity: .4; }
+  #diag {
+    position: fixed; left: 12px; bottom: 76px; max-width: min(420px, calc(100vw - 24px));
+    font: 12px/1.35 ui-monospace, Menlo, monospace; color: #e9e6ff;
+    background: rgba(20,18,30,.72); padding: 8px 10px; border-radius: 10px; white-space: pre-wrap;
+    display: none;
+  }
+  #diag.show { display: block; }
+  #msg {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 24px;
+  }
+  #msg.show { display: flex; }
+  #msg .card {
+    background: var(--paper); border-radius: 16px; padding: 20px 22px; max-width: 460px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.35); font-size: 16px; line-height: 1.4;
+  }
+  #msg h2 { margin: 0 0 8px; font-size: 19px; }
+  #msg .row { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  #msg .row button { background: var(--violet); color: #fff; }
+  #msg .row button.ghost { background: rgba(0,0,0,.06); color: var(--ink); }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" playsinline webkit-playsinline muted autoplay></video>
+  <div id="fallback"></div>
+  <canvas id="overlay"></canvas>
+</div>
+
+<div id="top" class="bar" role="toolbar" aria-label="Perspective">
+  <button data-mode="1" aria-pressed="false">1-point</button>
+  <button data-mode="2" aria-pressed="true">2-point</button>
+  <button data-mode="3" aria-pressed="false">3-point</button>
+  <button data-mode="tape" aria-pressed="false">Tape</button>
+  <span class="sep no-tape"></span>
+  <button id="raysBtn" class="no-tape" aria-pressed="true">Guide rays</button>
+</div>
+
+<div id="bottom" class="bar" role="toolbar" aria-label="Tools">
+  <button id="moveBtn" class="no-tape" aria-pressed="true">Move points</button>
+  <button id="traceBtn" class="no-tape" aria-pressed="false">Trace lines</button>
+  <span class="sep no-tape"></span>
+  <button id="freezeBtn" aria-pressed="false">Freeze</button>
+  <button id="zoomOutBtn">Zoom out</button>
+  <button id="resetViewBtn">Reset view</button>
+  <button id="flipBtn">Flip camera</button>
+  <span class="sep"></span>
+  <button id="undoBtn" class="no-tape">Undo</button>
+  <button id="clearBtn" class="no-tape">Clear</button>
+  <span class="sep no-tape"></span>
+  <button id="diagBtn" aria-pressed="false">Info</button>
+</div>
+
+<div id="tapeBar" class="bar" aria-live="polite">
+  <span id="tapeSwatch"></span>
+  <span id="tapeMsg"></span>
+  <button id="tapeSkip">Skip</button>
+  <button id="tapeReveal" class="cta">Reveal</button>
+  <button id="tapeAgain" class="cta">Try again</button>
+  <button id="tapeLoad">Load photo</button>
+  <input type="file" id="tapeFile" accept="image/*" hidden>
+</div>
+
+<div id="diag"></div>
+<div id="msg"><div class="card">
+  <h2 id="msgTitle"></h2>
+  <div id="msgBody"></div>
+  <div class="row">
+    <button id="retryBtn">Try again</button>
+    <button id="noCamBtn" class="ghost">Use without camera</button>
+  </div>
+</div></div>
+
+<script src="perspective-lens-tape.js"></script>
+<script>
+(() => {
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('overlay');
+  const ctx = canvas.getContext('2d');
+  const diagEl = document.getElementById('diag');
+  const fallback = document.getElementById('fallback');
+
+  // ---------- diagnostics (the spike's real output) ----------
+  const diag = {
+    ua: navigator.userAgent,
+    secureContext: String(window.isSecureContext),
+    mediaDevices: String(!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)),
+    status: 'starting',
+    track: '',
+    error: '',
+  };
+  function renderDiag() {
+    diagEl.textContent = Object.entries(diag).filter(([,v]) => v).map(([k, v]) => `${k}: ${v}`).join('\n');
+  }
+  // Bubble status to a native host if one listens (react-native-webview).
+  function report() {
+    renderDiag();
+    try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ perspectiveSpike: diag })); } catch (_) {}
+    try { window.parent !== window && window.parent.postMessage({ perspectiveSpike: diag }, '*'); } catch (_) {}
+  }
+
+  // ---------- camera ----------
+  let facing = 'environment';
+  let stream = null;
+  let camToken = 0;   // a newer startCamera() call supersedes an in-flight one
+  async function startCamera() {
+    const token = ++camToken;
+    hideMsg();
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      diag.status = 'no getUserMedia';
+      report();
+      showMsg('Camera not available here', 'This view can’t reach the camera (getUserMedia is missing). You can still practice on a blank background.');
+      return;
+    }
+    diag.status = 'requesting ' + facing;
+    report();
+    const attempts = [
+      { video: { facingMode: { exact: facing }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false },
+      { video: { facingMode: facing }, audio: false },
+      { video: true, audio: false },
+    ];
+    let lastErr = null;
+    for (const c of attempts) {
+      try {
+        const s = await navigator.mediaDevices.getUserMedia(c);
+        if (token !== camToken) { s.getTracks().forEach(t => t.stop()); return; }
+        stream = s; break;
+      }
+      catch (e) { lastErr = e; if (e && e.name === 'NotAllowedError') break; }
+    }
+    if (token !== camToken) return;
+    if (!stream) {
+      diag.status = 'failed';
+      diag.error = lastErr ? `${lastErr.name}: ${lastErr.message}` : 'unknown';
+      report();
+      const denied = lastErr && lastErr.name === 'NotAllowedError';
+      showMsg(denied ? 'Camera permission was declined' : 'Couldn’t start the camera',
+        denied ? 'Tap “Try again” to be asked again, or ask a teacher to turn on the camera for Rabbithole in Settings.'
+               : diag.error);
+      return;
+    }
+    video.srcObject = stream;
+    // A loaded test photo stays on screen; otherwise the live camera takes over.
+    const keepPhoto = mode === 'tape' && tape.photo;
+    if (!keepPhoto) {
+      noCamMode = false;
+      fallback.style.display = 'none';
+      // A restarted stream must not sit under a stale frozen frame, mask or guess.
+      if (mode === 'tape' && tape.state !== 'capture') tapeReset();
+    }
+    try { await video.play(); } catch (e) { diag.error = 'play(): ' + e.message; }
+    const t = stream.getVideoTracks()[0];
+    const s = t && t.getSettings ? t.getSettings() : {};
+    diag.status = 'live';
+    diag.error = '';
+    diag.track = `${t ? t.label : '?'} · ${s.width || '?'}×${s.height || '?'} · facing=${s.facingMode || 'n/a'}`;
+    report();
+  }
+  function showMsg(title, body) {
+    if (tape.photo) return;   // a loaded test photo needs no camera
+    document.getElementById('msgTitle').textContent = title;
+    document.getElementById('msgBody').textContent = body;
+    document.getElementById('msg').classList.add('show');
+  }
+  function hideMsg() { document.getElementById('msg').classList.remove('show'); }
+
+  // ---------- geometry state ----------
+  let W = 0, H = 0, dpr = 1;
+  let mode = 2;                    // 1 | 2 | 3 | 'tape'
+  let showRays = true;
+  let tool = 'move';
+  // Positions are stored as fractions of the screen so rotation keeps them sane.
+  const pts = {
+    // The horizon is not stored: it is the line through VP 1 and VP 2 (so it
+    // tilts when the camera rolls), or the level line through the 1-point VP.
+    vp1: { x: 0.50, y: 0.42 },     // 1-point VP
+    vpL: { x: 0.08, y: 0.42 },     // 2/3-point VP 1
+    vpR: { x: 0.92, y: 0.42 },     // 2/3-point VP 2
+    vp3: { x: 0.50, y: 1.55 },     // 3-point vertical VP (below = worm/bird's eye flips)
+  };
+  const traces = [];               // {a:{x,y}, b:{x,y}} in fractions
+
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // The frozen 480px frame has the old aspect ratio, so its mask would stretch.
+    if (mode === 'tape' && tape.img && Math.abs(W / H - tape.aspect) > 0.01) {
+      tapeReset();
+      tapeMsg.textContent = 'The iPad turned, so freeze again.';
+    }
+    draw();
+  }
+
+  // View transform: photo px (the screen at zoom 1) -> screen px. `pts` and
+  // traces stay in photo fractions, so they stay attached to the photo.
+  const view = { s: 1, tx: 0, ty: 0 };
+  const MIN_S = 0.08, MAX_S = 4;
+  const toScreen = p => ({ x: p.x * view.s + view.tx, y: p.y * view.s + view.ty });
+  const toPhoto = p => ({ x: (p.x - view.tx) / view.s, y: (p.y - view.ty) / view.s });
+  const px = f => toScreen({ x: f.x * W, y: f.y * H });          // photo fraction -> screen px
+  const frac = sp => { const q = toPhoto(sp); return { x: q.x / W, y: q.y / H }; };  // screen px -> photo fraction
+  function applyView() {
+    const t = `translate(${view.tx}px, ${view.ty}px) scale(${view.s})`;
+    video.style.transform = t; fallback.style.transform = t;
+  }
+  // Zoom by factor f keeping the photo point under screen point c fixed.
+  function zoomAt(c, f) {
+    const pp = toPhoto(c);
+    view.s = clamp(view.s * f, MIN_S, MAX_S);
+    view.tx = c.x - pp.x * view.s; view.ty = c.y - pp.y * view.s;
+  }
+  function resetView() { view.s = 1; view.tx = 0; view.ty = 0; draw(); }
+  // Fit the photo frame and every active VP on screen, clear of the toolbars.
+  function zoomOut() {
+    const P = [{ x: 0, y: 0 }, { x: W, y: H }, ...activeVPs().map(v => toPhoto(v.p)), ...tapeFitPts()];
+    const x0 = Math.min(...P.map(p => p.x)), x1 = Math.max(...P.map(p => p.x));
+    const y0 = Math.min(...P.map(p => p.y)), y1 = Math.max(...P.map(p => p.y));
+    const left = 48, right = W - 48, top = 80, bottom = H - 96;
+    const fit = Math.min((right - left) / Math.max(x1 - x0, 1), (bottom - top) / Math.max(y1 - y0, 1));
+    if (fit >= 1) return resetView();
+    view.s = Math.max(fit, MIN_S);
+    view.tx = (left + right) / 2 - ((x0 + x1) / 2) * view.s;
+    view.ty = (top + bottom) / 2 - ((y0 + y1) / 2) * view.s;
+    draw();
+  }
+  // Two points on the horizon, in px.
+  function horizonPts() {
+    if (mode === 'tape') return null;
+    if (mode === 1) { const v = px(pts.vp1); return [v, { x: v.x + 100, y: v.y }]; }
+    const a = px(pts.vpL), b = px(pts.vpR);
+    if (Math.hypot(b.x - a.x, b.y - a.y) < 1) return [a, { x: a.x + 100, y: a.y }];
+    return a.x <= b.x ? [a, b] : [b, a];
+  }
+  function distToLine(p, a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    return Math.abs(dy * (p.x - a.x) - dx * (p.y - a.y)) / Math.hypot(dx, dy);
+  }
+
+  function activeVPs() {
+    if (mode === 'tape') return [];
+    if (mode === 1) return [{ key: 'vp1', color: getVar('--vp1'), p: px(pts.vp1) }];
+    const list = [
+      { key: 'vpL', color: getVar('--vp1'), p: px(pts.vpL) },
+      { key: 'vpR', color: getVar('--vp2'), p: px(pts.vpR) },
+    ];
+    if (mode === 3) list.push({ key: 'vp3', color: getVar('--vp3'), p: px(pts.vp3) });
+    return list;
+  }
+  // Off-screen (or bar-covered) VPs are pinned to a safe edge spot clear of the toolbars.
+  const pin = p => ({ x: clamp(p.x, 24, W - 24), y: clamp(p.y, 72, H - 88) });
+  function getVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+
+  // Clip an infinite line through a and b to the screen rectangle.
+  function clipT(a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const ts = [];
+    const add = (t) => { const x = a.x + dx * t, y = a.y + dy * t; if (x >= -1 && x <= W + 1 && y >= -1 && y <= H + 1) ts.push(t); };
+    if (dx) { add((0 - a.x) / dx); add((W - a.x) / dx); }
+    if (dy) { add((0 - a.y) / dy); add((H - a.y) / dy); }
+    if (ts.length < 2) return null;
+    return [Math.min(...ts), Math.max(...ts)];
+  }
+  function clipLine(a, b) {
+    const r = clipT(a, b);
+    if (!r) return null;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    return [{ x: a.x + dx * r[0], y: a.y + dy * r[0] }, { x: a.x + dx * r[1], y: a.y + dy * r[1] }];
+  }
+  function intersect(a, b, c, d) {
+    const d1x = b.x - a.x, d1y = b.y - a.y, d2x = d.x - c.x, d2y = d.y - c.y;
+    const den = d1x * d2y - d1y * d2x;
+    if (Math.abs(den) < 1e-6) return null;
+    const t = ((c.x - a.x) * d2y - (c.y - a.y) * d2x) / den;
+    return { x: a.x + d1x * t, y: a.y + d1y * t };
+  }
+
+  function line(a, b, color, width, dash) {
+    ctx.save();
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash || []);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.restore();
+  }
+  // Rays from a VP: evenly spaced in angle, so they fan like a real perspective grid.
+  function rays(vp, color, n) {
+    for (let i = 0; i < n; i++) {
+      const ang = (i / n) * Math.PI * 2, ux = Math.cos(ang), uy = Math.sin(ang);
+      // Unit direction, so t is a distance; keep only the half-line leaving the VP.
+      // (Works however far off-screen the VP is.)
+      const r = clipT(vp, { x: vp.x + ux, y: vp.y + uy });
+      if (!r) continue;
+      const t0 = Math.max(r[0], 0), t1 = r[1];
+      if (t1 <= t0) continue;
+      line({ x: vp.x + ux * t0, y: vp.y + uy * t0 }, { x: vp.x + ux * t1, y: vp.y + uy * t1 }, color, 1.25);
+    }
+  }
+  function handle(p, color, label) {
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,.5)'; ctx.shadowBlur = 6;
+    ctx.fillStyle = color; ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 13, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#fff';
+    ctx.font = "600 14px 'Hanken Grotesk', system-ui, sans-serif";
+    ctx.textAlign = 'center';
+    ctx.fillText(label, p.x, p.y - 22);
+    ctx.restore();
+  }
+  function offscreenArrow(p, color, label) {
+    // VP off the screen: pin a marker to the edge pointing at it.
+    const { x: cx, y: cy } = pin(p);
+    const ang = Math.atan2(p.y - cy, p.x - cx);
+    ctx.save();
+    ctx.translate(cx, cy); ctx.rotate(ang);
+    ctx.fillStyle = color; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -10); ctx.lineTo(-8, 10); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.restore();
+    ctx.save();
+    ctx.fillStyle = '#fff'; ctx.font = "600 13px 'Hanken Grotesk', system-ui, sans-serif"; ctx.textAlign = 'center';
+    ctx.fillText(label, cx, cy + (cy > H / 2 ? -18 : 28));
+    ctx.restore();
+  }
+
+  function draw() {
+    applyView();
+    ctx.clearRect(0, 0, W, H);
+    // Photo frame outline (visible when zoomed out).
+    const f0 = toScreen({ x: 0, y: 0 });
+    ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 1;
+    ctx.strokeRect(f0.x, f0.y, W * view.s, H * view.s); ctx.restore();
+    // Horizon (eye level): through the horizon VPs, at whatever tilt they set.
+    const hp = horizonPts();
+    const hseg = hp ? clipLine(hp[0], hp[1]) : null;
+    if (hseg) {
+      line(hseg[0], hseg[1], 'rgba(255,255,255,.95)', 2.5);
+      const [s0, s1] = hseg[0].x <= hseg[1].x ? hseg : [hseg[1], hseg[0]];
+      const ang = Math.atan2(s1.y - s0.y, s1.x - s0.x);
+      ctx.save(); ctx.fillStyle = '#fff'; ctx.font = "600 13px 'Hanken Grotesk', system-ui, sans-serif";
+      ctx.translate(s0.x + Math.cos(ang) * 60, s0.y + Math.sin(ang) * 60); ctx.rotate(ang);
+      ctx.fillText('horizon · eye level', 0, -8); ctx.restore();
+    }
+
+    const vps = activeVPs();
+    if (mode === 'tape') { drawTape(); return; }
+    if (showRays) {
+      for (const v of vps) rays(v.p, hexA(v.color, 0.55), v.key === 'vp3' ? 28 : 36);
+    }
+    // Traced lines: solid where drawn, dashed where extended.
+    traces.forEach(t => {
+      const a = px(t.a), b = px(t.b);
+      const seg = clipLine(a, b);
+      if (seg) line(seg[0], seg[1], 'rgba(255,255,255,.75)', 1.5, [8, 7]);
+      line(a, b, '#fff', 4);
+    });
+    // Where traced lines cross: candidate vanishing points.
+    for (let i = 0; i < traces.length; i++) for (let j = i + 1; j < traces.length; j++) {
+      const A = traces[i], B = traces[j];
+      const p = intersect(px(A.a), px(A.b), px(B.a), px(B.b));
+      if (p && p.x > -20 && p.x < W + 20 && p.y > -20 && p.y < H + 20) {
+        ctx.save(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.moveTo(p.x - 9, p.y - 9); ctx.lineTo(p.x + 9, p.y + 9);
+        ctx.moveTo(p.x + 9, p.y - 9); ctx.lineTo(p.x - 9, p.y + 9); ctx.stroke(); ctx.restore();
+      }
+    }
+    if (drawing) line(drawing.a, drawing.b, '#fff', 4);
+
+    const labels = { vp1: 'VP', vpL: 'VP 1', vpR: 'VP 2', vp3: 'VP 3' };
+    for (const v of vps) {
+      const c = pin(v.p);
+      const on = Math.abs(c.x - v.p.x) < 0.5 && Math.abs(c.y - v.p.y) < 0.5;
+      on ? handle(v.p, v.color, labels[v.key]) : offscreenArrow(v.p, v.color, labels[v.key]);
+    }
+  }
+  function hexA(hex, a) {
+    const h = hex.replace('#', '');
+    const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+
+
+  // ---------- tape mode ----------
+  // state: 'capture' (live camera) -> 'calib' (tap the tape) -> 'guess' (tap where
+  // the lines meet) -> 'result'. Points are kept as photo fractions like `pts`.
+  const tape = { aspect: 1, state: 'capture', img: null, target: null, guess: null, res: null, photo: null, photoUrl: null };
+  const tapeBar = document.getElementById('tapeBar');
+  const tapeMsg = document.getElementById('tapeMsg'), tapeSwatch = document.getElementById('tapeSwatch');
+  const tapeSkip = document.getElementById('tapeSkip'), tapeReveal = document.getElementById('tapeReveal');
+  const tapeAgain = document.getElementById('tapeAgain'), tapeLoad = document.getElementById('tapeLoad');
+  const tapeFile = document.getElementById('tapeFile');
+  let tapeNote = '';   // result message
+  let noCamMode = false;
+  const TAPE_COL = '#ffc531';
+
+  function tapeFitPts() {
+    if (mode !== 'tape') return [];
+    const out = [];
+    if (tape.guess) out.push({ x: tape.guess.x * W, y: tape.guess.y * H });
+    // A 'two' crossing is only a hint; don't zoom way out for it.
+    if (tape.res && tape.res.vp && (tape.res.verdict === 'meet' || Math.hypot(tape.res.vp.x - 0.5, (tape.res.vp.y - 0.5) * H / W) < 3)) out.push({ x: tape.res.vp.x * W, y: tape.res.vp.y * H });
+    return out;
+  }
+  function hsv2css(c) {
+    const f = n => { const k = (n + c.h / 60) % 6; return Math.round(255 * (c.v - c.v * c.s * Math.max(0, Math.min(k, 4 - k, 1)))); };
+    return `rgb(${f(5)},${f(3)},${f(1)})`;
+  }
+  function setTapeUI() {
+    const st = tape.state;
+    const msgs = {
+      capture: noCamMode && !tape.photo ? 'No camera here. Tap Load photo to try a picture with tape in it.'
+        : 'Put blue tape on edges that are parallel in real life. Then tap Freeze.',
+      calib: 'Tap right on a piece of your blue tape. That helps me find it. (Skip works too.)',
+      guess: 'Where do you think the tape lines meet? Tap that spot. Pinch to zoom out if it is off the picture.',
+      result: tapeNote,
+    };
+    tapeMsg.textContent = msgs[st];
+    tapeSwatch.style.display = tape.target && st !== 'capture' ? 'inline-block' : 'none';
+    if (tape.target) tapeSwatch.style.background = hsv2css(tape.target);
+    tapeSkip.style.display = st === 'calib' ? '' : 'none';
+    tapeReveal.style.display = st === 'guess' ? '' : 'none';
+    tapeReveal.disabled = !tape.guess;
+    tapeAgain.style.display = st === 'result' || st === 'calib' || st === 'guess' ? '' : 'none';
+    tapeAgain.textContent = st === 'result' ? 'Try again' : 'Start over';
+    tapeAgain.className = st === 'result' ? 'cta' : '';
+  }
+  // Draw the current frame (camera or loaded photo, cropped like object-fit: cover) at ~480px wide.
+  function captureFrame() {
+    const src = tape.photo || video;
+    const sw = tape.photo ? tape.photo.naturalWidth : video.videoWidth;
+    const sh = tape.photo ? tape.photo.naturalHeight : video.videoHeight;
+    if (!sw || !sh) return null;
+    const k = Math.max(W / sw, H / sh), cw = W / k, ch = H / k;
+    const aw = 480, ah = Math.max(1, Math.round(480 * H / W));
+    const c = document.createElement('canvas'); c.width = aw; c.height = ah;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(src, (sw - cw) / 2, (sh - ch) / 2, cw, ch, 0, 0, aw, ah);
+    try { return g.getImageData(0, 0, aw, ah); } catch (_) { return null; }
+  }
+  function tapeFreeze() {
+    if (!tape.photo) video.pause();
+    toggle(freezeBtn, true);
+    tape.img = captureFrame();
+    if (!tape.img) {
+      if (!tape.photo) video.play().catch(() => {});
+      toggle(freezeBtn, false);
+      tapeNote = ''; tapeMsg.textContent = 'I can’t see a picture yet. Wait for the camera, or tap Load photo.';
+      return;
+    }
+    tape.aspect = W / H;
+    tape.state = 'calib'; setTapeUI(); draw();
+  }
+  function clearTapePhoto() {
+    tape.photo = null;
+    if (tape.photoUrl) { URL.revokeObjectURL(tape.photoUrl); tape.photoUrl = null; }
+    fallback.style.background = '';
+    fallback.style.display = noCamMode ? 'block' : 'none';
+  }
+  function tapeReset() {
+    clearTapePhoto();
+    tape.state = 'capture'; tape.img = null; tape.guess = null; tape.res = null; tapeNote = '';
+    if (stream && video.paused) video.play().catch(() => {});
+    toggle(freezeBtn, false);
+    resetView(); setTapeUI();
+  }
+  function setMode(m) {
+    const was = mode;
+    mode = m;
+    document.body.classList.toggle('tape', m === 'tape');
+    if (m === 'tape') { tape.target = null; tapeReset(); }
+    else if (was === 'tape') { tapeReset(); resetView(); }
+    document.querySelectorAll('[data-mode]').forEach(o => o.setAttribute('aria-pressed', String(o.dataset.mode === String(m))));
+    draw();
+  }
+  function onTapeTap(sp) {
+    if (tape.state === 'calib' && tape.img) {
+      const f = frac(sp), ax = f.x * tape.img.width, ay = f.y * tape.img.height;
+      if (f.x < 0 || f.x > 1 || f.y < 0 || f.y > 1) { tapeMsg.textContent = 'Tap right on the tape, inside the picture.'; return; }
+      const c = LensTape.sampleColor(tape.img, ax, ay, 6);
+      if (c.s < 0.15 || c.h < 150 || c.h > 275) { tapeMsg.textContent = 'That spot doesn’t look blue. Tap right on the blue tape.'; return; }
+      tape.target = c; tape.state = 'guess'; setTapeUI(); draw();
+    } else if (tape.state === 'guess') {
+      tape.guess = frac(sp); setTapeUI(); draw();
+    }
+  }
+  function tapeSkipCalib() { tape.target = null; tape.state = 'guess'; setTapeUI(); draw(); }
+  function tapeDoReveal() {
+    if (!tape.img || !tape.guess) return;
+    let r;
+    try { r = LensTape.detectTape(tape.img, { target: tape.target }); }
+    catch (e) {
+      diag.error = 'detectTape: ' + (e && e.message || e); report();
+      tapeMsg.textContent = 'I couldn’t read that picture. Tap Try again.';
+      tape.state = 'guess'; tapeReveal.style.display = 'none'; tapeAgain.style.display = ''; tapeAgain.textContent = 'Try again'; tapeAgain.className = 'cta';
+      return;
+    }
+    const aw = r.width, ah = r.height;
+    const fr = p => ({ x: p.x / aw, y: p.y / ah });
+    const mc = document.createElement('canvas'); mc.width = aw; mc.height = ah;
+    const mg = mc.getContext('2d'), id = mg.createImageData(aw, ah);
+    for (let i = 0; i < r.mask.length; i++) if (r.mask[i]) { id.data[i * 4] = 255; id.data[i * 4 + 1] = 159; id.data[i * 4 + 2] = 28; id.data[i * 4 + 3] = 255; }
+    mg.putImageData(id, 0, 0);
+    tape.res = {
+      verdict: r.verdict, mask: mc,
+      segs: r.segments.map(s => ({ a: fr({ x: s.x1, y: s.y1 }), b: fr({ x: s.x2, y: s.y2 }) })),
+      vp: r.vp ? fr(r.vp) : null, far: !!r.far,
+      pairs: r.pairwise.map(fr),
+    };
+    const n = r.segments.length;
+    if (r.verdict === 'meet') {
+      // How far is the guess from the detected lines? (RMS, as a fraction of the picture diagonal.)
+      const g = { x: tape.guess.x * W, y: tape.guess.y * H };
+      let ss = 0;
+      for (const s of tape.res.segs) {
+        const d = distToLine(g, { x: s.a.x * W, y: s.a.y * H }, { x: s.b.x * W, y: s.b.y * H });
+        ss += d * d;
+      }
+      const off = Math.sqrt(ss / n) / Math.hypot(W, H);
+      const how = off < 0.03 ? 'Your guess is right on the lines!' : off < 0.08 ? 'Your guess was very close.' : 'Your guess was a bit away from the lines. See how far?';
+      tapeNote = (tape.res.far ? 'They meet very far away: almost parallel, but still one family. ' : 'They all meet here: these edges are one family. ') + how;
+    } else if (r.verdict === 'two') {
+      tapeNote = 'Two lines always cross somewhere. Add a third piece of tape to test whether they’re one family.';
+    } else if (r.verdict === 'scattered') {
+      tapeNote = 'These don’t meet in one spot. Are they really parallel in real life? Move some tape and try again.';
+    } else if (r.verdict === 'parallel') {
+      tapeNote = 'These never meet: they run sideways to you, flat to the picture. Turn the box and try again.';
+    } else {
+      tapeNote = `I can only see ${n} piece${n === 1 ? '' : 's'} of tape. Add more, or tap a piece of tape to help me see it.`;
+    }
+    tape.state = 'result'; setTapeUI();
+    zoomOut();
+    draw();
+  }
+  function drawX(p, size, color) {
+    ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(p.x - size, p.y - size); ctx.lineTo(p.x + size, p.y + size);
+    ctx.moveTo(p.x + size, p.y - size); ctx.lineTo(p.x - size, p.y + size); ctx.stroke(); ctx.restore();
+  }
+  function label(text, x, y, color) {
+    ctx.save(); ctx.font = "600 14px 'Hanken Grotesk', system-ui, sans-serif"; ctx.textAlign = 'center';
+    ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.strokeText(text, x, y);
+    ctx.fillStyle = color || '#fff'; ctx.fillText(text, x, y); ctx.restore();
+  }
+  function drawTape() {
+    const res = tape.res;
+    if (res) {
+      // The mask shows exactly what I treated as tape, so a misdetection is visible.
+      const a = toScreen({ x: 0, y: 0 });
+      ctx.save(); ctx.globalAlpha = 0.45; ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(res.mask, a.x, a.y, W * view.s, H * view.s); ctx.restore();
+      for (const s of res.segs) {
+        const A = px(s.a), B = px(s.b);
+        const ext = clipLine(A, B);
+        if (ext) line(ext[0], ext[1], 'rgba(255,255,255,.8)', 2, [9, 7]);
+        line(A, B, 'rgba(0,0,0,.55)', 9);
+        line(A, B, TAPE_COL, 5);
+      }
+      if (res.verdict === 'scattered') {
+        for (const p of res.pairs) {
+          const q = px(p);
+          if (q.x > -30 && q.x < W + 30 && q.y > -30 && q.y < H + 30) drawX(q, 8, '#fff');
+        }
+      }
+    }
+    if (tape.guess) {
+      const g = px(tape.guess);
+      if (res && res.verdict === 'meet' && res.vp) {
+        line(g, px(res.vp), 'rgba(255,255,255,.9)', 2.5, [3, 6]);
+      }
+      const c = pin(g), on = Math.abs(c.x - g.x) < 0.5 && Math.abs(c.y - g.y) < 0.5;
+      if (on) {
+        ctx.save(); ctx.strokeStyle = '#fff'; ctx.fillStyle = 'rgba(109,74,255,.85)'; ctx.lineWidth = 3;
+        ctx.shadowColor = 'rgba(0,0,0,.5)'; ctx.shadowBlur = 6;
+        ctx.beginPath(); ctx.arc(g.x, g.y, 11, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore();
+        label('Your guess', g.x, g.y - 20);
+      } else offscreenArrow(g, '#6d4aff', 'Your guess');
+    }
+    if (res && res.verdict === 'two' && res.vp) {
+      const q = px(res.vp);   // just a hint: where these two happen to cross
+      if (q.x > -30 && q.x < W + 30 && q.y > -30 && q.y < H + 30) drawX(q, 8, '#fff');
+    }
+    if (res && res.verdict === 'meet' && res.vp) {
+      const v = px(res.vp), c = pin(v), on = Math.abs(c.x - v.x) < 0.5 && Math.abs(c.y - v.y) < 0.5;
+      if (on) {
+        ctx.save(); ctx.fillStyle = TAPE_COL; ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
+        ctx.shadowColor = 'rgba(0,0,0,.5)'; ctx.shadowBlur = 8;
+        ctx.beginPath(); ctx.arc(v.x, v.y, 17, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore();
+        label('They meet here', v.x, v.y - 28, TAPE_COL);
+      } else offscreenArrow(v, TAPE_COL, 'They meet here');
+    }
+  }
+
+  // ---------- input ----------
+  let drag = null;       // { key } or { key: 'horizon' }
+  let drawing = null;    // { a, b } in screen px (stored as photo fractions on commit)
+  let pan = null;        // { x, y } last screen position of a one-finger pan
+  let tapCand = null;    // tape mode: where a possible tap started
+  let activeId = null;   // only the first finger drives a single-finger gesture
+  const pointers = new Map();   // id -> {x, y}; up to two, for pinch
+  let pinch = null;      // { mid, dist } while two fingers are down
+  function nearest(x, y) {
+    let best = null, bd = 40;
+    for (const v of activeVPs()) {
+      // Off-screen VPs are grabbed by their edge marker.
+      const { x: cx, y: cy } = pin(v.p);
+      const d = Math.hypot(cx - x, cy - y);
+      if (d < bd) { bd = d; best = { key: v.key, ox: v.p.x - x, oy: v.p.y - y }; }
+    }
+    if (!best && mode !== 'tape') {
+      const [a, b] = horizonPts();
+      if (distToLine({ x, y }, a, b) < 26) best = { key: 'horizon', lx: x, ly: y };
+    }
+    return best;
+  }
+  function pinchState() {
+    const [a, b] = [...pointers.values()];
+    return { mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, dist: Math.max(Math.hypot(a.x - b.x, a.y - b.y), 1) };
+  }
+  canvas.addEventListener('pointerdown', e => {
+    if (pointers.size >= 2) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    canvas.setPointerCapture(e.pointerId);
+    if (pointers.size === 2) {
+      // Second finger: cancel the single-finger action (no trace committed) and pinch.
+      drag = null; drawing = null; pan = null; activeId = null; tapCand = null;
+      pinch = pinchState();
+      draw();
+      return;
+    }
+    activeId = e.pointerId;
+    if (mode === 'tape') {
+      tapCand = { x: e.clientX, y: e.clientY };
+      pan = { x: e.clientX, y: e.clientY };
+    } else if (tool === 'move') {
+      drag = nearest(e.clientX, e.clientY);
+      if (!drag) pan = { x: e.clientX, y: e.clientY };
+    } else {
+      drawing = { a: { x: e.clientX, y: e.clientY }, b: { x: e.clientX, y: e.clientY } };
+    }
+    draw();
+  });
+  canvas.addEventListener('pointermove', e => {
+    const p = pointers.get(e.pointerId);
+    if (!p) return;
+    p.x = e.clientX; p.y = e.clientY;
+    if (pinch) {
+      // The photo point that was under the old midpoint stays under the new one.
+      const n = pinchState();
+      const pp = toPhoto(pinch.mid);
+      view.s = clamp(view.s * n.dist / pinch.dist, MIN_S, MAX_S);
+      view.tx = n.mid.x - pp.x * view.s; view.ty = n.mid.y - pp.y * view.s;
+      pinch = n;
+      draw();
+      return;
+    }
+    if (e.pointerId !== activeId) return;
+    if (drag) {
+      const x = e.clientX + (drag.ox || 0), y = e.clientY + (drag.oy || 0);
+      if (drag.key === 'horizon') {
+        // Grabbing the horizon slides it (and its VPs) without changing its tilt.
+        const dx = (e.clientX - drag.lx) / (W * view.s), dy = (e.clientY - drag.ly) / (H * view.s);
+        drag.lx = e.clientX; drag.ly = e.clientY;
+        for (const k of mode === 1 ? ['vp1'] : ['vpL', 'vpR']) { pts[k].x += dx; pts[k].y += dy; }
+      } else {
+        // Every VP moves freely; the horizon follows VP 1 and VP 2.
+        const f = frac({ x, y });
+        pts[drag.key].x = f.x; pts[drag.key].y = f.y;
+      }
+      draw();
+    } else if (pan) {
+      view.tx += e.clientX - pan.x; view.ty += e.clientY - pan.y;
+      pan.x = e.clientX; pan.y = e.clientY;
+      draw();
+    } else if (drawing) {
+      drawing.b = { x: e.clientX, y: e.clientY };
+      draw();
+    }
+  });
+  const end = (e) => {
+    pointers.delete(e.pointerId);
+    if (pinch && pointers.size < 2) pinch = null;   // the leftover finger does nothing until lifted
+    if (e.pointerId !== activeId) return;
+    activeId = null;
+    if (tapCand && Math.hypot(e.clientX - tapCand.x, e.clientY - tapCand.y) < 10) onTapeTap({ x: e.clientX, y: e.clientY });
+    tapCand = null;
+    if (drawing && Math.hypot(drawing.b.x - drawing.a.x, drawing.b.y - drawing.a.y) > 24) {
+      traces.push({ a: frac(drawing.a), b: frac(drawing.b) });
+    }
+    drag = null; drawing = null; pan = null; draw();
+  };
+  canvas.addEventListener('pointerup', end);
+  canvas.addEventListener('pointercancel', e => { if (e.pointerId === activeId) { drawing = null; tapCand = null; } end(e); });
+  // Mouse wheel / trackpad: zoom around the cursor (ctrl = trackpad pinch, which reports bigger steps).
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    zoomAt({ x: e.clientX, y: e.clientY }, Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)));
+    draw();
+  }, { passive: false });
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+  // ---------- toolbar ----------
+  document.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => {
+    setMode(b.dataset.mode === 'tape' ? 'tape' : Number(b.dataset.mode));
+  }));
+  const toggle = (btn, on) => btn.setAttribute('aria-pressed', String(on));
+  const raysBtn = document.getElementById('raysBtn');
+  raysBtn.onclick = () => { showRays = !showRays; toggle(raysBtn, showRays); draw(); };
+  const moveBtn = document.getElementById('moveBtn'), traceBtn = document.getElementById('traceBtn');
+  moveBtn.onclick = () => { tool = 'move'; toggle(moveBtn, true); toggle(traceBtn, false); };
+  traceBtn.onclick = () => { tool = 'trace'; toggle(moveBtn, false); toggle(traceBtn, true); };
+  const freezeBtn = document.getElementById('freezeBtn');
+  freezeBtn.onclick = () => {
+    if (mode === 'tape') { if (tape.state === 'capture') tapeFreeze(); else tapeReset(); return; }
+    if (video.paused) { video.play(); toggle(freezeBtn, false); }
+    else { video.pause(); toggle(freezeBtn, true); }
+  };
+  document.getElementById('zoomOutBtn').onclick = zoomOut;
+  document.getElementById('resetViewBtn').onclick = resetView;
+  document.getElementById('flipBtn').onclick = () => {
+    facing = facing === 'environment' ? 'user' : 'environment';
+    toggle(freezeBtn, false);
+    startCamera();
+  };
+  document.getElementById('undoBtn').onclick = () => { traces.pop(); draw(); };
+  document.getElementById('clearBtn').onclick = () => { traces.length = 0; draw(); };
+  const diagBtn = document.getElementById('diagBtn');
+  diagBtn.onclick = () => { const on = !diagEl.classList.contains('show'); diagEl.classList.toggle('show', on); toggle(diagBtn, on); };
+  document.getElementById('retryBtn').onclick = startCamera;
+  document.getElementById('noCamBtn').onclick = () => { hideMsg(); noCamMode = true; fallback.style.display = 'block'; if (mode === 'tape') setTapeUI(); };
+  tapeSkip.onclick = tapeSkipCalib;
+  tapeReveal.onclick = tapeDoReveal;
+  tapeAgain.onclick = tapeReset;
+  tapeLoad.onclick = () => tapeFile.click();
+  tapeFile.onchange = () => {
+    const f = tapeFile.files && tapeFile.files[0];
+    tapeFile.value = '';
+    if (!f) return;
+    const url = URL.createObjectURL(f), im = new Image();
+    im.onload = () => {
+      hideMsg(); clearTapePhoto();
+      tape.photo = im; tape.photoUrl = url;
+      fallback.style.background = `#000 url(${url}) center / cover no-repeat`;
+      fallback.style.display = 'block';
+      tape.guess = null; tape.res = null; tape.target = null;
+      resetView();
+      tapeFreeze();
+    };
+    im.onerror = () => { URL.revokeObjectURL(url); tapeMsg.textContent = 'I couldn’t open that picture. Try another one.'; };
+    im.src = url;
+  };
+
+  window.addEventListener('resize', resize);
+  document.fonts && document.fonts.ready.then(draw);
+  resize();
+  startCamera();
+  // The native host keeps the WebView mounted when the scholar leaves, so
+  // release the camera while hidden and reacquire on return.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+      diag.status = 'released (hidden)'; report();
+    } else if (!stream && !(mode === 'tape' && tape.photo)) {
+      startCamera();
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -9,17 +9,23 @@
 // existing mutations). Pairs with `activityReflections` (the curriculum
 // self-reflection). See the TODO + review/curriculum-rehearse-and-maturity.md.
 //
-// Teacher-gated: it reads scholar records across the cohort.
+// Teacher-gated: it reads scholar records across the cohort. A curriculum:run
+// holder (lib/curriculumRun.ts) gets the same deck scoped to sessions under
+// the assignments she owns, with no transcript links.
 
 import { v } from "convex/values";
 import {
-  teacherQuery,
-  teacherMutation,
+  curriculumRunMutation,
   authedQuery,
 } from "./lib/customFunctions";
+import { isStaffRole, isTeacherRole } from "./lib/roles";
+import {
+  requireRunnableUnit,
+  runnableOwnedAssignmentIds,
+} from "./lib/curriculumRun";
 import { internalQuery } from "./_generated/server";
 import type { QueryCtx } from "./_generated/server";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import { sessionSignalMeta } from "../shared/learningSignals";
 import {
   scoreMastery,
@@ -38,6 +44,63 @@ const sourceValidator = v.union(
   v.literal("connection"),
 );
 
+/**
+ * Who may read an activity's Debrief, and how much of it.
+ *
+ *   - "teacher": unscoped (teachers are unchanged).
+ *   - "runner": a curriculum:run holder who can run the activity's unit. Her
+ *     scope is `rosters` — each assignment of that unit she OWNS and can still
+ *     run, mapped to its CURRENT roster. Only real sessions under one of those
+ *     runs, by a scholar still on that run's roster, ever reach her. A unit
+ *     she built may be run by someone else for another cohort; those sessions
+ *     never appear, and a scholar dropped from her roster leaves her deck.
+ *   - "none": anyone else, including a runner who has since lost access.
+ *     Reads answer empty instead of throwing, so her Debrief tab quietly
+ *     empties rather than hitting the error boundary.
+ */
+type DebriefAccess =
+  | { kind: "teacher" }
+  | { kind: "runner"; rosters: Map<string, Set<string>> }
+  | { kind: "none" };
+
+async function debriefAccess(
+  ctx: QueryCtx & { user: Doc<"users"> },
+  activityId: Id<"activities">,
+): Promise<DebriefAccess> {
+  if (isTeacherRole(ctx.user.role)) return { kind: "teacher" };
+  // Scholars, parents and other non-staff keep the old hard refusal; only
+  // staff (who may hold, or have just lost, curriculum:run) read as empty.
+  if (!isStaffRole(ctx.user.role)) {
+    throw new Error("Forbidden: teacher or admin role required");
+  }
+  const activity = await ctx.db.get(activityId);
+  const lesson = activity?.lessonId ? await ctx.db.get(activity.lessonId) : null;
+  if (!lesson) return { kind: "none" };
+  try {
+    await requireRunnableUnit(ctx, ctx.user, lesson.unitId);
+  } catch {
+    return { kind: "none" };
+  }
+  const runIds = await runnableOwnedAssignmentIds(ctx, ctx.user, lesson.unitId);
+  const rosters = new Map<string, Set<string>>();
+  for (const id of runIds) {
+    const a = await ctx.db.get(id as Id<"assignments">);
+    if (a) rosters.set(id, new Set(a.scholarIds.map(String)));
+  }
+  return { kind: "runner", rosters };
+}
+
+/** Writes: a teacher, or a runner who can run the activity — else throw. */
+async function requireDebriefWrite(
+  ctx: QueryCtx & { user: Doc<"users"> },
+  activityId: Id<"activities">,
+): Promise<void> {
+  const access = await debriefAccess(ctx, activityId);
+  if (access.kind === "none") {
+    throw new Error("Forbidden: teacher or admin role required");
+  }
+}
+
 // "creative_approach" → "Creative approach"
 type Moment = {
   source: "mastery" | "signal" | "connection";
@@ -46,7 +109,12 @@ type Moment = {
   score: number;
   scholarId: Id<"users">;
   scholarName: string;
-  sessionId: Id<"sessions">;
+  // The session (transcript) the moment came from — teacher-only. Null for a
+  // curriculum:run holder, who never gets a transcript link.
+  sessionId: Id<"sessions"> | null;
+  // The run (assignment) the moment came from, when it has one. A
+  // curriculum:run holder logs observations against it (observations.add).
+  assignmentId: Id<"assignments"> | null;
   label: string; // the headline (concept / signal name / domains)
   excerpt: string; // the evidence/description
   domain: string | null;
@@ -57,15 +125,31 @@ type Moment = {
  * interestingness) + `kept` (saved for action). Dismissed moments are
  * hidden. Scoped to the calling teacher's triage state.
  */
-export const forActivity = teacherQuery({
+export const forActivity = authedQuery({
   args: { activityId: v.id("activities"), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
+    // Teachers: every real session. A curriculum:run holder: only sessions
+    // under her own runnable runs, by a scholar still on that run's roster.
+    // Anyone else (or a runner who lost access): null, not a throw.
+    const access = await debriefAccess(ctx, args.activityId);
+    if (access.kind === "none") return null;
+    const isRunner = access.kind === "runner";
     // Real sessions for this activity (exclude teacher rehearsal drives).
     const sessions = await ctx.db
       .query("sessions")
       .withIndex("by_activity", (q) => q.eq("activityId", args.activityId))
       .collect();
-    const realSessions = sessions.filter((s) => !s.isTestDrive);
+    const realSessions = sessions.filter(
+      (s) =>
+        !s.isTestDrive &&
+        (access.kind === "teacher" ||
+          (!!s.assignmentId &&
+            !!access.rosters
+              .get(String(s.assignmentId))
+              ?.has(String(s.userId)))),
+    );
+    // Teacher-only: the transcript link. The runner keeps the run id.
+    const sessionLink = (id: Id<"sessions">) => (isRunner ? null : id);
 
     // This teacher's existing verdicts for this activity.
     const triaged = await ctx.db
@@ -104,9 +188,14 @@ export const forActivity = teacherQuery({
           score,
           scholarId: o.scholarId,
           scholarName: await nameOf(o.scholarId),
-          sessionId: s._id,
+          sessionId: sessionLink(s._id),
+          assignmentId: s.assignmentId ?? null,
           label: o.conceptLabel,
-          excerpt: o.evidenceSummary || o.transcriptExcerpt,
+          // The observer's summary. A runner never falls back to the
+          // scholar's verbatim transcript excerpt.
+          excerpt: isRunner
+            ? o.evidenceSummary
+            : o.evidenceSummary || o.transcriptExcerpt,
           domain: o.domain,
         });
       }
@@ -123,7 +212,8 @@ export const forActivity = teacherQuery({
           score,
           scholarId: sig.scholarId,
           scholarName: await nameOf(sig.scholarId),
-          sessionId: s._id,
+          sessionId: sessionLink(s._id),
+          assignmentId: s.assignmentId ?? null,
           label: sessionSignalMeta(sig.signalType)?.teacherLabel ?? sig.signalType,
           excerpt: sig.description,
           domain: null,
@@ -142,7 +232,8 @@ export const forActivity = teacherQuery({
           score,
           scholarId: c.scholarId,
           scholarName: await nameOf(c.scholarId),
-          sessionId: s._id,
+          sessionId: sessionLink(s._id),
+          assignmentId: s.assignmentId ?? null,
           label: c.conceptLabels.join(" ↔ "),
           excerpt: c.description,
           domain: c.domains.join(", "),
@@ -392,7 +483,7 @@ export const forScholarDayInternal = internalQuery({
 });
 
 /** Keep or dismiss a moment (idempotent re-triage). */
-export const triage = teacherMutation({
+export const triage = curriculumRunMutation({
   args: {
     activityId: v.id("activities"),
     source: sourceValidator,
@@ -400,6 +491,8 @@ export const triage = teacherMutation({
     verdict: v.union(v.literal("kept"), v.literal("dismissed")),
   },
   handler: async (ctx, args) => {
+    // Per-caller state; a runner must still be able to run the activity.
+    await requireDebriefWrite(ctx, args.activityId);
     const existing = await ctx.db
       .query("momentTriage")
       .withIndex("by_source", (q) =>
@@ -429,9 +522,12 @@ export const triage = teacherMutation({
 });
 
 /** The teacher's curriculum reflection on this activity (the self-reflect half). */
-export const reflection = teacherQuery({
+export const reflection = authedQuery({
   args: { activityId: v.id("activities") },
   handler: async (ctx, args) => {
+    if ((await debriefAccess(ctx, args.activityId)).kind === "none") {
+      return null;
+    }
     return await ctx.db
       .query("activityReflections")
       .withIndex("by_activity_teacher", (q) =>
@@ -441,9 +537,10 @@ export const reflection = teacherQuery({
   },
 });
 
-export const recordReflection = teacherMutation({
+export const recordReflection = curriculumRunMutation({
   args: { activityId: v.id("activities"), content: v.string() },
   handler: async (ctx, args) => {
+    await requireDebriefWrite(ctx, args.activityId);
     const existing = await ctx.db
       .query("activityReflections")
       .withIndex("by_activity_teacher", (q) =>
@@ -473,9 +570,14 @@ export const recordReflection = teacherMutation({
  * Assignments Run page. Real sessions only (teacher rehearsals excluded);
  * sorted most-recent first.
  */
-export const runsForActivity = teacherQuery({
+export const runsForActivity = authedQuery({
   args: { activityId: v.id("activities") },
   handler: async (ctx, args) => {
+    // Already owner-scoped below; a runner additionally sees only runs she
+    // can still run, and anyone without Debrief access gets [].
+    const access = await debriefAccess(ctx, args.activityId);
+    if (access.kind === "none") return [];
+    const ownedRuns = access.kind === "runner" ? access.rosters : null;
     const sessions = await ctx.db
       .query("sessions")
       .withIndex("by_activity", (q) => q.eq("activityId", args.activityId))
@@ -495,6 +597,7 @@ export const runsForActivity = teacherQuery({
       [...byAssignment.entries()].map(async ([assignmentId, scholarSet]) => {
         const a = await ctx.db.get(assignmentId as Id<"assignments">);
         if (!a || a.teacherId !== ctx.user._id) return null;
+        if (ownedRuns !== null && !ownedRuns.has(String(a._id))) return null;
         const unit = a.unitId ? await ctx.db.get(a.unitId) : null;
         const completions = await ctx.db
           .query("activityCompletions")

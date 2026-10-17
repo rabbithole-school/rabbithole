@@ -3,24 +3,34 @@
 /**
  * The scholar's PARKING LOT in the Workshop (sessions.parkingLot): ideas the
  * App designer parked for the Free play version instead of building them now
- * (lib/designerTools.ts park_idea). Hidden when empty. Once the assignment
- * version is done (`freePlayEligible`, lib/freePlay.ts), a "Start free play"
- * button beside the chips opens the scholar's own version (TRA-489).
+ * (lib/designerTools.ts park_idea). Hidden when empty. Once the activity is
+ * done, the builder passes `renderActions` (the done screen's Build it now +
+ * Make it a Quest per idea, TRA-519 B2 — useSavedForLaterActions) and each
+ * idea carries its own buttons. Until then the chips are read-only;
+ * `onStartFreePlay` remains for a caller with no per-idea actions (TRA-489).
+ * This strip owns its heading; the chips are the shared ParkedIdeaList (one
+ * rendering of the lot, TRA-519 B1).
  * Native twin: native/src/components/vibecode/ParkingLot.tsx.
  */
 import { Box, Button, Flex, Text } from "@chakra-ui/react";
+import type { ReactNode } from "react";
+import { ParkedIdeaList, type ParkedIdea } from "../ParkedIdeaList";
 
-export type ParkedIdea = { text: string; parkedAt: number; reason?: string };
+export type { ParkedIdea };
 
 export function ParkingLot({
   ideas,
   onStartFreePlay,
   startingFreePlay = false,
+  renderActions,
 }: {
   ideas: readonly ParkedIdea[] | undefined;
-  /** Present only when sessions.startFreePlay would succeed. */
+  /** Present only when sessions.startFreePlay would succeed. Ignored when
+   *  `renderActions` is given (each idea then has its own Build it now). */
   onStartFreePlay?: () => void;
   startingFreePlay?: boolean;
+  /** The done state's per-idea actions (useSavedForLaterActions). */
+  renderActions?: (idea: ParkedIdea) => ReactNode;
 }) {
   if (!ideas || ideas.length === 0) return null;
   return (
@@ -30,7 +40,7 @@ export function ParkingLot({
       borderTop="1px solid"
       borderColor="gray.200"
       flexShrink={0}
-      maxH="132px"
+      maxH={renderActions ? "240px" : "132px"}
       overflowY="auto"
       aria-label="Parking lot for Free play"
     >
@@ -39,7 +49,7 @@ export function ParkingLot({
           Parking lot · Free play
         </Text>
         <Box flex={1} />
-        {onStartFreePlay ? (
+        {onStartFreePlay && !renderActions ? (
           <Button
             size="xs"
             colorPalette="violet"
@@ -50,29 +60,7 @@ export function ParkingLot({
           </Button>
         ) : null}
       </Flex>
-      <Flex gap={1.5} wrap="wrap">
-        {ideas.map((idea) => (
-          <Box
-            key={`${idea.parkedAt}-${idea.text}`}
-            borderWidth="1px"
-            borderColor="gray.200"
-            borderRadius="md"
-            bg="white"
-            px={2}
-            py={1}
-            maxW="100%"
-          >
-            <Text fontSize="sm" fontFamily="heading" color="charcoal.700">
-              {idea.text}
-            </Text>
-            {idea.reason ? (
-              <Text fontSize="xs" color="charcoal.400">
-                {idea.reason}
-              </Text>
-            ) : null}
-          </Box>
-        ))}
-      </Flex>
+      <ParkedIdeaList ideas={ideas} renderActions={renderActions} />
     </Box>
   );
 }

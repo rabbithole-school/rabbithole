@@ -36,7 +36,7 @@ import {
 } from "./shared";
 import { SlidesSection } from "./SlidesFields";
 import { WebActivityFields } from "./WebActivityFields";
-import { VibecodeContractFields } from "./VibecodeContractFields";
+import { MissionFields } from "./MissionFields";
 import { GameActivityFields } from "./GameActivityFields";
 import { SimulatorSpecEditor } from "@/components/simulatorTeacher/SimulatorSpecEditor";
 import { ShareBackSection } from "./ShareBackSection";
@@ -46,7 +46,9 @@ import { NodeActionsMenu } from "@/components/NodeActionsMenu";
 import { FieldSelect } from "@/components/ui/FieldSelect";
 import { MODELS, modelLabel } from "@/convex/lib/models";
 import { TUTOR_DEFAULT_MODEL } from "@/convex/lib/tutorModel";
+import { defaultGateFor } from "@/convex/lib/mission";
 import { toaster } from "@/lib/toaster";
+import { effectiveActivityKind, isAppActivity } from "@/shared/appSurface";
 
 export function ActivityFields({
   activityId,
@@ -160,13 +162,17 @@ export function ActivityFields({
     await setArchived({ id: activityId, archived: false });
   };
 
-  const isOnline = activity.kind === "online";
+  // An app activity (TRA-519) is an online activity with app settings, or a
+  // row still stored with the legacy kind "vibecode". `isOnline` keeps meaning
+  // "an online activity that is not an app", exactly as before the fold.
+  const effectiveKind = effectiveActivityKind(activity);
+  const isApp = isAppActivity(activity);
+  const isOnline = effectiveKind === "online";
   const isShareBack = activity.kind === "shareBack";
   const isWeb = activity.kind === "web";
   const isGame = activity.kind === "game";
   const starterApp = activity.starterAppId ? activity.starterApp : null;
   const isSimulator = activity.kind === "simulator";
-  const isVibecode = activity.kind === "vibecode";
 
   // Compute activity-level warnings up-front so the banner under the
   // header tells the teacher what's wrong before they scroll, and each
@@ -251,8 +257,14 @@ export function ActivityFields({
           "Days after previous" — so the kind picker stands on its own. */}
       <Field label="Kind">
         <KindToggle
-          value={activity.kind}
-          onChange={(kind) => update({ id: activityId, kind })}
+          // An app activity is online; the switch below says it's an app.
+          value={isApp ? "online" : activity.kind}
+          onChange={(kind) => {
+            // Re-picking Online keeps an app an app (a legacy "vibecode" row
+            // would otherwise be written as a plain online activity).
+            if (isApp && kind === "online") return;
+            void update({ id: activityId, kind });
+          }}
         />
       </Field>
 
@@ -263,9 +275,42 @@ export function ActivityFields({
       {/* Per-scholar angles only makes sense for online activities —
           it relies on the AI tutor's kickoff phase, which doesn't
           exist on teacher-facing offline / shareBack activities. */}
-      {(isOnline || activity.kind === "offline") && (
+      {(isOnline || isApp || activity.kind === "offline") && (
         <Field label="Options">
           <Stack gap={2.5}>
+            {(isOnline || isApp) && (
+              <Box>
+                <Switch.Root
+                  checked={isApp}
+                  onCheckedChange={(d) =>
+                    update({
+                      id: activityId,
+                      kind: "online",
+                      appActivity: !!d.checked,
+                    })
+                  }
+                  colorPalette="violet"
+                  size="sm"
+                >
+                  <Switch.HiddenInput />
+                  <Switch.Control>
+                    <Switch.Thumb />
+                  </Switch.Control>
+                  <Switch.Label
+                    fontFamily="heading"
+                    fontSize="sm"
+                    color="charcoal.600"
+                  >
+                    Scholars build or use an app
+                  </Switch.Label>
+                </Switch.Root>
+                <Text fontSize="2xs" color="charcoal.400" pl={6} mt={0.5}>
+                  The session opens on a full-screen app the scholar
+                  directs the AI to build, or plays. The app is their
+                  deliverable.
+                </Text>
+              </Box>
+            )}
             {isOnline && (
             <Box>
               <Switch.Root
@@ -297,6 +342,7 @@ export function ActivityFields({
               </Text>
             </Box>
             )}
+            {!isApp && (
             <Box>
               <Checkbox.Root
                 checked={!!activity.assessesWritingMechanics}
@@ -325,6 +371,7 @@ export function ActivityFields({
                 work earns full credit.
               </Text>
             </Box>
+            )}
           </Stack>
         </Field>
       )}
@@ -481,7 +528,7 @@ export function ActivityFields({
           <SimulatorSpecEditor activityId={activityId} />
         </Box>
       )}
-      {(isOnline || isVibecode) && (
+      {(isOnline || isApp) && (
         <>
           <Field label="Process">
             <ProcessPicker
@@ -489,7 +536,7 @@ export function ActivityFields({
               onChange={(next) => update({ id: activityId, processId: next })}
             />
           </Field>
-          {isVibecode && (
+          {isApp && (
             <Field label="Tutor model">
               <FieldSelect
                 value={activity.tutorModel === "fable" ? "fable" : ""}
@@ -510,7 +557,7 @@ export function ActivityFields({
               </FieldSelect>
             </Field>
           )}
-          {isVibecode && (
+          {isApp && (
             <Field
               label="Scholars start from"
               hint={
@@ -541,7 +588,7 @@ export function ActivityFields({
               </FieldSelect>
             </Field>
           )}
-          {isVibecode && (
+          {isApp && (
             <Field
               label="Scholars can edit the app"
               hint={
@@ -569,7 +616,7 @@ export function ActivityFields({
               </FieldSelect>
             </Field>
           )}
-          {isVibecode && starterApp && (
+          {isApp && starterApp && (
             <Flex align="baseline" gap={2} flexWrap="wrap">
               <Text fontSize="xs" color="fg.muted">
                 Starter app: {starterApp.name}
@@ -598,9 +645,9 @@ export function ActivityFields({
             </Flex>
           )}
           <Field
-            label={isVibecode ? "Build brief" : "Activity system prompt"}
+            label={isApp ? "Build brief" : "Activity system prompt"}
             hint={
-              isVibecode
+              isApp
                 ? "What the scholar should build. The AI builder sees this and greets them with the challenge."
                 : "This is what drives the AI tutor when a scholar starts this activity. Be specific about objectives, scaffolds, and what 'done' looks like."
             }
@@ -622,18 +669,24 @@ export function ActivityFields({
               placeholder="Instructions for the AI tutor during this activity..."
             />
           </Field>
-          {isVibecode && (
-            <VibecodeContractFields
+          {/* The mission (TRA-519 B1): any online activity with work to
+              make has one; a non-app activity edits only its gate and what
+              the scholar owns. A discussion (no deliverable) is exploration
+              and resolves no mission, so its fields would steer nothing. */}
+          {defaultGateFor(activity) != null ? (
+            <MissionFields
               activityId={activityId}
+              appActivity={isApp}
+              defaultGate={defaultGateFor(activity)}
               buildContract={activity.buildContract}
               allowSilence={activity.allowSilence}
               update={update}
             />
-          )}
+          ) : null}
 
-          {/* Vibecode has no deliverable capture — the built app is the
-              artifact — so the deliverable block stays online-only. */}
-          {isOnline && <DeliverableSection activityId={activityId} />}
+          {/* An app activity's deliverable is the app itself: the section
+              shows its prompt and rubric with the kind fixed (TRA-519). */}
+          <DeliverableSection activityId={activityId} />
         </>
       )}
       <ResourcesSection activityId={activityId} />

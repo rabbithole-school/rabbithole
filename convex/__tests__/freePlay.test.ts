@@ -19,7 +19,7 @@ import {
   PARK_IDEA_TOOL_NAME,
   UNPARK_IDEA_TOOL_NAME,
   STAY_SILENT_TOOL_NAME,
-  designerToolOffer,
+  missionToolOffer,
 } from "../lib/designerTools";
 import { reconcileActivityCompletion } from "../lib/activityCompletionCore";
 import {
@@ -276,16 +276,16 @@ describe("free play in the prompt", () => {
     const { context, parts } = await promptParts(true);
     expect(context.freePlay).toBe(true);
     expect(context.lessonActivityContext).not.toHaveProperty("buildContract");
-    const prompt = parts.stable + parts.dynamic;
+    const prompt = parts.stable + parts.dynamic + parts.turnSystem;
     for (const piece of [...CONTRACT.invariants, CONTRACT.gate!]) {
       expect(prompt).not.toContain(piece);
     }
     expect(prompt).not.toContain(PARK_IDEA_TOOL_NAME);
     expect(prompt).not.toContain(UNPARK_IDEA_TOOL_NAME);
     expect(prompt).not.toContain(STAY_SILENT_TOOL_NAME);
-    // The opener (dynamic tail, never the cached prefix) lists the ideas.
+    // The opener (per-turn session state, never the cached prefix) lists the ideas.
     expect(parts.stable).not.toContain("IDEA-rainbow-fish");
-    expect(parts.dynamic).toContain(buildFreePlayOpenerSection(LOT)!);
+    expect(parts.turnSystem).toContain(buildFreePlayOpenerSection(LOT)!.trim());
     // The weapons rule survives the contract's absence.
     expect(parts.stable).toContain(WEAPON_DEFINITION);
   });
@@ -296,8 +296,8 @@ describe("free play in the prompt", () => {
     expect(context.lessonActivityContext?.buildContract).toEqual(CONTRACT);
     expect(parts.stable).toContain(CONTRACT.gate!);
     expect(parts.stable).toContain(WEAPON_DEFINITION);
-    expect(parts.dynamic).not.toContain(buildFreePlayOpenerSection(LOT)!);
-    expect(parts.dynamic).toContain("IDEA-rainbow-fish");
+    expect(parts.turnSystem).not.toContain(buildFreePlayOpenerSection(LOT)!.trim());
+    expect(parts.turnSystem).toContain("IDEA-rainbow-fish");
   });
 
   test("buildFreePlayOpenerSection: null when empty, one line per idea", () => {
@@ -307,13 +307,14 @@ describe("free play in the prompt", () => {
     for (const idea of LOT) expect(section).toContain(idea.text);
   });
 
-  test("designerToolOffer offers nothing in free play", () => {
+  test("missionToolOffer offers nothing in free play", () => {
     expect(
-      designerToolOffer({
-        sessionMode: "vibecode",
+      missionToolOffer({
+        hasMission: true,
+        builderStance: true,
         workshopMode: "edit",
         teacherBuild: false,
-        hasBuildContract: true,
+        appActivity: true,
         allowSilence: true,
         callerIsSessionOwner: true,
         freePlay: true,
@@ -369,5 +370,191 @@ describe("free play counts toward nothing", () => {
     expect(context?.advanceRubricContext).toBeNull();
     expect(context?.standaloneDeliverableContext).toBeNull();
     expect(context?.conversationCompletionContext).toBeNull();
+  });
+});
+
+// ── "Build it now" from any activity with a mission (TRA-519 B2) ───────────
+
+async function seedEssay(
+  t: ReturnType<typeof convexTest>,
+  opts: {
+    complete?: boolean;
+    lot?: typeof LOT;
+    activity?: Partial<Record<string, unknown>>;
+    quest?: boolean;
+  } = {},
+) {
+  const institutionId = await seedTestInstitution(t);
+  const scholarId = await seedScholarInInstitution(t, { institutionId });
+  return await t.run(async (ctx) => {
+    const unitId = await ctx.db.insert("units", {
+      teacherId: scholarId,
+      title: "Heron unit",
+      isActive: true,
+      institutionId,
+      ...(opts.quest ? { authorScholarId: scholarId } : {}),
+    });
+    const lessonId = await ctx.db.insert("lessons", {
+      unitId,
+      title: "Heron lesson",
+      order: 0,
+    });
+    const activityId = await ctx.db.insert("activities", {
+      lessonId,
+      title: "Field journal",
+      kind: "online",
+      order: 0,
+      // Not an app: refused as notApp before editAccess is read.
+      editAccess: "never",
+      deliverable: {
+        kind: "text",
+        prompt: "Write about the heron.",
+        mode: "none",
+        criteria: [],
+      },
+      ...opts.activity,
+    } as never);
+    const sessionId = await ctx.db.insert("sessions", {
+      userId: scholarId,
+      institutionId,
+      title: "Field journal",
+      isArchived: false,
+      unitId,
+      lessonId,
+      activityId,
+      parkingLot: opts.lot ?? LOT,
+    });
+    // A side app on a non-app source does not make it an app source.
+    await ctx.db.insert("artifacts", {
+      sessionId,
+      title: "Side app",
+      content: APP_HTML,
+      lastEditedBy: "ai",
+      revision: 1,
+      type: "code",
+      language: "html",
+    });
+    if (opts.complete ?? true) {
+      await ctx.db.insert("activityCompletions", {
+        scholarId,
+        activityId,
+        sessionId,
+        unitId,
+        lessonId,
+        completedAt: Date.now(),
+      });
+    }
+    return { scholarId, activityId, sessionId, unitId, lessonId };
+  });
+}
+
+describe("Build it now is for app activities only", () => {
+  test("a completed essay with parked ideas is not eligible, and startFreePlay refuses", async () => {
+    const t = convexTest(schema, modules);
+    const s = await seedEssay(t);
+    const as = await asUser(t, s.scholarId);
+    const view = await as.query(api.sessions.getWithMessages, { id: s.sessionId });
+    expect(view.session.freePlayEligible).toBe(false);
+    await expect(
+      as.mutation(api.sessions.startFreePlay, { sessionId: s.sessionId }),
+    ).rejects.toThrow(/notApp/);
+    const sessions = await t.run((ctx) => ctx.db.query("sessions").collect());
+    expect(sessions.filter((x) => x.freePlay === true)).toHaveLength(0);
+  });
+
+  test("a discussion (no deliverable) is refused as not an app", async () => {
+    const t = convexTest(schema, modules);
+    const s = await seedEssay(t, {
+      activity: {
+        deliverable: undefined,
+        advanceRubric: { criteria: [{ id: "c1", label: "Shares a view" }] },
+      },
+    });
+    const as = await asUser(t, s.scholarId);
+    await expect(
+      as.mutation(api.sessions.startFreePlay, { sessionId: s.sessionId }),
+    ).rejects.toThrow(/notApp/);
+  });
+
+  test("a session with no activity (open chat) is refused", async () => {
+    const t = convexTest(schema, modules);
+    const s = await seedEssay(t);
+    await t.run((ctx) => ctx.db.patch(s.sessionId, { activityId: undefined }));
+    const as = await asUser(t, s.scholarId);
+    await expect(
+      as.mutation(api.sessions.startFreePlay, { sessionId: s.sessionId }),
+    ).rejects.toThrow(/noActivity/);
+  });
+
+  test("a rehearsal is refused", async () => {
+    const t = convexTest(schema, modules);
+    const s = await seedEssay(t);
+    await t.run((ctx) => ctx.db.patch(s.sessionId, { isTestDrive: true }));
+    const as = await asUser(t, s.scholarId);
+    await expect(
+      as.mutation(api.sessions.startFreePlay, { sessionId: s.sessionId }),
+    ).rejects.toThrow(/testDrive/);
+  });
+
+  test("an online activity with the app marker is an app source", async () => {
+    const t = convexTest(schema, modules);
+    const s = await seedEssay(t, {
+      activity: {
+        appActivity: true,
+        editAccess: "afterCompletion",
+        deliverable: { kind: "artifact", prompt: "Build it.", mode: "none", criteria: [] },
+      },
+    });
+    const as = await asUser(t, s.scholarId);
+    const { sessionId } = await as.mutation(api.sessions.startFreePlay, {
+      sessionId: s.sessionId,
+    });
+    const created = await t.run((ctx) => ctx.db.get(sessionId));
+    expect(created?.activityId).toBe(s.activityId);
+    expect(created?.freePlay).toBe(true);
+  });
+});
+
+describe("startFreePlay idea", () => {
+  test("idea puts that entry first, on a new free play and on the existing one", async () => {
+    const t = convexTest(schema, modules);
+    const s = await seed(t);
+    const as = await asUser(t, s.scholarId);
+    const { sessionId } = await as.mutation(api.sessions.startFreePlay, {
+      sessionId: s.sessionId,
+      idea: "IDEA-night-mode",
+    });
+    const first = await t.run((ctx) => ctx.db.get(sessionId));
+    expect(first?.parkingLot?.map((e) => e.text)).toEqual([
+      "IDEA-night-mode",
+      "IDEA-rainbow-fish",
+    ]);
+    // The source's own lot keeps its order.
+    const source = await t.run((ctx) => ctx.db.get(s.sessionId));
+    expect(source?.parkingLot?.map((e) => e.text)).toEqual([
+      "IDEA-rainbow-fish",
+      "IDEA-night-mode",
+    ]);
+    // Idempotent per source; a second pick re-orders the existing session.
+    const again = await as.mutation(api.sessions.startFreePlay, {
+      sessionId: s.sessionId,
+      idea: "idea-rainbow-fish",
+    });
+    expect(again.sessionId).toBe(sessionId);
+    const reordered = await t.run((ctx) => ctx.db.get(sessionId));
+    expect(reordered?.parkingLot?.map((e) => e.text)).toEqual([
+      "IDEA-rainbow-fish",
+      "IDEA-night-mode",
+    ]);
+    // An idea that is not in the lot leaves the order alone.
+    await as.mutation(api.sessions.startFreePlay, {
+      sessionId: s.sessionId,
+      idea: "not parked",
+    });
+    const same = await t.run((ctx) => ctx.db.get(sessionId));
+    expect(same?.parkingLot?.map((e) => e.text)).toEqual([
+      "IDEA-rainbow-fish",
+      "IDEA-night-mode",
+    ]);
   });
 });

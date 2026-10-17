@@ -46,6 +46,7 @@ import {
   toggleInSet,
 } from "@/components/messaging/IncludeStaff";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { isTeacherRole } from "@/convex/lib/roles";
 import {
   MessageAttachmentPicker,
   useFamilyMessageAttachments,
@@ -544,6 +545,10 @@ function ComposeDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const attachmentState = useFamilyMessageAttachments();
+  // Attaching from a scholar's portfolio means browsing it, which is a
+  // teaching-staff read: operations staff message families with uploads and
+  // photos only (`portfolio.listForScholar` refuses them).
+  const canAttachFromPortfolio = isTeacherRole(useCurrentUser().user?.role);
   const updateParticipation = (next: ScholarParticipationSelection) => {
     if (includeProgramGuests && !next.extendedEducation) {
       setSelected(new Set());
@@ -678,10 +683,12 @@ function ComposeDialog({
                     disabled={busy}
                     onAddFiles={attachmentState.addFiles}
                     portfolioScholarId={
-                      scholarIds.length === 1 ? scholarIds[0] : undefined
+                      canAttachFromPortfolio && scholarIds.length === 1
+                        ? scholarIds[0]
+                        : undefined
                     }
                     onAddPortfolioItem={
-                      scholarIds.length === 1
+                      canAttachFromPortfolio && scholarIds.length === 1
                         ? (item) =>
                             void attachmentState.addPortfolioItem(
                               item._id,

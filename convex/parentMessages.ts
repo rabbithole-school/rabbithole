@@ -75,6 +75,7 @@ import {
   portfolioItemContainsIdentifiableMedia,
 } from "./lib/schoolMediaConsent";
 import { assignmentResolved } from "./lib/portfolioStatus";
+import { requireScholarWorkAccess } from "./lib/access";
 import {
   UPLOAD_RESERVATION_TTL_MS,
   attachmentOwnsBlob,
@@ -846,6 +847,10 @@ export const registerPortfolioAttachment = authedMutation({
   args: { portfolioItemId: v.id("portfolioItems"), scholarId: v.id("users") },
   handler: async (ctx, args) => {
     await requireSchoolOperationsForScholars(ctx, [args.scholarId]);
+    // Attaching a filed scan means opening a scholar's work: teaching staff
+    // only. Operations staff message families with uploads and photos (the
+    // composer hides this picker from them; this is the server half).
+    await requireScholarWorkAccess(ctx, ctx.user, args.scholarId);
     const item = await ctx.db.get(args.portfolioItemId);
     const attributed =
       item && (await isAttributedToScholar(ctx, item, args.scholarId));

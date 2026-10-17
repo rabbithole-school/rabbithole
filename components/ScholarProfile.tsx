@@ -135,7 +135,8 @@ interface ScholarProfileProps {
   onOpenObservation?: (observationId: string) => void;
   /**
    * "teacher" (default) shows all controls; "operations" restricts to
-   * account-admin + portfolio and hides all sensitive learning data.
+   * account admin + administrative documents and hides all learning data
+   * (portfolio included).
    * (Scholars have their own purpose-built self-view — MyLearningView at
    * /me — and parents have ParentDashboard; neither renders this.)
    */
@@ -205,16 +206,17 @@ const ALL_TABS: { key: TabKey; label: string; icon: React.ComponentType<{ size?:
   { key: "settings", label: "Settings", icon: Gear },
 ];
 
-// Tabs visible to operations staff: the Feed (non-sensitive overview), Portfolio
-// (the accumulated record — portfolio items only for operations staff), Documents
+// Tabs visible to operations staff: the Feed (non-sensitive overview), Documents
 // (the administrative record kinds they may file — incident reports, transfer
 // records, conference notes, doctor's notes, report cards — plus health-record
 // attachments; the merged list never shows them an assessment or IEP), and
-// Settings (identity + password + parents). No map/dossier/guidance/now (all sensitive learning data).
+// Settings (identity + password + parents). No map/dossier/guidance/now (all
+// sensitive learning data) and no Portfolio: a scholar's work is a learning
+// record too — operations staff file scans from the scanner inbox, they do not
+// browse a scholar's portfolio (`portfolio.listForScholar` refuses them).
 // Settings is the gear.
 const OPERATIONS_TABS: TabKey[] = [
   "feed",
-  "portfolio",
   "documents",
   "settings",
 ];
@@ -417,7 +419,7 @@ function InterestsBlock({
 }
 
 export function ScholarProfile({ scholarId, institutionScope, activeTab: controlledTab, onTabChange, onDelete, onOpenObservation, mode = "teacher", addAction = null, onAddConsumed }: ScholarProfileProps) {
-  // Operations staff: account-admin + portfolio only. Skip every sensitive read
+  // Operations staff: account admin + administrative documents. Skip every sensitive read
   // (they're teacher-gated server-side and would 403) and hide the
   // sensitive UI blocks below.
   const isOperationsMode = mode === "operations";
@@ -1404,11 +1406,9 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
 
         {/* ── Portfolio — the accumulated record (Renzulli Total Talent
             Portfolio): portfolio items · badges · session history · web
-            activity. Registrars see portfolio items only. ── */}
-        {activeTab === "portfolio" && (
-          isOperationsMode ? (
-            <PortfolioTab scholarId={scholarId} />
-          ) : (
+            activity. Teaching staff only; operations staff have no Portfolio
+            tab (they file scans from the scanner inbox instead). ── */}
+        {activeTab === "portfolio" && !isOperationsMode && (
             <VStack gap={4} align="stretch" maxW="1100px">
               {/* PortfolioTab renders its own Surface — no wrapper card here. */}
               <PortfolioTab scholarId={scholarId} />
@@ -1641,7 +1641,6 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                   itself when the scholar has none. */}
               <ActivitySessionsCard scholarId={scholarId as Id<"users">} />
             </VStack>
-          )
         )}
 
 

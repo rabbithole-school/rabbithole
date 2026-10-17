@@ -7,7 +7,7 @@ import {
 } from "./_generated/server";
 import { authedQuery, authedMutation } from "./lib/customFunctions";
 import { requireGuardianOrStaffPreview } from "./lib/auth";
-import { ROLES, isScholarAdminRole } from "./lib/roles";
+import { ROLES, isScholarAdminRole, isTeacherRole } from "./lib/roles";
 import {
   requireProgramCaptureReviewAccess,
   reviewableProgramGroups,
@@ -16,6 +16,8 @@ import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   assignmentResolved,
+  hasBeenFiled,
+  isProcessed,
   needsReview,
   openFields,
 } from "./lib/portfolioStatus";
@@ -37,8 +39,9 @@ import {
 import { candidateGroupsForScholar } from "./lib/scholarGroupMembership";
 import { getFormEntry } from "./lib/formRegistry";
 import {
-  canUserAccessScholar,
+  canUserReadScholarWork,
   requireActiveScholarAccess,
+  requireScholarWorkAccess,
 } from "./lib/access";
 import {
   resolveInstitutionLens,
@@ -63,6 +66,7 @@ import {
 // The cap is shared with the kiosk's own naming path (and the native input),
 // so it lives in shared/ rather than being restated per surface.
 import { LABEL_MAX_LENGTH } from "../shared/portfolioLabel";
+import { effectiveActivityKind } from "../shared/appSurface";
 
 const LABEL_BATCH_MAX = 200;
 const ASSIGNMENT_BATCH_MAX = 200;
@@ -107,10 +111,16 @@ export const assertSchoolOperationsForCaller = internalQuery({
  * Confident matches auto-file; uncertain ones land in `listNeedsReview` for a
  * teacher to assign in one click.
  *
- * All public functions are gated to scholar-admin roles (teacher, admin,
- * operations staff). Scholars don't manage their own portfolio in this surface;
- * staff curate attribution. Registrars triage the scanner inbox but do
- * not configure Drive sync (that stays curriculum-access in driveSync.ts).
+ * The filing surface (scanner inbox, attribution, labels, assignment and
+ * activity tagging) is gated to scholar-admin roles: teachers, admins, and
+ * operations staff (`school:operations`). BROWSING a scholar's filed work —
+ * `listForScholar`, `get`, `getFileUrl` on a filed scan, `offlineSessionView`,
+ * and the image of a Filed row in `scannerFeed` — is a learning-record read and
+ * needs teaching standing (`requireScholarWorkAccess`): operations staff open
+ * only scans still processing or needing review, see Filed rows by scholar,
+ * date and filing (no image) so they can refile, and never browse portfolios. Scholars don't manage their own portfolio in this surface;
+ * staff curate attribution. Operations staff do not configure Drive sync (that
+ * stays curriculum-access in driveSync.ts).
  */
 
 // ── Internal helpers ────────────────────────────────────────────────────
@@ -358,6 +368,22 @@ export const registerUpload = authedMutation({
 });
 
 /**
+ * Stamp `firstFiledAt` the first time an item is seen filed (both axes
+ * resolved). Called on the PRE-image of every write that can un-resolve an
+ * axis (so a filed scan can never leave filed-ness unrecorded) and on the
+ * POST-image of every filing write (so the stamp records when it was filed).
+ */
+export async function stampFiledIfProcessed(
+  ctx: MutationCtx,
+  itemId: Id<"portfolioItems">,
+): Promise<void> {
+  const item = await ctx.db.get(itemId);
+  if (item && item.firstFiledAt === undefined && isProcessed(item)) {
+    await ctx.db.patch(itemId, { firstFiledAt: Date.now() });
+  }
+}
+
+/**
  * Assign (or re-assign) a scholar to an item and mark it confirmed. This is
  * how a teacher clears the review queue, and also how they fix a bad
  * auto-match.
@@ -380,6 +406,20 @@ async function setAttributionSet(
     }
     for (const scholarId of await attributedScholarIds(ctx, item)) {
       await requireActiveScholarAccess(ctx, ctx.user, scholarId);
+    }
+    // Clearing EVERY scholar off an attributed scan sends it back to the
+    // inbox. Only teaching staff may do that: for operations staff it would
+    // be a way to pull a scholar's filed work back into view. They can still
+    // move a misfiled scan to a different scholar.
+    const currentIds = await attributedScholarIds(ctx, item);
+    if (uniqueIds.length === 0 && currentIds.length > 0) {
+      for (const scholarId of currentIds) {
+        if (!(await canUserReadScholarWork(ctx, ctx.user, scholarId))) {
+          throw new Error(
+            "Choose a scholar for this scan — only teaching staff can clear its scholars",
+          );
+        }
+      }
     }
   }
   const institutionIds = new Set(
@@ -420,6 +460,8 @@ async function setAttributionSet(
     }
   }
 
+  // Record filed-ness BEFORE an attribution change can un-resolve it.
+  await stampFiledIfProcessed(ctx, itemId);
   const existing = await ctx.db
     .query("portfolioAttributions")
     .withIndex("by_item", (q) => q.eq("portfolioItemId", itemId))
@@ -447,6 +489,7 @@ async function setAttributionSet(
     matchStatus: uniqueIds.length > 0 ? "confirmed" : "unmatched",
     ...(item.institutionId || !institutionId ? {} : { institutionId }),
   });
+  await stampFiledIfProcessed(ctx, itemId);
   if (attributionsChanged) {
     await clearScanAssessment(ctx, itemId);
   }
@@ -582,6 +625,7 @@ async function applyPortfolioItemAssignment(
       activityId: undefined,
     });
   }
+  await stampFiledIfProcessed(ctx, item._id);
   await reconcilePortfolioMaterialization(ctx, item._id);
 }
 
@@ -766,12 +810,13 @@ export const deleteItem = authedMutation({
 
 // ── Queries (public, teacher + admin only) ──────────────────────────────
 
-/** Portfolio items for a scholar, newest-first. */
+/** Portfolio items for a scholar, newest-first. Teaching staff only. */
 export const listForScholar = authedQuery({
   args: { scholarId: v.id("users") },
   handler: async (ctx, args) => {
     const user = requireScholarAdmin(ctx);
     await requireActiveScholarAccess(ctx, user, args.scholarId);
+    await requireScholarWorkAccess(ctx, user, args.scholarId);
     const legacyRows = await ctx.db
       .query("portfolioItems")
       .withIndex("by_scholar", (q) => q.eq("scholarId", args.scholarId))
@@ -801,7 +846,45 @@ export const listForScholar = authedQuery({
   },
 });
 
-/** One item's metadata (no storage URL — see getFileUrl). */
+/**
+ * Whether the caller may see this item's CONTENT — its file, thumbnail, video
+ * poster, OCR text and AI caption.
+ *
+ *  - A scan that has never been filed (`hasBeenFiled`, sticky) is an inbox
+ *    item: anyone who reached it through the scanner gate may see it, so
+ *    operations staff can identify what they are triaging.
+ *  - Once filed it is a scholar's work: every attributed scholar must pass
+ *    `canUserReadScholarWork`. A filed scan that has since been unfiled (no
+ *    attributions left) needs a teaching role — unfiling must not launder it
+ *    back into the inbox (the PR #4254 review's round trip).
+ *  - Capture-station items are governed by the captures:review gate in
+ *    `requirePortfolioItemAccess` alone.
+ */
+async function canReadItemContent(
+  ctx: QueryCtx & { user: Doc<"users"> },
+  item: Doc<"portfolioItems">,
+  memo?: Map<Id<"users">, boolean>,
+): Promise<boolean> {
+  if (item.source === "capture_station") return true;
+  if (!hasBeenFiled(item)) return true;
+  const scholarIds = await attributedScholarIds(ctx, item);
+  if (scholarIds.length === 0) return isTeacherRole(ctx.user.role);
+  for (const scholarId of scholarIds) {
+    let readable = memo?.get(scholarId);
+    if (readable === undefined) {
+      readable = await canUserReadScholarWork(ctx, ctx.user, scholarId);
+      memo?.set(scholarId, readable);
+    }
+    if (!readable) return false;
+  }
+  return true;
+}
+
+/**
+ * One item's metadata (no storage URL — see getFileUrl). Returns the OCR'd
+ * text, so it follows `canReadItemContent`: teaching staff, or anyone for a
+ * never-filed inbox scan. The scanner UI does not call it.
+ */
 export const get = authedQuery({
   args: { itemId: v.id("portfolioItems") },
   handler: async (ctx, args) => {
@@ -809,11 +892,20 @@ export const get = authedQuery({
     const item = await ctx.db.get(args.itemId);
     if (!item) return null;
     await requirePortfolioItemAccess(ctx, item);
+    if (!(await canReadItemContent(ctx, item))) {
+      throw new Error("Forbidden: teaching access required for scholar work");
+    }
     return { ...publicView(item), extractedText: item.extractedText ?? null };
   },
 });
 
-/** Signed URL for inline preview / download of the original file. */
+/**
+ * Signed URL for inline preview / download of the original file. Teaching
+ * staff may open any item they can reach; operations staff only a scan that
+ * has never been filed (`canReadItemContent` — the scan they are triaging).
+ * For a filed scan it answers `null` rather than throwing: the inbox is
+ * reactive, and a row that just got filed must not crash the panel.
+ */
 export const getFileUrl = authedQuery({
   args: { itemId: v.id("portfolioItems") },
   handler: async (ctx, args) => {
@@ -821,6 +913,7 @@ export const getFileUrl = authedQuery({
     const item = await ctx.db.get(args.itemId);
     if (!item || !item.fileStorageId) return null;
     await requirePortfolioItemAccess(ctx, item);
+    if (!(await canReadItemContent(ctx, item))) return null;
     return await ctx.storage.getUrl(item.fileStorageId);
   },
 });
@@ -1907,7 +2000,18 @@ export const scannerFeed = authedQuery({
 
     const toReview = [];
     const processed = [];
+    // A scan that has EVER been filed is a scholar's work: operations staff
+    // still see the row (title, scholar, date, label, filing) so they can
+    // refile it, but no image or AI caption of it — in either bucket, so an
+    // unfiled scan back in To review stays imageless. Withheld server-side,
+    // never by the client.
+    const teachingReadMemo = new Map<Id<"users">, boolean>();
     for (const r of rows) {
+      const withholdImage = !(await canReadItemContent(
+        ctx,
+        r,
+        teachingReadMemo,
+      ));
       const attributionIds = attributionIdsByItem.get(r._id) ?? [];
       const attributionNames = attributionIds.map(
         (id) => scholarName.get(String(id)) ?? "Scholar",
@@ -1918,24 +2022,30 @@ export const scannerFeed = authedQuery({
         portfolioItemContainsIdentifiableMedia(r),
       );
       const capture = await captureForPortfolioItem(ctx, r);
+      const enriched = enrich(
+        r,
+        attributionNames[0] ?? null,
+        r.assignmentId ? (assignmentTitle.get(r.assignmentId as string) ?? null) : null,
+        r.activityId ? (activityTitle.get(r.activityId as string) ?? null) : null,
+      );
       const item = {
-        ...enrich(
-          r,
-          attributionNames[0] ?? null,
-          r.assignmentId ? (assignmentTitle.get(r.assignmentId as string) ?? null) : null,
-          r.activityId ? (activityTitle.get(r.activityId as string) ?? null) : null,
-        ),
+        ...enriched,
+        ...(withholdImage
+          ? { aiCaption: undefined, thumbStatus: undefined }
+          : {}),
         scholarIds: attributionIds,
         scholarNames: attributionNames,
         familyVisibility: r.familyVisibility ?? "attributed_families",
         canShareWithFamilies: familySharing.allowed,
         familySharingBlocker: familySharing.blocker,
-        thumbUrl: r.thumbStorageId
-          ? await ctx.storage.getUrl(r.thumbStorageId)
-          : null,
-        videoThumbUrl: capture?.videoThumbStorageId
-          ? await ctx.storage.getUrl(capture.videoThumbStorageId)
-          : null,
+        thumbUrl:
+          !withholdImage && r.thumbStorageId
+            ? await ctx.storage.getUrl(r.thumbStorageId)
+            : null,
+        videoThumbUrl:
+          !withholdImage && capture?.videoThumbStorageId
+            ? await ctx.storage.getUrl(capture.videoThumbStorageId)
+            : null,
         videoDurationMs: capture?.videoDurationMs ?? null,
         // Retagging a capture offers the STATION'S group roster, not the whole
         // school: a program cohort is mostly program guests, who are filtered
@@ -2075,21 +2185,23 @@ export const listActivitiesForAssignment = authedQuery({
       acts.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
       for (const a of acts) {
         // No scans attach to Share Backs or external-site (web) work, nor to
-        // adaptive problem sets, games, or simulators (no scanned artifact — a
-        // game's record is its evidence digest, a simulator's is its run log).
+        // adaptive problem sets, games, simulators or apps (no scanned
+        // artifact — a game's record is its evidence digest, a simulator's is
+        // its run log). Effective kind, so an app stored as online is skipped.
+        const kind = effectiveActivityKind(a);
         if (
-          a.kind === "shareBack" ||
-          a.kind === "web" ||
-          a.kind === "problem_set" ||
-          a.kind === "game" ||
-          a.kind === "simulator" ||
-          a.kind === "vibecode"
+          kind === "shareBack" ||
+          kind === "web" ||
+          kind === "problem_set" ||
+          kind === "game" ||
+          kind === "simulator" ||
+          kind === "vibecode"
         )
           continue;
         out.push({
           id: a._id,
           title: a.title,
-          kind: a.kind,
+          kind,
           lessonTitle: lesson.title,
           order: a.order ?? 0,
         });
@@ -2103,7 +2215,8 @@ export const listActivitiesForAssignment = authedQuery({
  * Read-only view of an OFFLINE project: its scanned deliverables, each with a
  * thumbnail + file URL + caption + grading. Backs the read-only drill-in when
  * a teacher opens an offline project (it has no chat to render). Visible to
- * scholar-admins and to the owning scholar (their own work).
+ * teaching staff and to the owning scholar (their own work) — not to
+ * operations staff.
  */
 export const offlineSessionView = authedQuery({
   args: { sessionId: v.id("sessions") },
@@ -2111,11 +2224,13 @@ export const offlineSessionView = authedQuery({
     const session = await ctx.db.get(args.sessionId);
     if (!session || session.isOffline !== true) return null;
     const isOwner = session.userId === ctx.user._id;
-    const canAdministerScholar =
+    // Scores, rubric results and teacher feedback are the learning record:
+    // teaching staff only, never operations staff (who file the scans).
+    const canReadScholarWork =
       !isOwner &&
       !!session.userId &&
-      (await canUserAccessScholar(ctx, ctx.user, session.userId));
-    if (!isOwner && !canAdministerScholar) {
+      (await canUserReadScholarWork(ctx, ctx.user, session.userId));
+    if (!isOwner && !canReadScholarWork) {
       throw new Error("Forbidden");
     }
     // The teacher grade control + AI-assess are teacher-only mutations; only a
@@ -2344,6 +2459,7 @@ export const aiPatchProcessingStatus = internalMutation({
     // portfolioAssess). Only on "ready": reconciling a still-processing or
     // errored item would materialize/tear down deliverables mid-flight.
     if (args.status === "ready") {
+      await stampFiledIfProcessed(ctx, args.itemId);
       await reconcilePortfolioMaterialization(ctx, args.itemId);
     }
   },
@@ -2576,6 +2692,9 @@ export const aiSetMatch = internalMutation({
     const item = await ctx.db.get(args.itemId);
     if (!item) return;
     if (item.matchStatus === "confirmed") return; // never clobber a human/manual decision
+    // A re-match (e.g. after a rotation re-extract) can un-resolve an
+    // AI-filed scan; record that it was filed first (see hasBeenFiled).
+    await stampFiledIfProcessed(ctx, args.itemId);
     await ctx.db.patch(args.itemId, {
       scholarId: args.scholarId,
       matchStatus: args.matchStatus,

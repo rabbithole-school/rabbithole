@@ -13,6 +13,8 @@ import {
 } from "./lib/roles";
 import { schoolOperationsInstitutionIds } from "./lib/staffCapabilities";
 import { requireActiveScholarAccess } from "./lib/access";
+import { requireUnitEditAccessForUser } from "./lib/auth";
+import { curriculumUnitLensPredicate } from "./units";
 import {
   readScholarRoster,
   readScholarGroups,
@@ -37,6 +39,7 @@ import { toKeyedGranules } from "./lib/granules";
 import { activityHasScholarWork, deleteActivityCascade } from "./lib/activityCascade";
 import { presentationState } from "./lib/activityPresentationResources";
 import { renderStoppedAssistantContent } from "../shared/stoppedTurn";
+import { effectiveActivityKind } from "../shared/appSurface";
 
 async function stampLatestStreamingCurriculumMessage(
   ctx: Pick<MutationCtx, "db">,
@@ -431,7 +434,9 @@ export const getUnitDesignerContext = internalQuery({
                 _id: a._id,
                 title: a.title,
                 description: a.description ?? null,
-                kind: a.kind,
+                // Effective kind (TRA-519): an app activity reads "vibecode" in
+                // either stored shape, as it did before the fold.
+                kind: effectiveActivityKind(a),
                 systemPrompt: a.systemPrompt ?? null,
                 deliverable: a.deliverable ?? null,
                 processId: a.processId ? String(a.processId) : null,
@@ -1047,7 +1052,9 @@ export const getUnitDesignerContextForSession = internalQuery({
                 _id: a._id,
                 title: a.title,
                 description: a.description ?? null,
-                kind: a.kind,
+                // Effective kind (TRA-519): an app activity reads "vibecode" in
+                // either stored shape, as it did before the fold.
+                kind: effectiveActivityKind(a),
                 systemPrompt: a.systemPrompt ?? null,
                 deliverable: a.deliverable ?? null,
                 processId: a.processId ? String(a.processId) : null,
@@ -1432,9 +1439,24 @@ export const getScholarMathCheckIn = internalQuery({
 });
 
 export const listUnitsInternal = internalQuery({
-  args: {},
-  handler: async (ctx) => {
-    const units = await ctx.db.query("units").collect();
+  // The caller's Curriculum-page view of units: the same lens predicate
+  // `units.list` applies (their school, or the lens they picked; a
+  // `curriculum:edit` grant's schools; a scholar's Quest unit only where
+  // they may read that scholar). Required, so no aide path lists every
+  // school's units.
+  args: {
+    callerUserId: v.id("users"),
+    scope: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller) return [];
+    const visible = await curriculumUnitLensPredicate(
+      ctx,
+      args.scope,
+      caller,
+    );
+    const units = (await ctx.db.query("units").collect()).filter(visible);
     const result = [];
     for (const u of units) {
       const persona = u.personaId ? await ctx.db.get(u.personaId) : null;
@@ -1659,6 +1681,59 @@ export const deleteLessonInternal = internalMutation({
 });
 
 /** Direct lesson resolver for the global Curriculum Bot's kind-specific tools. */
+/**
+ * The aide's curriculum-write gate: the SAME check the UI runs before a
+ * curriculum edit (`requireUnitEditAccessForUser` — curriculum role or a
+ * `curriculum:edit` grant for the unit's school, plus the institution
+ * boundary), and, for a scholar-owned Quest unit, access to that scholar —
+ * the belt-and-braces `units.aideDeleteEmptyUnit` also applies. The backing
+ * internal mutations carry no caller identity, so the aide's unit-detail,
+ * lesson, move and activity tools ask this first. Returns a refusal string
+ * instead of throwing so the tool can hand the model a recoverable message.
+ */
+export const checkUnitEditAccessForAide = internalQuery({
+  args: {
+    callerUserId: v.id("users"),
+    // Strings, not v.id: they come straight from model tool input, and a
+    // malformed id should refuse legibly rather than throw a validator error.
+    unitId: v.optional(v.string()),
+    lessonId: v.optional(v.string()),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ ok: true } | { ok: false; error: string }> => {
+    const caller = await ctx.db.get(args.callerUserId);
+    if (!caller) return { ok: false, error: "Caller not found" };
+    let ref: { unitId: Id<"units"> } | { lessonId: Id<"lessons"> };
+    if (args.unitId !== undefined) {
+      const unitId = ctx.db.normalizeId("units", args.unitId);
+      if (!unitId) return { ok: false, error: `No unit found for id "${args.unitId}"` };
+      ref = { unitId };
+    } else if (args.lessonId !== undefined) {
+      const lessonId = ctx.db.normalizeId("lessons", args.lessonId);
+      if (!lessonId) {
+        return { ok: false, error: `No lesson found for id "${args.lessonId}"` };
+      }
+      ref = { lessonId };
+    } else {
+      return { ok: false, error: "No unit or lesson given" };
+    }
+    try {
+      const { unit } = await requireUnitEditAccessForUser(ctx, caller, ref);
+      if (unit.authorScholarId) {
+        await requireActiveScholarAccess(ctx, caller, unit.authorScholarId);
+      }
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  },
+});
+
 export const getLessonForActivityAuthoring = internalQuery({
   args: { lessonId: v.id("lessons") },
   handler: async (ctx, args) => {

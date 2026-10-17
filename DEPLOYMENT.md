@@ -485,9 +485,12 @@ Set these deployment-specific items before you rely on the related features.
 - `app/school/nav.tsx` — School-directory navigation rebuilt from a neutral template. No deployment-specific value.
 - `app/school/page.tsx` — School-directory index rebuilt from a neutral template. No deployment-specific value.
 - `app/school/settings/page.tsx` — School settings with a private print-status surface removed. No adopter action required.
+- `app/teacher/(dashboard)/_components/CommandPalette.test.ts` — Test file with the first-party admissions search cases removed. Published and runnable; not a configuration point.
 - `components/BehindTheCurtain.tsx` — Published-prompts links neutralized to the public repository. No adopter action required.
+- `components/CommandPalette.tsx` — Staff command palette with the first-party admissions search removed. No adopter action required.
 - `components/ParentDashboard.tsx` — Parent dashboard with private surfaces removed. No adopter action required.
 - `components/ScholarFeed.tsx` — Scholar feed with private surfaces removed. No adopter action required.
+- `components/StaffShell.tsx` — Staff shell with the first-party admissions access check removed. No adopter action required.
 - `convex/__tests__/activityResources.test.ts` — Test file. Published and runnable; not a configuration point.
 - `convex/__tests__/alerts.test.ts` — Test file. Published and runnable; not a configuration point.
 - `convex/__tests__/applicantParent.test.ts` — Test file. Published and runnable; not a configuration point.

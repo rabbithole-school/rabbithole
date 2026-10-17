@@ -26,15 +26,17 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { MODELS, modelLabel } from "@/convex/lib/models";
 import { TUTOR_DEFAULT_MODEL } from "@/convex/lib/tutorModel";
+import { defaultGateFor } from "@/convex/lib/mission";
 import { toaster } from "@/lib/toaster";
 import {
   contractLines,
   nextBuildContract,
   type BuildContract,
-} from "@/components/nodeEditor/VibecodeContractFields";
+} from "@/components/nodeEditor/MissionFields";
 import type { NodeStatus } from "@/convex/lib/unitMaturity";
 import { normalizeGranules } from "@/convex/lib/granules";
 import { ACTIVITY_KIND, type ActivityKind } from "@/lib/activityKinds";
+import { effectiveActivityKind, isAppActivity } from "@/shared/appSurface";
 import { getGame } from "@/lib/games/catalog";
 import type { Strand } from "@/lib/constants";
 import { NodeMaturityControls, RehearseButton } from "./NodeMaturityCta";
@@ -197,6 +199,15 @@ const ANGLES_OPTIONS: EditableChipSelectOption<boolean>[] = [
     value: true,
     label: "On",
     description: "Each scholar picks their own angle",
+  },
+];
+
+const APP_ACTIVITY_OPTIONS: EditableChipSelectOption<boolean>[] = [
+  { value: false, label: "Off" },
+  {
+    value: true,
+    label: "On",
+    description: "Scholars build or play an app with the AI builder",
   },
 ];
 
@@ -1117,15 +1128,17 @@ export function ActivityReadView({
     );
   }
 
-  const kind = activity.kind as ActivityKind;
+  // The effective kind: "vibecode" for an app activity in either shape
+  // (TRA-519), so `isOnline` keeps meaning "online, not an app".
+  const kind = effectiveActivityKind(activity) as ActivityKind;
   const isOnline = kind === "online";
-  // Vibecode reuses the activity's systemPrompt as its BUILD BRIEF (the same
-  // field the online tutor prompt uses) — so it wants the same prose editor,
-  // just relabeled.
-  const isVibecode = kind === "vibecode";
+  // An app activity reuses the activity's systemPrompt as its BUILD BRIEF (the
+  // same field the online tutor prompt uses) — so it wants the same prose
+  // editor, just relabeled.
+  const isApp = isAppActivity(activity);
   const isProblemSet = kind === "problem_set";
   const isArchived = !!activity.archivedAt;
-  const missingSystemPrompt = (isOnline || isVibecode) && !activity.systemPrompt?.trim();
+  const missingSystemPrompt = (isOnline || isApp) && !activity.systemPrompt?.trim();
   const starterApp = activity.starterAppId ? activity.starterApp : null;
 
   const handleClearStarter = async () => {
@@ -1150,14 +1163,18 @@ export function ActivityReadView({
     }
   };
 
-  // Vibecode model contract: each part edits as its own block and saves the
-  // whole contract (lib/buildContract.ts validates it server-side).
+  // The mission (stored as buildContract, TRA-519 B1): each part edits as its
+  // own block and saves the whole mission (lib/buildContract.ts validates it
+  // server-side). Every online activity has one; only an app activity has
+  // "must be true" lines.
   const commitContract = async (patch: Partial<BuildContract>) => {
-    const next = nextBuildContract(activity.buildContract, patch);
+    const next = nextBuildContract(activity.buildContract, patch, {
+      appActivity: isApp,
+    });
     if (next === "needsInvariant") {
       toaster.error({
         title: "Add a “must be true” line first",
-        description: "A model contract needs at least one.",
+        description: "An app's mission needs at least one.",
       });
       return;
     }
@@ -1166,7 +1183,7 @@ export function ActivityReadView({
     } catch (err) {
       console.error(err);
       toaster.error({
-        title: "Couldn't save the model contract",
+        title: "Couldn't save the mission",
         description: err instanceof Error ? err.message : undefined,
       });
     }
@@ -1214,6 +1231,25 @@ export function ActivityReadView({
       options: DEFAULT_MODE_OPTIONS,
       onCommit: (v) => updateActivity({ id: activityId, defaultMode: v }),
     },
+    // An app activity is an online activity with this on (TRA-519).
+    ...(isOnline || isApp
+      ? [
+          {
+            label: "Scholars build or use an app",
+            hint: "The session opens on a full-screen app the scholar directs the AI to build, or plays. The app is their deliverable.",
+            summary: isApp ? ACTIVITY_KIND.vibecode.label : undefined,
+            value: isApp,
+            valueLabel: selectValueLabel(APP_ACTIVITY_OPTIONS, isApp, "Off"),
+            options: APP_ACTIVITY_OPTIONS,
+            onCommit: (v) =>
+              updateActivity({
+                id: activityId,
+                kind: "online",
+                appActivity: v,
+              }),
+          } satisfies NodeOptionRow,
+        ]
+      : []),
     ...(isOnline
       ? [
           {
@@ -1345,9 +1381,17 @@ export function ActivityReadView({
     <EditableChip
       type="select"
       label="Kind"
+      // An app activity is an online activity whose "App" option is on: the
+      // chip reads "App", which is not itself a kind to pick (TRA-519).
       value={kind as Exclude<ActivityKind, "problem_set">}
+      displayValue={isApp ? ACTIVITY_KIND.vibecode.label : undefined}
       options={activityKindSelectOptions()}
-      onCommit={(v) => updateActivity({ id: activityId, kind: v })}
+      onCommit={(v) => {
+        // Re-picking Online keeps an app an app (a legacy "vibecode" row
+        // would otherwise be written as a plain online activity).
+        if (isApp && v === "online") return;
+        void updateActivity({ id: activityId, kind: v });
+      }}
     />
   );
   const durationChip = (
@@ -1570,7 +1614,7 @@ export function ActivityReadView({
             onCommit={noop}
           />
         )}
-        {isVibecode && (
+        {isApp && (
           <EditableChip<"fable" | null>
             type="select"
             label="Tutor model"
@@ -1590,7 +1634,7 @@ export function ActivityReadView({
             }
           />
         )}
-        {isVibecode && (
+        {isApp && (
           <>
             <EditableChip<"blank" | "starter">
               type="select"
@@ -1627,10 +1671,10 @@ export function ActivityReadView({
                   ? "silent"
                   : "replies"
               }
-              // Silence only applies under a model contract (the server
-              // drops allowSilence without one), so the control waits for it.
+              // Silence only applies under a mission (the server drops
+              // allowSilence without one), so the control waits for it.
               readOnly={!activity.buildContract}
-              readOnlyHint="Needs a model contract"
+              readOnlyHint="Needs a mission"
               options={[
                 {
                   value: "replies",
@@ -1710,7 +1754,7 @@ export function ActivityReadView({
           />
         </FixHighlightBox>
       )}
-      {isVibecode && (
+      {isApp && (
         <EditableProseBlock
           label="Build brief"
           value={activity.systemPrompt ?? ""}
@@ -1722,26 +1766,35 @@ export function ActivityReadView({
           }
         />
       )}
-      {isVibecode && (
+      {/* The mission (TRA-519 B1): only where one applies. A discussion
+          (no deliverable) resolves no mission, so fields there would steer
+          nothing. A blank gate shows the default the tutor will use. */}
+      {(isOnline || isApp) && defaultGateFor(activity) != null && (
         <>
+          {isApp && (
+            <EditableProseBlock
+              label="Mission · must be true"
+              value={(activity.buildContract?.invariants ?? []).join("\n")}
+              placeholder="One per line, up to 5: what the scholar's app must get right, as a mechanic you could check by running it…"
+              ariaLabel="Must be true"
+              onCommit={(v) => void commitContract({ invariants: contractLines(v) })}
+            />
+          )}
           <EditableProseBlock
-            label="Model contract · must be true"
-            value={(activity.buildContract?.invariants ?? []).join("\n")}
-            placeholder="One per line, up to 5: what the scholar's app must get right, as a mechanic you could check by running it…"
-            ariaLabel="Must be true"
-            onCommit={(v) => void commitContract({ invariants: contractLines(v) })}
-          />
-          <EditableProseBlock
-            label="Model contract · scholar owns"
+            label="Mission · scholar owns"
             value={(activity.buildContract?.freedoms ?? []).join("\n")}
-            placeholder="One per line, up to 8: setting, characters, genre, visuals, side quests…"
+            placeholder={
+              isApp
+                ? "One per line, up to 8: setting, characters, genre, visuals, side quests…"
+                : "One per line, up to 8: which moment, the characters, funny or serious…"
+            }
             ariaLabel="Scholar owns"
             onCommit={(v) => void commitContract({ freedoms: contractLines(v) })}
           />
           <EditableProseBlock
-            label="Model contract · gate"
+            label="Mission · gate"
             value={activity.buildContract?.gate ?? ""}
-            placeholder="What must exist and have run once before the designer builds cosmetic requests…"
+            placeholder={`Default: ${defaultGateFor(activity)}`}
             ariaLabel="Gate"
             onCommit={(v) => void commitContract({ gate: v })}
           />

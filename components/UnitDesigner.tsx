@@ -62,9 +62,24 @@ const TAB_LABEL: Record<UnitTab, string> = {
 };
 
 // The tab set for a node altitude — uniform: every level gets all five.
-// hideBot (a scholar editing their own IS unit) gets only Summary + Edit;
-// the quality/execution tabs are curriculum/teacher-only.
-function tabsForType(_type: NodeType, hideBot: boolean): UnitTab[] {
+// hideBot (a scholar editing their own IS unit, or a staffer with supplemental
+// curriculum access) gets only Summary + Edit; the quality/execution tabs are
+// curriculum/teacher-only. A staffer who also holds curriculum:run gets
+// Preflight (synthetic rehearsal only), Assign (her own runs) and Debrief
+// back. Every real-scholar read behind them is scoped server-side to the
+// assignments she owns and can still run: the activity's Key Moments deck
+// (keyMoments.forActivity) and the session counts, judged scores and
+// "assigned" lamps the Summary, roll-ups and outline show
+// (activitySessions.getForUnit, unitMaturity.*). A teacher's run of the same
+// unit never moves her numbers, and grounding never lights for her.
+function tabsForType(
+  _type: NodeType,
+  hideBot: boolean,
+  runsCurriculum = false,
+): UnitTab[] {
+  if (hideBot && runsCurriculum) {
+    return ["summary", "edit", "preflight", "assign", "debrief"];
+  }
   if (hideBot) return ["summary", "edit"];
   return ["summary", "edit", "preflight", "assign", "debrief"];
 }
@@ -113,6 +128,13 @@ export function UnitDesigner({
   // Summary + Edit, without the bot, rehearsal, assignment, or debrief queries.
   const supplementalCurriculumAccess =
     !!user?.hasCurriculumAccess && !isCurriculumRole(user.role);
+  // …unless she also holds curriculum:run: then she may run what she builds
+  // (synthetic Preflight + Assign to her own runs), still without the bot or
+  // Debrief. The backend re-checks the unit + ownership on every call.
+  const runsCurriculum =
+    supplementalCurriculumAccess &&
+    user?.hasCurriculumRunAccess === true &&
+    !unit?.authorScholarId;
   const hideBot =
     !!user &&
     ((user.role === "scholar" &&
@@ -211,7 +233,7 @@ export function UnitDesigner({
   // The tab is always written into the href so an in-app click never
   // round-trips through page.tsx's "bare node → edit" default.
   const clampTab = (type: NodeType): UnitTab =>
-    tabsForType(type, hideBot).includes(tab) ? tab : "summary";
+    tabsForType(type, hideBot, runsCurriculum).includes(tab) ? tab : "summary";
 
   const getHref = (sel: TreeSelection) => {
     const t = clampTab(sel.type);
@@ -285,7 +307,7 @@ export function UnitDesigner({
     : selectedLessonId
       ? "lesson"
       : "unit";
-  const availTabs = tabsForType(selType, hideBot);
+  const availTabs = tabsForType(selType, hideBot, runsCurriculum);
   // Clamp the requested tab to what this altitude offers (an activity-only
   // Rehearse with the unit selected → Summary).
   const activeTab: UnitTab = availTabs.includes(tab) ? tab : "summary";
@@ -390,7 +412,7 @@ export function UnitDesigner({
           }
         />
       );
-  } else if (activeTab === "edit" || hideBot) {
+  } else if (activeTab === "edit" || (hideBot && !runsCurriculum)) {
     tabBody = editBody;
   } else if (activeTab === "preflight") {
     // Pre-ship quality: sims at the activity, the coherence Review at the

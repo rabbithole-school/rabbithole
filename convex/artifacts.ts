@@ -53,6 +53,7 @@ import {
   storedDeck,
 } from "./lib/slideAssetUrls";
 import { isTextArtifact } from "../shared/textArtifacts";
+import { SCHOLAR_WRITING_REFUSAL } from "./lib/tutorCodeEditor";
 
 function artifactState(artifact: {
   _id: Id<"artifacts">;
@@ -74,6 +75,22 @@ function artifactState(artifact: {
   };
 }
 
+/**
+ * AI content writes (str_replace / insert) land only in CODE artifacts. Any
+ * other text artifact is a scholar's writing box, and the tutor never puts
+ * words in it (rename and create-empty are separate mutations). Enforced here,
+ * under every tool that calls these mutations, not only in the tool handlers.
+ */
+function refuseScholarWriting(artifact: Parameters<typeof artifactState>[0]) {
+  if (!isTextArtifact(artifact) || artifact.type === "code") return null;
+  return {
+    kind: "refused" as const,
+    reason: "scholar_writing" as const,
+    error: SCHOLAR_WRITING_REFUSAL,
+    artifact: artifactState(artifact),
+  };
+}
+
 function editResult(
   artifact: Parameters<typeof artifactState>[0],
   baseRevision: number | undefined,
@@ -81,6 +98,7 @@ function editResult(
   if (!isTextArtifact(artifact)) {
     return {
       kind: "refused" as const,
+      reason: "structured" as const,
       error: "Structured artifacts must be edited with their own tool.",
       artifact: artifactState(artifact),
     };
@@ -156,7 +174,9 @@ export const scholarUpdate = authedMutation({
     // (History → Restore, a manual code edit), so a scholar under `never` or a
     // still-locked `afterCompletion` cannot produce a version through it. A
     // teacher-role caller is never gated (see lib/workshopPolicy.ts).
-    if (artifact.type === "code" && session.sessionMode === "vibecode") {
+    // Any session with an app (TRA-519): a non-app activity resolves to
+    // `always`, so only an app activity's policy can refuse.
+    if (artifact.type === "code") {
       const { effectiveEditAccess } = await resolveWorkshopPolicy(ctx, {
         session,
         caller: ctx.user,
@@ -309,7 +329,9 @@ export const deleteArtifact = authedMutation({
     // teacher-authored app and never rebuild it (Play has no code tools). Gate
     // it behind the same verdict scholarUpdate uses; a teacher-role caller is
     // never gated (see lib/workshopPolicy.ts).
-    if (artifact.type === "code" && session.sessionMode === "vibecode") {
+    // Any session with an app (TRA-519): a non-app activity resolves to
+    // `always`, so only an app activity's policy can refuse.
+    if (artifact.type === "code") {
       const { effectiveEditAccess } = await resolveWorkshopPolicy(ctx, {
         session,
         caller: ctx.user,
@@ -443,22 +465,25 @@ export const aiStrReplace = internalMutation({
         .then((rows) => rows.find(isTextArtifact) ?? null);
     }
     if (!artifact) {
-      return { kind: "refused" as const, error: "Error: No document exists yet. Use create first." };
+      return { kind: "refused" as const, reason: "missing" as const, error: "Error: No document exists yet. Use create first." };
     }
+    const writingBox = refuseScholarWriting(artifact);
+    if (writingBox) return writingBox;
     const result = editResult(artifact, args.baseRevision);
     if (result.kind !== "ready") return result;
     const match = findExactlyOneLiteral(artifact.content, args.oldStr);
     if (match.kind === "invalid") {
       return {
         kind: "refused" as const,
+        reason: "empty" as const,
         error: "Error: old_str must not be empty.",
       };
     }
     if (match.kind === "none") {
-      return { kind: "refused" as const, error: "Error: old_str not found in document. Make sure it matches exactly, including whitespace and line breaks." };
+      return { kind: "refused" as const, reason: "not_found" as const, error: "Error: old_str not found in document. Make sure it matches exactly, including whitespace and line breaks." };
     }
     if (match.kind === "many") {
-      return { kind: "refused" as const, error: "Error: old_str matches multiple places. Re-view the document and provide a unique exact match." };
+      return { kind: "refused" as const, reason: "many" as const, error: "Error: old_str matches multiple places. Re-view the document and provide a unique exact match." };
     }
     const newContent =
       artifact.content.slice(0, match.index) +
@@ -507,7 +532,9 @@ export const aiInsert = internalMutation({
         .collect()
         .then((rows) => rows.find(isTextArtifact) ?? null);
     }
-    if (!artifact) return { kind: "refused" as const, error: "Error: No document exists yet. Use create first." };
+    if (!artifact) return { kind: "refused" as const, reason: "missing" as const, error: "Error: No document exists yet. Use create first." };
+    const writingBox = refuseScholarWriting(artifact);
+    if (writingBox) return writingBox;
     const result = editResult(artifact, args.baseRevision);
     if (result.kind !== "ready") return result;
     const lines = artifact.content.split("\n");

@@ -91,8 +91,10 @@ export type EditableChipProps<
   T extends EditableChipValue = EditableChipValue,
 > = SelectChipProps<T> | NumberChipProps | TextChipProps;
 
-const ACTIVITY_KIND_EDIT_ORDER = ["online", "offline", "shareBack", "web", "game", "simulator", "vibecode"] as const satisfies ReadonlyArray<
-  Exclude<ActivityKind, "problem_set">
+// No "vibecode": an app activity is an online activity with its "App" chip
+// on (TRA-519), not a kind to pick.
+const ACTIVITY_KIND_EDIT_ORDER = ["online", "offline", "shareBack", "web", "game", "simulator"] as const satisfies ReadonlyArray<
+  Exclude<ActivityKind, "problem_set" | "vibecode">
 >;
 
 export function activityKindSelectOptions(): EditableChipSelectOption<

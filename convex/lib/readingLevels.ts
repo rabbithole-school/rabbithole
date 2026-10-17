@@ -20,7 +20,7 @@
 //     into the talk level (TRA-513 removed "Set as talk level"); it is shown
 //     info-only under the Write row. It is WRITING-DERIVED: every input to
 //     `readingLevelAnalysis` is the child's own PRODUCTION — typed tutor-chat
-//     messages plus OCR-transcribed handwritten portfolio prose. There is no
+//     messages only (spoken turns and handwriting are not read). There is no
 //     reception evidence anywhere in it; nothing measures what the child can
 //     READ. Describe it to humans as an estimate from the scholar's own
 //     writing, never as a reading measurement.

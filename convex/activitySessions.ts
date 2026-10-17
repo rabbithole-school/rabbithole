@@ -6,8 +6,10 @@
 
 import { v } from "convex/values";
 import { authedQuery } from "./lib/customFunctions";
-import { requireUnitEditAccess } from "./lib/auth";
+import { canGroundUnit, requireUnitEditAccess } from "./lib/auth";
+import { MIN_REAL_N_WITHOUT_GROUNDING } from "./lib/curriculumGround";
 import type { QueryCtx } from "./_generated/server";
+import { curriculumRunnerScopeForUnit } from "./lib/curriculumRun";
 import type { Id } from "./_generated/dataModel";
 import {
   activitySessions,
@@ -22,6 +24,10 @@ import {
 async function activitySignal(
   ctx: QueryCtx,
   activityId: Id<"activities">,
+  canGround: boolean,
+  // curriculum:run: only sessions under her own runnable assignments count
+  // (null = unscoped, everyone else's existing behavior).
+  runnerScope: Set<string> | null,
 ): Promise<SessionsSignal> {
   const sessions = await ctx.db
     .query("sessions")
@@ -33,7 +39,12 @@ async function activitySignal(
       ),
     )
     .collect();
-  const real = sessions.filter((s) => s.assignmentId != null);
+  const real = sessions.filter(
+    (s) =>
+      s.assignmentId != null &&
+      (runnerScope === null || runnerScope.has(String(s.assignmentId))),
+  );
+  const realIds = new Set(real.map((s) => String(s._id)));
   let activeCount = 0;
   let completeCount = 0;
   for (const s of real) {
@@ -45,9 +56,15 @@ async function activitySignal(
     .query("groundedSessionVerdicts")
     .withIndex("by_activity", (q) => q.eq("activityId", activityId))
     .collect();
-  const fitnesses = verdicts
+  const judged = verdicts
+    // A runner's judged scores come only from her own runs' sessions.
+    .filter((v) => runnerScope === null || realIds.has(String(v.sessionId)))
     .map((v) => v.fitness)
     .filter((f): f is number => typeof f === "number");
+  // A unit editor without grounding rights (canGroundUnit) sees judged scores
+  // only once enough sessions back them that no one scholar's score shows.
+  const fitnesses =
+    canGround || judged.length >= MIN_REAL_N_WITHOUT_GROUNDING ? judged : [];
 
   // The sims' prediction for the calibration overlay — the best rehearsal
   // fitness across this activity's variants (what §8's dashed "sim said" line
@@ -92,7 +109,13 @@ export const getForUnit = authedQuery({
     lessons: Record<string, SessionsSignal>;
     activities: Record<string, SessionsSignal>;
   }> => {
-    await requireUnitEditAccess(ctx, { unitId: args.unitId });
+    const access = await requireUnitEditAccess(ctx, { unitId: args.unitId });
+    const canGround = await canGroundUnit(ctx, access.user, access.unit);
+    const runnerScope = await curriculumRunnerScopeForUnit(
+      ctx,
+      access.user,
+      args.unitId,
+    );
 
     const lessons = await ctx.db
       .query("lessons")
@@ -114,7 +137,7 @@ export const getForUnit = authedQuery({
     for (let i = 0; i < lessons.length; i++) {
       const kids: SessionsSignal[] = [];
       for (const a of activityLists[i]) {
-        const sig = await activitySignal(ctx, a._id);
+        const sig = await activitySignal(ctx, a._id, canGround, runnerScope);
         activities[String(a._id)] = sig;
         kids.push(sig);
       }

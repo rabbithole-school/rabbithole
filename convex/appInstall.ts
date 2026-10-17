@@ -32,6 +32,11 @@ import { assertInstitutionActive } from "./lib/access";
 import { isTeacherRole } from "./lib/roles";
 import { looksLikeHtml } from "../lib/vibecode/helpers";
 import { requestedAppAssetIds } from "../shared/appAssets";
+import { isAppActivity } from "../shared/appSurface";
+import {
+  defaultAppDeliverable,
+  foldedAppActivityPatch,
+} from "./lib/appActivity";
 
 const characterInput = v.object({
   name: v.string(),
@@ -78,7 +83,7 @@ export const installAppAsActivity = internalMutation({
     unitTitle: v.optional(v.string()),
     // Defaults to the activity title; reused by (unit, title).
     lessonTitle: v.optional(v.string()),
-    // Reused by (lesson, title); the reused activity must be vibecode.
+    // Reused by (lesson, title); the reused activity must be an app activity.
     activityTitle: v.string(),
     html: v.string(),
     character: v.optional(characterInput),
@@ -161,9 +166,9 @@ export const installAppAsActivity = internalMutation({
     if (args.allowSilence && !args.buildContract) {
       throw new Error("allowSilence needs a buildContract (it only means something under one).");
     }
-    // Validates + normalizes the contract (throws on bad shape). The kind is
-    // always vibecode here, so a contract is always allowed.
-    const contract = buildContractPatch("vibecode", {
+    // Validates + normalizes the contract (throws on bad shape). The activity
+    // is always an app activity here, so a contract is always allowed.
+    const contract = buildContractPatch({ kind: "online", appActivity: true }, {
       buildContract: args.buildContract ?? null,
       allowSilence: args.allowSilence ?? false,
     });
@@ -185,7 +190,7 @@ export const installAppAsActivity = internalMutation({
     const match = peers.find(
       (a) => a.title.trim().toLowerCase() === activityTitle.toLowerCase(),
     );
-    if (match && match.kind !== "vibecode") {
+    if (match && !isAppActivity(match)) {
       throw new Error(
         `"${match.title}" in this lesson is a ${match.kind} activity, not an app; pick another activityTitle.`,
       );
@@ -195,11 +200,17 @@ export const installAppAsActivity = internalMutation({
       (await createActivityCore(ctx, {
         lessonId: lesson.lessonId,
         title: activityTitle,
-        kind: "vibecode",
+        kind: "online",
+        appActivity: true,
         systemPrompt: brief,
+        deliverable: defaultAppDeliverable({
+          scholarDescription: args.scholarDescription,
+        }),
       }));
     // A re-run makes the activity match the files exactly: no contract clears one.
     await ctx.db.patch(activityId, {
+      // A reused legacy kind:"vibecode" row folds to the new shape on re-run.
+      ...(match ? foldedAppActivityPatch(match) : {}),
       systemPrompt: brief,
       buildContract: contract.buildContract,
       allowSilence: contract.allowSilence,

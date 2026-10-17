@@ -19,15 +19,16 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { OBSERVER_SYSTEM_PROMPT } from "../../convex/prompts";
 import {
-  OBSERVER_TOOL,
+  buildObserverRequest,
   buildObserverTranscript,
   buildObserverUserMessage,
+  createObserverMessage,
   observerTranscriptWindow,
   parseObserverResponse,
   scholarWordCount,
 } from "../../convex/lib/observerShared";
 import { gradeValue, validTalkJudgment } from "../../convex/lib/levelEvidence";
-import { MODELS } from "../../convex/lib/models";
+import { OBSERVER_MODEL } from "../../convex/lib/models";
 
 type Turn = { role: "user" | "assistant"; content: string; spoken?: boolean };
 interface Case {
@@ -231,7 +232,7 @@ export const CASES: Case[] = [
 
 const anthropic = new Anthropic();
 const runs = Number(process.argv[process.argv.indexOf("--runs") + 1]) || 3;
-const model = process.env.OBSERVER_MODEL || MODELS.SONNET;
+const model = OBSERVER_MODEL;
 
 async function judge(c: Case): Promise<string | null> {
   const history = c.turns.map((t, i) => ({
@@ -251,14 +252,11 @@ async function judge(c: Case): Promise<string | null> {
   );
   for (let attempt = 1; ; attempt++) {
     try {
-      const response = await anthropic.messages.create({
-        model,
-        max_tokens: 4096,
-        system: OBSERVER_SYSTEM_PROMPT,
-        tools: [OBSERVER_TOOL],
-        tool_choice: { type: "tool", name: "record_observations" },
-        messages: [{ role: "user", content: userMessage }],
-      });
+      const response = await createObserverMessage(() =>
+        anthropic.messages.create(
+          buildObserverRequest({ model, system: OBSERVER_SYSTEM_PROMPT, userContent: userMessage }),
+        ),
+      );
       return parseObserverResponse(response.content)?.talkLevel ?? null;
     } catch (error) {
       if (attempt >= 3) throw error;

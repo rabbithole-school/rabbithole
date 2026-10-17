@@ -560,6 +560,48 @@ describe("bake: provenance + context loaders", () => {
   });
 });
 
+describe("bake: Custom Quest topic reads title + description together", () => {
+  async function questContext(title: string, description?: string) {
+    const t = convexTest(schema, modules);
+    const scholarId = await makeScholar(t);
+    const asScholar = await withScholar(t, scholarId);
+    const { unitId } = await asScholar.mutation(api.units.createQuest, {
+      title,
+      ...(description ? { description } : {}),
+    });
+    return t.query(internal.bakeUnitFromSeed.loadBakeContextFromUnit, {
+      unitId,
+    });
+  }
+
+  test("a title that is only the scholar's name bakes on the description", async () => {
+    // makeScholar's fixture name is "Kai".
+    const cx = await questContext("Kai", "a dragon matching game");
+    expect(cx?.topic).toBe("a dragon matching game");
+    expect(cx?.rationale).toBeNull();
+  });
+
+  test("a one-word title is read together with the description", async () => {
+    const cx = await questContext("Pebble", "Dragon gam");
+    expect(cx?.topic).toBe("Pebble: Dragon gam");
+    expect(cx?.rationale).toBeNull();
+  });
+
+  test("a real question title keeps the description as steering", async () => {
+    const cx = await questContext(
+      "Why do volcanoes explode?",
+      "We saw one on a field trip",
+    );
+    expect(cx?.topic).toBe("Why do volcanoes explode?");
+    expect(cx?.rationale).toBe("We saw one on a field trip");
+  });
+
+  test("a one-word topic title keeps its referent beside a vague description", async () => {
+    const cx = await questContext("Sharks", "I like them");
+    expect(cx?.topic).toBe("Sharks: I like them");
+  });
+});
+
 describe("bake: upgrade-in-place prompt flip", () => {
   test("once an activity is linked, the seed-origin section flips from ad-lib to the self-chosen note", async () => {
     const t = convexTest(schema, modules);

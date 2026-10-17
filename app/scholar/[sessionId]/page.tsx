@@ -43,6 +43,7 @@ import { SessionInterface } from "@/components/SessionInterface";
 import { WorkbenchSurface } from "@/components/workbench/WorkbenchSurface";
 import { VibecodeWorkshop } from "@/components/vibecode/VibecodeWorkshop";
 import { ManualRehearsalBanner } from "@/components/ManualRehearsalBanner";
+import { flushAllArtifactSaves } from "@/components/ArtifactPanel";
 import { AppLogo } from "@/components/AppLogo";
 import { UnitPickerDialog } from "@/components/UnitPickerDialog";
 import { SetPasswordDialog } from "@/components/SetPasswordDialog";
@@ -92,9 +93,15 @@ function ScholarSessionInner() {
   // Remote mode: teacher viewing as a scholar
   const remoteUserId = searchParams.get("remote");
   const isRemoteMode = !!(remoteUserId && user && isTeacherRole(user.role));
+  // A curriculum:run holder (base staff) reaches this page only for her own
+  // synthetic Preflight rehearsal, so she reads it as staff, not as a learner.
   const isTestMode =
     isRemoteMode ||
-    !!(user && isTeacherRole(user.role) && !hasLearnerContext);
+    !!(
+      user &&
+      (isTeacherRole(user.role) || user.hasCurriculumRunAccess === true) &&
+      !hasLearnerContext
+    );
 
   // Touch: swipe right from the left screen edge opens the sidebar (iPadOS
   // convention — the hamburger stays as the visible affordance); swipe left
@@ -301,6 +308,42 @@ function ScholarSessionInner() {
     setDialogOpen(true);
   }, []);
 
+  // One app surface (TRA-519): a chat session's app opens full screen in the
+  // builder as a VIEW of the same session (`?view=builder`), and the builder's
+  // Chat control comes back. A view switch, not a navigation, so it replaces
+  // the history entry (as native's setParams does). Each view unmounts the
+  // other, which drops unsaved drafts, so pending saves flush first; a failed
+  // flush keeps the scholar where they are.
+  // `appId` names the app the card opened (`&app=`), so an older app opens
+  // itself rather than the session's newest.
+  const setBuilderView = useCallback(
+    (open: boolean, appId?: string) => {
+      flushAllArtifactSaves()
+        .then(() => {
+          const next = new URLSearchParams(searchParams.toString());
+          if (open) {
+            next.set("view", "builder");
+            if (appId) next.set("app", appId);
+            else next.delete("app");
+          } else {
+            next.delete("view");
+            next.delete("app");
+          }
+          const query = next.toString();
+          router.replace(`/scholar/${sessionId}${query ? `?${query}` : ""}`);
+        })
+        .catch((error: unknown) => {
+          console.error("[session] save before switching views failed", error);
+          toaster.error({
+            title: "Finish saving your work",
+            description:
+              "Choose a saved version or retry the save, then try again.",
+          });
+        });
+    },
+    [router, searchParams, sessionId],
+  );
+
   // Create project after unit+lesson+activity selection from dialog
   const handleUnitSelected = useCallback(async (sel: { unitId: string | null; lessonId: string | null; activityId: string | null }) => {
     setIsCreatingViaDialog(true);
@@ -371,7 +414,14 @@ function ScholarSessionInner() {
 
   const isWorkbench =
     currentSession?.sessionMode === "workbench" || benchProbe != null;
-  const isVibecode = currentSession?.sessionMode === "vibecode";
+  // Builder-primary: the builder IS this session's view (app activities,
+  // activity-less builds, free play). Any other session shows the builder
+  // only when its app is opened (`?view=builder`) and keeps a way back to
+  // the chat. A world bench is never shown as the builder.
+  const isBuilderPrimary = currentSession?.sessionMode === "vibecode";
+  const showBuilder =
+    isBuilderPrimary ||
+    (searchParams.get("view") === "builder" && !isWorkbench);
 
   return (
     <Flex
@@ -607,11 +657,16 @@ function ScholarSessionInner() {
                 onOpenSidebar={isRemoteMode ? undefined : () => setIsSidebarOpen(true)}
               />
             </ErrorBoundary>
-          ) : isVibecode ? (
+          ) : showBuilder ? (
             <ErrorBoundary fallbackMessage="Something went wrong in the workshop">
               <VibecodeWorkshop
                 sessionId={sessionId as Id<"sessions">}
+                appId={searchParams.get("app")}
+                onShowApp={(appId) => setBuilderView(true, appId)}
                 onOpenSidebar={isRemoteMode ? undefined : () => setIsSidebarOpen(true)}
+                onBackToChat={
+                  isBuilderPrimary ? undefined : () => setBuilderView(false)
+                }
               />
             </ErrorBoundary>
           ) : (
@@ -631,6 +686,7 @@ function ScholarSessionInner() {
                   if (window.history.length > 1) router.back();
                   else router.push(stamp("/scholar"));
                 }}
+                onOpenBuilder={(appId) => setBuilderView(true, appId)}
               />
             </ErrorBoundary>
           )

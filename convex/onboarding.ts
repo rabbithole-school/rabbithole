@@ -31,6 +31,7 @@ import {
   ONBOARDING_UNIT_SLUG,
   ONBOARDING_SYSTEM_USERNAME,
 } from "./onboardingData";
+import { effectiveActivityKind } from "../shared/appSurface";
 
 // ── Resolve helpers ────────────────────────────────────────────────────
 
@@ -237,7 +238,7 @@ async function firstOnlineActivity(ctx: MutationCtx, unitId: Id<"units">) {
       .withIndex("by_lesson", (q) => q.eq("lessonId", lesson._id))
       .collect();
     const online = acts
-      .filter((a) => a.kind === "online")
+      .filter((a) => effectiveActivityKind(a) === "online")
       .sort((a, b) => a.order - b.order);
     const fixtureOpener = online.find(
       (activity) => activity.title === ONBOARDING_UNIT.activities[0].title,

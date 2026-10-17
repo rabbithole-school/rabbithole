@@ -9,7 +9,7 @@
  * This is the gate the §7.5 prompt change ships behind — run it after editing
  * the observer prompt/schema:
  *
- *   evals/observer/fluency-check.sh            # sonnet (the live observer model)
+ *   evals/observer/fluency-check.sh            # observer (the live observer model, lib/models.OBSERVER_MODEL)
  *   MODEL=opus evals/observer/fluency-check.sh
  *
  * Exits non-zero if the live observer's fluency behaviour regresses.
@@ -17,12 +17,12 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MODELS } from "../../convex/lib/models";
+import { MODELS, OBSERVER_MODEL } from "../../convex/lib/models";
 import { runObserver, type TranscriptCase } from "./lib/runObserver";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MODEL_MAP: Record<string, string> = { sonnet: MODELS.SONNET, opus: MODELS.OPUS, haiku: MODELS.HAIKU };
-const model = MODEL_MAP[process.env.MODEL ?? "sonnet"] ?? MODELS.SONNET;
+const MODEL_MAP: Record<string, string> = { observer: OBSERVER_MODEL, sonnet: MODELS.SONNET, opus: MODELS.OPUS, haiku: MODELS.HAIKU };
+const model = MODEL_MAP[process.env.MODEL ?? "observer"] ?? OBSERVER_MODEL;
 const runs = parseInt(process.env.RUNS ?? "2", 10); // a couple of samples — LLMs vary
 
 function load(id: string): TranscriptCase {

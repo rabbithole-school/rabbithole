@@ -11,6 +11,7 @@
  * and is also imported directly by the harness.
  */
 
+import { OBSERVER_EFFORT, OBSERVER_MODEL } from "./models";
 import { OBSERVER_ORIGIN_LABELS } from "./observerOrigin";
 import type { AppAiContextTurn } from "./appUpdateTools";
 import type { ImageContentPart } from "./imageBytes";
@@ -285,6 +286,80 @@ export const OBSERVER_TOOL = {
     },
   },
 };
+
+// ─── Request ─────────────────────────────────────────────────────────
+
+/**
+ * Room for adaptive thinking (OBSERVER_MODEL always thinks, and thinking
+ * counts against max_tokens) plus the tool input, which runs to a few thousand
+ * tokens on a busy session. A cut-off call is unparseable, so this errs high;
+ * unused headroom costs nothing.
+ */
+export const OBSERVER_MAX_TOKENS = 16000;
+
+/**
+ * The whole request body for one observer call — shared by the live observer
+ * (convex/observer.ts), the mastery re-derive replay (convex/masteryReDerive.ts)
+ * and the eval harnesses, so none of them can drift from what ships.
+ *
+ * Why `tool_choice: auto` and not structured outputs: OBSERVER_MODEL (Sonnet
+ * 5.5) rejects forced `tool_choice` (`tool`/`any`), and this schema is too big
+ * for structured outputs — it has 29 optional parameters against a cap of 24,
+ * and even with those reduced the API refuses it ("The compiled grammar is too
+ * large"; probed 2026-10-14). So the observer keeps its one tool, unchanged,
+ * offered with `auto`; the system prompt already says to call it, and
+ * {@link createObserverMessage} retries the rare reply that doesn't.
+ *
+ * `effort` is sent only for OBSERVER_MODEL; any other model (an eval's
+ * comparison baseline) gets the same request at its API defaults.
+ */
+export function buildObserverRequest<S, U>(args: {
+  system: S;
+  userContent: U;
+  model?: string;
+}) {
+  const model = args.model ?? OBSERVER_MODEL;
+  return {
+    model,
+    max_tokens: OBSERVER_MAX_TOKENS,
+    ...(model === OBSERVER_MODEL
+      ? { output_config: { effort: OBSERVER_EFFORT } }
+      : {}),
+    system: args.system,
+    tools: [OBSERVER_TOOL],
+    tool_choice: { type: "auto" as const },
+    messages: [{ role: "user" as const, content: args.userContent }],
+  };
+}
+
+/** How many times to ask before accepting a reply with no tool call. */
+const OBSERVER_CALL_ATTEMPTS = 2;
+
+/**
+ * Send an observer request, asking once more when the model finished without
+ * calling the tool — `tool_choice: auto` permits that, a forced call never
+ * did. `send` makes one API call; `onResponse` runs for EVERY response (usage
+ * recording), retries included. Returns the last response; any stop other
+ * than a clean `end_turn` (a refusal, max_tokens) is returned as-is, since
+ * repeating the same request would not change it.
+ */
+export async function createObserverMessage<
+  R extends { stop_reason: string | null; content: Array<{ type: string }> },
+>(
+  send: () => Promise<R>,
+  onResponse?: (response: R) => Promise<void> | void,
+): Promise<R> {
+  for (let attempt = 1; ; attempt++) {
+    const response = await send();
+    await onResponse?.(response);
+    const called = response.content.some((b) => b.type === "tool_use");
+    if (called || response.stop_reason !== "end_turn") return response;
+    if (attempt >= OBSERVER_CALL_ATTEMPTS) return response;
+    console.warn(
+      `[Observer] reply without a record_observations call (attempt ${attempt}) — asking again`,
+    );
+  }
+}
 
 // ─── Transcript Builder ──────────────────────────────────────────────
 
@@ -678,7 +753,14 @@ export function parseObserverResponse(
     stuckAlert: parsed.stuckAlert ?? undefined,
     overwhelmAlert: parsed.overwhelmAlert ?? undefined,
     pulse,
-    observations: Array.isArray(parsed.observations) ? parsed.observations : [],
+    // The tool input is not schema-enforced (see buildObserverRequest), and
+    // Sonnet 5.5 occasionally leaves `confidenceScore` off an observation
+    // (3 of 90 eval runs). Both scores are required by
+    // masteryObservations.record, so one such row would throw and abort every
+    // write after it; drop it here instead.
+    observations: Array.isArray(parsed.observations)
+      ? scoredObservations(parsed.observations)
+      : [],
     sessionSignals: Array.isArray(parsed.sessionSignals)
       ? parsed.sessionSignals
       : [],
@@ -688,6 +770,22 @@ export function parseObserverResponse(
       : [],
     seeds: Array.isArray(parsed.seeds) ? parsed.seeds : [],
   };
+}
+
+/** Observations carrying both scores the mastery write requires; logs drops. */
+function scoredObservations(
+  observations: ObserverResult["observations"],
+): ObserverResult["observations"] {
+  const kept = observations.filter(
+    (o) =>
+      Number.isFinite(o?.masteryLevel) && Number.isFinite(o?.confidenceScore),
+  );
+  if (kept.length < observations.length) {
+    console.warn(
+      `[Observer] dropped ${observations.length - kept.length} observation(s) missing masteryLevel/confidenceScore`,
+    );
+  }
+  return kept;
 }
 
 // ─── Input Types (from internal queries) ─────────────────────────────

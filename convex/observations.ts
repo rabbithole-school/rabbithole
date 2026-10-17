@@ -4,6 +4,7 @@ import { authedQuery, authedMutation, teacherQuery } from "./lib/customFunctions
 import { isTeacherRole } from "./lib/roles";
 import { requireTeacherOrSelf } from "./lib/auth";
 import { requireActiveScholarAccess } from "./lib/access";
+import { requireCanRunOwnedAssignment } from "./lib/curriculumRun";
 
 const observationTypeValidator = v.union(
   v.literal("praise"),
@@ -107,10 +108,40 @@ export const add = authedMutation({
     type: observationTypeValidator,
     weight: v.optional(observationWeightValidator),
     category: v.optional(observationCategoryValidator),
+    // curriculum:run only: the assignment (run) she owns that this scholar is
+    // on — the authority for a non-teacher to log about them. Not stored.
+    assignmentId: v.optional(v.id("assignments")),
   },
   handler: async (ctx, args) => {
-    const isTeacher = requireTeacherOrSelf(ctx.user, args.scholarId);
-    if (isTeacher) await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
+    const isSelf = ctx.user._id === args.scholarId;
+    if (!isTeacherRole(ctx.user.role) && !isSelf && args.assignmentId) {
+      // A curriculum:run holder logs from her Debrief, about an assignee on a
+      // run she OWNS and can still run. A named session must be that
+      // scholar's real session on that same run.
+      const assignment = await ctx.db.get(args.assignmentId);
+      if (
+        !assignment ||
+        assignment.teacherId !== ctx.user._id ||
+        !assignment.scholarIds.includes(args.scholarId)
+      ) {
+        throw new Error("Forbidden");
+      }
+      await requireCanRunOwnedAssignment(ctx, ctx.user, assignment);
+      if (args.sessionId) {
+        const session = await ctx.db.get(args.sessionId);
+        if (
+          !session ||
+          session.isTestDrive ||
+          session.userId !== args.scholarId ||
+          session.assignmentId !== args.assignmentId
+        ) {
+          throw new Error("Forbidden");
+        }
+      }
+    } else {
+      const isTeacher = requireTeacherOrSelf(ctx.user, args.scholarId);
+      if (isTeacher) await requireActiveScholarAccess(ctx, ctx.user, args.scholarId);
+    }
 
     const id = await ctx.db.insert("observations", {
       teacherId: ctx.user._id,

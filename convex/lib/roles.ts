@@ -211,10 +211,12 @@ export function canUsePassword(
 
 /**
  * "Scholar admin" roles — can create and administer scholar accounts and
- * manage portfolios, but NOT sensitive documents / measurements /
+ * file scanner scans, but NOT sensitive documents / measurements /
  * assessments and NOT curriculum. Teachers and both admins have these
  * powers by role; base `staff` gains them through the `school:operations`
  * capability grant (checked separately in `requireScholarAdmin`), not here.
+ * Browsing a scholar's filed work is NOT a scholar-admin power: it needs
+ * teaching standing (`requireScholarWorkAccess` in lib/access.ts).
  * Used by `requireScholarAdmin` / `scholarAdminQuery|Mutation`.
  */
 export const SCHOLAR_ADMIN_ROLES: readonly Role[] = [

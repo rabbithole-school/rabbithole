@@ -198,4 +198,49 @@ describe("scoped curriculum capability", () => {
       /teacher or admin role required/i,
     );
   });
+
+  test("a grant at one school cannot edit the primary school's unstamped unit (TRA-531)", async () => {
+    const t = convexTest(schema, modules);
+    const world = await makeWorld(t, {
+      schools: 2,
+      scholarsPerSchool: 0,
+      parentsPerSchool: 0,
+      includePlatformAdmin: false,
+    });
+    const [primary, guest] = world.schools;
+    // Staff at both schools; the guest membership is older, so it is the
+    // active school — and the only one the grant covers.
+    const dual = await t.run((ctx) =>
+      ctx.db.insert("users", { role: "staff", name: "Hoku Makani", username: "hoku-dual" }),
+    );
+    await t.run(async (ctx) => {
+      await ctx.db.insert("memberships", { userId: dual, role: "staff", institutionId: guest.id });
+      await ctx.db.insert("memberships", { userId: dual, role: "staff", institutionId: primary.id });
+      await ctx.db.insert("staffCapabilityGrants", {
+        granteeUserId: dual,
+        institutionId: guest.id,
+        capability: "curriculum:edit",
+        grantedBy: guest.admin.id,
+        grantedAt: Date.now(),
+      });
+    });
+    // A pre-tenancy unit: no institutionId, so it is the primary school's.
+    const legacy = await t.run((ctx) =>
+      ctx.db.insert("units", {
+        teacherId: primary.teacher.id,
+        title: "Legacy catalog",
+        isActive: true,
+      }),
+    );
+    const guestUnit = await makeUnit(t, guest.teacher, guest, { title: "Guest unit" });
+    const asDual = await asUser(t, dual);
+
+    await expect(
+      asDual.mutation(api.lessons.create, { unitId: legacy, title: "Denied" }),
+    ).rejects.toThrow(/not allowed to edit/i);
+    // The grant still works where it applies.
+    await expect(
+      asDual.mutation(api.lessons.create, { unitId: guestUnit, title: "Allowed" }),
+    ).resolves.toBeTruthy();
+  });
 });

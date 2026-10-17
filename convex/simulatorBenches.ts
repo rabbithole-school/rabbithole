@@ -721,7 +721,11 @@ export async function updateBenchSpecCore(
       throw new Error("Only the session owner can edit this Workbench");
     }
   } else {
-    const isAssignmentTeacher = assignment?.teacherId === caller._id;
+    // The assignment teacher edits a scholar's Workbench as a TEACHER act.
+    // Owning the assignment is not enough on its own: a curriculum:run holder
+    // (base staff) owns the runs she assigns but never edits scholar work.
+    const isAssignmentTeacher =
+      assignment?.teacherId === caller._id && isTeacherRole(caller.role);
     let isScopedSchoolAdmin = false;
     if (isSchoolAdminRole(caller.role)) {
       const scholar = await ctx.db.get(session.userId);

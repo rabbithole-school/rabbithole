@@ -269,6 +269,18 @@ describe("portfolio scanner record refiling", () => {
     );
     const staff = await f.world.as.staffOf(f.school, "staff");
 
+    // A scan already filed to the scholar is their work: operations staff
+    // may not copy it into a downloadable record (PR #4254 review).
+    await expect(
+      staff.action(refile, { itemId: f.itemId, kind: "incident_report" }),
+    ).rejects.toThrow(/only teaching staff can refile/i);
+    expect(await t.run((ctx) => ctx.db.get(f.itemId))).not.toBeNull();
+
+    // Still in the inbox (scholar matched, filing open): theirs to refile.
+    await t.run((ctx) =>
+      ctx.db.patch(f.itemId, { assignmentStatus: "unresolved" }),
+    );
+
     // The teacher-only kind is refused on the registry, before any copy.
     await expect(
       staff.action(refile, { itemId: f.itemId, kind: "assessment" }),
@@ -286,6 +298,46 @@ describe("portfolio scanner record refiling", () => {
       feedsTutor: false,
     });
     expect(await t.run((ctx) => ctx.db.get(f.itemId))).toBeNull();
+  });
+
+  test("operations staff cannot refile a scan that was filed and then unfiled", async () => {
+    const t = convexTest(schema, modules);
+    const f = await fixture(t, "incident_report");
+    await t.run((ctx) =>
+      ctx.db.insert("staffCapabilityGrants", {
+        granteeUserId: f.school.ops.id,
+        institutionId: f.institutionId,
+        capability: "school:operations",
+        grantedBy: f.teacherId,
+        grantedAt: Date.now(),
+      }),
+    );
+    const teacher = await f.world.as.staffOf(f.school);
+    // A teacher unfiles it (clears its scholar), which stamps it as filed.
+    await teacher.mutation(api.portfolio.setAttributions, {
+      itemId: f.itemId,
+      scholarIds: [],
+    });
+    const stamped = await t.run((ctx) => ctx.db.get(f.itemId));
+    expect(stamped?.firstFiledAt).toEqual(expect.any(Number));
+    // Back in the inbox looking like a fresh match: scholar set, filing open.
+    await t.run(async (ctx) => {
+      await ctx.db.patch(f.itemId, {
+        scholarId: f.scholarId,
+        matchStatus: "matched",
+        assignmentStatus: "unresolved",
+      });
+      await ctx.db.insert("portfolioAttributions", {
+        portfolioItemId: f.itemId,
+        scholarId: f.scholarId,
+        attributedAt: Date.now(),
+      });
+    });
+    const staff = await f.world.as.staffOf(f.school, "staff");
+    await expect(
+      staff.action(refile, { itemId: f.itemId, kind: "incident_report" }),
+    ).rejects.toThrow(/only teaching staff can refile/i);
+    expect(await t.run((ctx) => ctx.db.get(f.itemId))).not.toBeNull();
   });
 
   test("tears down materialized deliverables and writes one Drive dismissal", async () => {

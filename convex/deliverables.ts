@@ -69,6 +69,8 @@ import {
   describeEffectiveLevelsForPrompt,
   levelsPromptLine,
 } from "./lib/readingLevels";
+import { isAppActivity } from "../shared/appSurface";
+import { APP_MAKER_EXPLANATION_CRITERION } from "./lib/appActivity";
 
 // ── Queries ───────────────────────────────────────────────────────────
 
@@ -401,8 +403,10 @@ export const setFamilyVisibility = teacherMutation({
 
 /**
  * Resolve the artifact that matches the activity's deliverable kind. Slides
- * activities use the session's one deck; text/artifact activities keep the
- * newest-text fallback used when the tutor omits artifact_id.
+ * activities use the session's one deck; a text deliverable takes the newest
+ * non-code text artifact, an app ("artifact") deliverable the newest code
+ * artifact, and anything else the newest text-or-code artifact — the fallback
+ * used when the tutor omits artifact_id.
  *
  * "Newest" = greatest _creationTime. There is no edit timestamp on artifacts,
  * so most-recently-CREATED is the best available signal; on a single-document
@@ -430,7 +434,18 @@ export async function resolveScorableArtifactId(
     return artifacts.find((artifact) => artifact.type === "map")?._id ?? null;
   }
 
-  const textArtifacts = artifacts.filter(isTextArtifact);
+  // TRA-519 one app surface: any session can hold an app beside the
+  // scholar's writing, so the deliverable kind decides which one is scored —
+  // a writing activity checks the writing, never the side app the tutor
+  // built, and an app deliverable checks the app.
+  const deliverableKind = activity?.deliverable?.kind;
+  const textArtifacts = artifacts.filter((artifact) =>
+    deliverableKind === "text"
+      ? isTextArtifact(artifact) && artifact.type !== "code"
+      : deliverableKind === "artifact"
+        ? artifact.type === "code"
+        : isTextArtifact(artifact),
+  );
   if (textArtifacts.length === 0) return null;
   let newest = textArtifacts[0];
   for (const a of textArtifacts) {
@@ -1526,6 +1541,9 @@ interface CriteriaGenContext {
   institutionProfile: InstitutionPromptProfile;
   // The activity's `assessesWritingMechanics` flag (TRA-502).
   assessesWritingMechanics: boolean;
+  // The deliverable is an app the scholar builds (an app activity's
+  // "artifact"): one criterion is the maker's own explanation of it.
+  isAppDeliverable: boolean;
 }
 
 export const internalGetCriteriaGenContext = internalQuery({
@@ -1589,6 +1607,8 @@ export const internalGetCriteriaGenContext = internalQuery({
         session.testDriveAsScholarId ?? session.userId,
       ),
       assessesWritingMechanics: activity.assessesWritingMechanics === true,
+      isAppDeliverable:
+        isAppActivity(activity) && activity.deliverable.kind === "artifact",
     };
   },
 });
@@ -1648,6 +1668,7 @@ export function buildCriteriaGenUserMessage(
     bundle.assessesWritingMechanics
       ? WRITING_MECHANICS_CRITERIA_ALLOWED
       : WRITING_MECHANICS_CRITERIA_FORBIDDEN,
+    bundle.isAppDeliverable ? APP_MAKER_EXPLANATION_CRITERION : null,
     "",
     "Produce 3-5 dimensional criteria calibrated for this scholar. Call report_criteria.",
   ]

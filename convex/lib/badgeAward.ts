@@ -13,6 +13,7 @@ import type { Doc, Id } from "../_generated/dataModel";
 import { internal } from "../_generated/api";
 import { DEFAULT_BADGE_STYLE, DEFAULT_BADGE_COLORWAY } from "./badgeArt";
 import { ONBOARDING_UNIT, ONBOARDING_UNIT_SLUG } from "../onboardingData";
+import { effectiveActivityKind } from "../../shared/appSurface";
 
 export async function maybeAwardUnitBadge(
   ctx: MutationCtx,
@@ -55,7 +56,7 @@ export async function maybeAwardUnitBadge(
       : null;
   const onlineActivities = allActivities.filter(
     (activity) =>
-      activity.kind === "online" &&
+      effectiveActivityKind(activity) === "online" &&
       (!currentOnboardingTitles || currentOnboardingTitles.has(activity.title)),
   );
   if (onlineActivities.length === 0) return;

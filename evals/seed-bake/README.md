@@ -65,6 +65,11 @@ imported from `evals/curriculum-sim`; this harness only adds the two prompt arms
 
 # Custom topics:
 ./evals/seed-bake/run.sh --topics evals/seed-bake/scripts/topics.json
+
+# Build-path bakes ("Build a simulation", TRA-519 B4): each topic carries
+# path.shape "build"; the run also prints how many bakes end in an app
+# activity with a contract (target: at least 4 of 5).
+./evals/seed-bake/run.sh --topics evals/seed-bake/scripts/topics-build.json
 ```
 
 Flags: `--offline`, `--scholars N` (synthetic scholars per topic, default 2),

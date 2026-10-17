@@ -22,7 +22,7 @@ import {
 } from "@/shared/scholarSearchCopy";
 
 // ── Command Palette (⌘K) ─────────────────────────────────────────────
-// Global jump-to for scholars + curriculum. Lives in StaffShell so it is
+// Global jump-to for scholars, admissions candidates/families, and curriculum. Lives in StaffShell so it is
 // reachable from every staff tab.
 //
 // It reads `listDirectoryScholars`, NOT the roster's `listScholars`: this
@@ -36,7 +36,7 @@ import {
 
 type CmdEntry = { key: string; href: string; label: string; sublabel?: string } & (
   | { kind: "scholar"; scholar: Scholar }
-  | { kind: "curriculum" | "skill"; emoji: string; category: string }
+  | { kind: "curriculum" | "skill" | "admissions"; emoji: string; category: string }
 );
 type Scholar = {
   _id: string;
@@ -54,6 +54,25 @@ type SkillEntry = {
   label: string;
   domain: string;
   domainLabel: string;
+};
+
+/** `admissions.searchForPalette`'s result, already projected to the caller's
+ *  admissions tier and filtered server-side (archived candidates excluded). */
+export type AdmissionsHits = {
+  candidates: {
+    candidateId: string;
+    householdId: string;
+    name: string;
+    gradeLevel?: string;
+    state: string;
+  }[];
+  contacts: {
+    contactId: string;
+    householdId: string;
+    name: string;
+    email?: string;
+    isCurrentFamily: boolean;
+  }[];
 };
 
 type CurriculumHit =
@@ -93,6 +112,18 @@ const EMPTY_SCHOLARS: Scholar[] = [];
 const EMPTY_SKILLS: SkillEntry[] = [];
 const EMPTY_CURRICULUM: CurriculumHit[] = [];
 const EMPTY_RESULTS: CmdEntry[] = [];
+const EMPTY_ADMISSIONS: AdmissionsHits = { candidates: [], contacts: [] };
+
+/** Same gates as the other server searches (access, open, ≥2 chars — the
+ *  server's own minimum for a name). The server enforces access too. */
+export function searchAdmissionsQueryArgs(
+  canSearchAdmissions: boolean,
+  isOpen: boolean,
+  query: string,
+): { q: string } | "skip" {
+  const q = query.trim();
+  return canSearchAdmissions && isOpen && q.length >= 2 ? { q } : "skip";
+}
 
 export function searchSkillsQueryArgs(
   canSearchSkills: boolean,
@@ -125,7 +156,16 @@ export function buildEntries(
   skills: SkillEntry[],
   curriculum: CurriculumHit[],
   q: string,
+  admissions: AdmissionsHits = EMPTY_ADMISSIONS,
 ): CmdEntry[] {
+  // A family whose two parents both match ("Palakiko") is one destination, so
+  // it gets one row.
+  const seenFamilies = new Set<string>();
+  const families = admissions.contacts.filter((c) => {
+    if (seenFamilies.has(c.householdId)) return false;
+    seenFamilies.add(c.householdId);
+    return true;
+  });
   const needle = q.toLowerCase();
   const match = (s: string) => !q || s.toLowerCase().includes(needle);
   return [
@@ -140,6 +180,15 @@ export function buildEntries(
         href: `/teacher/scholars/${s.username ?? s._id}`,
         label: s.name ?? "Scholar", sublabel: s.username ?? undefined, scholar: s,
       })),
+    // Admissions: already matched server-side (child name, parent name or
+    // email), so no client `match`.
+    ...families.map((c) => ({
+      kind: "admissions" as const, key: `family-${c.householdId}`,
+      href: `/school/admissions/${c.householdId}`,
+      label: c.name,
+      sublabel: c.email ?? (c.isCurrentFamily ? "Current family" : "Parent"),
+      emoji: "🏡", category: "Family",
+    })),
     ...units.filter((u) => match(u.title)).map((u) => ({
       kind: "curriculum" as const, key: `unit-${u._id}`,
       href: curriculumUnitHref(u._id),
@@ -205,6 +254,7 @@ export function CommandPalette({
   canSearchScholars = true,
   canSearchSkills,
   canSearchCurriculum,
+  canSearchAdmissions = false,
 }: {
   units: UnitInfo[];
   perspectives: { _id: string; title: string; icon?: string | null }[];
@@ -225,6 +275,8 @@ export function CommandPalette({
   canSearchSkills: boolean;
   /** Whether the caller has curriculum access — i.e. a Units tab to land on. */
   canSearchCurriculum: boolean;
+  /** Whether the caller holds admissions access (`admissions.myAccess`). */
+  canSearchAdmissions?: boolean;
 }) {
   // Gate the live scholar subscription on open — keeps it out of the layout's
   // steady state. (`?? []` so a freshly-opened palette renders curriculum
@@ -256,18 +308,20 @@ export function CommandPalette({
         institutionScope,
       ),
     ) ?? EMPTY_CURRICULUM) as CurriculumHit[];
+  let admissions: AdmissionsHits = EMPTY_ADMISSIONS;
 
   const results = useMemo(
     () => (
       isOpen
         ? buildEntries(
             scholars, units, perspectives, processes, skills, curriculum, query,
+            admissions,
           )
         : EMPTY_RESULTS
     ),
     [
       isOpen, scholars, units, perspectives, processes, skills, curriculum,
-      query,
+      query, admissions,
     ],
   );
 
@@ -302,7 +356,11 @@ export function CommandPalette({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Jump to a scholar, unit, lesson, activity, or math skill…"
+                placeholder={
+                  canSearchAdmissions
+                    ? "Jump to a scholar, candidate, family, unit, or lesson…"
+                    : "Jump to a scholar, unit, lesson, activity, or math skill…"
+                }
                 border="none"
                 fontFamily="heading"
                 fontSize="md"

@@ -279,14 +279,27 @@ export const APP_UPDATE_VOICE_RULE =
  * before one is the tutor talking to itself about the play ("Biscuit did
  * something useless… the notes say this is the moment"), never a line for
  * the scholar. Any other tool, or the end of the message, releases it.
+ *
+ * A builder's Edit turn holds every message's text the same way, and an app
+ * build tool drops it: text written just before an edit is the builder
+ * thinking aloud between edits ("Now the lava rules: player steps in →
+ * frozen"), which each tool's stream split would otherwise turn into its own
+ * chat bubble, whatever the prompt's NO BUILD NARRATION rule says. The words
+ * meant for the scholar come after the last edit, in a message that ends
+ * without a tool, and are released. `buildToolNames` is empty off such a turn.
  */
 export function heldTextFateAtTool(
   toolName: string | undefined,
-  args: { quietAppUpdate: boolean; directorToolNames: ReadonlySet<string> },
+  args: {
+    quietAppUpdate: boolean;
+    directorToolNames: ReadonlySet<string>;
+    buildToolNames: ReadonlySet<string>;
+  },
 ): "drop" | "release" {
   if (toolName === STAY_SILENT_TOOL_NAME) return "drop";
   if (args.quietAppUpdate && args.directorToolNames.has(toolName ?? "")) {
     return "drop";
   }
+  if (args.buildToolNames.has(toolName ?? "")) return "drop";
   return "release";
 }

@@ -1,5 +1,5 @@
 // App designer steering by an activity's MODEL CONTRACT: the prompt section's
-// presence (never its wording), the designer-tool gate, the parking lot's
+// presence (never its wording), the mission-tool gate, the parking lot's
 // caps, the silent-turn finalize, and buildContract reaching the tutor context.
 import { convexTest } from "convex-test";
 import { describe, expect, test } from "vitest";
@@ -17,7 +17,7 @@ import {
   PARK_IDEA_TOOL_NAME,
   STAY_SILENT_TOOL_NAME,
   appendParkingLotEntry,
-  designerToolOffer,
+  missionToolOffer,
 } from "../lib/designerTools";
 
 const modules = (
@@ -66,6 +66,38 @@ describe("buildVibecodeSection with a model contract", () => {
     expect(buildVibecodeSection({ buildContract: null })).toBe(without);
   });
 
+  test("in the scholar's own Quest the contract is offered, not enforced", () => {
+    const mission = {
+      source: "authored" as const,
+      gate: CONTRACT.gate!,
+      freedoms: CONTRACT.freedoms,
+      invariants: CONTRACT.invariants,
+      questLine: null,
+      unlocksBuild: null,
+      buildStepOpen: false,
+    };
+    const teacher = buildVibecodeSection({
+      buildContract: CONTRACT,
+      mission: { ...mission, ownQuest: false },
+      allowSilence: true,
+    });
+    const quest = buildVibecodeSection({
+      buildContract: CONTRACT,
+      mission: { ...mission, ownQuest: true },
+      allowSilence: true,
+    });
+    // Same builder lead-in, different steering after it.
+    expect(quest.startsWith(teacher.slice(0, 200))).toBe(true);
+    expect(quest).not.toBe(teacher);
+    // The model is still visible as an idea to offer; no gate, no silence.
+    expect(quest).toContain(CONTRACT.invariants[0]);
+    expect(quest).not.toContain(CONTRACT.gate!);
+    expect(quest).not.toContain(STAY_SILENT_TOOL_NAME);
+    // Saving what one app cannot do still goes through park_idea.
+    expect(quest).toContain(PARK_IDEA_TOOL_NAME);
+    expect(teacher).toContain(CONTRACT.gate!);
+  });
+
   test("stay_silent is named iff allowSilence", () => {
     expect(
       buildVibecodeSection({ buildContract: CONTRACT, allowSilence: true }),
@@ -112,44 +144,66 @@ describe("buildVibecodeSection with a model contract", () => {
   });
 });
 
-describe("designerToolOffer", () => {
-  const scholarTurn = {
-    sessionMode: "vibecode",
+describe("missionToolOffer", () => {
+  const builderTurn = {
+    hasMission: true,
+    builderStance: true,
     workshopMode: "edit" as const,
     teacherBuild: false,
-    hasBuildContract: true,
+    appActivity: true,
     allowSilence: true,
     callerIsSessionOwner: true,
   };
+  const tutorTurn = {
+    ...builderTurn,
+    builderStance: false,
+    appActivity: false,
+    allowSilence: false,
+  };
 
-  test("a scholar's vibecode Edit turn under a contract gets both tools", () => {
-    expect(designerToolOffer(scholarTurn)).toEqual({
+  test("a builder-stance Edit turn on an app activity gets both tools", () => {
+    expect(missionToolOffer(builderTurn)).toEqual({
       parkIdea: true,
       staySilent: true,
     });
     expect(
-      designerToolOffer({ ...scholarTurn, allowSilence: false }),
+      missionToolOffer({ ...builderTurn, allowSilence: false }),
+    ).toEqual({ parkIdea: true, staySilent: false });
+  });
+
+  test("a tutor-stance turn with a mission can park, and is never silenced", () => {
+    expect(missionToolOffer(tutorTurn)).toEqual({
+      parkIdea: true,
+      staySilent: false,
+    });
+    // allowSilence is builder-only and app-activity-only.
+    expect(
+      missionToolOffer({ ...tutorTurn, allowSilence: true, appActivity: true }),
+    ).toEqual({ parkIdea: true, staySilent: false });
+    expect(
+      missionToolOffer({ ...builderTurn, appActivity: false }),
     ).toEqual({ parkIdea: true, staySilent: false });
   });
 
   test("a non-owner (teacher in remote view) can park but is never silenced", () => {
     expect(
-      designerToolOffer({ ...scholarTurn, callerIsSessionOwner: false }),
+      missionToolOffer({ ...builderTurn, callerIsSessionOwner: false }),
     ).toEqual({ parkIdea: true, staySilent: false });
   });
 
-  test("anything else gets neither", () => {
+  test("no mission, Play, a teacher build or free play gets neither", () => {
     for (const change of [
-      { sessionMode: "conversation" },
-      { sessionMode: null },
+      { hasMission: false },
       { workshopMode: "play" as const },
       { teacherBuild: true },
-      { hasBuildContract: false },
+      { freePlay: true },
     ]) {
-      expect(designerToolOffer({ ...scholarTurn, ...change })).toEqual({
-        parkIdea: false,
-        staySilent: false,
-      });
+      for (const turn of [builderTurn, tutorTurn]) {
+        expect(missionToolOffer({ ...turn, ...change })).toEqual({
+          parkIdea: false,
+          staySilent: false,
+        });
+      }
     }
   });
 });
@@ -253,15 +307,16 @@ describe("sessions.parkIdea", () => {
     expect(session?.parkingLot?.[0].reason).toBe("after the model runs");
   });
 
-  test("never writes to a non-vibecode session", async () => {
+  test("parks in a chat-primary session too — the tool offer is the gate (TRA-519)", async () => {
     const t = convexTest(schema, modules);
     const { sessionId } = await seedVibecodeSession(t);
     await t.run((ctx) => ctx.db.patch(sessionId, { sessionMode: "conversation" }));
     expect(
       await t.mutation(internal.sessions.parkIdea, { sessionId, text: "x" }),
-    ).toBe("empty");
-    const session = await t.run((ctx) => ctx.db.get(sessionId));
-    expect(session?.parkingLot).toBeUndefined();
+    ).toBe("added");
+    expect(
+      await t.mutation(internal.sessions.unparkIdea, { sessionId, text: "x" }),
+    ).toBe("removed");
   });
 });
 
@@ -343,21 +398,23 @@ describe("parking lot in the prompt", () => {
       ctx.runQuery(internal.sessionHelpers.getSessionContext, { sessionId }),
     );
     const parts = buildTutorSystemPromptParts({ ...context!, ...extra });
-    return parts.stable + parts.dynamic;
+    return parts.stable + parts.dynamic + parts.turnSystem;
   }
   const LOT = [{ text: "IDEA-rainbow-fish", parkedAt: 1, reason: "REASON-later" }];
 
-  test("present iff the lot is non-empty and the activity has a contract", async () => {
+  test("present iff the lot is non-empty and the session has a mission", async () => {
     expect(await promptFor({ buildContract: CONTRACT }, LOT)).toContain(
       "IDEA-rainbow-fish",
     );
-    expect(await promptFor({}, LOT)).not.toContain("IDEA-rainbow-fish");
+    // An app activity with no authored contract still has a mission (the
+    // default app gate, TRA-519 B1), so its lot renders too.
+    expect(await promptFor({}, LOT)).toContain("IDEA-rainbow-fish");
     const empty = await promptFor({ buildContract: CONTRACT }, []);
     expect(empty).toBe(await promptFor({ buildContract: CONTRACT }, null));
     expect(empty).not.toContain("IDEA-rainbow-fish");
   });
 
-  test("rides in the dynamic tail, never the cached prefix", async () => {
+  test("rides in the per-turn session state, never the cached prefix", async () => {
     const t = convexTest(schema, modules);
     const { sessionId } = await seedVibecodeSession(t, { buildContract: CONTRACT });
     await t.run((ctx) => ctx.db.patch(sessionId, { parkingLot: LOT }));
@@ -366,7 +423,7 @@ describe("parking lot in the prompt", () => {
     );
     const parts = buildTutorSystemPromptParts(context!);
     expect(parts.stable).not.toContain("IDEA-rainbow-fish");
-    expect(parts.dynamic).toContain("IDEA-rainbow-fish");
+    expect(parts.turnSystem).toContain("IDEA-rainbow-fish");
   });
 
   test("the silence branch renders only for the session owner", async () => {

@@ -19,7 +19,8 @@ import {
 import { ThumbsUp, ThumbsDown, ArrowRight, ArrowUp, CheckSquare, Clock, PencilSimple, House, Lock, Microphone, Square, SpeakerHigh, Pause, Play, Waveform, X } from "@phosphor-icons/react";
 import { RemoteLink } from "./RemoteLink";
 import { DispatchCompletionReceipt } from "./DispatchCompletionReceipt";
-import { useStreamingDictation } from "@/hooks/useStreamingDictation";
+import { useStreamingDictation, type DictationState } from "@/hooks/useStreamingDictation";
+import { DICTATION_CONNECTING_LABEL } from "@/lib/realtimeTranscriptionProtocol";
 import { usePendingImage } from "@/hooks/usePendingImage";
 import {
   type CaptureAppSnapshot,
@@ -79,6 +80,9 @@ import { ReflectionDrawer } from "./ReflectionDrawer";
 import { ManualRehearsalBanner } from "./ManualRehearsalBanner";
 import { OfflineSessionView } from "./OfflineSessionView";
 import { BadgeCelebration } from "./BadgeCelebration";
+import { QuestBuildUnlockOffer } from "./QuestBuildUnlockOffer";
+import { SavedForLaterBlock } from "./SavedForLaterBlock";
+import type { ParkedIdea } from "./ParkedIdeaList";
 import { SessionRecapCard } from "./SessionRecapCard";
 import { toaster } from "@/lib/toaster";
 import { haptic, keepAwake, isLikelyMuted } from "@/lib/native";
@@ -147,7 +151,9 @@ import { convexSiteUrl } from "@/lib/convexUrls";
 import { GraphemeText } from "@/components/GraphemeText";
 import { buildStageMap } from "@/lib/graphemeStageMap";
 import { pickLockingFocus } from "@/lib/focusLock";
-import { shouldProvideDeliverableContext } from "@/lib/deliverablePanelContext";
+import { useSessionDeliverable } from "@/hooks/useSessionDeliverable";
+import { newestHtmlArtifact } from "@/lib/vibecode/helpers";
+import { composerAfterPersistedSend } from "@/lib/composerAfterSend";
 import type { GraphemeSpan, GraphemeStages } from "@/shared/graphemeSegments";
 import {
   classFocusPlateLine,
@@ -175,6 +181,9 @@ interface ProjectInterfaceProps {
   scholarImage?: string | null;
   remoteUserId?: string | null;
   onBack?: () => void;
+  /** Open this session's app full screen in the builder (the app card's Open). */
+  /** Open the full-screen builder on the app with this artifact id. */
+  onOpenBuilder?: (appId: string) => void;
 }
 
 export function SessionInterface({
@@ -187,6 +196,7 @@ export function SessionInterface({
   scholarName,
   remoteUserId,
   onBack,
+  onOpenBuilder,
 }: ProjectInterfaceProps) {
   useEffect(() => () => clearAllArtifactSaves(), [sessionId]);
   const [input, setInput] = useState("");
@@ -573,6 +583,9 @@ export function SessionInterface({
   // subscription for chats without an app, nor for the scholar (the app
   // already shows them the scene).
   const sessionHasApp = artifacts.some((a) => a.type === "code");
+  // Whether the session has an app the full-screen builder can show; each
+  // app card's Open names its own app (builderHtmlArtifact).
+  const builderApp = newestHtmlArtifact(artifacts);
   const appAiTurns = useQuery(
     api.appAi.listForSession,
     isRemoteMode && sessionHasApp && isTeacherRole(currentUser?.role)
@@ -581,44 +594,21 @@ export function SessionInterface({
   );
   const appCharacterNames = appCharacterNamesFrom(artifacts);
 
-  // Deliverable context for the per-document Check buttons. We load
-  // it once at the project level (activity + criteria snapshot for
-  // auto-mode + scholarQuest) and pass it into ArtifactPanel.
-  const activityForDeliverable = useQuery(
-    api.activities.getPublic,
-    sessionData?.session?.activityId
-      ? { id: sessionData.session.activityId as Id<"activities"> }
-      : "skip",
-  );
-  const deliverableSnapshot = useQuery(
-    api.sessions.getDeliverableSnapshot,
-    { sessionId: sessionId as Id<"sessions"> },
-  );
-  const ensureActivitySetup = useMutation(api.sessions.ensureActivitySetup);
-  const submitDeliverable = useMutation(api.deliverables.submit);
+  // Deliverable context for the per-document Check buttons, resolved by the
+  // same hook the full-screen app builder uses (one resolution, one submit
+  // path for both views of a session) and passed into ArtifactPanel.
+  const {
+    activity: activityForDeliverable,
+    deliverableContext: resolvedDeliverableContext,
+    prepareSubmit: prepareDeliverableSubmit,
+  } = useSessionDeliverable({
+    sessionId: sessionId as Id<"sessions">,
+    session: sessionData?.session,
+  });
   const saveArtifact = useMutation(api.artifacts.scholarUpdate);
   const createArtifact = useMutation(api.artifacts.scholarCreate);
   const deleteArtifactMut = useMutation(api.artifacts.deleteArtifact);
   const [artifactSynced, setArtifactSynced] = useState(true);
-
-  useEffect(() => {
-    if (
-      activityForDeliverable?.deliverable?.mode === "auto" &&
-      deliverableSnapshot !== undefined &&
-      deliverableSnapshot?.status === null
-    ) {
-      void ensureActivitySetup({
-        sessionId: sessionId as Id<"sessions">,
-      }).catch((error) => {
-        console.error("Error initializing activity deliverable:", error);
-      });
-    }
-  }, [
-    activityForDeliverable?.deliverable?.mode,
-    deliverableSnapshot,
-    ensureActivitySetup,
-    sessionId,
-  ]);
 
   // Auto-select last artifact when artifacts change
   useEffect(() => {
@@ -750,11 +740,6 @@ export function SessionInterface({
   // Convex mutation for updating project dimensions
   const updateSession = useMutation(api.sessions.update);
 
-  // Kicks off a rubric re-check WITHOUT a fabricated user turn. Creates only
-  // an assistant placeholder + streamId; the stream injects an ephemeral,
-  // non-persisted instruction (see convex/http.ts) so no fake "check this"
-  // bubble is ever persisted or rendered.
-  const startRubricCheck = useMutation(api.sessions.startRubricCheck);
   const startActivityKickoff = useMutation(api.sessions.startActivityKickoff);
   // User-initiated stop: stamps stopRequestedAt on the session's in-flight
   // assistant row so the running server loop stops and finalizes the partial.
@@ -1360,7 +1345,11 @@ export function SessionInterface({
         });
         // Both the artifact flush and message mutation succeeded. Keep the
         // composer intact when a revision conflict blocks either operation.
-        setInput("");
+        // Only a send that read the composer clears it: the <start> opener
+        // persisting must not erase a first question typed meanwhile (TRA-527).
+        setInput((composer) =>
+          composerAfterPersistedSend(composer, { directText, isAppRequest }),
+        );
         clearPendingImage();
         // This turn carries the app's character/judge events to the tutor.
         appTutorUpdates.clearAppAi();
@@ -1551,46 +1540,14 @@ export function SessionInterface({
     // Hold the lock only around the deliverable submit + rubric-check
     // preparation; stream OUTSIDE it (like handleSend) so a steer submitted
     // mid-check can acquire the lock instead of being silently dropped.
-    const prepared = await runWithSendLock(async () => {
-      try {
-        await flushAllArtifactSaves();
-      } catch (error) {
-        console.error("Error saving work before check:", error);
-        toaster.error({
-          title: "Finish saving your work",
-          description:
-            "Choose a saved version or retry the save before checking your work.",
-        });
-        return null;
-      }
-      try {
-        await submitDeliverable({
-          sessionId: sessionId as Id<"sessions">,
-          activityId: activityForDeliverable!._id as Id<"activities">,
-          artifactId,
-          intent: shouldCheck ? "check" : "send",
-        });
-        if (!shouldCheck) return null;
-        const result = await startRubricCheck({
-          sessionId: sessionId as Id<"sessions">,
-        });
-        // A new silent turn supersedes any lingering failed-user-turn state.
-        setUserTurnFailed(false);
-        return result;
-      } catch (error) {
-        console.error("Error checking artifact:", error);
-        toaster.error({
-          title: shouldCheck
-            ? "Couldn't check your work"
-            : "Couldn't send your work",
-          description: "Your work is still saved. Try again in a moment.",
-        });
-        return null;
-      }
-    });
+    const prepared = await runWithSendLock(() =>
+      prepareDeliverableSubmit({ artifactId, shouldCheck }),
+    );
     // undefined = lock held; null = send-only / flush conflict / error. Nothing
     // to stream in any of those cases.
     if (!prepared) return;
+    // A new silent turn supersedes any lingering failed-user-turn state.
+    setUserTurnFailed(false);
     const convexUrl = convexSiteUrl();
     await stream.send(
       `${convexUrl}/session-stream`,
@@ -2208,6 +2165,19 @@ export function SessionInterface({
           dispatchCompleted: isRemoteMode
             ? []
             : (sessionData?.dispatchCompleted ?? []),
+          // TRA-519 B2: parked ideas come back on the done screen — only for
+          // the scholar who owns the session, never in a rehearsal.
+          savedForLater:
+            !isRemoteMode &&
+            !isManualRehearsalSession &&
+            !!currentUser &&
+            sessionData?.session?.userId === currentUser._id &&
+            (sessionData?.session?.parkingLot?.length ?? 0) > 0
+              ? {
+                  ideas: sessionData.session.parkingLot ?? [],
+                  canBuildNow: sessionData.session.freePlayEligible === true,
+                }
+              : null,
         };
 
         // Rubric is now per-document — each artifact carries its own
@@ -2216,37 +2186,6 @@ export function SessionInterface({
         // independent rubric results, one per artifact.
         const rubricThumbnailElement = null;
 
-        // Resolve deliverable context once, pass into ArtifactPanel so
-        // each artifact tile can render a Check button bound to its
-        // own artifactId.
-        const resolvedDeliverableContext: Parameters<
-          typeof ArtifactPanel
-        >[0]["deliverableContext"] =
-          shouldProvideDeliverableContext({
-            hasSession: !!sessionData?.session,
-            deliverable: activityForDeliverable?.deliverable ?? null,
-            snapshotLoaded: deliverableSnapshot !== undefined,
-            snapshotStatus: deliverableSnapshot?.status,
-            snapshotHasCriteria: !!deliverableSnapshot?.criteria,
-          }) && sessionData?.session && activityForDeliverable?.deliverable
-            ? {
-                sessionId: sessionData.session._id as Id<"sessions">,
-                activityId: activityForDeliverable._id as Id<"activities">,
-                activityTitle: activityForDeliverable.title,
-                deliverableSpec: {
-                  kind: activityForDeliverable.deliverable.kind,
-                  prompt: activityForDeliverable.deliverable.prompt,
-                  mode: activityForDeliverable.deliverable.mode,
-                  criteria:
-                    activityForDeliverable.deliverable.mode === "auto" &&
-                    deliverableSnapshot?.criteria
-                      ? deliverableSnapshot.criteria
-                      : activityForDeliverable.deliverable.criteria,
-                  criteriaStatus: deliverableSnapshot?.status,
-                  criteriaError: deliverableSnapshot?.error,
-                },
-              }
-            : undefined;
         const artifactPanelElement = (
           <ErrorBoundary fallbackMessage="Something went wrong in the document panel">
             <ArtifactPanel
@@ -2302,6 +2241,14 @@ export function SessionInterface({
               // back-compat with ArtifactPanel's signature.
               process={null}
               deliverableContext={resolvedDeliverableContext}
+              appBuilder={
+                onOpenBuilder && builderApp
+                  ? {
+                      sessionId: sessionId as Id<"sessions">,
+                      onOpen: onOpenBuilder,
+                    }
+                  : undefined
+              }
             />
           </ErrorBoundary>
         );
@@ -2511,7 +2458,7 @@ interface ChatColumnProps {
   handleSend: (text?: string) => void;
   textareaRef: React.Ref<HTMLTextAreaElement>;
   messagesEndRef: React.Ref<HTMLDivElement>;
-  dictationState: "idle" | "recording" | "transcribing";
+  dictationState: DictationState;
   dictationError: string | null;
   /** True only when a DIFFERENT recorder (writing box, practice handoff) holds
    *  the mic — mirrors DictationMicButton/PracticeSession's use of the same
@@ -2608,6 +2555,8 @@ interface ChatColumnProps {
    *  shared/nextIncompleteActivity.ts), so Home owns routing back to them. */
   completionEarlierHole?: boolean;
   dispatchCompleted?: DispatchCompletionReceiptData[];
+  /** Parked ideas to bring back on the done screen (null = don't show). */
+  savedForLater?: SavedForLater | null;
   /** Process pipeline for the sticky thumbnail at top of chat. */
   process?: {
     title: string;
@@ -2635,6 +2584,7 @@ function CompletionMilestone({
   onContinueToNextActivity,
   onNewSession,
   dispatchCompleted,
+  savedForLater,
 }: {
   sessionId: Id<"sessions">;
   completedUnitId: Id<"units"> | null;
@@ -2644,6 +2594,7 @@ function CompletionMilestone({
   onContinueToNextActivity?: () => void;
   onNewSession?: () => void;
   dispatchCompleted: readonly DispatchCompletionReceiptData[];
+  savedForLater: SavedForLater | null;
 }) {
   return (
     <>
@@ -2652,6 +2603,9 @@ function CompletionMilestone({
            so remounting discards exactly what the effect used to clear. */}
       <SessionRecapCard key={sessionId} sessionId={sessionId} isComplete />
       {completedUnitId && <BadgeCelebration unitId={completedUnitId} />}
+      {/* B6 badge moment: a finished Quest with no build step offers one.
+          Renders nothing unless units.get says canUnlockBuild. */}
+      {completedUnitId && <QuestBuildUnlockOffer unitId={completedUnitId} />}
       <Box
         as="section"
         aria-label="Activity complete"
@@ -2747,9 +2701,21 @@ function CompletionMilestone({
           )
         )}
       </Box>
+      {savedForLater ? (
+        <SavedForLaterBlock
+          sessionId={sessionId}
+          ideas={savedForLater.ideas}
+          canBuildNow={savedForLater.canBuildNow}
+        />
+      ) : null}
     </>
   );
 }
+
+type SavedForLater = {
+  ideas: readonly ParkedIdea[];
+  canBuildNow: boolean;
+};
 
 function ChatColumn({
   messages,
@@ -2828,6 +2794,7 @@ function ChatColumn({
   completionHandsOffToHome = false,
   completionEarlierHole = false,
   dispatchCompleted = [],
+  savedForLater = null,
 }: ChatColumnProps) {
   const micBtnRef = useRef<HTMLButtonElement>(null);
   const tabHeldRef = useRef(false);
@@ -3371,6 +3338,7 @@ function ChatColumn({
                     onContinueToNextActivity={onContinueToNextActivity}
                     onNewSession={onNewSession}
                     dispatchCompleted={dispatchCompleted}
+                    savedForLater={savedForLater}
                   />
                 );
               }
@@ -3791,7 +3759,7 @@ function ChatColumn({
           </Flex>
         )}
         <Flex maxW="3xl" mx="auto" gap={isTouchDevice? 1 : 3} align="center">
-          {dictationState === "recording" ? (
+          {dictationState === "recording" || dictationState === "connecting" ? (
             <>
               {/* Cancel recording — discard audio, nothing sends */}
               <IconButton
@@ -3819,6 +3787,32 @@ function ChatColumn({
                   style={{ visibility: "hidden" }}
                   readOnly
                 />
+                {dictationState === "connecting" ? (
+                  // Audio isn't reaching the transcriber yet — never show the
+                  // red listening state here, or the first words are lost.
+                  <Flex
+                    position="absolute"
+                    inset={0}
+                    align="center"
+                    justify="center"
+                    bg="gray.50"
+                    border="0.5px solid"
+                    borderColor="gray.300"
+                    borderRadius="xl"
+                    gap={3}
+                    role="status"
+                  >
+                    <Spinner size="sm" color="charcoal.400" />
+                    <Text
+                      fontFamily="heading"
+                      fontWeight="600"
+                      fontSize={isTouchDevice ? "md" : "xl"}
+                      color="charcoal.400"
+                    >
+                      {DICTATION_CONNECTING_LABEL}
+                    </Text>
+                  </Flex>
+                ) : (
                 <Flex
                   position="absolute"
                   inset={0}
@@ -3848,14 +3842,17 @@ function ChatColumn({
                     {isTooLoud ? "Too loud!" : timerDisplay}
                   </Text>
                 </Flex>
+                )}
               </Box>
               {/* Stop recording — transcribe + send in one tap. Big and red so
-                  it's the obvious "I'm done, send it" action. */}
+                  it's the obvious "I'm done, send it" action. Nothing to send
+                  until audio is flowing. */}
               <IconButton
                 ref={sendRecBtnRef}
                 aria-label="Stop and send recording"
                 {...composerStopRecordingStyle(hasSpeech)}
                 onClick={stopRecording}
+                disabled={dictationState === "connecting"}
               >
                 <ArrowUp />
               </IconButton>

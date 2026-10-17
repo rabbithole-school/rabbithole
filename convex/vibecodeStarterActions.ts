@@ -200,20 +200,23 @@ export const recordWorkshopTurn = internalAction({
     sessionId: v.id("sessions"),
     messageId: v.id("messages"),
     callerUserId: v.id("users"),
-    sessionMode: v.union(
-      v.literal("conversation"),
-      v.literal("vibecode"),
-      v.literal("workbench"),
-      v.null(),
-    ),
+    // TRA-519: this turn worked on an app — the session has builder features
+    // (any session with an app, or a builder-primary one;
+    // shared/appSurface.ts) or `create_code` ran this turn. Replaces the old
+    // `sessionMode === "vibecode"` gate, so a chat session's app gets History
+    // too.
+    appBuild: v.boolean(),
     workshopMode: v.union(v.literal("edit"), v.literal("play")),
     baselineArtifactId: v.optional(v.id("artifacts")),
     baselineRevision: v.number(),
+    // TRA-519: the app open in the builder this turn (recordTurnRevision).
+    focusArtifactId: v.optional(v.id("artifacts")),
   },
   handler: async (ctx, args): Promise<void> => {
-    // Vibecode + Edit only — Play never records or autosaves (F9), and only a
-    // vibecode session has an app to version.
-    if (args.sessionMode !== "vibecode" || args.workshopMode === "play") {
+    // App turns in Edit only — Play never records or autosaves (F9), and a
+    // turn with no app has nothing to version. (recordTurnRevision also finds
+    // no code artifact and records nothing for such a session.)
+    if (!args.appBuild || args.workshopMode === "play") {
       return;
     }
     try {
@@ -226,6 +229,9 @@ export const recordWorkshopTurn = internalAction({
             ? { baselineArtifactId: args.baselineArtifactId }
             : {}),
           baselineRevision: args.baselineRevision,
+          ...(args.focusArtifactId
+            ? { focusArtifactId: args.focusArtifactId }
+            : {}),
         },
       );
       if (rec.recorded && rec.autosaveActivityId && rec.artifactId) {

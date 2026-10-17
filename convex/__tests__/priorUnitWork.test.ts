@@ -15,7 +15,7 @@ import {
   loadPriorUnitWork,
   type PriorUnitWorkItem,
 } from "../lib/priorUnitWork";
-import { TUTOR_PROMPT_SECTION_ORDER, FIRST_DYNAMIC_TUTOR_SECTION } from "../prompts";
+import { TUTOR_TURN_SYSTEM_SECTIONS } from "../prompts";
 import { buildTutorSystemPromptParts } from "../sessionStreamHelpers";
 
 const modules = (
@@ -141,16 +141,14 @@ describe("prior unit work in a vibecode session", () => {
     expect(c.priorUnitWork).toContain(mechanism);
     expect(c.priorUnitWork).toContain("Explain the mechanism");
 
-    // Plumbed into the assembled prompt, in the dynamic tail.
+    // Plumbed into the assembled prompt, in the per-turn session state.
     const parts = buildTutorSystemPromptParts({
       ...c,
       playMode: false,
     });
-    expect(parts.dynamic).toContain(c.priorUnitWork!);
+    expect(parts.turnSystem).toContain(c.priorUnitWork!.trim());
     expect(parts.stable).not.toContain(PRIOR_UNIT_WORK_HEADER);
-    expect(TUTOR_PROMPT_SECTION_ORDER.indexOf("priorUnitWork")).toBeGreaterThan(
-      TUTOR_PROMPT_SECTION_ORDER.indexOf(FIRST_DYNAMIC_TUTOR_SECTION),
-    );
+    expect(TUTOR_TURN_SYSTEM_SECTIONS).toContain("priorUnitWork");
   });
 
   test("falls back to the scholar's own typed turns when a session left no deliverable", async () => {
@@ -261,7 +259,8 @@ describe("prior unit work in a vibecode session", () => {
     });
     expect((await contextFor(t, rehearsal)).priorUnitWork).toBeNull();
 
-    // A plain conversation session gets nothing (vibecode only).
+    // A plain conversation session with no app gets nothing (builder
+    // features only; sessionAppContext.test.ts covers a chat with an app).
     const chat = await seedSession(t, w, w.scholarId, w.onlineActivityId);
     expect((await contextFor(t, chat)).priorUnitWork).toBeNull();
 

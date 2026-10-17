@@ -59,6 +59,7 @@ import {
 } from "../customApps";
 import { APP_STATE_RULES } from "../prompts";
 import { appBaseUrl } from "./deploymentConfig";
+import { isAppActivity } from "../../shared/appSurface";
 
 const scholarNamesProp = {
   type: "array" as const,
@@ -884,7 +885,7 @@ export async function makeCustomAppTools(
           candidate.title.trim().toLowerCase() ===
           activityTitle.trim().toLowerCase(),
       );
-      if (existingActivity && existingActivity.kind !== "vibecode") {
+      if (existingActivity && !isAppActivity(existingActivity)) {
         const existingActivityLink = markdownLink(
           existingActivity.title,
           withBase(
@@ -895,10 +896,10 @@ export async function makeCustomAppTools(
             }),
           ),
         );
-        return `PARTIAL: ${unitLink} and ${lessonLink} exist, but ${existingActivityLink} already exists and is not a vibecode activity, so it was left unchanged and no assignment was created. Choose a different activity title;${appSuffix}`;
+        return `PARTIAL: ${unitLink} and ${lessonLink} exist, but ${existingActivityLink} already exists and is not an app activity, so it was left unchanged and no assignment was created. Choose a different activity title;${appSuffix}`;
       }
 
-      // Build hand-off reuse safety: a same-title vibecode activity may only be
+      // Build hand-off reuse safety: a same-title app activity may only be
       // reused when it is a PLAIN DRAFT — no starter, no scholarsStartFrom, and
       // not referenced by any assignment. Otherwise it is already built and/or
       // live to scholars; rewriting its brief/appRequest under a repeated or
@@ -978,8 +979,9 @@ export async function makeCustomAppTools(
           }),
         ),
       );
-      if (activity.kind !== "vibecode") {
-        return `PARTIAL: ${activityLink} is not a vibecode activity, so no assignment was created.${appSuffix} Choose a different activity title.`;
+      // `kind` comes back effective ("vibecode" for either app shape).
+      if (!isAppActivity({ kind: activity.kind })) {
+        return `PARTIAL: ${activityLink} is not an app activity, so no assignment was created.${appSuffix} Choose a different activity title.`;
       }
 
       if (isBuildHandoff) {

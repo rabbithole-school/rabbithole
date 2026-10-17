@@ -100,7 +100,7 @@ describe("teacher build stance — gated to a coached activity", () => {
     // The teacher's request travels in verbatim (dedicated appRequest field).
     expect(prompt).toContain(APP_REQUEST);
     expect(prompt).toContain(
-      "Keep the first version compact — a working core you can extend, not the whole spec at once; grow it with edit_document.",
+      "Keep the first version compact — a working core you can extend, not the whole spec at once; grow it with str_replace_based_edit_tool.",
     );
     // The scholar-only Socratic role is explicitly overridden for this session,
     // resolving the contradiction with the base prompt below.

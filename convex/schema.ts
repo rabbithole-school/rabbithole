@@ -383,6 +383,9 @@ const sessionTableFields = {
           // Why it was parked, in the scholar's words-level register; shown as
           // the chip's tooltip/caption.
           reason: v.optional(v.string()),
+          // "Make it a Quest" (TRA-519 B2) planted this seed from the idea;
+          // the done-screen button re-opens it instead of planting another.
+          questSeedId: v.optional(v.id("seeds")),
         }),
       ),
     ),
@@ -562,6 +565,12 @@ const sessionTableFields = {
     lastMessageAt: v.optional(v.number()),
     lastMessageRole: v.optional(v.string()),
     lastMessagePreview: v.optional(v.string()), // first 120 chars of last message
+    // Anthropic `id` of the tutor's last API response in this session — the
+    // next turn sends it as `diagnostics.previous_message_id` so the API can
+    // say where that turn's prompt prefix diverged (lib/cacheDiagnostics.ts).
+    // Written by usage.record with the turn's usageEvents row, whose
+    // `cacheMissAt` the weekly usage report groups by. No prompt text.
+    tutorLastResponseId: v.optional(v.string()),
     // When sessions.startAppUpdateTurn last opened a tutor turn. A silent
     // turn deletes its placeholder, so this is what paces zero-ask updates.
     lastAppUpdateTurnAt: v.optional(v.number()),
@@ -1072,6 +1081,11 @@ export default defineSchema({
     institutionId: v.id("institutions"),
     capability: v.union(
       v.literal("curriculum:edit"),
+      // Run the units you can edit: assign them to scholars at this school,
+      // push/schedule on assignments you own, read their progress, and
+      // Preflight with a synthetic scholar. Institution-only, meaningful only
+      // alongside curriculum:edit, and NOT a scholar lens (no record reads).
+      v.literal("curriculum:run"),
       v.literal("school:operations"),
       v.literal("health:manage"),
       v.literal("program:publish"),
@@ -2204,6 +2218,11 @@ export default defineSchema({
     // is left out of the Write row's spoken share and the observer's talk word
     // floor. Unset on every row written before this field (read as the scholar's).
     byStaff: v.optional(v.boolean()),
+    // TRA-530: on a "user" row, when the scholar stopped the reply to it
+    // (Stop, or a new send mid-turn). A stopped reply that showed nothing is
+    // deleted, so without this the request looks merely unanswered and the
+    // next turn carries it out. Unset after a crash, which should be answered.
+    replyStoppedAt: v.optional(v.number()),
     // App designer (TRA-301): which of the session's two threads this turn
     // belongs to. Edit talks to the DESIGNER (code tools, versions); Play talks
     // to the TUTOR (no code tools, never a version). Stamped server-side from
@@ -2357,6 +2376,12 @@ export default defineSchema({
     streamTrigger: v.optional(
       v.union(v.literal("activityKickoff"), v.literal("appUpdate")),
     ),
+    // TRA-519: the app open in the builder when this turn was sent (an
+    // assistant placeholder only). The stream acts on THIS app — prompt,
+    // app state, version baseline, character/judge — rather than the newest
+    // one (lib/focusApp.ts). Server-validated as a code artifact of the
+    // session when stamped; absent = the newest app (older clients).
+    focusArtifactId: v.optional(v.id("artifacts")),
     // Liveness heartbeat for an in-flight stream. The HTTP stream handler
     // stamps this at message_start and on every persist tick; the orphan-reap
     // in sessions.sendMessage keys its age-guard off it (not _creationTime) so
@@ -4709,6 +4734,21 @@ export default defineSchema({
     videoTranscript: v.optional(v.string()),
     // PCM curriculum fields
     bigIdea: v.optional(v.string()),
+    // A scholar's own Quest's MISSION (TRA-519 B5): one line in their words
+    // (what they are making or finding out) and its gate (the first thing
+    // that has to exist). Co-written in the planning chat via the tutor's
+    // set_quest_mission; shown as one line on the Quest page (never Home).
+    // Separate from bigIdea on purpose: the bake and update_unit_metadata
+    // rewrite bigIdea freely, while a mission changes only when the scholar
+    // explicitly asks (`changedBecause` quotes that ask).
+    mission: v.optional(
+      v.object({
+        text: v.string(),
+        gate: v.optional(v.string()),
+        setAt: v.number(),
+        changedBecause: v.optional(v.string()),
+      }),
+    ),
     // EQs/EUs are the unit's "granules" — the mastery atoms that
     // granuleEvidence rows attribute observations to. Each entry
     // carries a stable `key` so evidence survives reordering and
@@ -4877,6 +4917,14 @@ export default defineSchema({
       v.literal("simulator"),
       v.literal("vibecode"),
     ),
+    // TRA-519 A4: an APP ACTIVITY is { kind: "online", appActivity: true } —
+    // an online activity whose work is building or using an app (opens in the
+    // builder; systemPrompt is the build brief). Legacy rows keep kind
+    // "vibecode" and read identically; behavior reads isAppActivity /
+    // effectiveActivityKind (shared/appSurface.ts), never kind directly. The
+    // app fields below (starterAppId … allowSilence, tutorModel) apply to app
+    // activities in either shape.
+    appActivity: v.optional(v.boolean()),
     // kind="vibecode" only: the canonical teacher-approved starter app.
     // Ordinary in-place duplicates share this reference; "Fork to my unit"
     // clones the customApps row so another teacher owns an independent starter.
@@ -7472,6 +7520,16 @@ export default defineSchema({
     viewedUserId: v.optional(v.id("users")), // impersonation/remote target
     institutionId: v.optional(v.id("institutions")), // server-resolved; never guessed
     surface: v.union(v.literal("native"), v.literal("web")),
+    // Set when the iPad filed this itself (native/src/lib/appHealth.ts):
+    // a fatal JS error, a quit while on screen, or a JS freeze. Absent for a
+    // person's report.
+    trigger: v.optional(
+      v.union(
+        v.literal("js_crash"),
+        v.literal("unclean_exit"),
+        v.literal("stall"),
+      ),
+    ),
     // context (server-validated)
     url: v.string(), // sanitized pathname + relevant params
     sessionId: v.optional(v.id("sessions")), // kept only if it belongs to the scholar
@@ -7510,7 +7568,8 @@ export default defineSchema({
     .index("by_institution", ["institutionId"])
     .index("by_actor", ["actorUserId"])
     .index("by_client_id", ["clientReportId", "actorUserId"])
-    .index("by_status", ["status"]),
+    .index("by_status", ["status"])
+    .index("by_trigger", ["trigger"]),
 
   // Outbound notification queue for group-linked channels (Phase 3).
   // Digest-mode events accumulate here until the hourly flush posts one
@@ -8394,6 +8453,11 @@ export default defineSchema({
     characters: v.optional(v.number()), // character-metered text input
     images: v.optional(v.number()), // per-image count (Gemini image model)
     sessionId: v.optional(v.id("sessions")),
+    // Tutor turns only: where the turn's prompt prefix diverged from the
+    // previous turn's, per Anthropic cache diagnostics — `first`, `none`,
+    // `pending`, or the API's `cache_miss_reason.type` (e.g. `system_changed`).
+    // Vocabulary: lib/cacheDiagnostics.ts. Grouped by the weekly usage report.
+    cacheMissAt: v.optional(v.string()),
     createdAt: v.number(),
   }).index("by_createdAt", ["createdAt"]).index("by_institution", ["institutionId"]),
 
@@ -9207,6 +9271,14 @@ export default defineSchema({
         v.literal("none"),
       ),
     ),
+    // Sticky "this scan has been filed" stamp: set the first time BOTH axes
+    // above are resolved (or before any write that could un-resolve them), and
+    // never cleared. Unfiling a scan does not turn it back into an inbox item
+    // for operations staff — a filed scan is a scholar's work, and only
+    // teaching staff may see its content (`hasBeenFiled`,
+    // lib/portfolioStatus.ts). Legacy rows without it count as filed while
+    // both axes are resolved.
+    firstFiledAt: v.optional(v.number()),
     // ── Activity tagging (which activity within the assignment?) ──
     // Optional refinement of the assignment axis. When a teacher sets
     // BOTH a scholar and an activity, the item "materializes" into an

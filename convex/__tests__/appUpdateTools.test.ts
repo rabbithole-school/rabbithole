@@ -27,7 +27,11 @@ import {
   AUTHOR_NOTES_TAG,
   buildCharacterOnStageSection,
 } from "../sessionHelpers";
-import { CHARACTER_DIRECTOR_TOOL_NAMES } from "../lib/tutorSessionTools";
+import {
+  APP_BUILD_TOOL_NAMES,
+  CHARACTER_DIRECTOR_TOOL_NAMES,
+} from "../lib/tutorSessionTools";
+import { CODE_EDITOR_TOOL_NAME } from "../lib/tutorCodeEditor";
 
 function msg(
   id: string,
@@ -525,6 +529,7 @@ describe("the author's notes stay private", () => {
     const quiet = {
       quietAppUpdate: true,
       directorToolNames: CHARACTER_DIRECTOR_TOOL_NAMES,
+      buildToolNames: new Set<string>(),
     };
     for (const name of CHARACTER_DIRECTOR_TOOL_NAMES) {
       expect(heldTextFateAtTool(name, quiet)).toBe("drop");
@@ -542,5 +547,26 @@ describe("the author's notes stay private", () => {
     ).toBe("drop");
     expect(heldTextFateAtTool("run_app_action", quiet)).toBe("release");
     expect(heldTextFateAtTool(undefined, quiet)).toBe("release");
+  });
+
+  test("a builder's narration before an app build tool is dropped", () => {
+    const build = {
+      quietAppUpdate: false,
+      directorToolNames: CHARACTER_DIRECTOR_TOOL_NAMES,
+      buildToolNames: APP_BUILD_TOOL_NAMES,
+    };
+    for (const name of APP_BUILD_TOOL_NAMES) {
+      expect(heldTextFateAtTool(name, build)).toBe("drop");
+      // Off a builder's Edit turn (no build tools named) it still goes out.
+      expect(
+        heldTextFateAtTool(name, { ...build, buildToolNames: new Set() }),
+      ).toBe("release");
+    }
+    expect(APP_BUILD_TOOL_NAMES.has(CODE_EDITOR_TOOL_NAME)).toBe(true);
+    // Saving an idea is not a build: the sentence the prompt asks for
+    // around park_idea still reaches the scholar.
+    expect(heldTextFateAtTool("park_idea", build)).toBe("release");
+    // The reply after the last edit ends the message without a tool.
+    expect(heldTextFateAtTool(undefined, build)).toBe("release");
   });
 });

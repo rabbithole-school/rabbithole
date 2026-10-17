@@ -40,6 +40,9 @@ export type Topic = {
   /** The target understanding — SAME for both arms (the fairness anchor). */
   learningGoal: string;
   readingLevel?: string;
+  /** The way in the scholar picked; `shape: "build"` is the Build a
+   * simulation card (shared/missionCopy.ts), whose bake ends in an app. */
+  path?: { title: string; blurb: string; shape?: "build" };
 };
 
 export type BakedDesign = {
@@ -66,6 +69,9 @@ export type BakedDesign = {
         notes: string | null;
         criteria: { label: string; description: string | null }[];
       } | null;
+      /** Present on live bakes (convex/bakeEval.ts). */
+      appActivity?: boolean;
+      hasContract?: boolean;
     }[];
   }[];
 };

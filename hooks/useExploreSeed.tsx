@@ -23,7 +23,7 @@ import { useRemote } from "@/hooks/useRemote";
 import { toaster } from "@/lib/toaster";
 import { serverErrorMessage } from "@/lib/serverErrorMessage";
 import { ChoosePathDialog } from "@/components/ChoosePathDialog";
-import { ENDLESS_CHAT } from "@/lib/bakePaths";
+import { bakePathArg, ENDLESS_CHAT } from "@/lib/bakePaths";
 import type {
   ExploreSeedOptions,
   PathChoice,
@@ -66,7 +66,7 @@ export function useExploreSeed() {
         ...(choice === ENDLESS_CHAT
           ? { endlessChat: true }
           : choice
-            ? { bakePath: { title: choice.title, blurb: choice.blurb } }
+            ? { bakePath: bakePathArg(choice) }
             : {}),
       });
       if (result && isCurrent()) router.push(stamp(`/scholar/${result.id}`));

@@ -6,6 +6,11 @@ import { isEnrolledScholar } from "./enrollmentStanding";
 
 export const STAFF_CAPABILITIES = [
   "curriculum:edit",
+  // Run the units you can edit (assign, push/schedule your own assignments,
+  // read their progress, synthetic Preflight). Ownership is the boundary, not
+  // a roster: it confers NO institution lens and NO scholar-record access —
+  // see staffCapabilityInstitutionIds and lib/curriculumRun.ts.
+  "curriculum:run",
   "school:operations",
   "health:manage",
   "program:publish",
@@ -62,6 +67,7 @@ function hasValidScope(
 ) {
   return (
     ((capability === "curriculum:edit" ||
+      capability === "curriculum:run" ||
       capability === "school:operations" ||
       capability === "health:manage" ||
       capability === "admissions:full" ||
@@ -135,6 +141,7 @@ export async function hasActiveInstitutionCapability(
 ): Promise<boolean> {
   if (
     capability !== "curriculum:edit" &&
+    capability !== "curriculum:run" &&
     capability !== "school:operations" &&
     capability !== "health:manage" &&
     capability !== "admissions:full" &&
@@ -232,6 +239,7 @@ export async function authorizedInstitutionIds(
 ): Promise<Set<Id<"institutions">>> {
   if (
     capability !== "curriculum:edit" &&
+    capability !== "curriculum:run" &&
     capability !== "school:operations" &&
     capability !== "health:manage" &&
     capability !== "admissions:full" &&
@@ -448,6 +456,10 @@ export async function staffCapabilityInstitutionIds(
     if (capability === "admissions:full" || capability === "admissions:scheduling") {
       continue;
     }
+    // curriculum:run is ownership-scoped ("run the units you make"): it must
+    // never be the thing that gives a staffer a school lens. Its holder's
+    // lens, if any, comes from curriculum:edit, which it always rides beside.
+    if (capability === "curriculum:run") continue;
     for (const grant of await activeGrantsFor(ctx, userId, capability)) {
       if (
         await hasActiveStaffMembershipAtInstitution(

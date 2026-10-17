@@ -1,15 +1,16 @@
-// The App designer's two steering tools, offered only on a scholar's vibecode
-// Edit turn when the activity carries a MODEL CONTRACT (activities.buildContract;
-// the doctrine is in prompts.ts buildVibecodeSection):
+// The mission tools (TRA-519 B1), offered by missionToolOffer below — any
+// session with a MISSION (lib/mission.ts), in the tutor or the builder stance;
+// the doctrine is in prompts.ts buildTutorMissionSteering and
+// buildVibecodeSection:
 //
-// - park_idea: a request the assignment version will not build yet (no domain
-//   twin, or asked before the contract's gate is met) goes into the session's
-//   PARKING LOT for the scholar's Free play version — visibly, never refused.
-// - stay_silent: with activities.allowSilence, a non-answer to the designer's
-//   standing learning question ends the turn with nothing shown.
+// - park_idea / unpark_idea: an idea not done now (no domain twin, or asked
+//   before the mission's gate is met) is saved for later in the session's
+//   PARKING LOT, where the scholar sees it as a chip — visibly, never refused.
+// - stay_silent: builder only, with activities.allowSilence, a non-answer to
+//   the designer's standing learning question ends the turn with nothing shown.
 //
 // Kept apart from tutorSessionTools.ts and appended AFTER the factory's tools,
-// so every other turn's tool list (and its prompt-cache prefix) is unchanged.
+// so the factory's tool order (and its prompt-cache prefix) is unchanged.
 // Like the factory, this dynamically imports `betaTool` and does no static
 // `@anthropic-ai/sdk` import.
 import type { BetaRunnableTool } from "@anthropic-ai/sdk/lib/tools/BetaRunnableTool.js";
@@ -115,33 +116,51 @@ function contentWords(text: string): string[] {
     .filter((w) => w.length > 1 && !STOP_WORDS.has(w));
 }
 
-/** Which designer tools a turn is offered. Pure, so the gate is testable. */
-export function designerToolOffer(opts: {
-  sessionMode: string | null | undefined;
+/**
+ * Which mission tools a turn is offered (TRA-519 B1). Pure, so the gate is
+ * testable.
+ *
+ * park_idea / unpark_idea follow the prompt's MISSION steering exactly: any
+ * turn of a session with a mission — the tutor stance (a writing, slides, map,
+ * photo or recording activity, a side app, a Quest's planning chat) or the
+ * builder stance on an Edit turn — whoever is typing (a teacher in remote view
+ * included), since that steering tells the model to park. Never a teacher
+ * build, free play (no mission), or Play.
+ *
+ * stay_silent stays builder-only, app-activity-only and teacher-opt-in
+ * (allowSilence): it is tied to the builder's rule that the next build waits
+ * on a standing learning question, and a silent tutor in a writing activity
+ * reads as a dead tutor. It is the owner's only — silence toward anyone else
+ * would read as a dead tutor too — and buildSystemPromptParts renders the
+ * silence branch under the same owner condition.
+ */
+export function missionToolOffer(opts: {
+  /** The session resolves a mission (lib/mission.ts resolveSessionMission). */
+  hasMission: boolean;
+  /** TRA-519: the session takes the builder stance (its app is the work). */
+  builderStance: boolean;
   workshopMode: "edit" | "play";
   teacherBuild: boolean;
-  hasBuildContract: boolean;
+  /** The activity is an app activity (shared/appSurface.ts isAppActivity). */
+  appActivity: boolean;
   allowSilence: boolean;
   callerIsSessionOwner: boolean;
-  /** A free-play session (TRA-489): no contract, nothing to park, no silence. */
+  /** A free-play session (TRA-489): no mission, nothing to park, no silence. */
   freePlay?: boolean;
 }): { parkIdea: boolean; staySilent: boolean } {
-  // park_idea / unpark_idea follow the prompt's contract steering exactly: any
-  // scholar-stance Edit turn under a MODEL CONTRACT, whoever is typing (a
-  // teacher in remote view included), since that steering tells the model to
-  // park. stay_silent is the owner's only — silence toward anyone else would
-  // read as a dead tutor — and buildSystemPromptParts renders the silence
-  // branch under the same owner condition.
-  const designerTurn =
-    opts.sessionMode === "vibecode" &&
-    opts.workshopMode === "edit" &&
+  const parkIdea =
+    opts.hasMission &&
     !opts.teacherBuild &&
     opts.freePlay !== true &&
-    opts.hasBuildContract;
+    opts.workshopMode === "edit";
   return {
-    parkIdea: designerTurn,
+    parkIdea,
     staySilent:
-      designerTurn && opts.callerIsSessionOwner && opts.allowSilence,
+      parkIdea &&
+      opts.builderStance &&
+      opts.appActivity &&
+      opts.allowSilence &&
+      opts.callerIsSessionOwner,
   };
 }
 
@@ -161,7 +180,7 @@ export async function makeDesignerTools(opts: {
       betaTool({
         name: PARK_IDEA_TOOL_NAME,
         description:
-          "Park one of the scholar's ideas for their Free play version, where it waits as a chip they can see. Use it for a request you are not building in this version: one asked before the model contract's gate is met, or one with no domain twin. Text is the idea in the scholar's own words (short); reason is a few plain words a nine-year-old reads easily, e.g. \"after the model runs\". Then tell them in one sentence that it is parked.",
+          "Save one of the scholar's ideas for later, where it waits as a chip they can see. When the activity is done they can build it or make it a Quest. Use it for an idea you are not doing now: one asked before the gate is met, or one with no domain twin. Text is the idea in the scholar's own words (short); reason is a few plain words a nine-year-old reads easily, e.g. \"after your first draft\". Then tell them in one sentence that it is saved for later.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -198,7 +217,7 @@ export async function makeDesignerTools(opts: {
       betaTool({
         name: UNPARK_IDEA_TOOL_NAME,
         description:
-          "Take an idea out of the scholar's parking lot because you are building it now (the gate has been met, or its domain twin is what you are building). Call it in the same turn as the build, before create_code / edit_document, with the idea's text as it was parked.",
+          "Take an idea out of the scholar's saved-for-later list because you are starting it now (the gate has been met, or its domain twin is what you are doing). Call it in the same turn, before you start it (before create_code / str_replace_based_edit_tool when it is a build), with the idea's text as it was saved.",
         inputSchema: {
           type: "object" as const,
           properties: {

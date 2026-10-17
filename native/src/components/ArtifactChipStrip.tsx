@@ -80,9 +80,8 @@ export function ArtifactChipStrip({
 }
 
 function chipIcon(type: string | undefined): SymbolViewProps["name"] {
-  return type === "code"
-    ? "chevron.left.forwardslash.chevron.right"
-    : "doc.text";
+  // A code artifact is the session's app (AppCard), not source to read.
+  return type === "code" ? "macwindow" : "doc.text";
 }
 
 function makeStyles(c: ReturnType<typeof useColors>) {

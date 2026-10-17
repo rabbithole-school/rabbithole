@@ -21,7 +21,7 @@ import {
   toolsForWorkshopMode,
   buildTutorSystemPrompt,
   buildTutorSystemPromptParts,
-  appendTurnContext,
+  layoutTutorRequest,
   injectPendingWhisper,
   rubricCheckInstruction,
   kickoffInstructionForContext,
@@ -38,6 +38,7 @@ import { MODELS } from "./lib/models";
 import {
   TUTOR_REFUSAL_FALLBACK_BETA,
   resolveTutorModel,
+  supportsMidConversationSystem,
   tutorRuntime,
 } from "./lib/tutorModel";
 import { requireAnthropicApiKey } from "./lib/anthropic";
@@ -113,7 +114,10 @@ import { makeScholarReadTools } from "./lib/scholarReadTools";
 import { buildParentAideSystemPrompt, resolveSelectedChildName } from "./lib/parentAidePrompt";
 import { verifyMetaSignature } from "./lib/parentMessageChannels";
 import { geminiGenerateImage, type GeminiPart } from "./lib/gemini";
-import { assembleCurriculumTools } from "./lib/aideTools";
+import {
+  assembleCurriculumTools,
+  staffHoldsCurriculumGrant,
+} from "./lib/aideTools";
 import { CUSTOM_APPS_SYSTEM_PROMPT_SECTION } from "./lib/customAppTools";
 import { SUGGESTION_SYSTEM_PROMPT_SECTION } from "./lib/suggestionTools";
 import { appBaseUrlOrNull } from "./lib/deploymentConfig";
@@ -181,6 +185,7 @@ import {
   buildAideUserContent,
 } from "./lib/aideAttachments";
 import { recordAnthropicUsage, recordImageUsage, recordUnitUsage, recordUsage } from "./usage";
+import { createCacheDiagnosticsTracker } from "./lib/cacheDiagnostics";
 import { emptyUsage, addStartUsage, addDeltaOutput } from "./lib/usage";
 import {
   createScholarVisibleTextFilter,
@@ -210,14 +215,20 @@ import {
 } from "./lib/activityCompletionTool";
 import { makeStaySilentTool } from "./lib/staySilentTool";
 import {
-  designerToolOffer,
+  missionToolOffer,
   makeDesignerTools,
 } from "./lib/designerTools";
 import {
+  APP_BUILD_TOOL_NAMES,
   CHARACTER_DIRECTOR_TOOL_NAMES,
   makeTutorSessionTools,
   type TutorToolSessionState,
 } from "./lib/tutorSessionTools";
+import {
+  clientToolName,
+  CODE_EDITOR_TOOL_NAME,
+  requestedArtifactIdFromToolInput,
+} from "./lib/tutorCodeEditor";
 import { academicCalendarIcs } from "../shared/academicCalendarIcs";
 import {
   authorizeGoogleEventsPush,
@@ -385,7 +396,12 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
     // Fetch session and related data from DB
     const session = await ctx.runQuery(
       internal.sessionHelpers.getSessionContext,
-      { sessionId: sessionId as Id<"sessions"> }
+      {
+        sessionId: sessionId as Id<"sessions">,
+        // The placeholder carries the app the builder had open (TRA-519);
+        // getSessionContext trusts it only for a placeholder of this session.
+        ...(assistantMsgId ? { assistantMsgId: String(assistantMsgId) } : {}),
+      }
     );
 
     if (!session) {
@@ -450,8 +466,8 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
     // The mutation that opened the turn stamped its thread from the same
     // derivation; the stream honors that stamp as the turn's mode of record
     // (so the user row and the assistant row can never land in different
-    // threads) and derives only for an unstamped placeholder. Outside a
-    // vibecode session there is no Play: the turn runs as Edit.
+    // threads) and derives only for an unstamped placeholder. A turn with no
+    // builder thread has no Play: it runs as Edit (lib/workshopPolicy.ts).
     const turnPolicy = await ctx
       .runQuery(internal.workshopPolicy.resolveTurnModeForStream, {
         sessionId: sessionId as Id<"sessions">,
@@ -530,9 +546,9 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
     // to answer, the tutor may choose silence (stay_silent).
     const isAppUpdate = turnPolicy.streamTrigger === "appUpdate";
     const offerStaySilent = isAppUpdate && turnPolicy.appUpdateAskCount === 0;
+    // Clamped only where the turn runs in a builder thread (Edit/Play exists).
     const workshopModeClamped =
-      session.sessionMode === "vibecode" &&
-      workshopMode !== requestedWorkshopMode;
+      turnPolicy.thread !== null && workshopMode !== requestedWorkshopMode;
     if (turnPolicy.stampNeeded && turnPolicy.thread) {
       await ctx.runMutation(internal.sessions.stampTurnThread, {
         sessionId: sessionId as Id<"sessions">,
@@ -557,20 +573,19 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
     // Thread the parsed workshop mode so a Play turn's prompt matches the tools
     // actually offered — Play drops the code tools, so the prompt must not
     // advertise them (G5). `workshopMode` is "edit" for any non-Play request;
-    // the Play lead-in only renders for a vibecode session anyway.
+    // the Play lead-in only renders under the builder stance anyway.
     // callerIsSessionOwner: stay_silent is offered only to the session owner
-    // (designerToolOffer below), so the prompt's silence branch must agree.
+    // (missionToolOffer below), so the prompt's silence branch must agree.
     const promptContext = {
       ...session,
       playMode: workshopMode === "play",
       callerIsSessionOwner: callerUserId === session.scholarId,
     };
-    // Cache-split form: the stable leading prefix (base prompt + the tools array
-    // that precedes `system` in the cache order) is marked `cache_control` so it
-    // reads at ~1/10th rate on every turn after the first. Observer-written
-    // dynamic sections remain in system; minute-varying turn context rides
-    // after the rolling message breakpoint. See buildTutorSystemPromptParts /
-    // cachedSystem.
+    // Cache-split form, ordered by volatility: the stable prefix (cached with
+    // the tools array before it), the turn-1-only remainder, the documents
+    // (cached in their own block), and the per-turn context that rides after
+    // the rolling message breakpoint. See buildTutorSystemPromptParts /
+    // layoutTutorRequest.
     const systemParts = buildTutorSystemPromptParts(promptContext);
 
     const encoder = new TextEncoder();
@@ -620,7 +635,9 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
       maxTokens: tutorMaxTokens,
       effort: tutorEffort,
       refusalFallback: tutorRefusalFallback,
-    } = tutorRuntime(selectedTutorModel, session.sessionMode);
+    } = tutorRuntime(selectedTutorModel, {
+      appBuild: session.appContext.builderFeatures,
+    });
     // A teacher rehearsing an activity (isTestDrive) is staff spend, not the
     // scholar tutor's: bill it under its own source and the caller's real role,
     // so the usage report buckets it with Teachers / Platform-admin instead of
@@ -637,6 +654,14 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
     const tutorFallbackOptions = tutorRefusalFallback
       ? { headers: { "anthropic-beta": TUTOR_REFUSAL_FALLBACK_BETA } }
       : undefined;
+    // Cache diagnostics: every request of this turn names the previous turn's
+    // last response, and the turn's usage row records where the prompt prefix
+    // diverged (lib/cacheDiagnostics.ts). Like `fallbacks`, a plain body field.
+    const tutorCacheDiagnostics = createCacheDiagnosticsTracker(
+      await ctx.runQuery(internal.usage.tutorPreviousResponseId, {
+        sessionId: sessionId as Id<"sessions">,
+      }),
+    );
 
     let cancelled = false;
     let activeMessageStream: { abort: () => void } | null = null;
@@ -695,6 +720,10 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           artifactId: Id<"artifacts">;
           revision: number;
         } | null = null;
+        // create_code ran this turn (TRA-519): a chat session's first app is
+        // recorded as a version too. Out here with the baseline so the error
+        // path records it as well.
+        let createdCodeArtifact = false;
         const stopPredicate = createStreamStopPredicate({
           // A client disconnect is NOT a stop: the scholar's Stop button and a
           // steering send both stop through the database (requestStop /
@@ -747,11 +776,14 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           let lastPersistLength = 0;
           // Content is persisted every ~200 chars, and the FIRST visible text
           // of every placeholder at once, so an empty stored placeholder
-          // reliably means the scholar has seen nothing from it — the rule a
-          // stop, steer, or reap uses to delete it rather than keep it
-          // (sessions.stampLatestStreamingAssistant, TRA-501). Without the
-          // first-text write a young reader's ~40-word reply was never stored
-          // mid-stream, so Stop deleted text the child was reading.
+          // reliably means the scholar has seen nothing from it. A stop or
+          // steer always STAMPS the row (sessions.stampLatestStreamingAssistant;
+          // only an empty quiet app-update placeholder is deleted outright);
+          // an empty stopped row is deleted later by
+          // sessions.reapDeadStoppedPlaceholder once its liveness heartbeat is
+          // stale (TRA-501). Without the first-text write a young reader's
+          // ~40-word reply was never stored mid-stream, so Stop deleted text
+          // the child was reading.
           const shouldPersistContent = () =>
             shouldPersistStreamContent(fullContent.length, lastPersistLength);
           let renderChecksThisTurn = 0;
@@ -760,27 +792,19 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           const canUseRenderChecks = renderChecksEnabled({
             supportsRenderCheck,
             platform,
-            sessionMode: session.sessionMode,
+            builderFeatures: session.appContext.builderFeatures,
           });
 
-          // Prompt-cached system (stable prefix + tools cached).
-          let systemPromptForRun:
-            | string
-            | ReturnType<typeof cachedSystem> = cachedSystem(
-            systemParts.stable,
-            systemParts.dynamic,
-            // TRA-407 measured 91% of tutor turn gaps under five minutes, so
-            // the default 5m cache costs less than the 1h write premium.
-          );
           // Gated tutor-prompt add-ons. Each is OFF by default (env kill-switch)
           // so the live tutor is byte-identical to today; enabling one still
           // requires owner review, while its runtime state is captured in
           // messages.promptVersion. Collected here in two buckets: STATIC
           // sections (constant text, env-gated only) extend the cached `stable`
           // prefix — they are session-stable by construction, so leaving them
-          // in the tail would re-bill them every turn; sections keyed on
-          // per-scholar state extend the DYNAMIC half. Either way the breakpoint
-          // falls between the two halves regardless of how many fire.
+          // in per-turn context would re-bill them every turn; sections keyed on
+          // per-scholar state extend the per-turn context after the rolling
+          // conversation breakpoint (layoutTutorRequest), so a change in them
+          // never invalidates the cached documents or history.
           const stableExtraSections: string[] = [];
           const dynamicExtraSections: string[] = [];
           stableExtraSections.push(buildChatInstructionSection());
@@ -807,18 +831,6 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
               buildCharacterOnStageSection(session.characterContext),
             );
           }
-          if (stableExtraSections.length > 0 || dynamicExtraSections.length > 0) {
-            systemPromptForRun = cachedSystem(
-              stableExtraSections.length > 0
-                ? `${systemParts.stable}\n${stableExtraSections.join("\n")}`
-                : systemParts.stable,
-              dynamicExtraSections.length > 0
-                ? `${systemParts.dynamic}\n${dynamicExtraSections.join("\n")}`
-                : systemParts.dynamic,
-              // TRA-407 measured 91% of tutor turn gaps under five minutes, so
-              // keep the default 5m cache here too.
-            );
-          }
           // Build messages for API (with image support).
           let apiMessages = await assembleProjectStreamApiMessages({
             chatHistory: session.chatHistory,
@@ -827,6 +839,7 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
               session.characterContext?.turns ??
               session.appJudgeContext?.turns,
             characterName: session.characterContext?.name ?? null,
+            appAssetPhotos: session.appContext.builderFeatures,
             resolveImagePart: async (imageId) => {
               const imageUrl = await ctx.runQuery(
                 internal.files.getUrlInternal,
@@ -901,51 +914,39 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
             });
           }
 
-          // Rolling prompt-cache breakpoint on the last user message (TRA-185).
-          // The minute-varying clock and pacing note ride after this marker, so
-          // they no longer invalidate the transcript prefix. Observer-written
-          // dynamic system sections can still churn that prefix. Both system
-          // and conversation breakpoints use the default 5m TTL (TRA-407: 91%
-          // of tutor turn gaps are under five minutes). Must run AFTER every
-          // apiMessages.push above so the marker lands on the last model-visible
-          // user message (an app update placed it before its instruction,
-          // above). The `string` system arm is unreachable today and
-          // keeps the turn context in system as a defensive fallback.
-          let messagesForRun;
-          if (typeof systemPromptForRun === "string") {
-            systemPromptForRun += `\n\n${systemParts.turnContext}`;
-            messagesForRun = apiMessages;
-          } else {
-            if (!systemPromptForRun) {
-              throw new Error("Tutor system prompt was not built");
-            }
-            const messagesWithBreakpoint = breakpointPlaced
-              ? apiMessages
-              : withConversationCacheBreakpoint(apiMessages);
-            const hasUserMessage = messagesWithBreakpoint.some(
-              (message) => message.role === "user",
-            );
-            messagesForRun = appendTurnContext(
-              messagesWithBreakpoint,
-              systemParts.turnContext,
-            );
-            if (!hasUserMessage) {
-              const blocks = [...systemPromptForRun];
-              const last = blocks[blocks.length - 1];
-              if (last && last.type === "text" && !last.cache_control) {
-                blocks[blocks.length - 1] = {
-                  ...last,
-                  text: `${last.text}\n\n${systemParts.turnContext}`,
-                };
-              } else {
-                blocks.push({
-                  type: "text",
-                  text: systemParts.turnContext,
-                });
-              }
-              systemPromptForRun = blocks;
-            }
-          }
+          // Volatility-ordered request (layoutTutorRequest): tools → stable
+          // system [breakpoint] → turn-1-only text → DOCUMENTS [breakpoint] →
+          // history [rolling breakpoint on the last user message, TRA-185] →
+          // per-turn context (learning record, app state, clock, pacing)
+          // appended after it. A turn that edits nothing reads the app code and
+          // the history from cache; only the newest exchange and the per-turn
+          // context are new input. Every breakpoint uses the default 5m TTL
+          // (TRA-407: 91% of tutor turn gaps are under five minutes). Must run
+          // AFTER every apiMessages.push above so the marker lands on the last
+          // model-visible user message (an app update placed it before its
+          // instruction, above).
+          const tutorRequest = layoutTutorRequest({
+            stable:
+              stableExtraSections.length > 0
+                ? `${systemParts.stable}\n${stableExtraSections.join("\n")}`
+                : systemParts.stable,
+            dynamic: systemParts.dynamic,
+            documents: systemParts.documents,
+            turnSystem:
+              dynamicExtraSections.length > 0
+                ? `${systemParts.turnSystem}\n${dynamicExtraSections.join("\n")}`
+                : systemParts.turnSystem,
+            turnContext: systemParts.turnContext,
+            messages: apiMessages,
+            conversationBreakpointPlaced: breakpointPlaced,
+            midConversationSystem:
+              supportsMidConversationSystem(selectedTutorModel),
+          });
+          const systemPromptForRun = tutorRequest.system;
+          // The trailing role:"system" message postdates the pinned SDK's
+          // MessageParam type; the API accepts it on every tutor model
+          // (lib/tutorModel.supportsMidConversationSystem).
+          const messagesForRun = tutorRequest.messages as typeof apiMessages;
 
           // Split the assistant message at a tool boundary: finalize the text
           // streamed so far into its own bubble, drop a tool chip, and open a
@@ -1025,7 +1026,7 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           let activityCompletedThisStream = false;
           // stay_silent ran this turn. ONE tool of that name per turn: an app
           // update with no asks offers lib/staySilentTool.ts, a scholar's
-          // vibecode Edit turn under a contract offers lib/designerTools.ts's,
+          // builder-stance Edit turn under a contract offers lib/designerTools.ts's,
           // never both (see the tool assembly below). Until the model's first
           // tool decision, its text is HELD rather than streamed: if that
           // decision is stay_silent the held text is dropped, so nothing
@@ -1116,6 +1117,8 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
             set suppressCompletionFollowUp(v) { suppressCompletionFollowUp = v; },
             get activityCompletedThisStream() { return activityCompletedThisStream; },
             set activityCompletedThisStream(v) { activityCompletedThisStream = v; },
+            get createdCodeArtifact() { return createdCodeArtifact; },
+            set createdCodeArtifact(v) { createdCodeArtifact = v; },
           };
           const tools = await makeTutorSessionTools(ctx, emit, {
             session,
@@ -1166,13 +1169,8 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                 (!previous || previous.content !== artifact.content)
               );
             });
-            const requestedId =
-              input &&
-              typeof input === "object" &&
-              "document_id" in input &&
-              typeof input.document_id === "string"
-                ? input.document_id
-                : null;
+            // edit_document names a document_id; the app editor a path.
+            const requestedId = requestedArtifactIdFromToolInput(input);
             return (
               (requestedId
                 ? changed.find(
@@ -1217,7 +1215,8 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           ): BetaRunnableTool => {
             if (
               tool.name !== "create_code" &&
-              tool.name !== "edit_document"
+              tool.name !== "edit_document" &&
+              tool.name !== CODE_EDITOR_TOOL_NAME
             ) {
               return tool;
             }
@@ -1309,18 +1308,21 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           const runnableTools: readonly BetaRunnableTool[] =
             toolsForWorkshopMode(tools, workshopMode);
           const toolsForRun = runnableTools.map(withRenderCheck);
-          // App designer steering (lib/designerTools.ts): park_idea /
-          // unpark_idea on any scholar-stance vibecode Edit turn under a MODEL
-          // CONTRACT (the condition the prompt's contract section renders
-          // under), and stay_silent only for the session owner with
-          // allowSilence (the prompt's silence branch uses the same owner test
-          // via promptContext.callerIsSessionOwner). Appended after the factory's tools so every
-          // other turn's tool list (and cache prefix) is unchanged.
-          const designerOffer = designerToolOffer({
-            sessionMode: session.sessionMode,
+          // Mission steering (TRA-519 B1, lib/designerTools.ts):
+          // park_idea / unpark_idea on any turn of a session with a MISSION —
+          // tutor stance, or builder stance in Edit — the condition the
+          // prompt's MISSION section / contract steering renders under; and
+          // stay_silent only on a builder-stance app activity, for the
+          // session owner, with allowSilence (the prompt's silence branch uses
+          // the same owner test via promptContext.callerIsSessionOwner).
+          // Appended after the factory's tools so the factory's tool order
+          // (and cache prefix) is unchanged.
+          const designerOffer = missionToolOffer({
+            hasMission: session.mission != null,
+            builderStance: session.appContext.builderStance,
             workshopMode,
             teacherBuild: isTeacherBuildContext(session),
-            hasBuildContract: !!session.lessonActivityContext?.buildContract,
+            appActivity: session.lessonActivityContext?.kind === "vibecode",
             allowSilence: session.lessonActivityContext?.allowSilence === true,
             callerIsSessionOwner: callerUserId === session.scholarId,
             freePlay: session.freePlay === true,
@@ -1358,19 +1360,38 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
               }),
             );
           }
+          // A builder's Edit turn holds EVERY message's text until that
+          // message's tool decision, and an app build tool drops it: the
+          // model writes "Now the lava rules: ..." between edits whatever the
+          // prompt says, and each tool's stream split would show it as its
+          // own bubble. The reply after the last edit ends without a tool and
+          // is released whole.
+          const holdBuildNarration =
+            session.appContext.builderStance && workshopMode !== "play";
+          const buildToolNames: ReadonlySet<string> = holdBuildNarration
+            ? APP_BUILD_TOOL_NAMES
+            : new Set();
           // The designer's hold covers the turn's FIRST message only (later
-          // messages stream as usual); an app update re-arms it on every
-          // message (below).
-          let holdingText = designerStaySilent || offerStaySilent;
+          // messages stream as usual); an app update or a builder's Edit turn
+          // re-arms it on every message (below).
+          let holdingText =
+            designerStaySilent || offerStaySilent || holdBuildNarration;
 
           // App designer: capture the pre-turn app baseline so the stream
           // commit path can record a version only when THIS turn changed the
-          // app (server-side recording + autosave — F3/F4/F11). Vibecode +
-          // Edit only — Play never records or autosaves (F9).
-          if (session.sessionMode === "vibecode" && workshopMode !== "play") {
+          // app (server-side recording + autosave — F3/F4/F11). Any session
+          // with an app (TRA-519), Edit only — Play never records or
+          // autosaves (F9). A session with no app yet has no baseline: a
+          // create_code this turn records from nothing.
+          if (session.appContext.hasApp && workshopMode !== "play") {
             turnAppBaseline = await ctx.runQuery(
               internal.codeArtifactRevisions.newestCodeArtifactBaseline,
-              { sessionId: projId },
+              {
+                sessionId: projId,
+                ...(session.focusAppId
+                  ? { focusArtifactId: session.focusAppId }
+                  : {}),
+              },
             );
           }
 
@@ -1393,6 +1414,7 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                 ? { output_config: { effort: tutorEffort } }
                 : {}),
               ...tutorFallbackBody,
+              ...tutorCacheDiagnostics.requestBody,
             }, tutorFallbackOptions);
 
             // Nested iteration: outer = turns, inner = streaming events.
@@ -1413,7 +1435,7 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                 }
                 // An app update holds each message's text until that
                 // message's first tool decision.
-                if (offerStaySilent) holdingText = true;
+                if (offerStaySilent || holdBuildNarration) holdingText = true;
                 try {
                   for await (const event of messageStream) {
                     if (await checkStop()) {
@@ -1424,25 +1446,28 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                       event.type === "content_block_start" &&
                       event.content_block?.type === "tool_use"
                     ) {
-                      if (await checkStop(true)) {
-                        messageStream.abort();
-                        break streamLoop;
-                      }
-                      toolBlockOpen = true;
                       const toolName = (
                         event.content_block as { name?: string }
                       ).name;
+                      // Decide the held text before the stop check, so a stop
+                      // here still drops narration (and keeps a real line).
                       if (holdingText) {
                         holdingText = false;
                         if (
                           heldTextFateAtTool(toolName, {
                             quietAppUpdate: offerStaySilent,
                             directorToolNames: CHARACTER_DIRECTOR_TOOL_NAMES,
+                            buildToolNames,
                           }) === "drop"
                         ) {
                           heldText = "";
                         } else releaseHeldText();
                       }
+                      if (await checkStop(true)) {
+                        messageStream.abort();
+                        break streamLoop;
+                      }
+                      toolBlockOpen = true;
                       flushSafeText();
                       if (toolName === MARK_ACTIVITY_COMPLETE_TOOL_NAME) {
                         completionHadPreToolText = !!fullContent.trim();
@@ -1463,7 +1488,9 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                       ) {
                         enqueue(
                           encoder.encode(
-                            sseEvent({ toolStart: { name: toolName } }),
+                            // The app editor goes out as edit_document,
+                            // the name both clients already know.
+                            sseEvent({ toolStart: { name: clientToolName(toolName) } }),
                           ),
                         );
                       }
@@ -1480,6 +1507,7 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                       currentAssistantStopReason = null;
                       model = event.message.model;
                       addStartUsage(tutorUsage, event.message.usage);
+                      tutorCacheDiagnostics.observe(event.message);
                       // Backstop: never glue two model messages into one row.
                       // `fullContent` is a closure variable that survives across
                       // toolRunner iterations, and each tool's run() is expected
@@ -1580,6 +1608,12 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
             } finally {
               activeMessageStream = null;
             }
+            // A stop or cancel leaves the loop before a held message reaches
+            // its tool decision or its end. What it said so far was speech, not
+            // narration (no build tool followed), so keep it, as a streamed
+            // reply keeps its partial text on a stop.
+            if (holdingText && !silenced) releaseHeldText();
+            holdingText = false;
           } else {
             // No tools: simple streaming (no tool runner needed)
             const anthropicStream = anthropic.messages.stream({
@@ -1591,6 +1625,7 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                 ? { output_config: { effort: tutorEffort } }
                 : {}),
               ...tutorFallbackBody,
+              ...tutorCacheDiagnostics.requestBody,
             }, tutorFallbackOptions);
 
             activeMessageStream = anthropicStream;
@@ -1606,6 +1641,7 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                   if (event.type === "message_start") {
                     model = event.message.model;
                     addStartUsage(tutorUsage, event.message.usage);
+                    tutorCacheDiagnostics.observe(event.message);
                     // Heartbeat: proof-of-life before any text streams (see the
                     // tools-path message_start above and the reap in sendMessage).
                     await ctx.runMutation(
@@ -1678,6 +1714,8 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
             model: model || selectedTutorModel,
             usage: tutorUsage,
             sessionId: projId,
+            cacheMissAt: tutorCacheDiagnostics.cacheMissAt,
+            responseId: tutorCacheDiagnostics.lastResponseId,
           });
           usageRecorded = true;
 
@@ -1720,12 +1758,18 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
               sessionId: projId,
               messageId: assistantMsgId as Id<"messages">,
               callerUserId: session.scholarId,
-              sessionMode: session.sessionMode,
+              // TRA-519: any session with an app, or one whose create_code ran
+              // this turn, records its app versions.
+              appBuild:
+                session.appContext.builderFeatures || createdCodeArtifact,
               workshopMode,
               ...(turnAppBaseline
                 ? { baselineArtifactId: turnAppBaseline.artifactId }
                 : {}),
               baselineRevision: turnAppBaseline?.revision ?? -1,
+              ...(session.focusAppId
+                ? { focusArtifactId: session.focusAppId }
+                : {}),
             },
           );
 
@@ -1761,6 +1805,8 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
               model: model || selectedTutorModel,
               usage: tutorUsage,
               sessionId: projId,
+              cacheMissAt: tutorCacheDiagnostics.cacheMissAt,
+              responseId: tutorCacheDiagnostics.lastResponseId,
             });
           }
           if (!cancelled) {
@@ -1780,12 +1826,18 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
               sessionId: projId,
               messageId: assistantMsgId as Id<"messages">,
               callerUserId: session.scholarId,
-              sessionMode: session.sessionMode,
+              // TRA-519: any session with an app, or one whose create_code ran
+              // this turn, records its app versions.
+              appBuild:
+                session.appContext.builderFeatures || createdCodeArtifact,
               workshopMode,
               ...(turnAppBaseline
                 ? { baselineArtifactId: turnAppBaseline.artifactId }
                 : {}),
               baselineRevision: turnAppBaseline?.revision ?? -1,
+              ...(session.focusAppId
+                ? { focusArtifactId: session.focusAppId }
+                : {}),
             },
           );
           await releaseLeaseBeforeClosingStream({
@@ -2900,7 +2952,7 @@ To author from scratch in one go: \`create_unit\` → \`create_scholar_lesson\` 
 
 **A new unit is unpublished.** What \`create_unit\` makes is visible to teachers only: scholars do not see it in Start a Quest and cannot start it. Assigning it (\`assign_unit\`, or placing it on a schedule) publishes it automatically. If the teacher wants scholars to find it on their own without an assignment, call \`publish_unit\`; tell the teacher which state the unit is in when you hand it back.
 
-**Activity kind.** \`create_scholar_activity\` takes a \`kind\`: \`online\` (default — an AI-tutor session), \`offline\` (a teacher-run classroom task), or \`vibecode\` (a full-screen app-builder workshop where the scholar directs an AI builder to make a live web app — its \`systemPrompt\` is the BUILD BRIEF, not a tutor prompt). Reach for \`kind:"vibecode"\` whenever the teacher wants scholars to make/build/"vibecode" something interactive — don't default it to a generic online chat.
+**Activity kind.** \`create_scholar_activity\` takes a \`kind\`: \`online\` (default — an AI-tutor session), \`offline\` (a teacher-run classroom task), or \`app\` (an app activity: an online activity with app settings, where the scholar directs an AI builder to make a live web app in the full-screen app builder — its \`systemPrompt\` is the BUILD BRIEF, not a tutor prompt, and the app is its deliverable; \`vibecode\` is the older name). Reach for \`kind:"app"\` whenever the teacher wants scholars to make/build/"vibecode" something interactive — don't default it to a generic online chat. Any online activity's tutor can also build a side app on request, so an app activity is for when the app IS the work.
 
 **On deliverables (READ THIS):** an ONLINE \`create_scholar_activity\` REQUIRES exactly one evaluation shape: a \`deliverable\` when the scholar produces a document/product, OR an \`advanceRubric\` when readiness is demonstrated in conversation with no document. A deliverable's \`criteria\` array is a private quality map for the tutor, NOT a scholar checklist or a completion gate. The AI gives each criterion a "not"/"half"/"full" verdict; a full criterion permanently awards it as scholar-visible flair, with its label and description shown together, while half/not-full verdicts remain private. Advance-rubric all-full still completes the activity. Criteria written only into systemPrompt are decorative — they cannot award flair or complete an advance rubric. Use 3-6 concrete DIMENSIONAL criteria, each with { label, description }.
 
@@ -3048,11 +3100,14 @@ http.route({
     // records — roster, mastery, or the per-scholar write tools, all of which
     // resolve a scholar by name and would expose the roster.
     const canSeeScholarData = isTeacherRole(caller.role);
-    // Designing GENERAL curriculum (the create_unit tool) is open to the
-    // broader teacher/admin/curriculum_designer set — it writes no scholar
-    // data. Mirrors the same gate in lib/aideTools.
+    // Designing GENERAL curriculum (create_unit + lesson/activity authoring)
+    // is open to the broader teacher/admin/curriculum_designer set, plus base
+    // staff holding a `curriculum:edit` grant — it writes no scholar data.
+    // Mirrors the same gate in lib/aideTools.
     const canDesignCurriculum =
-      isTeacherRole(caller.role) || caller.role === ROLES.CURRICULUM_DESIGNER;
+      isTeacherRole(caller.role) ||
+      caller.role === ROLES.CURRICULUM_DESIGNER ||
+      (await staffHoldsCurriculumGrant(ctx, caller.role, callerUserId));
 
     // Prefer session-based context; fall back to legacy scholarId-based context
     const context = sessionId
@@ -3211,7 +3266,7 @@ http.route({
           "## Your role here: curriculum design only",
           "You are working with a CURRICULUM DESIGNER, not a teacher. You have NO access to scholar records — no roster, profiles, mastery, signals, seeds, observations, or documents, and no tools to look any of that up. Disregard every instruction above about looking up scholars or grounding work in student data.",
           "Do not offer to pull up a scholar and do not claim you can. If asked about a specific scholar, say that scholar data lives in the teacher tools and isn't available in the design assistant.",
-          `Your tools are list_units, get_unit_details, and create_unit (create a new general curriculum unit). Help with general curriculum design — units, lessons, activities, building blocks, Bloom's levels, rubrics, and ${aideProfile.shortName} pedagogy. Per-scholar authoring happens in the unit designer.`,
+          `Your curriculum tools find units (list_units, get_unit_details), create a new general unit (create_unit), and fill it with lessons and activities (create_scholar_lesson, move_lesson, create_scholar_activity and the dedicated activity-kind tools) — always by unitId or lessonId, never by scholar name. Help with general curriculum design — units, lessons, activities, building blocks, Bloom's levels, rubrics, and ${aideProfile.shortName} pedagogy. Quests (a scholar's own independent study) are teacher-only.`,
         ].join("\n"),
       );
     }

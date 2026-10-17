@@ -6,13 +6,14 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { buildObserverSystemPrompt } from "./prompts";
 import { resolveObserverOrigin } from "./lib/observerOrigin";
-import { MODELS } from "./lib/models";
+import { OBSERVER_MODEL } from "./lib/models";
 import { recordAnthropicUsage } from "./usage";
 import { ROLES } from "./lib/roles";
 import {
-  OBSERVER_TOOL,
+  buildObserverRequest,
   buildObserverTranscript,
   buildObserverUserMessage,
+  createObserverMessage,
   parseObserverResponse,
 } from "./lib/observerShared";
 import { conceptLabelsNearDuplicate, AUTO_MERGE_THRESHOLD } from "./lib/conceptLabels";
@@ -204,7 +205,7 @@ export const run = internalAction({
     if (offset > 0) sessions = sessions.slice(offset);
     if (args.limit !== undefined) sessions = sessions.slice(0, args.limit);
 
-    const observerModel = process.env.OBSERVER_MODEL || MODELS.SONNET;
+    const observerModel = OBSERVER_MODEL;
     const { default: Anthropic } = await import("@anthropic-ai/sdk");
     const anthropic = new Anthropic();
 
@@ -248,22 +249,24 @@ export const run = internalAction({
 
       const observations: typeof proposed = [];
       try {
-        const response = await anthropic.messages.create({
-          model: observerModel,
-          max_tokens: 4096,
-          system: buildObserverSystemPrompt(context.institutionProfile),
-          tools: [OBSERVER_TOOL],
-          tool_choice: { type: "tool", name: "record_observations" },
-          messages: [{ role: "user", content: userMessage }],
-        });
-        await recordAnthropicUsage(ctx, {
-          source: "mastery-rederive",
-          role: ROLES.SCHOLAR,
-          model: observerModel,
-          usage: response.usage,
-          sessionId: s.sessionId as Id<"sessions">,
-          institutionId,
-        });
+        const response = await createObserverMessage(
+          () =>
+            anthropic.messages.create(
+              buildObserverRequest({
+                system: buildObserverSystemPrompt(context.institutionProfile),
+                userContent: userMessage,
+              }),
+            ),
+          (r) =>
+            recordAnthropicUsage(ctx, {
+              source: "mastery-rederive",
+              role: ROLES.SCHOLAR,
+              model: observerModel,
+              usage: r.usage,
+              sessionId: s.sessionId as Id<"sessions">,
+              institutionId,
+            }),
+        );
         const result = parseObserverResponse(response.content);
         const obs = result?.observations ?? [];
 

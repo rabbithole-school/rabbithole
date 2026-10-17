@@ -50,7 +50,14 @@ vi.mock("@/convex/_generated/api", () => ({
       unmarkComplete: "activityCompletions.unmarkComplete",
     },
     lessons: { getPublic: "lessons.getPublic" },
-    sessions: { create: "sessions.create", get: "sessions.get", list: "sessions.list" },
+    sessions: {
+      create: "sessions.create",
+      get: "sessions.get",
+      list: "sessions.list",
+      startFreePlay: "sessions.startFreePlay",
+      questFromParkedIdea: "sessions.questFromParkedIdea",
+    },
+    quests: { appendBuildStep: "quests.appendBuildStep" },
     units: { get: "units.get" },
   },
 }));

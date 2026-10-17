@@ -18,6 +18,7 @@ import {
   internalQuery,
   type ActionCtx,
 } from "../_generated/server";
+import { isAppActivity } from "../../shared/appSurface";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import { makeFunctionReference } from "convex/server";
@@ -40,7 +41,7 @@ import {
   type RawBotDeliverable,
   type RawBotAdvanceRubric,
 } from "./botTools";
-import { normalizeBuildContract, parseBuildContractArg } from "./buildContract";
+import { parseBuildContractArg } from "./buildContract";
 import {
   makeScholarReadTools,
   makeListScholarGroupsTool,
@@ -545,6 +546,7 @@ export async function assembleUnitDesignerTools(
     callerUserId: teacherId,
     currentUnit: unitTitle ? { id: unitId, title: unitTitle } : null,
     allowedScholarIds,
+    institutionScope,
   });
 
   const readUnitStructureTool = betaTool({
@@ -591,7 +593,7 @@ export async function assembleUnitDesignerTools(
                   ? " 🖼️slides"
                   : "";
               const recipeMark = a.recipe ? ` [recipe: ${a.recipe}]` : "";
-              const line = `        ${i + 1}. [${a.kind}] ${a.title}${a.description ? `: ${a.description}` : ""}${promptMark}${deckMark}${recipeMark} (activityId: ${a._id})`;
+              const line = `        ${i + 1}. [${isAppActivity(a) ? "app" : a.kind}] ${a.title}${a.description ? `: ${a.description}` : ""}${promptMark}${deckMark}${recipeMark} (activityId: ${a._id})`;
               if (!input.includeActivityDetails) return [line];
               const detail: string[] = [line];
               if (a.systemPrompt) {
@@ -898,10 +900,11 @@ export async function assembleUnitDesignerTools(
       "Add a new activity to a lesson.\n\n" +
       "Online activities (kind='online') drive a Rabbithole AI tutor session. They REQUIRE EITHER a deliverable OR an advanceRubric (never both):\n" +
       "  • deliverable { kind, prompt, criteria } — when the scholar produces an ARTIFACT/product, including a map that is itself the work. Its criteria are a private quality map for the tutor, NOT a scholar checklist or a completion gate (criteria in systemPrompt are decorative). The AI verdicts each 'not'/'half'/'full'; a full criterion permanently awards it as scholar-visible flair, with its label and description shown together, while half/not-full remain private. Distill the teacher's quality bar into 3-6 concrete dimensional criteria.\n" +
+      "  • MISSION — every online activity with a deliverable ALSO gets a buildContract with a `gate` (the first thing the scholar must make before side ideas get built, usually 'a first draft of X exists') and `freedoms` (what the scholar owns: topic choice, characters, look). No `invariants` on a non-app activity: must-be-true items go in the deliverable's criteria. Never ask the teacher how tangents should be handled.\n" +
       "  • advanceRubric { criteria } — when the learning happens IN CONVERSATION with NO produced artifact: a Socratic discussion or an interactive map/geography discovery activity. The tutor grades the scholar's talk + map interactions against the criteria and a full pass completes the activity. For a geography/map activity, use advanceRubric when the learning is the discovery sequence; use deliverable kind 'map' only when the saved map itself is the product scholars should check or send.\n\n" +
       "Make criteria DIMENSIONAL (specificity, length, structure, evidence; or 'located the places', 'explained the why', 'transferred the pattern') — not procedural (drafted, revised, published). Never write a criterion about spelling, punctuation, capitalization, handwriting or typing unless the activity is explicitly about spelling or typing (scholars may dictate, and dictated work earns full credit). Give each a short label and put the concrete quality bar in its description. Vague criteria produce vague verdicts.\n\n" +
       "Offline activities (kind='offline') are teacher-planned classroom moments — lab demos, discussions, worksheets. No tutor session or evaluation shape.\n\n" +
-      "Vibecode activities (kind='vibecode'): the systemPrompt is the BUILD BRIEF, and you ALWAYS also write a buildContract (2–3 testable invariants, the scholar's freedoms, one gate) with allowSilence: true — see the buildContract property. Never ask the teacher how off-topic scholar ideas should be handled. Set scholarEdit too: `build` when scholars make/remix the app (the default when omitted), `play` when they only use it — ask the teacher one short question first if it's genuinely unclear.\n\n" +
+      "App activities (kind='app'; 'vibecode' is the older name) are online activities with app settings: scholars build or use an app in the full-screen app builder, and the app is the deliverable (no other evaluation shape). Any online activity's tutor can also build a scholar a side app on request, so make an app activity only when the app IS the work. The systemPrompt is the BUILD BRIEF, and you ALWAYS also write a buildContract (2–3 testable invariants, the scholar's freedoms, one gate) with allowSilence: true — see the buildContract property. Never ask the teacher how off-topic scholar ideas should be handled. Set scholarEdit too: `build` when scholars make/remix the app (the default when omitted), `play` when they only use it — ask the teacher one short question first if it's genuinely unclear.\n\n" +
       "TWO AUDIENCES — keep them separate: `description` is teacher-facing (design intent, facilitation notes; the tutor also reads it) and is NEVER shown to scholars; `scholarDescription` is the scholar-facing card blurb, written TO the scholar in the 2nd person and free of any pedagogy/assessment framing. Author both when you know them.\n\n" +
       "CONVERSATION RECIPE (recipe='baseline' | 'exitTicket'): mark an activity as the unit's pre/post understanding assessment of its essential questions / enduring understandings. 'baseline' opens the unit (surface current thinking, no teaching); 'exitTicket' closes it (revisit the EQs, show growth). Works for BOTH kinds: an ONLINE recipe runs through the tutor; an OFFLINE recipe assesses the scholar's uploaded written work (typed or scanned). Both feed the teacher's Understanding grid. Only set a recipe when the teacher wants a stealth assessment activity — most activities have no recipe. Requires the unit to have essential questions / enduring understandings set.",
     inputSchema: {
@@ -911,8 +914,8 @@ export async function assembleUnitDesignerTools(
         title: { type: "string" as const, description: "Short activity title — just the title, with NO leading sequence number or category/type prefix (e.g. 'Blood typing demo', not '2. Blood typing demo', 'Connection 1: ...', or 'Project 3: ...')." },
         description: { type: "string" as const, description: "TEACHER-FACING description: design intent + facilitation notes, and (for online activities) context the AI tutor reads. NEVER shown to scholars. This is NOT the scholar's card copy — use scholarDescription for what the scholar reads." },
         scholarDescription: { type: "string" as const, description: "SCHOLAR-FACING blurb shown on the scholar's home card and activity nav. Write TO the scholar, 2nd person, invitational and concrete (e.g. \"You'll design a terrarium, then predict what happens when a species disappears\"). Do NOT reveal pedagogy or assessment framing — never mention 'stealth pre-assessment', 'baseline', 'exit ticket', rubrics, or 'we're measuring'. Optional; if omitted the scholar sees a title-only card (there is no fallback to the teacher description)." },
-        kind: { type: "string" as const, enum: ["online", "offline", "vibecode", "simulator"] as const, description: "online = AI tutor session; offline = classroom task; vibecode = full-screen app-builder workshop (systemPrompt is the BUILD BRIEF) — scholars BUILD an app themselves; world = a Simulator activity (fixed-physics terrarium: ecosystem grid or prisoner's dilemma) the scholar TUNES. A 'simulation/game/model' ask is ambiguous between vibecode and a Simulator — ask which before assuming. To author a Simulator, DON'T use this tool — use create_simulator_activity (it sets the required simulatorSpec). A Simulator made here would be an empty Draft. A Simulator is NOT a map or a build-your-own place/civilization — see list_simulator_templates." },
-        systemPrompt: { type: "string" as const, description: "For online = the AI tutor system prompt. For vibecode = the BUILD BRIEF (what the scholar should build + the learning goal). Ignored for offline/Simulator. Quality criteria DON'T belong here; they belong in deliverable.criteria." },
+        kind: { type: "string" as const, enum: ["online", "offline", "app", "vibecode", "simulator"] as const, description: "online = AI tutor session; offline = classroom task; app = an app activity (online with app settings; systemPrompt is the BUILD BRIEF) — scholars BUILD an app themselves in the full-screen app builder; vibecode = the older name for app; world = a Simulator activity (fixed-physics terrarium: ecosystem grid or prisoner's dilemma) the scholar TUNES. A 'simulation/game/model' ask is ambiguous between an app activity and a Simulator — ask which before assuming. To author a Simulator, DON'T use this tool — use create_simulator_activity (it sets the required simulatorSpec). A Simulator made here would be an empty Draft. A Simulator is NOT a map or a build-your-own place/civilization — see list_simulator_templates." },
+        systemPrompt: { type: "string" as const, description: "For online = the AI tutor system prompt. For app = the BUILD BRIEF (what the scholar should build + the learning goal). Ignored for offline/Simulator. Quality criteria DON'T belong here; they belong in deliverable.criteria." },
         tutorModel: tutorModelSchemaFragment(),
         processId: { type: "string" as const, description: "Process ID (only for online activities)" },
         durationMinutes: { type: "number" as const, description: "Expected duration in minutes" },
@@ -929,6 +932,16 @@ export async function assembleUnitDesignerTools(
     run: async (input) => {
       const f = await findLesson(input.lessonTitle);
       if (!f.ok) return f.error;
+      // "app" (or its older name "vibecode") travels to the write path as
+      // kind "vibecode", which every write path normalizes to an online
+      // activity with app settings (TRA-519).
+      const isApp = input.kind === "app" || input.kind === "vibecode";
+      const kind = (isApp ? "vibecode" : input.kind) as
+        | "online"
+        | "offline"
+        | "shareBack"
+        | "vibecode"
+        | "simulator";
       const deliverable = parseDeliverableArg(
         input.deliverable as RawBotDeliverable | undefined,
       );
@@ -943,11 +956,9 @@ export async function assembleUnitDesignerTools(
           title: input.title,
           description: input.description,
           scholarDescription: input.scholarDescription,
-          kind: input.kind as "online" | "offline" | "shareBack" | "vibecode" | "simulator",
+          kind,
           systemPrompt:
-            input.kind === "online" || input.kind === "vibecode"
-              ? input.systemPrompt
-              : undefined,
+            input.kind === "online" || isApp ? input.systemPrompt : undefined,
           tutorModel: input.tutorModel as
             | "sonnet"
             | "fable"
@@ -959,9 +970,8 @@ export async function assembleUnitDesignerTools(
           deliverable,
           advanceRubric,
           recipe: input.recipe as "baseline" | "exitTicket" | undefined,
-          buildContract: rawContract
-            ? normalizeBuildContract(rawContract)
-            : undefined,
+          // The mutation normalizes per activity shape (lib/buildContract.ts).
+          buildContract: rawContract ?? undefined,
           allowSilence: input.allowSilence === true ? true : undefined,
           assessesWritingMechanics:
             input.assessesWritingMechanics === true ? true : undefined,
@@ -987,9 +997,9 @@ export async function assembleUnitDesignerTools(
         },
       });
       // Be honest about what actually persisted, so the bot doesn't narrate a
-      // rich tutor/build prompt it never saved. An online/vibecode activity
+      // rich tutor/build prompt it never saved. An online or app activity
       // with no systemPrompt is a stub until a prompt is generated.
-      const needsPrompt = input.kind === "online" || input.kind === "vibecode";
+      const needsPrompt = input.kind === "online" || isApp;
       const gotPrompt = Boolean(
         typeof input.systemPrompt === "string" && input.systemPrompt.trim(),
       );
@@ -1004,7 +1014,7 @@ export async function assembleUnitDesignerTools(
         note =
           " NOTE: this is an EMPTY Simulator (a Draft) — it has no physics/spec. Call create_simulator_activity (or update_simulator_spec on this activity) with a real simulatorSpec, or it won't run.";
       }
-      return `Activity "${input.title}" (${input.kind}) created on lesson "${f.lesson.title}".${note}`;
+      return `Activity "${input.title}" (${isApp ? "app" : input.kind}) created on lesson "${f.lesson.title}".${note}`;
     },
   });
 
@@ -1059,8 +1069,8 @@ export async function assembleUnitDesignerTools(
         title: { type: "string" as const, description: "New title — just the title, no leading number or category prefix" },
         description: { type: "string" as const, description: "New TEACHER-FACING description (design intent + facilitation notes; the tutor reads it for online activities; never shown to scholars). NOT the scholar's card copy — use scholarDescription for that. Pass an empty string to clear it." },
         scholarDescription: { type: "string" as const, description: "New SCHOLAR-FACING card blurb — 2nd person, invitational, concrete, with no pedagogy/assessment framing (no 'stealth pre-assessment', 'baseline', rubrics). Pass an empty string to clear it (cleared = scholars see a title-only card, no fallback)." },
-        kind: { type: "string" as const, enum: ["online", "offline", "vibecode", "simulator"] as const, description: "Switch the activity kind (online / offline / vibecode / Simulator; use `world` for the Simulator identifier)." },
-        systemPrompt: { type: "string" as const, description: "New system prompt — the tutor prompt for online, the BUILD BRIEF for vibecode." },
+        kind: { type: "string" as const, enum: ["online", "offline", "app", "vibecode", "simulator"] as const, description: "Switch the activity kind (online / offline / app / Simulator; use `world` for the Simulator identifier). app = an app activity (online with app settings; vibecode is its older name); online on an app activity turns its app settings off." },
+        systemPrompt: { type: "string" as const, description: "New system prompt — the tutor prompt for online, the BUILD BRIEF for an app activity." },
         processId: { type: "string" as const, description: "New process ID (empty string clears)" },
         durationMinutes: { type: "number" as const, description: "New duration in minutes" },
         deliverable: deliverableSchemaFragment(),
@@ -1085,7 +1095,18 @@ export async function assembleUnitDesignerTools(
       if (input.description !== undefined) patch.description = input.description || null;
       if (input.scholarDescription !== undefined)
         patch.scholarDescription = input.scholarDescription || null;
-      if (input.kind !== undefined) patch.kind = input.kind;
+      if (input.kind !== undefined) {
+        // app (or vibecode) → the write path's app-activity input; online on an
+        // app activity explicitly turns the app settings off (TRA-519).
+        if (input.kind === "app" || input.kind === "vibecode") {
+          patch.kind = "vibecode";
+        } else {
+          patch.kind = input.kind;
+          if (input.kind === "online" && isAppActivity(f.activity)) {
+            patch.appActivity = false;
+          }
+        }
+      }
       if (input.systemPrompt !== undefined) patch.systemPrompt = input.systemPrompt || null;
       if (input.processId !== undefined)
         patch.processId = input.processId ? (input.processId as Id<"processes">) : null;
@@ -1097,11 +1118,11 @@ export async function assembleUnitDesignerTools(
       if (input.assessesWritingMechanics !== undefined)
         patch.assessesWritingMechanics = input.assessesWritingMechanics === true;
       try {
-        // Model contract (vibecode only): supplied = replace. The mutation
-        // rejects it on any other kind.
+        // Mission: supplied = replace. The mutation normalizes it for the
+        // activity's shape and rejects it on a kind with no tutor session.
         const rawContract = parseBuildContractArg(input.buildContract);
-        if (rawContract) patch.buildContract = normalizeBuildContract(rawContract);
-        // Scholar edit policy (vibecode only; the mutation rejects others).
+        if (rawContract) patch.buildContract = rawContract;
+        // Scholar edit policy (app activities only; the mutation rejects others).
         const editAccess = scholarEditToEditAccess(input.scholarEdit);
         if (editAccess !== undefined) patch.editAccess = editAccess;
         await ctx.runMutation(internal.activities.updateInternal, patch as Parameters<typeof ctx.runMutation>[1]);

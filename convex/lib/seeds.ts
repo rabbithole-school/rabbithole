@@ -29,6 +29,7 @@ export const seedOriginValidator = v.union(
   v.literal("teacher"), // a teacher/aide hand-planted it (incl. unit offers)
   v.literal("badge_follow"), // a "follow this trail" fork off a peer's badge
   v.literal("story"), // a scholar-minted world-connection story souvenir (Moments)
+  v.literal("parked"), // "Make it a Quest" from an idea the tutor saved for later (TRA-519 B2)
 );
 
 /**
@@ -60,7 +61,8 @@ export type SeedOrigin =
   | "dev-sky"
   | "teacher"
   | "badge_follow"
-  | "story";
+  | "story"
+  | "parked";
 export type SeedStatus = "pending" | "active" | "dismissed" | "completed";
 export type SeedSuggestionType =
   | "frontier"
@@ -560,6 +562,45 @@ export async function plantBadgeFollowSeed(
     teacherId: args.teacherId,
   });
   return { id, alreadyFollowing: false };
+}
+
+/**
+ * "Make it a Quest" (TRA-519 B2) — plant a `parked` star from an idea the tutor
+ * saved for later during an activity. The scholar's own act: `scholarId` is the
+ * caller (no cross-scholar input). Idempotent per (scholar, topic): a second
+ * call for the same idea returns the existing live star, so the done-screen
+ * button re-opens it instead of cluttering the sky. `connectionTo` carries the
+ * activity title (the bake reads it as "What sparked it").
+ */
+export async function plantParkedIdeaSeed(
+  ctx: MutationCtx,
+  args: {
+    scholarId: Id<"users">;
+    idea: string;
+    activityTitle: string;
+    sessionId: Id<"sessions">;
+  },
+): Promise<{ id: Id<"seeds">; existed: boolean }> {
+  const existing = (
+    await ctx.db
+      .query("seeds")
+      .withIndex("by_scholar_status", (q) => q.eq("scholarId", args.scholarId))
+      .filter((q) => q.eq(q.field("topic"), args.idea))
+      .collect()
+  ).find((seed) => !["dismissed", "completed"].includes(seed.status));
+  if (existing) return { id: existing._id, existed: true };
+  const id = await insertSeed(ctx, {
+    scholarId: args.scholarId,
+    origin: "parked",
+    status: "active",
+    suggestionType: "extension",
+    topic: args.idea,
+    scholarInvitation: args.idea,
+    rationale: `Saved for later during '${args.activityTitle}'; the scholar chose to make it a Quest.`,
+    connectionTo: args.activityTitle,
+    sessionId: args.sessionId,
+  });
+  return { id, existed: false };
 }
 
 /**

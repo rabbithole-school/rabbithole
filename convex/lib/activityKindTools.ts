@@ -19,11 +19,11 @@ type ToolInput = Record<string, unknown>;
  * Shared "which simulation kind?" guidance, injected verbatim into BOTH
  * curriculum bots' prompts (the global aide in http.ts and the unit designer
  * in unitDesignerStream.ts) — one copy, never pasted twice. A "simulation /
- * game / model" ask is genuinely ambiguous between vibecode and world, so the
+ * game / model" ask is genuinely ambiguous between an app activity and world, so the
  * bot must fork with ONE question instead of silently guessing.
  */
 export const KIND_DISAMBIGUATION_GUIDANCE =
-  `**"Simulation / game / model" requests are genuinely AMBIGUOUS.** They sit between **vibecode** (the SCHOLAR builds an app with the AI — the making is the learning) and a **Simulator** (a fixed-physics terrarium the scholar TUNES and observes — the experimenting is the learning). When the teacher's ask could reasonably be either and they haven't signaled which, DON'T assume — ask ONE short either/or question first, e.g. "Should scholars BUILD the simulation themselves (vibecode), or experiment inside a fixed Simulator I set up?" One question, then act on the answer — never a questionnaire. When the teacher clearly signals, act without asking: "have them code…" / "app-building" → vibecode; "a simulator activity" / "an ecosystem they tune" / "predator-prey terrarium" / "a tournament" → Simulator.`;
+  `**"Simulation / game / model" requests are genuinely AMBIGUOUS.** They sit between an **app activity** (the SCHOLAR builds an app with the AI — the making is the learning; "vibecode" is its older name) and a **Simulator** (a fixed-physics terrarium the scholar TUNES and observes — the experimenting is the learning). When the teacher's ask could reasonably be either and they haven't signaled which, DON'T assume — ask ONE short either/or question first, e.g. "Should scholars BUILD the simulation themselves (an app activity), or experiment inside a fixed Simulator I set up?" One question, then act on the answer — never a questionnaire. When the teacher clearly signals, act without asking: "have them code…" / "app-building" → app activity; "a simulator activity" / "an ecosystem they tune" / "predator-prey terrarium" / "a tournament" → Simulator.`;
 
 export type ActivityKindLesson = Pick<
   Doc<"lessons">,
@@ -335,7 +335,7 @@ export async function makeActivityKindTools(
       kind: "simulator",
       describeForModel: {
         create:
-          "Create a Simulator activity on a lesson, fully configured with its physics. Use this — NOT create_activity — whenever a teacher wants a simulator activity: a fixed-physics terrarium (ecosystem grid or prisoner's dilemma), not a map or a build-your-own place/civilization (those are online/vibecode activities). The scholar tunes the Simulator by writing behavior prompts for its species; it runs and scores against the criterion. If the teacher may instead want scholars to BUILD the simulation themselves, that is vibecode — ask before assuming." +
+          "Create a Simulator activity on a lesson, fully configured with its physics. Use this — NOT create_activity — whenever a teacher wants a simulator activity: a fixed-physics terrarium (ecosystem grid or prisoner's dilemma), not a map or a build-your-own place/civilization (those are online or app activities). The scholar tunes the Simulator by writing behavior prompts for its species; it runs and scores against the criterion. If the teacher may instead want scholars to BUILD the simulation themselves, that is an app activity — ask before assuming." +
           SIMULATOR_TOOL_GUIDANCE,
         update:
           "Reconfigure an EXISTING Simulator activity — set or replace its physics (`simulatorSpec`). Use this to change a Simulator's template, config, species, criterion, or run length, or to turn an existing activity into a Simulator. Targets the activity by lesson + activity title." +

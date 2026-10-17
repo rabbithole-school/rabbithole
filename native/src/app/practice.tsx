@@ -38,7 +38,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   AccessibilityInfo,
-  ActionSheetIOS,
   ActivityIndicator,
   Dimensions,
   Image,
@@ -6311,15 +6310,7 @@ function HandoffChat({
 
   // Attach a scratch photo — same iOS action sheet as the tutor-chat composer.
   const onAttach = useCallback(() => {
-    Haptics.selectionAsync().catch(() => {});
-    ActionSheetIOS.showActionSheetWithOptions(
-      { options: ["Cancel", "Take Photo", "Choose Photo"], cancelButtonIndex: 0 },
-      (i) => {
-        if (!imageUploadTarget) return;
-        if (i === 1) void image.attach("camera", imageUploadTarget);
-        else if (i === 2) void image.attach("library", imageUploadTarget);
-      },
-    );
+    if (imageUploadTarget) image.chooseAndAttach(imageUploadTarget);
   }, [image, imageUploadTarget]);
 
   // Keep the composer focused the whole time the chat is open — on open, and

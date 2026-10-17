@@ -20,6 +20,8 @@ export type ProjectStreamHistoryMessage = {
   inputModality?: "typed" | "spoken" | "app";
   /** The "your turn" line this spoken turn reads aloud (TRA-504). */
   readAloudOf?: string;
+  /** The scholar stopped the reply to this message before any reached them (TRA-530). */
+  replyStopped?: boolean;
 };
 
 /**
@@ -61,6 +63,19 @@ export function readAloudLabel(line: string, heard: string): string {
     `The line: "${line}". Speech-to-text of their reading follows. Word check: ${result}.]`
   );
 }
+
+/**
+ * Marks a scholar message whose reply they stopped before any of it reached
+ * them (TRA-530). Without it the model sees two scholar turns in a row, reads
+ * the first as owed work, and carries out the request the scholar cancelled.
+ * The message stays visible because a stop is often a correction ("no, blue").
+ * The last sentence is load-bearing: without it, Opus treated the scholar's
+ * NEXT message as stopped too and built nothing (spot A/B, 2026-10-13).
+ */
+export const WITHDRAWN_REQUEST_LABEL =
+  "[The scholar stopped your reply to this request before you said anything, " +
+  "so this request is withdrawn: don't carry it out unless they ask for it again. " +
+  "Their next message is a new request; answer it normally.]";
 
 const GENERATED_IMAGE_LABEL =
   "[You generated this illustration earlier with the generate_image tool. " +
@@ -121,6 +136,16 @@ export const IMAGE_UNAVAILABLE_LABEL =
   "[The scholar attached a photo here, but it could not be shown to you " +
   "(too large or unreadable). If it matters, tell them you can't see it and " +
   "ask them to try a smaller photo or describe it.]";
+
+/**
+ * Tells the builder how to put a scholar's photo into their app. The model
+ * sees the pixels but not the storage id, and `/app-assets/<id>` is the only
+ * way an app may show a picture (appAssets.ts authorizes the session's chat
+ * images). Builder sessions only: elsewhere no app can use the path.
+ */
+export function scholarPhotoAppAssetLabel(imageId: string): string {
+  return `[To show this photo itself in the app, use /app-assets/${imageId}; if it is an example to copy, match its look instead.]`;
+}
 
 function generatedImagePromptMetadata(
   imagePrompt: string | null | undefined,
@@ -187,6 +212,7 @@ export async function assembleProjectStreamApiMessages({
   appAiTurns,
   characterName = null,
   resolveImagePart,
+  appAssetPhotos = false,
 }: {
   chatHistory: readonly ProjectStreamHistoryMessage[];
   appRequest?: Pick<AppTutorRequest, "context">;
@@ -198,6 +224,9 @@ export async function assembleProjectStreamApiMessages({
   appAiTurns?: readonly AppAiContextTurn[];
   characterName?: string | null;
   resolveImagePart: (imageId: string) => Promise<ImageContentPart | null>;
+  /** The session can build apps, so a scholar's photo carries its
+   *  /app-assets/ path (scholarPhotoAppAssetLabel). */
+  appAssetPhotos?: boolean;
 }): Promise<AppSnapshotModelMessage[]> {
   const apiMessages: AppSnapshotModelMessage[] = [];
   const appAiBlocksBefore = new Map<string | null, string[]>();
@@ -273,7 +302,7 @@ export async function assembleProjectStreamApiMessages({
         : message.content;
     // An empty dictated turn carries no words to attribute, so it stays empty
     // rather than becoming a bare marker.
-    const modelVisibleContent =
+    const turnContent =
       message.role === "user" && message.readAloudOf
         ? `${readAloudLabel(message.readAloudOf, baseContent)} ${baseContent}`.trim()
         : message.role === "user" &&
@@ -281,6 +310,10 @@ export async function assembleProjectStreamApiMessages({
             baseContent.trim() !== ""
           ? `${DICTATED_TURN_LABEL} ${baseContent}`
           : baseContent;
+    const modelVisibleContent =
+      message.role === "user" && message.replyStopped
+        ? `${WITHDRAWN_REQUEST_LABEL} ${turnContent}`.trim()
+        : turnContent;
 
     if (message.imageId && message.role === "user") {
       const resolved = resolvedImages.get(message.id);
@@ -303,6 +336,12 @@ export async function assembleProjectStreamApiMessages({
           }
         }
         contentParts.push(imagePart);
+        if (appAssetPhotos && !message.generatedImage) {
+          contentParts.push({
+            type: "text",
+            text: scholarPhotoAppAssetLabel(message.imageId),
+          });
+        }
         if (modelVisibleContent) {
           contentParts.push({ type: "text", text: modelVisibleContent });
         }

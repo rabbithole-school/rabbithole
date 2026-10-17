@@ -22,7 +22,14 @@ import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
-import { teacherMutation, teacherQuery } from "./lib/customFunctions";
+import {
+  curriculumRunMutation,
+  curriculumRunQuery,
+  teacherMutation,
+  teacherQuery,
+} from "./lib/customFunctions";
+import { requireRunnableUnit } from "./lib/curriculumRun";
+import { isTeacherRole } from "./lib/roles";
 import { resolveActiveMembership } from "./lib/access";
 import { requireUnitEditAccess } from "./lib/auth";
 import { AUTOMATON_MODEL } from "./lib/models";
@@ -353,6 +360,21 @@ export function preflightSpeciesForLaunch(input: {
 }
 
 /**
+ * Preflight is synthetic by construction (automata, no scholars), so a
+ * curriculum:run holder may run it on a unit she can run. Teachers keep the
+ * plain unit-edit gate.
+ */
+async function requirePreflightAccess(
+  ctx: QueryCtx & { user: Doc<"users"> },
+  activityId: Id<"activities">,
+) {
+  const { unit } = await requireUnitEditAccess(ctx, { activityId });
+  if (!isTeacherRole(ctx.user.role)) {
+    await requireRunnableUnit(ctx, ctx.user, unit._id);
+  }
+}
+
+/**
  * Preflight achievability + criterion red-team (plan §8): two starter duplicates
  * calibrate the observed noise band; deterministic template-supported probes
  * test whether the criterion separates authored effort from degenerate behavior.
@@ -365,10 +387,10 @@ export function preflightSpeciesForLaunch(input: {
  * Prisoner's Dilemma runs. New templates grow this only by explicitly adding a
  * probe to the registry-driven plan.
  */
-export const startPreflight = teacherMutation({
+export const startPreflight = curriculumRunMutation({
   args: { activityId: v.id("activities"), ticks: v.optional(v.number()) },
   handler: async (ctx, args) => {
-    await requireUnitEditAccess(ctx, { activityId: args.activityId });
+    await requirePreflightAccess(ctx, args.activityId);
     const activity = await ctx.db.get(args.activityId);
     const spec = activitySimulatorSpec(activity);
     if (!activity || !spec) throw new Error("Not a World activity");
@@ -517,10 +539,10 @@ export const startPreflight = teacherMutation({
  * invalid-action rate, calibrated degenerate-deck verdicts, the remaining human
  * review, and budget/active state.
  */
-export const preflightStatus = teacherQuery({
+export const preflightStatus = curriculumRunQuery({
   args: { activityId: v.id("activities") },
   handler: async (ctx, args) => {
-    await requireUnitEditAccess(ctx, { activityId: args.activityId });
+    await requirePreflightAccess(ctx, args.activityId);
     const activity = await ctx.db.get(args.activityId);
     const spec = activitySimulatorSpec(activity);
     if (!activity || !spec) return null;

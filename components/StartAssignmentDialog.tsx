@@ -573,6 +573,7 @@ export function StartAssignmentDialog({
                 ) : (
                   <TeacherSettings
                     scholarSel={teacher.scholarSel}
+                    runnerRoster={teacher.runnerRoster}
                     onScholarSelChange={teacher.onScholarSelChange}
                     hasWorldTarget={teacher.hasWorldTarget}
                     worldBudget={teacher.worldBudget}

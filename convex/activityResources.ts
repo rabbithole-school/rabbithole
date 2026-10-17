@@ -23,6 +23,11 @@ import { resolveReachableActivityResources } from "./lib/activityResourceReachab
 import { isTeacherRole } from "./lib/roles";
 import { requireProgramHandoutAccess } from "./lib/programHandoutAccess";
 import { validateActivityResourceUrl } from "../shared/activityResourceUrl";
+import { effectiveActivityKind } from "../shared/appSurface";
+
+/** Effective kinds whose activities carry tutor-facing resources (TRA-519:
+ * an app activity, in either shape, is one). */
+const RESOURCE_ACTIVITY_KINDS: ReadonlySet<string> = new Set(["online", "vibecode"]);
 
 export const ACTIVITY_RESOURCE_MAX_BYTES = 25 * 1024 * 1024;
 export const ACTIVITY_RESOURCE_AI_MAX_BYTES = 20 * 1024 * 1024;
@@ -421,7 +426,9 @@ export const listForSession = authedQuery({
     }
     if (!session.activityId) return [];
     const activity = await ctx.db.get(session.activityId);
-    if (!activity || activity.kind !== "online") return [];
+    // Online activities (an app activity included — the tutor reads its
+    // resources too, matching sessionHelpers) carry tutor-facing resources.
+    if (!activity || !RESOURCE_ACTIVITY_KINDS.has(effectiveActivityKind(activity))) return [];
 
     return await activityResourceDisplayRows(ctx, session.activityId);
   },
@@ -828,7 +835,7 @@ export const shareFromTutor = internalMutation({
       throw new Error("Session has no activity resources");
     }
     const activity = await ctx.db.get(session.activityId);
-    if (!activity || activity.kind !== "online") {
+    if (!activity || !RESOURCE_ACTIVITY_KINDS.has(effectiveActivityKind(activity))) {
       throw new Error("Resources can only be shared in an online activity");
     }
     const resource = (

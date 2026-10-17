@@ -87,7 +87,10 @@ export function StaffShell({
   const canSearchScholars = messagingAccess?.canSearchScholars === true;
   const canSearchSkills = isTeacherRole(role);
   const canSearchCurriculum = user?.hasCurriculumAccess === true;
-  const canSearch = canSearchScholars || canSearchSkills || canSearchCurriculum;
+  // Admissions candidates + families: `myAccess` never throws, null = no access.
+  let canSearchAdmissions = false;
+  const canSearch =
+    canSearchScholars || canSearchSkills || canSearchCurriculum || canSearchAdmissions;
 
   const units =
     useQuery(
@@ -221,6 +224,7 @@ export function StaffShell({
             canSearchScholars={canSearchScholars}
             canSearchSkills={canSearchSkills}
             canSearchCurriculum={canSearchCurriculum}
+            canSearchAdmissions={canSearchAdmissions}
           />
         )}
       </Flex>

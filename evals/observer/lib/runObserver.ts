@@ -1,15 +1,17 @@
 /**
  * Runs the PRODUCTION observer against a transcript under a chosen model.
  *
- * Imports the exact system prompt, tool schema, and user-message builder the
- * live observer uses (`convex/prompts.ts` + `convex/lib/observerShared.ts`), so
- * what the eval scores is what actually ships — not a paraphrase.
+ * Imports the exact system prompt, request builder (tool, tool_choice,
+ * max_tokens, effort), no-call retry, and user-message builder the live
+ * observer uses (`convex/prompts.ts` + `convex/lib/observerShared.ts`), so what
+ * the eval scores is what actually ships — not a paraphrase.
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { OBSERVER_SYSTEM_PROMPT } from "../../../convex/prompts";
 import {
-  OBSERVER_TOOL,
+  buildObserverRequest,
   buildObserverUserMessage,
+  createObserverMessage,
   buildObserverTranscript,
   parseObserverResponse,
   type ObserverResult,
@@ -78,14 +80,28 @@ export async function runObserver(
 
   const start = Date.now();
   try {
-    const response = await anthropic.messages.create({
+    const request = buildObserverRequest({
       model,
-      max_tokens: 4096,
       system: OBSERVER_SYSTEM_PROMPT,
-      tools: [OBSERVER_TOOL],
-      tool_choice: { type: "tool", name: "record_observations" },
-      messages: [{ role: "user", content: userMessage }],
+      userContent: userMessage,
     });
+    // Eval-only effort sweep: OBSERVER_EFFORT_OVERRIDE=low|medium|high.
+    const effort = process.env.OBSERVER_EFFORT_OVERRIDE as
+      | "low"
+      | "medium"
+      | "high"
+      | undefined;
+    const usage = { input: 0, output: 0 };
+    const response = await createObserverMessage(
+      () =>
+        anthropic.messages.create(
+          effort ? { ...request, output_config: { effort } } : request,
+        ),
+      (r) => {
+        usage.input += r.usage.input_tokens;
+        usage.output += r.usage.output_tokens;
+      },
+    );
     const latencyMs = Date.now() - start;
     // Same parse + default-normalization the live observer applies.
     const result = parseObserverResponse(response.content);
@@ -94,9 +110,9 @@ export async function runObserver(
         caseId: c.id,
         model,
         result: null,
-        error: "no tool_use block",
+        error: `no tool_use block (stop_reason: ${response.stop_reason})`,
         latencyMs,
-        usage: { input: response.usage.input_tokens, output: response.usage.output_tokens },
+        usage,
       };
     }
     if (!result.pulse) {
@@ -109,7 +125,7 @@ export async function runObserver(
         result: null,
         error: "degraded pulse (no usable summary)",
         latencyMs,
-        usage: { input: response.usage.input_tokens, output: response.usage.output_tokens },
+        usage,
       };
     }
     return {
@@ -117,7 +133,7 @@ export async function runObserver(
       model,
       result: { ...result, pulse: result.pulse },
       latencyMs,
-      usage: { input: response.usage.input_tokens, output: response.usage.output_tokens },
+      usage,
     };
   } catch (e) {
     return {

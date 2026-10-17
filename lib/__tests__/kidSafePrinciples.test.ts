@@ -76,8 +76,12 @@ import { KID_SAFE_PRINCIPLES } from "../kidSafePrinciples";
 // the writing-box mic; the tutor still never writes in the box). Re-reviewed
 // against the gloss: it supports "No doing your work for you" (the words stay
 // the scholar's). No gloss change needed.
+// Re-baselined 2026-10-13 (PR #4227): a new bullet keeps attribution honest — the
+// tutor credits the scholar only with words/ideas that appear in the scholar's
+// own messages, never with an example the tutor introduced. Re-reviewed against
+// the gloss: it supports "No doing your work for you". No gloss change needed.
 const EXPECTED_TUTOR_GUIDELINES_HASH =
-  "8f699ed698256d52565e7e8effafc0ed4e5a9003e6a31df4b2a6f833032f44ae";
+  "af10ab90b141294b7c2cff959d0b30cd2a70f07c1658e53cf0b12d1573b21f23";
 
 const FORBIDDEN_TOKENS = [
   /\bwhisper\b/i,

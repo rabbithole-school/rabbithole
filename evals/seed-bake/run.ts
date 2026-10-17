@@ -23,7 +23,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mean, parseEvalArgs, writeRunArtifacts } from "../lib/harness";
 import { runAdLibArm, runBakedArm, adLibActivity, bakedSimActivity, armTutorTokens, type Topic } from "./lib/arms";
-import { bakeTopic } from "./lib/bake";
+import { bakeTopic, buildStageCheck } from "./lib/bake";
 import { judgeSession, judgeTokens } from "../curriculum-sim/lib/judge";
 import { simTokens } from "../curriculum-sim/lib/scholarSimulator";
 import type { ScholarProfile } from "../curriculum-sim/lib/types";
@@ -66,12 +66,20 @@ async function main() {
   const bakedVerdicts: SessionVerdict[] = [];
   const perTopicMs: number[] = [];
   const records: PairRecord[] = [];
+  const buildChecks: boolean[] = [];
 
   for (const topic of topics) {
     process.stdout.write(`\n[${topic.id}] baking… `);
     const baked = await bakeTopic(topic, offline);
     perTopicMs.push(baked.ms);
     process.stdout.write(`done (${(baked.ms / 1000).toFixed(0)}s) — "${baked.activity.title}"\n`);
+    if (topic.path?.shape === "build" && !offline) {
+      const check = buildStageCheck(baked.activity.design);
+      buildChecks.push(check.ok);
+      process.stdout.write(
+        `  build stage: app ${check.app ? "yes" : "no"} · contract ${check.contract ? "yes" : "no"}\n`,
+      );
+    }
 
     for (const profile of profiles) {
       process.stdout.write(`  ${profile.name}: ad-lib… `);
@@ -136,6 +144,11 @@ async function main() {
   }
 
   console.log("\n" + report);
+  if (buildChecks.length > 0) {
+    console.log(
+      `build-path bakes: ${buildChecks.filter(Boolean).length}/${buildChecks.length} end in an app activity with a contract (target >= 4 of 5)`,
+    );
+  }
   console.log(
     `\ntokens — tutor ${armTutorTokens.input}/${armTutorTokens.output} · sim ${simTokens.input}/${simTokens.output} · judge ${judgeTokens.input}/${judgeTokens.output}`,
   );

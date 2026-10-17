@@ -6,6 +6,7 @@ import {
   IMAGE_NOT_REPLAYED_LABEL,
   IMAGE_UNAVAILABLE_LABEL,
   MAX_REPLAYED_IMAGE_BASE64_CHARS,
+  scholarPhotoAppAssetLabel,
 } from "../lib/projectStreamMessages";
 
 const APP_REQUEST_PREFIX = "[APP REQUEST";
@@ -203,6 +204,45 @@ describe("assembleProjectStreamApiMessages", () => {
 
     expect(magic).not.toBe(generated);
     expect(magic).toContain("an Arctic food web with a polar bear");
+  });
+
+  test("a builder session's scholar photo carries its app-asset path; generated images and chat-only sessions do not", async () => {
+    const imagePart = {
+      type: "image" as const,
+      source: { type: "base64" as const, media_type: "image/png" as const, data: "x" },
+    };
+    const textsFor = async (appAssetPhotos: boolean, generatedImage: boolean) => {
+      const [message] = await assembleProjectStreamApiMessages({
+        chatHistory: [
+          {
+            id: "u1",
+            sourceRole: generatedImage ? "tool" : "user",
+            role: "user",
+            content: "make the art look like this",
+            imageId: "photo123",
+            generatedImage,
+          },
+        ],
+        resolveImagePart: async () => imagePart,
+        appAssetPhotos,
+      });
+      return (message.content as Array<{ type: string; text?: string }>)
+        .filter((part) => part.type === "text")
+        .map((part) => part.text);
+    };
+
+    expect(await textsFor(true, false)).toContain(
+      scholarPhotoAppAssetLabel("photo123"),
+    );
+    expect(scholarPhotoAppAssetLabel("photo123")).toContain(
+      "/app-assets/photo123",
+    );
+    expect((await textsFor(false, false)).join(" ")).not.toContain(
+      "/app-assets/",
+    );
+    expect((await textsFor(true, true)).join(" ")).not.toContain(
+      "/app-assets/",
+    );
   });
 
   describe("replayed image budget", () => {

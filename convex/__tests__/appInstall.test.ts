@@ -105,7 +105,8 @@ describe("appInstall.installAppAsActivity", () => {
     expect(rows.lesson).toMatchObject({ title: "Literal minds", unitId: result.unitId });
     expect(rows.activity).toMatchObject({
       title: "Teach the robot",
-      kind: "vibecode",
+      kind: "online",
+      appActivity: true,
       systemPrompt: "Play the game; the tutor directs Widget.",
       editAccess: "never",
       scholarsStartFrom: "starter",

@@ -50,7 +50,7 @@ import {
   type RawBotDeliverable,
   type RawBotAdvanceRubric,
 } from "./botTools";
-import { normalizeBuildContract, parseBuildContractArg } from "./buildContract";
+import { parseBuildContractArg } from "./buildContract";
 import {
   makeScholarReadTools,
   makeListScholarGroupsTool,
@@ -144,6 +144,28 @@ export function pickActivityByTitle<T extends { title: string }>(
  * - read_drive_link / search_drive — every staff role, read as the asker's
  *   own linked Google account, only when a transport names itself.
  */
+/**
+ * Whether a base `staff` caller holds a `curriculum:edit` grant — the UI's
+ * `hasCurriculumAccess`. False for every other role (their curriculum power
+ * is the role itself) and for a staffer whose schools are all suspended
+ * (the backing query throws there; that must shrink the toolset, not fail
+ * the turn). Shared with the web aide's prompt assembly in http.ts.
+ */
+export async function staffHoldsCurriculumGrant(
+  ctx: ActionCtx,
+  role: Role | undefined | null,
+  callerUserId: Id<"users">,
+): Promise<boolean> {
+  if (role !== ROLES.STAFF) return false;
+  try {
+    return await ctx.runQuery(internal.users.hasCurriculumAccessInternal, {
+      id: callerUserId,
+    });
+  } catch {
+    return false;
+  }
+}
+
 export async function assembleCurriculumTools(
   ctx: ActionCtx,
   emit: AideEmit,
@@ -236,6 +258,30 @@ export async function assembleCurriculumTools(
   // generative entry point), which writes no scholar data.
   const canDesignCurriculum =
     isTeacherRole(role) || role === ROLES.CURRICULUM_DESIGNER;
+  // Base staff can hold the same design power as a per-school
+  // `curriculum:edit` grant — the check the UI already honors
+  // (`hasCurriculumAccess`). They get the general authoring tools in the
+  // staff branch below; every unit those tools touch is re-checked against
+  // the grant's school by `unitEditRefusal`.
+  const staffCanDesignCurriculum = await staffHoldsCurriculumGrant(
+    ctx,
+    role,
+    callerUserId,
+  );
+  const canAuthorCurriculum = canDesignCurriculum || staffCanDesignCurriculum;
+
+  // The aide's curriculum-write gate (see
+  // curriculumAssistant.checkUnitEditAccessForAide): the UI's unit-edit
+  // check, run as the caller. Returns a refusal for the model, or null.
+  const unitEditRefusal = async (
+    ref: { unitId: string } | { lessonId: string },
+  ): Promise<string | null> => {
+    const res = await ctx.runQuery(
+      internal.curriculumAssistant.checkUnitEditAccessForAide,
+      { callerUserId, ...ref },
+    );
+    return res.ok ? null : `Refused: ${res.error}`;
+  };
 
   const { betaTool } = await import(
     "@anthropic-ai/sdk/helpers/beta/json-schema"
@@ -446,9 +492,10 @@ export async function assembleCurriculumTools(
     callerUserId,
     linkBase,
     allowedScholarIds,
+    institutionScope,
   });
 
-  const activityKindTools = canSeeScholarData
+  const activityKindTools = canAuthorCurriculum
     ? await makeActivityKindTools(ctx, emit, {
         callerUserId,
         lessonAddress: {
@@ -463,6 +510,9 @@ export async function assembleCurriculumTools(
           recoveryArg: "lessonId",
           resolve: async (input) => {
             const lessonId = input.lessonId as Id<"lessons">;
+            // Gate first: it also turns a malformed id into a refusal.
+            const refusal = await unitEditRefusal({ lessonId });
+            if (refusal) return { ok: false as const, error: refusal };
             const resolved = await ctx.runQuery(
               internal.curriculumAssistant.getLessonForActivityAuthoring,
               { lessonId },
@@ -492,6 +542,8 @@ export async function assembleCurriculumTools(
           recoveryArg: "lessonId + activityTitle",
           resolve: async (input) => {
             const lessonId = input.lessonId as Id<"lessons">;
+            const refusal = await unitEditRefusal({ lessonId });
+            if (refusal) return { ok: false as const, error: refusal };
             const resolved = await ctx.runQuery(
               internal.curriculumAssistant.getLessonForActivityAuthoring,
               { lessonId },
@@ -545,7 +597,11 @@ export async function assembleCurriculumTools(
   // same way. An exact title wins, a unique partial wins, an ambiguous
   // partial refuses with the candidates, and a miss returns a nearby-titles
   // menu the model can self-correct from.
-  const resolveUnitStrict = makeUnitResolver(ctx);
+  const resolveUnitStrict = makeUnitResolver(
+    ctx,
+    callerUserId,
+    institutionScope,
+  );
 
   const listUnitsTool = betaTool({
     name: "list_units",
@@ -559,7 +615,7 @@ export async function assembleCurriculumTools(
     run: async () => {
       const units = await ctx.runQuery(
         internal.curriculumAssistant.listUnitsInternal,
-        {},
+        { callerUserId, scope: institutionScope },
       );
       const withUrls = units.map((u) => ({
         ...u,
@@ -593,6 +649,8 @@ export async function assembleCurriculumTools(
       const r = await resolveUnitStrict(input.unitTitle);
       if (!r.ok) return r.error;
       const unit = r.unit;
+      const refusal = await unitEditRefusal({ unitId: unit.id as Id<"units"> });
+      if (refusal) return refusal;
       const details = await ctx.runQuery(
         internal.curriculumAssistant.getUnitDetails,
         {
@@ -619,7 +677,11 @@ export async function assembleCurriculumTools(
   // (UI↔tool parity: the same ops the teacher clicks in the Rehearse tab).
   // Both resolve the activity by title within a named unit and delegate to
   // the shared coreStart/coreGround behind explicit-actor internal
-  // mutations. Curriculum-role only (gated with the unit reads below).
+  // mutations, which take the caller but don't check it — so each run is
+  // gated on unitEditRefusal. The scoped resolver already hides another
+  // school's unit; the gate is defence in depth for whatever the lens and
+  // the edit check disagree on. Curriculum-role only (gated with the unit
+  // reads below).
   const rehearseTool = betaTool({
     name: "rehearse_activity",
     description:
@@ -637,6 +699,8 @@ export async function assembleCurriculumTools(
       const r = await resolveUnitStrict(input.unitTitle);
       if (!r.ok) return r.error;
       const unit = r.unit;
+      const refusal = await unitEditRefusal({ unitId: unit.id });
+      if (refusal) return refusal;
       const res = await ctx.runMutation(
         internal.curriculumExperiments.aideStartRehearsal,
         {
@@ -670,6 +734,9 @@ export async function assembleCurriculumTools(
       const r = await resolveUnitStrict(input.unitTitle);
       if (!r.ok) return r.error;
       const unit = r.unit;
+      // Debrief reads real scholar transcripts: same per-unit gate.
+      const refusal = await unitEditRefusal({ unitId: unit.id });
+      if (refusal) return refusal;
       const res = await ctx.runMutation(
         internal.curriculumExperiments.aideGroundLatest,
         {
@@ -1041,6 +1108,8 @@ export async function assembleCurriculumTools(
       let unitLabel = "(unknown)";
       if (input.unitId) {
         unitId = input.unitId as Id<"units">;
+        const refusal = await unitEditRefusal({ unitId });
+        if (refusal) return refusal;
         const details = await ctx.runQuery(
           internal.curriculumAssistant.getUnitDetails,
           { unitId },
@@ -1056,6 +1125,8 @@ export async function assembleCurriculumTools(
         if (!r.ok) return r.error;
         unitId = r.unit.id;
         unitLabel = r.unit.title;
+        const refusal = await unitEditRefusal({ unitId });
+        if (refusal) return refusal;
       } else {
         return "Either unitId or unitTitle must be provided.";
       }
@@ -1139,6 +1210,11 @@ export async function assembleCurriculumTools(
       } else {
         return "Either targetUnitId or targetUnitTitle must be provided.";
       }
+      // Both ends: the lesson leaves one unit and lands in another.
+      const refusal =
+        (await unitEditRefusal({ lessonId: input.lessonId as Id<"lessons"> })) ??
+        (await unitEditRefusal({ unitId: targetUnitId }));
+      if (refusal) return `Could not move lesson: ${refusal}`;
 
       let result: {
         movedLessonId: Id<"lessons">;
@@ -1174,7 +1250,7 @@ export async function assembleCurriculumTools(
   const createScholarActivityTool = betaTool({
     name: "create_scholar_activity",
     description:
-      "Create an activity inside a lesson. Idempotent by (lessonId, title). When creating multiple activities for the same lesson, ALWAYS pass each activity's zero-based position in the intended sequence (0, 1, 2, ...) because tool calls may run in parallel. Without position, a new activity appends. If position is already occupied, the activity inserts there and shifts the consecutive occupied slots after it by one — but when the lesson ALREADY has activities, prefer positions continuing after the existing ones: parallel insert-at into occupied slots can land relative to pre-existing activities in arrival order.\n\n**kind** selects the activity type (default `online`):\n  - `online` — the scholar opens this in Rabbithole and it drives an AI tutor session. Give it a `systemPrompt` AND exactly ONE evaluation shape — a `deliverable` OR an `advanceRubric` (see below).\n  - `offline` — a teacher-run classroom task (discussion, lab, worksheet). Not opened in Rabbithole; no systemPrompt or rubric needed.\n  - `vibecode` — a full-screen app-builder workshop: the scholar describes an app/game and DIRECTS an AI builder that writes + iterates a live web app; the app is the artifact. Reach for this whenever the teacher wants scholars to make/build/\"vibecode\" something interactive. Here the `systemPrompt` IS the BUILD BRIEF (what to build + the learning goal), NOT a tutor prompt. No rubric needed. ALWAYS also write a `buildContract` (2–3 testable invariants, the scholar's freedoms, one gate) and set `allowSilence: true` — see the buildContract property; never ask the teacher how off-topic ideas should be handled. Also set `scholarEdit`: `build` when scholars make/remix their own app (the default when omitted), `play` when they only USE an app — and when it's genuinely unclear which the teacher wants, ASK one short question before creating (\"Should scholars just play it, or be able to change it?\"). (If the teacher may instead want a fixed simulation the scholar TUNES and observes, that's a Simulator — use `create_simulator_activity`, and ask first if it's ambiguous.) What the scholar gets: " + SESSION_SURFACE.vibecode + " So put it in the SAME unit as the work it builds on, and don't make the brief ask the scholar to retype what they already wrote.\nFor a Simulator activity (stored as `world`), use `create_simulator_activity`; for `problem_set`, use `create_problem_set`. Do NOT widen this tool's kind: both dedicated tools validate payloads this generic writer cannot carry. For `game`, `web`, or `shareBack`, create the lesson, link its Edit surface, and hand off to the teacher to choose the catalog-backed activity there.\n\n**Choosing the evaluation shape for an ONLINE activity — the most important decision.** Pick ONE:\n\n  • **`deliverable`** — when the scholar produces any ARTIFACT/PRODUCT (a story, drawing, photo, code, slide deck, audio, a written write-up). This explicitly includes kind 'map' when the saved map itself is the work scholars should repeatedly 'Check my work' or 'Send'. Its criteria are a private quality map for the tutor, NOT a scholar checklist or a completion gate. The scholar clicks 'Check my work' and the AI verdicts each criterion 'not'/'half'/'full'. A full criterion permanently awards it as scholar-visible flair; its label and description are shown together. Half/not-full remain private, and normal completion is separate.\n\n  • **`advanceRubric`** — when the learning happens IN CONVERSATION or through interactions and there is NO produced artifact: a Socratic discussion, or an INTERACTIVE MAP / GEOGRAPHY DISCOVERY activity. The tutor grades the scholar's talk + map interactions (pins, predictions, explanations) against the criteria and a full pass completes the activity — with no noise document. Criteria grade what the scholar DEMONSTRATES ('Located the requested places', 'Predicted before revealing', 'Explained the pattern in their own words', 'Transferred it to a new case').\n\nCriteria written only into `systemPrompt` are decorative and cannot award flair or complete an advance rubric.\n\n**GEOGRAPHY / MAP activities specifically:** do NOT build a rapid verbal quiz over a mute base map, and do NOT force a write-up document onto it. For a discovery sequence, build it as an `online` activity whose `systemPrompt` drives the tutor's `show_map` tool — open ONE map (op 'create', once), then before each change call op 'read' and reveal ONE variable with op 'patch'. Ask a question between patches, and have the scholar COMMIT a pin BEFORE each reveal (predict-before-reveal). Set a checkable `task` on the map when there's a right answer to locate, and design the prompt so the scholar drops a pin before each reveal. Give discovery sequences an `advanceRubric`; when the saved map itself is the product scholars should repeatedly 'Check my work' or 'Send', use a kind 'map' deliverable instead. (See the seeded Geography Quests for the canonical shape.)\n\n**criteria** (in either shape) is an array of 3-6 DIMENSIONAL items, each { label, description }. Give each a short label and put the concrete quality bar in its description. State what counts as 'full' vs 'half'/'not'. Never attach BOTH a deliverable and an advanceRubric.",
+      "Create an activity inside a lesson. Idempotent by (lessonId, title). When creating multiple activities for the same lesson, ALWAYS pass each activity's zero-based position in the intended sequence (0, 1, 2, ...) because tool calls may run in parallel. Without position, a new activity appends. If position is already occupied, the activity inserts there and shifts the consecutive occupied slots after it by one — but when the lesson ALREADY has activities, prefer positions continuing after the existing ones: parallel insert-at into occupied slots can land relative to pre-existing activities in arrival order.\n\n**kind** selects the activity type (default `online`):\n  - `online` — the scholar opens this in Rabbithole and it drives an AI tutor session. Give it a `systemPrompt` AND exactly ONE evaluation shape — a `deliverable` OR an `advanceRubric` (see below). With a `deliverable`, ALSO write a `buildContract` mission: a `gate` (the first thing the scholar must make before side ideas get built, usually 'a first draft of X exists') and `freedoms` (what the scholar owns: topic choice, characters, look); no `invariants` there (must-be-true items go in the deliverable's criteria), and never ask the teacher how tangents should be handled.\n  - `offline` — a teacher-run classroom task (discussion, lab, worksheet). Not opened in Rabbithole; no systemPrompt or rubric needed.\n  - `app` — an APP ACTIVITY: an online activity with app settings. The scholar describes an app/game and DIRECTS an AI builder that writes + iterates a live web app in the full-screen app builder; the app is the work (and the activity's deliverable). Reach for this whenever the teacher wants scholars to make/build/\"vibecode\" something interactive. (`vibecode` is accepted as the older name for the same thing.) Here the `systemPrompt` IS the BUILD BRIEF (what to build + the learning goal), NOT a tutor prompt. No rubric needed. Any other online activity's tutor can also build a scholar a side app on request, so make an app activity only when building or using the app IS the work. ALWAYS also write a `buildContract` (2–3 testable invariants, the scholar's freedoms, one gate) and set `allowSilence: true` — see the buildContract property; never ask the teacher how off-topic ideas should be handled. Also set `scholarEdit`: `build` when scholars make/remix their own app (the default when omitted), `play` when they only USE an app — and when it's genuinely unclear which the teacher wants, ASK one short question before creating (\"Should scholars just play it, or be able to change it?\"). (If the teacher may instead want a fixed simulation the scholar TUNES and observes, that's a Simulator — use `create_simulator_activity`, and ask first if it's ambiguous.) What the scholar gets: " + SESSION_SURFACE.vibecode + " So put it in the SAME unit as the work it builds on, and don't make the brief ask the scholar to retype what they already wrote.\nFor a Simulator activity (stored as `world`), use `create_simulator_activity`; for `problem_set`, use `create_problem_set`. Do NOT widen this tool's kind: both dedicated tools validate payloads this generic writer cannot carry. For `game`, `web`, or `shareBack`, create the lesson, link its Edit surface, and hand off to the teacher to choose the catalog-backed activity there.\n\n**Choosing the evaluation shape for an ONLINE activity — the most important decision.** Pick ONE:\n\n  • **`deliverable`** — when the scholar produces any ARTIFACT/PRODUCT (a story, drawing, photo, code, slide deck, audio, a written write-up). This explicitly includes kind 'map' when the saved map itself is the work scholars should repeatedly 'Check my work' or 'Send'. Its criteria are a private quality map for the tutor, NOT a scholar checklist or a completion gate. The scholar clicks 'Check my work' and the AI verdicts each criterion 'not'/'half'/'full'. A full criterion permanently awards it as scholar-visible flair; its label and description are shown together. Half/not-full remain private, and normal completion is separate.\n\n  • **`advanceRubric`** — when the learning happens IN CONVERSATION or through interactions and there is NO produced artifact: a Socratic discussion, or an INTERACTIVE MAP / GEOGRAPHY DISCOVERY activity. The tutor grades the scholar's talk + map interactions (pins, predictions, explanations) against the criteria and a full pass completes the activity — with no noise document. Criteria grade what the scholar DEMONSTRATES ('Located the requested places', 'Predicted before revealing', 'Explained the pattern in their own words', 'Transferred it to a new case').\n\nCriteria written only into `systemPrompt` are decorative and cannot award flair or complete an advance rubric.\n\n**GEOGRAPHY / MAP activities specifically:** do NOT build a rapid verbal quiz over a mute base map, and do NOT force a write-up document onto it. For a discovery sequence, build it as an `online` activity whose `systemPrompt` drives the tutor's `show_map` tool — open ONE map (op 'create', once), then before each change call op 'read' and reveal ONE variable with op 'patch'. Ask a question between patches, and have the scholar COMMIT a pin BEFORE each reveal (predict-before-reveal). Set a checkable `task` on the map when there's a right answer to locate, and design the prompt so the scholar drops a pin before each reveal. Give discovery sequences an `advanceRubric`; when the saved map itself is the product scholars should repeatedly 'Check my work' or 'Send', use a kind 'map' deliverable instead. (See the seeded Geography Quests for the canonical shape.)\n\n**criteria** (in either shape) is an array of 3-6 DIMENSIONAL items, each { label, description }. Give each a short label and put the concrete quality bar in its description. State what counts as 'full' vs 'half'/'not'. Never attach BOTH a deliverable and an advanceRubric.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1189,9 +1265,9 @@ export async function assembleCurriculumTools(
         },
         kind: {
           type: "string" as const,
-          enum: ["online", "offline", "vibecode"] as const,
+          enum: ["online", "offline", "app", "vibecode"] as const,
           description:
-            "Activity type. online (default) = AI tutor session (needs systemPrompt + exactly ONE evaluation shape: a deliverable OR an advanceRubric); offline = teacher-run classroom task (no rubric); vibecode = full-screen app-builder workshop where systemPrompt is the BUILD BRIEF (no rubric). Set vibecode whenever the teacher wants scholars to make/build/'vibecode' something interactive.",
+            "Activity type. online (default) = AI tutor session (needs systemPrompt + exactly ONE evaluation shape: a deliverable OR an advanceRubric); offline = teacher-run classroom task (no rubric); app = an app activity, an online activity with app settings where scholars build or use an app in the full-screen app builder and systemPrompt is the BUILD BRIEF (no rubric; the app is the deliverable). Set app whenever the teacher wants scholars to make/build/'vibecode' something interactive. vibecode is the older name for app.",
         },
         description: {
           type: "string" as const,
@@ -1205,7 +1281,7 @@ export async function assembleCurriculumTools(
         },
         systemPrompt: {
           type: "string" as const,
-          description: `For online: the AI tutor's system prompt during this activity (overrides lesson/unit prompts). For vibecode: ${VIBECODE_BUILD_BRIEF_DESCRIPTION} Omit for offline.`,
+          description: `For online: the AI tutor's system prompt during this activity (overrides lesson/unit prompts). For app: ${VIBECODE_BUILD_BRIEF_DESCRIPTION} Omit for offline.`,
         },
         tutorModel: tutorModelSchemaFragment(),
         durationMinutes: {
@@ -1224,20 +1300,30 @@ export async function assembleCurriculumTools(
         allowSilence: allowSilenceSchemaFragment(),
         assessesWritingMechanics: assessesWritingMechanicsSchemaFragment(),
         scholarEdit: scholarEditSchemaFragment(
-          "Omitted on a vibecode activity = `build` (scholars make their own app).",
+          "Omitted on an app activity = `build` (scholars make their own app).",
         ),
       },
       required: ["lessonId", "title"] as const,
     },
     run: async (input) => {
-      const kind =
-        (input.kind as "online" | "offline" | "vibecode" | undefined) ??
+      const requestedKind =
+        (input.kind as "online" | "offline" | "app" | "vibecode" | undefined) ??
         "online";
+      const refusal = await unitEditRefusal({
+        lessonId: input.lessonId as Id<"lessons">,
+      });
+      if (refusal) return refusal;
+      // "app" (and its older name "vibecode") is an app activity: online with
+      // app settings. It travels to the write path as kind "vibecode", which
+      // every write path normalizes to the stored shape (TRA-519).
+      const isApp = requestedKind === "app" || requestedKind === "vibecode";
+      const kind: "online" | "offline" | "vibecode" =
+        requestedKind === "app" ? "vibecode" : requestedKind;
       let result;
       try {
-        // Only ONLINE activities are exit-bar-gated. offline = a teacher-run
-        // classroom task; vibecode = a build-brief workshop (systemPrompt is
-        // the brief). Neither takes an exit bar.
+        // Only plain ONLINE activities take an authored exit bar. offline = a
+        // teacher-run classroom task; an app activity's deliverable is its
+        // app (the write path supplies it), and its systemPrompt is the brief.
         const deliverable =
           kind === "online"
             ? parseDeliverableArg(input.deliverable as RawBotDeliverable)
@@ -1246,14 +1332,12 @@ export async function assembleCurriculumTools(
           kind === "online"
             ? parseAdvanceRubricArg(input.advanceRubric as RawBotAdvanceRubric)
             : undefined;
-        // Model contract: vibecode only. The mutation rejects it on any other
-        // kind, which surfaces as a Refused message the model can recover from.
-        const rawContract = parseBuildContractArg(input.buildContract);
-        const buildContract = rawContract
-          ? normalizeBuildContract(rawContract)
-          : undefined;
-        // Scholar edit policy: vibecode only; the mutation refuses it on any
-        // other kind (TRA-477).
+        // Mission: the mutation normalizes it for the activity's shape and
+        // rejects it on a kind with no tutor session, which surfaces as a
+        // Refused message the model can recover from.
+        const buildContract = parseBuildContractArg(input.buildContract);
+        // Scholar edit policy: app activities only; the mutation refuses it
+        // on any other activity (TRA-477).
         const editAccess = scholarEditToEditAccess(input.scholarEdit);
         if (kind === "online" && deliverable && advanceRubric) {
           throw new Error(
@@ -1268,8 +1352,8 @@ export async function assembleCurriculumTools(
               "produces a document, OR an advanceRubric ({ criteria: [{label, description}, ...] }) " +
               "when the learning happens in conversation with no document (a discussion or a " +
               "map/geography discovery quiz — grade the talk + map interactions). " +
-              "If this is an offline classroom task or a vibecode build workshop, pass " +
-              "kind:'offline' or kind:'vibecode' instead — those need no exit bar.",
+              "If this is an offline classroom task or an app activity, pass " +
+              "kind:'offline' or kind:'app' instead — those need no exit bar.",
           );
         }
         result = await ctx.runMutation(
@@ -1312,8 +1396,8 @@ export async function assembleCurriculumTools(
 
       const sseSummary = result.existed
         ? `Activity "${input.title}" already exists; left as-is.`
-        : result.kind === "vibecode"
-          ? `Created vibecode activity "${input.title}".`
+        : isApp
+          ? `Created app activity "${input.title}".`
           : result.kind === "offline"
             ? `Created offline activity "${input.title}".`
             : `Created online activity "${input.title}".`;
@@ -1328,7 +1412,9 @@ export async function assembleCurriculumTools(
         activityId: result.activityId,
         existed: result.existed,
         title: input.title,
-        kind: result.kind,
+        // The write returns the effective kind; an existing app activity reads
+        // "vibecode" there and is reported in the tool vocabulary as "app".
+        kind: isApp || result.kind === "vibecode" ? "app" : result.kind,
         deliverableAttached: result.deliverableAttached,
         // Deep link straight to the activity in the curriculum column-view.
         // ALWAYS link this — it's the thing the teacher most wants to open
@@ -1848,6 +1934,20 @@ export async function assembleCurriculumTools(
   // curriculum-design surfaces below.
   const listGeomapAssetsTool = await makeListGeomapAssetsTool(emit);
 
+  // General curriculum authoring: find a unit, build it, fill it with
+  // lessons and activities. Writes no scholar data; each tool re-checks the
+  // unit against the caller (unitEditRefusal), the same gate as the UI.
+  const curriculumAuthoringTools: AideTool[] = [
+    listUnitsTool,
+    getUnitDetailsTool,
+    createUnitTool,
+    deleteEmptyUnitTool,
+    createScholarLessonTool,
+    moveLessonTool,
+    createScholarActivityTool,
+    ...activityKindTools,
+  ];
+
   // Built by push into a pre-typed array rather than as one literal: a
   // literal holding this many tools makes TS materialise the union of every
   // tool's input schema, which exceeds its complexity limit (TS2590) — same
@@ -1869,6 +1969,32 @@ export async function assembleCurriculumTools(
       );
     }
     if (hasHealthManagementAccess) tools.push(...healthRecordTools);
+    // A `curriculum:edit` grant: the same general authoring the Curriculum
+    // UI already lets this staffer do. Unit-scoped, never scholar-named —
+    // no Quests, seeds, directives, assignments or roster lookups.
+    if (staffCanDesignCurriculum) tools.push(...curriculumAuthoringTools);
+    // A `curriculum:run` grant beside it: run the units she can edit —
+    // assign, push/schedule and read progress on assignments she OWNS. Names
+    // resolve only against her assignee lens (scholars at her run schools),
+    // never the scholar-read lens; every scholar-record read stays closed.
+    if (staffCanDesignCurriculum) {
+      const runScope = await ctx.runQuery(
+        internal.assignments.aideCurriculumRunScope,
+        { callerUserId },
+      );
+      if (runScope) {
+        tools.push(
+          ...(await makeAssignmentTools(ctx, emit, {
+            role,
+            callerUserId,
+            linkBase,
+            allowedScholarIds: new Set(runScope.scholarIds),
+            institutionScope,
+            curriculumRunner: true,
+          })),
+        );
+      }
+    }
     // The asker's OWN Drive — no school authority involved, so every base
     // staff account gets it, grant or not (as on Slack before the move).
     tools.push(...driveTools);
@@ -1912,7 +2038,18 @@ export async function assembleCurriculumTools(
     // mutation separately requires scholar access before it will remove a
     // SCHOLAR-owned unit, so a designer can undo their own unit without
     // reaching into a scholar's Quests board.
-    ...(canDesignCurriculum ? [createUnitTool, deleteEmptyUnitTool] : []),
+    ...(canDesignCurriculum
+      ? [
+          createUnitTool,
+          deleteEmptyUnitTool,
+          // Lesson + activity authoring: the UI lets every curriculum role
+          // do this, and each tool re-checks the unit against the caller.
+          createScholarLessonTool,
+          moveLessonTool,
+          createScholarActivityTool,
+          ...activityKindTools,
+        ]
+      : []),
     // Scholar-targeted writes — teacher/admin only. They resolve a scholar
     // by name, so handing them to a designer both writes per-scholar records
     // and leaks the roster.
@@ -1924,10 +2061,6 @@ export async function assembleCurriculumTools(
           upsertTeacherDirectiveTool,
           createScholarSeedTool,
           createScholarQuestTool,
-          createScholarLessonTool,
-          moveLessonTool,
-          createScholarActivityTool,
-          ...activityKindTools,
           // Assignment scheduling (create / read / schedule / push / roster /
           // archive) — the SHARED group from lib/assignmentTools.ts, which the
           // unit-page Curriculum Bot registers too. It re-checks the same

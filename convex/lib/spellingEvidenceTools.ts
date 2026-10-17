@@ -96,7 +96,7 @@ export async function makeSpellingEvidenceTools(
         emit({
           toolComplete: {
             name: SPELLING_EVIDENCE_TOOL_NAME,
-            result: `Loaded ${evidence.samples.length} typed message(s) for ${scholar.name}`,
+            result: `Loaded ${evidence.samples.length} spelling-evidence sample(s) for ${scholar.name}`,
           },
         });
         return JSON.stringify({

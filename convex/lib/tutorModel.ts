@@ -63,7 +63,9 @@ export function tutorEffort(model: string): AideEffort | undefined {
 
 export function tutorRuntime(
   model: ModelId,
-  sessionMode?: "conversation" | "workbench" | "vibecode" | null,
+  // A turn that builds an app (TRA-519: any session with builder features)
+  // gets the big budget, so a whole HTML app fits in one tool call.
+  opts: { appBuild?: boolean } = {},
 ): {
   maxTokens: number;
   effort: AideEffort | undefined;
@@ -72,10 +74,34 @@ export function tutorRuntime(
   return {
     maxTokens:
       (model === MODELS.FABLE || model === MODELS.OPUS_5_5) &&
-      sessionMode === "vibecode"
+      opts.appBuild === true
         ? 64000
         : aideMaxTokens(model, 4096),
     effort: tutorEffort(model),
     refusalFallback: tutorRefusalFallback(model),
   };
+}
+
+/**
+ * Can this tutor request carry a mid-conversation `role: "system"` message
+ * (the per-turn session state, sessionStreamHelpers.layoutTutorRequest)?
+ *
+ * The tutor runs Opus 5.5 or Fable 5.1 (resolveTutorModel), and the refusal
+ * fallback (`fallbacks: "default"`) re-runs a declined request on Opus 5 or
+ * Opus 4.8. Anthropic documents all four as accepting mid-conversation system
+ * messages with no beta header, and Sonnet 5 as rejecting them with a 400, so
+ * the list is explicit: a model not on it gets the same text as user-turn
+ * context instead of a request the API may refuse. Probed live 2026-10-14 on
+ * all four, including the tool loop (user → system → assistant(tool_use) →
+ * user(tool_result)).
+ */
+const MID_CONVERSATION_SYSTEM_MODELS: ReadonlySet<string> = new Set([
+  MODELS.OPUS_5_5,
+  MODELS.FABLE,
+  "claude-opus-5",
+  MODELS.OPUS,
+]);
+
+export function supportsMidConversationSystem(model: string): boolean {
+  return MID_CONVERSATION_SYSTEM_MODELS.has(model);
 }

@@ -3,7 +3,7 @@ import {
   authedQuery,
   authedMutation,
 } from "./lib/customFunctions";
-import { isTeacherRole } from "./lib/roles";
+import { canRunAssignments } from "./lib/curriculumRun";
 
 /**
  * Test-drive flag toggle. Teacher clicks 👍 / 👎 on a tutor message in
@@ -45,9 +45,9 @@ export const toggle = authedMutation({
       throw new Error("Flags are only available on test-drive projects");
     }
 
-    const isTeacher =
-      isTeacherRole(ctx.user.role);
-    if (!isTeacher || session.userId !== ctx.user._id) {
+    // Teachers, and a curriculum:run holder on her own (synthetic) rehearsal.
+    const canRehearse = await canRunAssignments(ctx, ctx.user);
+    if (!canRehearse || session.userId !== ctx.user._id) {
       throw new Error("Forbidden");
     }
 
@@ -109,9 +109,9 @@ export const setNote = authedMutation({
     if (!session.isTestDrive) {
       throw new Error("Flags are only available on test-drive projects");
     }
-    const isTeacher =
-      isTeacherRole(ctx.user.role);
-    if (!isTeacher || session.userId !== ctx.user._id) {
+    // Teachers, and a curriculum:run holder on her own (synthetic) rehearsal.
+    const canRehearse = await canRunAssignments(ctx, ctx.user);
+    if (!canRehearse || session.userId !== ctx.user._id) {
       throw new Error("Forbidden");
     }
     const existing = await ctx.db
@@ -135,9 +135,9 @@ export const listForSession = authedQuery({
     if (!session) return [];
     if (!session.isTestDrive) return [];
 
-    const isTeacher =
-      isTeacherRole(ctx.user.role);
-    if (!isTeacher || session.userId !== ctx.user._id) return [];
+    // Teachers, and a curriculum:run holder on her own (synthetic) rehearsal.
+    const canRehearse = await canRunAssignments(ctx, ctx.user);
+    if (!canRehearse || session.userId !== ctx.user._id) return [];
 
     const flags = await ctx.db
       .query("testDriveFlags")

@@ -28,7 +28,7 @@
  * observer emits that run.
  *
  *   ANTHROPIC_API_KEY=... npx tsx evals/observer/pcm-dimension-check.ts
- *   ./evals/observer/pcm-dimension-check.sh              # sonnet, the live observer model
+ *   ./evals/observer/pcm-dimension-check.sh              # observer, the live observer model (lib/models.OBSERVER_MODEL)
  *   MODEL=opus RUNS=5 npx tsx evals/observer/pcm-dimension-check.ts
  *
  * See README-pcm-dimension-check.md for the full invocation note. Exits
@@ -40,14 +40,14 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MODELS } from "../../convex/lib/models";
+import { MODELS, OBSERVER_MODEL } from "../../convex/lib/models";
 import { OBSERVER_TOOL, type ObserverResult } from "../../convex/lib/observerShared";
 import { PCM_DIMENSIONS, type PcmDimension } from "../../convex/lib/pcm";
 import { runObserver, type TranscriptCase } from "./lib/runObserver";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MODEL_MAP: Record<string, string> = { sonnet: MODELS.SONNET, opus: MODELS.OPUS, haiku: MODELS.HAIKU };
-const model = MODEL_MAP[process.env.MODEL ?? "sonnet"] ?? MODELS.SONNET;
+const MODEL_MAP: Record<string, string> = { observer: OBSERVER_MODEL, sonnet: MODELS.SONNET, opus: MODELS.OPUS, haiku: MODELS.HAIKU };
+const model = MODEL_MAP[process.env.MODEL ?? "observer"] ?? OBSERVER_MODEL;
 const runs = parseInt(process.env.RUNS ?? "3", 10); // LLMs sample — average a few
 const HIT_RATE_GATE = 0.5; // majority of runs must tag the expected dimension somewhere
 

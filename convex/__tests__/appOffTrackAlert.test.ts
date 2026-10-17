@@ -5,7 +5,8 @@ import { internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import {
   APP_OFF_TRACK_ALERT_KIND,
-  buildAppOffTrackAlert,
+  OFF_MISSION_ALERT_KIND,
+  buildOffMissionAlert,
   entersOffTrack,
 } from "../appOffTrackAlert";
 import { CONCERN_ON_TASK } from "../lib/rosterPulse";
@@ -51,6 +52,10 @@ async function seedWorld(
     session?: Partial<Doc<"sessions">>;
     assignmentTeacherElsewhere?: boolean;
     buildContract?: boolean;
+    /** Fields of the activity, replacing the default vibecode app. */
+    activity?: Partial<Doc<"activities">>;
+    /** The session has no activity (open chat, Quest planning, exploration). */
+    noActivity?: boolean;
   } = {},
 ) {
   const institutionId = await seedTestInstitution(t, { slug: "home-school" });
@@ -102,6 +107,7 @@ async function seedWorld(
             },
           }
         : {}),
+      ...opts.activity,
     } as Doc<"activities">);
     const assignmentId = await ctx.db.insert("assignments", {
       teacherId: assignmentTeacherId,
@@ -113,7 +119,7 @@ async function seedWorld(
       userId: scholarId,
       institutionId,
       unitId,
-      activityId,
+      ...(opts.noActivity ? {} : { activityId }),
       assignmentId,
       sessionMode: "vibecode",
       title: "My cholera game",
@@ -150,7 +156,7 @@ async function offTrackAlerts(t: T) {
   return await t.run((ctx) =>
     ctx.db
       .query("alerts")
-      .filter((q) => q.eq(q.field("kind"), APP_OFF_TRACK_ALERT_KIND))
+      .filter((q) => q.eq(q.field("kind"), OFF_MISSION_ALERT_KIND))
       .collect(),
   );
 }
@@ -208,13 +214,241 @@ describe("app off-track alert", () => {
   test.each([
     ["a test drive (teacher build)", { isTestDrive: true }],
     ["free play", { freePlay: true }],
-    ["a conversation session", { sessionMode: "conversation" as const }],
+    ["an archived session", { isArchived: true }],
+    ["an offline row", { isOffline: true }],
+    ["a seeded exemplar", { seedExemplar: true }],
   ])("never fires for %s", async (_label, session) => {
     const t = convexTest(schema, modules);
     const w = await seedWorld(t, { session });
     await reading(t, w.sessionId, OFF);
     await reading(t, w.sessionId, OFF);
     expect(await offTrackAlerts(t)).toHaveLength(0);
+  });
+
+  test("an app activity still alerts, whatever the session mode", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, {
+      session: { sessionMode: "conversation" as const },
+    });
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(1);
+  });
+});
+
+describe("off-mission alert", () => {
+  const ESSAY = {
+    kind: "online" as const,
+    title: "Field journal",
+    deliverable: {
+      kind: "text" as const,
+      prompt: "Write about the pond.",
+      mode: "none" as const,
+      criteria: [],
+    },
+  };
+
+  test("an essay activity with a text deliverable alerts after two low readings", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, {
+      activity: ESSAY,
+      session: { sessionMode: "conversation" as const },
+    });
+    await reading(t, w.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(0);
+    await reading(t, w.sessionId, OFF);
+    const alerts = await offTrackAlerts(t);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].kind).toBe("off_mission");
+    expect(alerts[0].dedupKey).toBe(`off_mission:${w.sessionId}`);
+    const [post] = await slackPosts(t);
+    expect(post.text).toContain("🧭");
+    expect(post.text).toContain("Ava looks off mission in Field journal");
+  });
+
+  test("a discussion-only (advanceRubric) activity has no mission and never alerts", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, {
+      activity: {
+        kind: "online" as const,
+        title: "Circle talk",
+        advanceRubric: { criteria: [{ id: "c1", label: "Shares a view" }] },
+      },
+      session: { sessionMode: "conversation" as const },
+    });
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(0);
+  });
+
+  test("a session with no activity (open chat, Quest planning, seed exploration) never alerts", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, {
+      noActivity: true,
+      session: { sessionMode: "conversation" as const },
+    });
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(0);
+
+    // A seed exploration is an activity-less session carrying a seed.
+    const seeded = await seedWorld(t, { noActivity: true });
+    const seedId = await t.run((ctx) =>
+      ctx.db.insert("seeds", {
+        scholarId: seeded.scholarId,
+        origin: "ai",
+        status: "active",
+        topic: "Why is the sky dark at night",
+        suggestionType: "frontier",
+        rationale: "test",
+      }),
+    );
+    await t.run((ctx) => ctx.db.patch(seeded.sessionId, { seedId }));
+    await reading(t, seeded.sessionId, OFF);
+    await reading(t, seeded.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(0);
+  });
+
+  test("the message carries the authored gate, or the default gate marked as default", async () => {
+    const t = convexTest(schema, modules);
+    const authored = await seedWorld(t, {
+      activity: {
+        ...ESSAY,
+        buildContract: {
+          invariants: [],
+          freedoms: [],
+          gate: "GATE-first-paragraph-about-the-heron",
+        },
+      },
+    });
+    await reading(t, authored.sessionId, OFF);
+    await reading(t, authored.sessionId, OFF);
+    const dflt = await seedWorld(t, { activity: ESSAY });
+    await reading(t, dflt.sessionId, OFF);
+    await reading(t, dflt.sessionId, OFF);
+    const [a, d] = await slackPosts(t);
+    expect(a.text).toContain("Mission: GATE-first-paragraph-about-the-heron");
+    expect(a.text).not.toContain("(default)");
+    expect(d.text).toContain("Mission: (default) ");
+  });
+
+  test("a contract with no gate still reads as the default gate", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, {
+      activity: {
+        ...ESSAY,
+        buildContract: { invariants: [], freedoms: ["FREE-which-bird"] },
+      },
+    });
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    const [post] = await slackPosts(t);
+    expect(post.text).toContain("Mission: (default) ");
+  });
+
+  test("a scholar who has completed the activity is never alerted", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, { activity: ESSAY });
+    await t.run((ctx) =>
+      ctx.db.insert("activityCompletions", {
+        scholarId: w.scholarId,
+        activityId: w.activityId,
+        assignmentId: w.assignmentId,
+        sessionId: w.sessionId,
+        completedAt: Date.now(),
+      }),
+    );
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(0);
+  });
+
+  test("a completion under another assignment does not silence this one", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t, { activity: ESSAY });
+    await t.run(async (ctx) => {
+      const otherAssignment = await ctx.db.insert("assignments", {
+        teacherId: w.unitTeacherId,
+        unitId: w.unitId,
+        scholarIds: [w.scholarId],
+        startedAt: Date.now(),
+      });
+      await ctx.db.insert("activityCompletions", {
+        scholarId: w.scholarId,
+        activityId: w.activityId,
+        assignmentId: otherAssignment,
+        completedAt: Date.now(),
+      });
+    });
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(1);
+  });
+
+  test("the saved-ideas line appears only when the lot is non-empty", async () => {
+    const t = convexTest(schema, modules);
+    const empty = await seedWorld(t, { activity: ESSAY });
+    await reading(t, empty.sessionId, OFF);
+    await reading(t, empty.sessionId, OFF);
+    const withLot = await seedWorld(t, {
+      activity: ESSAY,
+      session: {
+        parkingLot: [
+          { text: "a podcast about herons", parkedAt: Date.now() },
+          { text: "a heron board game", parkedAt: Date.now() },
+        ],
+      },
+    });
+    await reading(t, withLot.sessionId, OFF);
+    await reading(t, withLot.sessionId, OFF);
+    const [e, l] = await slackPosts(t);
+    expect(e.text).not.toContain("saved");
+    expect(l.text).toContain("The tutor has saved 2 ideas for later this session.");
+  });
+
+  test("the 12-hour window holds across the old and new kinds for one session", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t);
+    // A session already paged under the app-only kind.
+    await t.run((ctx) =>
+      ctx.db.insert("alerts", {
+        kind: APP_OFF_TRACK_ALERT_KIND,
+        severity: "warning",
+        title: "old",
+        body: "old",
+        source: "observer",
+        scholarId: w.scholarId,
+        sessionId: w.sessionId,
+        dedupKey: `${APP_OFF_TRACK_ALERT_KIND}:${w.sessionId}`,
+        status: "open",
+        createdAt: Date.now() - 60 * 60 * 1000,
+      }),
+    );
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(0);
+  });
+
+  test("an old-kind alert past the window no longer blocks the new kind", async () => {
+    const t = convexTest(schema, modules);
+    const w = await seedWorld(t);
+    await t.run((ctx) =>
+      ctx.db.insert("alerts", {
+        kind: APP_OFF_TRACK_ALERT_KIND,
+        severity: "warning",
+        title: "old",
+        body: "old",
+        source: "observer",
+        scholarId: w.scholarId,
+        sessionId: w.sessionId,
+        dedupKey: `${APP_OFF_TRACK_ALERT_KIND}:${w.sessionId}`,
+        status: "open",
+        createdAt: Date.now() - 13 * 60 * 60 * 1000,
+      }),
+    );
+    await reading(t, w.sessionId, OFF);
+    await reading(t, w.sessionId, OFF);
+    expect(await offTrackAlerts(t)).toHaveLength(1);
   });
 
   test("a sustained off-track session alerts once; clearing and returning the same day stays at one", async () => {
@@ -295,22 +529,38 @@ describe("app off-track alert", () => {
     expect(lines[0]).toContain("Cholera game");
     expect(lines[1].startsWith("<@UASSIGN01> ")).toBe(true);
     expect(lines[1]).toContain("microbe model");
-    expect(lines[2]).toContain("2 ideas");
+    expect(lines[2].startsWith("Mission: ")).toBe(true);
+    expect(lines[3]).toContain("2 ideas for later");
     expect(lines.at(-1)).toContain(`/scholar/${w.sessionId}?remote=${w.scholarId}`);
     expect(post.text).not.toMatch(/0\.\d/);
   });
 });
 
-describe("buildAppOffTrackAlert", () => {
-  test("drops a malformed Slack id and omits the parked line when there is none", () => {
-    const { title, body } = buildAppOffTrackAlert({
+describe("buildOffMissionAlert", () => {
+  test("drops a malformed Slack id, names the mission, omits the saved-ideas line when there is none", () => {
+    const { title, body } = buildOffMissionAlert({
       scholarName: "Ava",
       activityTitle: "Cholera game",
       observerSummary: "Drifted into combat.",
+      mission: { gateAuthored: true, gate: "The microbe model has run once." },
       teacherSlackUserId: "not-an-id>",
       parkedIdeas: 0,
     });
-    expect(title).toBe("Ava looks off track in Cholera game");
-    expect(body).toBe("Drifted into combat.");
+    expect(title).toBe("Ava looks off mission in Cholera game");
+    expect(body).toBe(
+      "Drifted into combat.\nMission: The microbe model has run once.",
+    );
+  });
+
+  test("a single saved idea reads in the singular", () => {
+    const { body } = buildOffMissionAlert({
+      scholarName: "Ava",
+      activityTitle: "Field journal",
+      observerSummary: "Wandered off.",
+      mission: { gateAuthored: false, gate: "A first draft exists." },
+      parkedIdeas: 1,
+    });
+    expect(body).toContain("Mission: (default) A first draft exists.");
+    expect(body).toContain("The tutor has saved 1 idea for later this session.");
   });
 });

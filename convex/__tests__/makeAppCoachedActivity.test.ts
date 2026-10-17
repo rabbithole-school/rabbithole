@@ -171,7 +171,8 @@ describe("make_app_a_coached_activity", () => {
     expect(state.lesson?.title).toBe("Cart Experiments");
     expect(state.activity).toMatchObject({
       title: "Investigate Force and Motion",
-      kind: "vibecode",
+      kind: "online",
+      appActivity: true,
       systemPrompt: BUILD_BRIEF,
       starterAppId: app.customAppId,
       scholarsStartFrom: "starter",
@@ -510,7 +511,8 @@ describe("make_app_a_coached_activity", () => {
     expect(state.activities).toHaveLength(1);
     expect(state.activities[0]).toMatchObject({
       title: "Force Explorer",
-      kind: "vibecode",
+      kind: "online",
+      appActivity: true,
       systemPrompt: BUILD_BRIEF,
       starterAppId: app.customAppId,
       scholarsStartFrom: "starter",
@@ -561,7 +563,8 @@ describe("make_app_a_coached_activity", () => {
     expect(state.activities).toHaveLength(1);
     expect(state.activities[0]).toMatchObject({
       title: "Rocket Shop",
-      kind: "vibecode",
+      kind: "online",
+      appActivity: true,
       systemPrompt: BUILD_BRIEF,
       appRequest: APP_REQUEST,
     });

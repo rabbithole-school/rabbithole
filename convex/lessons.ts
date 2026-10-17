@@ -338,7 +338,8 @@ export const reorder = authedMutation({
  * they only reference `lessonId`, never `unitId`, so they follow for free)
  * to a different unit. No auth checks here — callers are responsible for
  * gating (the public `moveToUnit` mutation via `requireUnitEditAccess`; the
- * `teacherAide.moveLesson` internal mutation via the aide tool's role ACL).
+ * `teacherAide.moveLesson` internal mutation via the aide tool's
+ * `curriculumAssistant.checkUnitEditAccessForAide` on both units).
  *
  * Appends the lesson to the end of the target unit's lesson order. A
  * same-unit "move" is a safe no-op (returns `moved: false` instead of

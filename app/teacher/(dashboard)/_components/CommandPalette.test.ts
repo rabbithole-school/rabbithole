@@ -136,3 +136,4 @@ describe("CommandPalette curriculum entries", () => {
     expect(hits).toHaveLength(1);
   });
 });
+

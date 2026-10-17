@@ -51,6 +51,14 @@ export default function ScheduleLayout({
     !!user?.hasProgramPublishingAccess &&
     !isTeacherRole(user.role);
   const programScoped = programPublisher && !!user?.hasCurriculumAccess;
+  // A curriculum:run holder (base staff) runs only the units she built: the
+  // List of her OWN assignments + their Run page. No term timetable, no
+  // Happening Now — those read the whole school's schedule.
+  const runnerScoped =
+    !programScoped &&
+    !!user &&
+    !isTeacherRole(user.role) &&
+    user.hasCurriculumRunAccess === true;
 
   const selectedFromPath = assignmentIdFromPathname(pathname);
   const viewParam = searchParams.get("view");
@@ -150,6 +158,25 @@ export default function ScheduleLayout({
             />
           )}
         </Flex>
+        <Box position="absolute" inset={0} pointerEvents="none">
+          {children}
+        </Box>
+      </Flex>
+    );
+  }
+
+  if (runnerScoped) {
+    return (
+      <Flex h="full" overflow="hidden" position="relative">
+        <Flex flex={1} direction="column" overflow="hidden" minW={0}>
+          <AssignmentsListDetail
+            onStartAssignment={() => setGlobalStartOpen(true)}
+          />
+        </Flex>
+        <StartAssignmentDialog
+          open={globalStartOpen}
+          onClose={() => setGlobalStartOpen(false)}
+        />
         <Box position="absolute" inset={0} pointerEvents="none">
           {children}
         </Box>

@@ -19,11 +19,14 @@
  *     the soul doc is edited or switched off.
  *   - buildNonHumanIntroSection(true) — the static first-session self-intro.
  *   - buildToolsSection() — the static tool-affordance description (chat and
- *     app-builder variants).
+ *     app-builder variants), plus buildSideAppSection (a side app's steer-back).
+ *   - buildTutorMissionSteering — the tutor-stance MISSION steering
+ *     (TRA-519 B1), rendered for a fixed reference mission with and without
+ *     a Quest build unlock.
  *   - buildOpenExplorationWrapUpSection() — the static "how an open
  *     exploration ends" note (rendered only for activity-less sessions).
- *   - TUTOR_PROMPT_SECTION_ORDER + TUTOR_TURN_CONTEXT_SECTIONS + the
- *     cache-breakpoint key — the section LAYOUT of the assembled prompt.
+ *   - TUTOR_PROMPT_SECTION_ORDER + TUTOR_TURN_SYSTEM_SECTIONS +
+ *     TUTOR_TURN_CONTEXT_SECTIONS + the cache-breakpoint keys — the section LAYOUT of the assembled prompt.
  *     Reordering sections is model-visible (what the tutor reads first changes)
  *     even though no section's text does, so a layout change must group as a
  *     new prompt version (TRA-185).
@@ -64,9 +67,13 @@ import {
   buildOpeningTurnSection,
   buildOpenExplorationWrapUpSection,
   buildToolsSection,
+  buildSideAppSection,
+  buildTutorMissionSteering,
+  FIRST_DOCUMENT_TUTOR_SECTION,
   FIRST_DYNAMIC_TUTOR_SECTION,
   TUTOR_PROMPT_SECTION_ORDER,
   TUTOR_TURN_CONTEXT_SECTIONS,
+  TUTOR_TURN_SYSTEM_SECTIONS,
 } from "../prompts";
 import {
   buildChatPracticeSection,
@@ -114,6 +121,18 @@ function normalizeBasePrompt(prompt: string): string {
 /** Arbitrary fixed epoch-ms anchor for the opening-turn hash material. */
 const REF_LAST_SESSION_AT = 1_700_000_000_000;
 
+/** Fixed reference mission for the MISSION steering's hash material. */
+const REF_MISSION = {
+  source: "default" as const,
+  gate: "Reference gate.",
+  freedoms: [],
+  invariants: [],
+  questLine: null,
+  ownQuest: false,
+  unlocksBuild: null,
+  buildStepOpen: false,
+};
+
 export function buildVersionMaterial(): string {
   const chatPracticeOn = chatPracticeEnabled();
   const teachBackOn = teachBackEnabled();
@@ -129,12 +148,27 @@ export function buildVersionMaterial(): string {
     // doc (and returns null when it's switched off).
     buildSoulSection(),
     buildNonHumanIntroSection(true),
-    buildToolsSection({ appBuilder: false }),
-    buildToolsSection({ appBuilder: true }),
-    buildToolsSection({ appBuilder: false, appActions: true }),
+    buildToolsSection({ builderFeatures: false }),
+    buildToolsSection({ builderFeatures: true }),
+    buildToolsSection({ builderFeatures: false, appActions: true }),
+    buildSideAppSection("text"),
+    buildSideAppSection(null),
+    buildSideAppSection("text", { hasMission: true }),
+    buildSideAppSection("text", { lockedBuild: "Reference build step" }),
+    buildTutorMissionSteering(REF_MISSION),
+    buildTutorMissionSteering({
+      ...REF_MISSION,
+      unlocksBuild: "Reference build step",
+    }),
+    buildTutorMissionSteering({
+      ...REF_MISSION,
+      unlocksBuild: "Reference build step",
+      buildStepOpen: true,
+    }),
+    buildSideAppSection("text", { openBuild: "Reference build step" }),
     buildOpenExplorationWrapUpSection(),
     // Section layout + where the prompt-cache breakpoint falls.
-    `layout: ${TUTOR_PROMPT_SECTION_ORDER.join(",")} | turn-context: ${TUTOR_TURN_CONTEXT_SECTIONS.join(",")} | breakpoint: ${FIRST_DYNAMIC_TUTOR_SECTION}`,
+    `layout: ${TUTOR_PROMPT_SECTION_ORDER.join(",")} | turn-system: ${TUTOR_TURN_SYSTEM_SECTIONS.join(",")} | turn-context: ${TUTOR_TURN_CONTEXT_SECTIONS.join(",")} | breakpoint: ${FIRST_DYNAMIC_TUTOR_SECTION} | documents: ${FIRST_DOCUMENT_TUTOR_SECTION}`,
     chatPracticeOn
       ? buildChatPracticeSection({
           fluentLabels: ["Reference fluent skill"],

@@ -1230,7 +1230,7 @@ describe("app-state prompt projection", () => {
     // on the instrumentation contract; a drift here means one surface stops
     // knowing about window.rabbithole entirely.
     for (const prompt of [
-      buildToolsSection({ appBuilder: true }),
+      buildToolsSection({ builderFeatures: true }),
       buildVibecodeSection(),
     ]) {
       expect(prompt).toContain("window.rabbithole.setState");
@@ -1244,19 +1244,19 @@ describe("app-state prompt projection", () => {
     }
   });
 
-  test("a chat session's tools section promises no builder-only capability", () => {
+  test("a session with no app promises no builder-only capability", () => {
     // Render check, /app-assets/ pictures (charm_icon), and tutor-run app
-    // actions are gated on the app builder server-side; a chat prompt that
+    // actions follow builder features (any app) server-side; a prompt that
     // mentions them sends the tutor looking for things it will never get.
-    const chat = buildToolsSection({ appBuilder: false });
+    const chat = buildToolsSection({ builderFeatures: false });
     for (const builderOnly of ["RENDER CHECK", "charm_icon", "registerAction"]) {
       expect(chat).not.toContain(builderOnly);
-      expect(buildToolsSection({ appBuilder: true })).toContain(builderOnly);
+      expect(buildToolsSection({ builderFeatures: true })).toContain(builderOnly);
     }
     expect(chat).toContain("window.rabbithole.setState");
     expect(chat).toContain("window.rabbithole.askTutor");
     // Workbench runs app actions but has no render check or app assets.
-    const workbench = buildToolsSection({ appBuilder: false, appActions: true });
+    const workbench = buildToolsSection({ builderFeatures: false, appActions: true });
     expect(workbench).toContain("registerAction");
     expect(workbench).not.toContain("RENDER CHECK");
     expect(workbench).not.toContain("charm_icon");

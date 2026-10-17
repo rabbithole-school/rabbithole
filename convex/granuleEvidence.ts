@@ -3,6 +3,7 @@ import { internalMutation, internalQuery } from "./_generated/server";
 import { authedQuery, teacherQuery } from "./lib/customFunctions";
 import { requireTeacherOrSelf } from "./lib/auth";
 import { requireActiveScholarAccess } from "./lib/access";
+import { isTeacherRole } from "./lib/roles";
 import { deriveGranuleStatuses, statusFromEvidence, unitGranules } from "./lib/granules";
 import type { GranuleStatus } from "./lib/granules";
 import { extendedEducationTag } from "./lib/scholarParticipationTooling";
@@ -132,6 +133,10 @@ export const aideCoverage = internalQuery({
     assignmentId: v.id("assignments"),
   },
   handler: async (ctx, { callerUserId, assignmentId }) => {
+    // Per-scholar understanding evidence is learning record: teacher-only,
+    // even for the assignment's owner (a curriculum:run holder owns runs).
+    const caller = await ctx.db.get(callerUserId);
+    if (!caller || !isTeacherRole(caller.role)) return null;
     const a = await ctx.db.get(assignmentId);
     if (!a || a.teacherId !== callerUserId) return null;
     // A standing (unitId-less) assignment has no unit/granules grid.

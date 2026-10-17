@@ -86,6 +86,9 @@ export function teacherNavKeysForRole(
     mentor: false,
     mentorOnly: false,
   },
+  // A `curriculum:run` grant (beside curriculum:edit): Schedule opens on her
+  // OWN assignments only — the Run page for the units she built.
+  hasCurriculumRunAccess = false,
 ): TeacherNavKey[] {
   // Every role that reaches either shell is staff, and every staff role may
   // enter `/school` (the school shell then filters its own left rail per role),
@@ -106,7 +109,8 @@ export function teacherNavKeysForRole(
     // else — not even School, whose rail would be empty for them.
     if (scholarMessaging.mentorOnly) return ["messages"];
     return [
-      ...(hasProgramPublishingAccess && hasCurriculumAccess
+      ...((hasProgramPublishingAccess || hasCurriculumRunAccess) &&
+      hasCurriculumAccess
         ? (["schedule"] as const)
         : []),
       ...(hasSchoolOperationsAccess ? (["scholars"] as const) : []),

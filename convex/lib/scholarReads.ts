@@ -64,6 +64,7 @@ import {
   PARENT_INTERESTS_LEGEND,
   renderInterestsForPrompt,
 } from "./interests";
+import { isAppActivity, effectiveActivityKind } from "../../shared/appSurface";
 
 type OrderedOnlineActivity = {
   activity: Doc<"activities">;
@@ -102,7 +103,12 @@ async function orderedActivitiesForUnit(
     ).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
     for (const activity of activities) {
       if (activity.archivedAt) continue; // archived = out of active curriculum
-      if (!launchableKindSet.has(activity.kind as LaunchableActivityKind)) continue;
+      if (
+        !launchableKindSet.has(
+          effectiveActivityKind(activity) as LaunchableActivityKind,
+        )
+      )
+        continue;
       ordered.push({
         activity,
         lesson,
@@ -626,7 +632,9 @@ export async function suggestedQuestsForScholar(
         .query("activities")
         .withIndex("by_lesson", (q) => q.eq("lessonId", l._id))
         .collect();
-      activityCount += acts.filter((a) => a.kind === "online").length;
+      activityCount += acts.filter(
+        (a) => effectiveActivityKind(a) === "online",
+      ).length;
     }
     const teacher =
       (s.teacherId ? await ctx.db.get(s.teacherId) : null) ?? fallbackTeacher;
@@ -1727,10 +1735,10 @@ export async function readSessionTranscript(
     // (scholarReadPolicy), so the TEACHER description is the right context here
     // — the aide judging a session needs the design intent.
     activityDescription: activity?.description ?? null,
-    activityKind: activity?.kind ?? null,
-    // Vibecode only: whether the scholar could open Edit (and so the Code
-    // view) — whatTheScholarSees explains the values.
-    ...(activity?.kind === "vibecode"
+    activityKind: activity ? effectiveActivityKind(activity) : null,
+    // App activities only: whether the scholar could open Edit (and so the
+    // Code view) — whatTheScholarSees explains the values.
+    ...(activity && isAppActivity(activity)
       ? { appEditAccess: activity.editAccess ?? null }
       : {}),
     sessionMode,

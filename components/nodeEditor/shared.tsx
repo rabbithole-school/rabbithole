@@ -268,14 +268,16 @@ export function AddRow({
   );
 }
 
+// No "vibecode": an app activity is an online activity with the editor's
+// "Scholars build or use an app" switch on (TRA-519), not a kind to pick.
+const KIND_ORDER = ["online", "offline", "shareBack", "web", "game", "simulator"] as const;
+
 /**
  * Activity kind picker. A compact Chakra Menu (same pattern as the
  * deliverable kind picker) — the trigger collapses to a single row
  * showing the current kind, and each kind teaches itself in the menu
  * via its description.
  */
-const KIND_ORDER = ["online", "offline", "shareBack", "web", "game", "simulator", "vibecode"] as const;
-
 export function KindToggle({
   value,
   onChange,

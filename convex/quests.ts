@@ -39,6 +39,16 @@ import { questStateForPair, questsForScholar } from "./lib/questLifecycle";
 import type { QuestState } from "./lib/questLifecycle";
 import { chosenPathValidator } from "./bakeUnitFromSeed";
 import { createSessionFromSeedCore } from "./sessions";
+import { isAppActivity } from "../shared/appSurface";
+import { normalizeDeliverable } from "./lib/deliverable";
+import {
+  canUnlockQuestBuild,
+  orderedQuestActivities,
+} from "./lib/questBuildLock";
+import {
+  requireActiveLearnerInstitution,
+  requireUnitInLearnerInstitution,
+} from "./lib/scholarEnrollment";
 
 // ── Shared cores (also called by the aide tools' internal mutations) ──────
 
@@ -285,6 +295,105 @@ export const start = authedMutation({
 
     const state = await questStateForPair(ctx, scholarId, args.unitId);
     return { sessionId: id, state };
+  },
+});
+
+/** Title of a Quest's appended build step (B6 badge moment). */
+function buildStepTitle(unitTitle: string): string {
+  const short = unitTitle.replace(/\s+/g, " ").trim();
+  const clipped = short.length <= 60 ? short : `${short.slice(0, 59)}…`;
+  return `Build a simulation of ${clipped || "this"}`;
+}
+
+/** The deterministic builder brief of an appended build step (no LLM). */
+function buildStepBrief(unitTitle: string): string {
+  return [
+    `The scholar has just finished their Quest "${unitTitle.trim()}": they worked out how something behaves, step by step. Their work from the earlier steps is in the prior unit work.`,
+    "Your job in this step is to help them build a simulation that shows what they figured out. The ideas come from their Quest work, not from you.",
+    "Start from what they discovered, in their own words. Ask what the simulation should let someone change, and what it should show happening. Then build a first version fast, run it, and improve it with them.",
+    "Do not do their thinking for them: if the simulation needs a rule or a number, ask what they found and build that. Make the simulation check against their findings, so they can see whether it matches.",
+  ].join("\n\n");
+}
+
+/**
+ * `appendBuildStep` (TRA-519 B6, the badge moment): a scholar who finished
+ * their own Quest WITHOUT a build step may add one to the SAME Quest — a
+ * simulation of what they figured out. Appends one app activity in a new last
+ * lesson of its own, deterministically (no LLM): the default app
+ * deliverable and gate, no contract. Prior unit work carries over because it is
+ * the same unit, and the badge stays earned.
+ *
+ * Author-only (a teacher's remote view is refused); requires the Quest to be
+ * complete (`canUnlockQuestBuild`, the same predicate `units.get` reports as
+ * `canUnlockBuild`). Idempotent: a Quest that already has an app activity
+ * returns that one, so it is offered once per Quest.
+ */
+export const appendBuildStep = authedMutation({
+  args: { unitId: v.id("units") },
+  handler: async (ctx, args): Promise<{ activityId: Id<"activities"> }> => {
+    const scholarId = ctx.user._id;
+    const unit = await ctx.db.get(args.unitId);
+    if (!unit || !unit.isActive) throw new Error("Quest not found");
+    if (unit.authorScholarId !== scholarId) throw new Error("Forbidden");
+    const learnerInstitutionId = await requireActiveLearnerInstitution(
+      ctx,
+      scholarId,
+    );
+    await requireUnitInLearnerInstitution(
+      ctx,
+      scholarId,
+      learnerInstitutionId,
+      unit,
+    );
+
+    const existing = (await orderedQuestActivities(ctx, unit._id, scholarId)).find(
+      (a) => isAppActivity(a),
+    );
+    if (existing) return { activityId: existing._id };
+
+    if (!(await canUnlockQuestBuild(ctx, { unit, scholarId }))) {
+      throw new Error("Finish the Quest before unlocking the build.");
+    }
+
+    const lessons = (
+      await ctx.db
+        .query("lessons")
+        .withIndex("by_unit", (q) => q.eq("unitId", unit._id))
+        .collect()
+    ).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    if (lessons.length === 0) throw new Error("Quest has no lessons");
+    // Its OWN lesson at the end: appended into a choice lesson it would become
+    // one of that lesson's options. (The lock reads a satisfied choice lesson
+    // as done — questBuildLock.ts — so the step is open at once.)
+    const lessonOrder =
+      lessons.reduce((m, l) => Math.max(m, l.order ?? 0), -1) + 1;
+    const lessonId = await ctx.db.insert("lessons", {
+      unitId: unit._id,
+      title: "Build it",
+      order: lessonOrder,
+    });
+
+    const activityId = await ctx.db.insert("activities", {
+      lessonId,
+      title: buildStepTitle(unit.title),
+      order: 0,
+      kind: "online",
+      appActivity: true,
+      systemPrompt: buildStepBrief(unit.title),
+      // One rule for every Quest build step (baked, co-designed, or this
+      // badge-moment append): the app is graded like any Quest step, with
+      // per-scholar criteria generated from the brief at session start, so
+      // it earns stars like the learning steps. Teacher app activities keep
+      // the teacher's rubric (none by default, lib/appActivity.ts).
+      deliverable: normalizeDeliverable({
+        kind: "artifact",
+        prompt: `Your simulation, running, showing what you figured out in ${unit.title}.`,
+        mode: "auto",
+        notes: buildStepBrief(unit.title),
+        criteria: [],
+      }),
+    });
+    return { activityId };
   },
 });
 

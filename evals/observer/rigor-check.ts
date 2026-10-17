@@ -21,7 +21,7 @@
  *
  * Run it after editing the observer prompt/schema:
  *
- *   evals/observer/rigor-check.sh            # sonnet (the live observer model)
+ *   evals/observer/rigor-check.sh            # observer (the live observer model, lib/models.OBSERVER_MODEL)
  *   MODEL=opus RUNS=3 evals/observer/rigor-check.sh
  *
  * Exits non-zero if the live observer's mastery calibration regresses.
@@ -29,13 +29,13 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MODELS } from "../../convex/lib/models";
+import { MODELS, OBSERVER_MODEL } from "../../convex/lib/models";
 import { conceptLabelsNearDuplicate as nearDup } from "../../convex/lib/conceptLabels";
 import { runObserver, type TranscriptCase } from "./lib/runObserver";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MODEL_MAP: Record<string, string> = { sonnet: MODELS.SONNET, opus: MODELS.OPUS, haiku: MODELS.HAIKU };
-const model = MODEL_MAP[process.env.MODEL ?? "sonnet"] ?? MODELS.SONNET;
+const MODEL_MAP: Record<string, string> = { observer: OBSERVER_MODEL, sonnet: MODELS.SONNET, opus: MODELS.OPUS, haiku: MODELS.HAIKU };
+const model = MODEL_MAP[process.env.MODEL ?? "observer"] ?? OBSERVER_MODEL;
 const runs = parseInt(process.env.RUNS ?? "3", 10); // LLMs sample — average a few
 
 const ANALYZE_PLUS = 4.0; // Bloom Analyze; on these modest sessions, ~nothing should reach it

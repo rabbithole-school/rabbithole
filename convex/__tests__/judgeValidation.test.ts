@@ -13,6 +13,10 @@ import { describe, expect, test } from "vitest";
 import schema from "../schema";
 import { api } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
+import {
+  grantInstitutionMembership,
+  seedTestInstitution,
+} from "./institutionTestHelpers";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -22,20 +26,43 @@ const modules = (
 
 type Role = "scholar" | "teacher" | "platform_admin";
 
+// Verdict reads are narrowed to scholars the teacher can read, so every user
+// in a test shares one school: teachers hold a membership, scholars an
+// institutionId.
+const schools = new WeakMap<object, Promise<Id<"institutions">>>();
+function schoolFor(t: ReturnType<typeof convexTest>) {
+  let school = schools.get(t);
+  if (!school) {
+    school = seedTestInstitution(t, {
+      name: "Moli School",
+      slug: "moli",
+      isPrimary: true,
+    });
+    schools.set(t, school);
+  }
+  return school;
+}
+
 async function seedUser(
   t: ReturnType<typeof convexTest>,
   role: Role = "scholar",
   overrides: { name?: string; username?: string } = {},
 ) {
-  return await t.run(async (ctx) =>
+  const institutionId = await schoolFor(t);
+  const userId = await t.run(async (ctx) =>
     ctx.db.insert("users", {
       name: overrides.name ?? `Test ${role}`,
       username:
         overrides.username ??
         `test-${role}-${Math.random().toString(36).slice(2, 8)}`,
       role,
+      ...(role === "scholar" ? { institutionId } : {}),
     }),
   );
+  if (role === "teacher") {
+    await grantInstitutionMembership(t, userId, institutionId, "teacher");
+  }
+  return userId;
 }
 
 async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
@@ -152,12 +179,13 @@ describe("pairsForActivity", () => {
   test("fewer than two judged sessions ⇒ empty deck + note", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
+    const scholar = await seedUser(t, "scholar");
     const { activityId } = await seedUnitWithActivity(t, teacher);
     const exp = await seedExperiment(t, { activityId, teacherId: teacher });
     await seedJudgedSession(t, {
       activityId,
       experimentId: exp,
-      scholarId: teacher,
+      scholarId: scholar,
       name: "Solo",
       fitness: 3,
     });

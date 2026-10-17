@@ -16,7 +16,9 @@ import {
   Stack,
   Text,
 } from "@chakra-ui/react";
-import { ArrowRight, CheckCircle, Circle, PencilSimple, Play, ArrowClockwise, X } from "@phosphor-icons/react";
+import { ArrowRight, CheckCircle, Circle, Lock, PencilSimple, Play, ArrowClockwise, X } from "@phosphor-icons/react";
+import { questLockOf, type QuestLock } from "@/lib/missionApi";
+import { questBuildLockLabel } from "@/shared/missionCopy";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { HierarchyRow } from "@/components/hierarchy";
 import { api } from "@/convex/_generated/api";
@@ -432,6 +434,9 @@ function LessonProgressView({
   onToggleComplete?: () => void;
   isCurrentDone?: boolean;
 }) {
+  // B6 (TRA-519): the unit row carries the Quest's build-step locks
+  // (`questLocks`, empty unless this is the scholar's own Quest).
+  const unit = useQuery(api.units.get, { id: progress.unitId });
   const totalActivities = progress.activities.length;
   const passedActivities = progress.activities.filter(
     (a) => a.status === "passed",
@@ -495,6 +500,7 @@ function LessonProgressView({
 
       <ActivitiesList
         activities={progress.activities}
+        unit={unit}
         onNavigate={onNavigate}
         sectionLabel={`Activities (${passedActivities} of ${totalActivities} passed)`}
         onRename={onRename}
@@ -524,6 +530,7 @@ function LessonProgressView({
 
 function ActivitiesList({
   activities,
+  unit,
   onNavigate,
   sectionLabel,
   onRename,
@@ -531,6 +538,8 @@ function ActivitiesList({
   isCurrentDone,
 }: {
   activities: ActivityRow[];
+  /** `units.get` for this unit (its `questLocks`), when loaded. */
+  unit?: unknown;
   onNavigate: (sessionId: Id<"sessions">) => void;
   sectionLabel: string;
   onRename?: () => void;
@@ -554,6 +563,7 @@ function ActivitiesList({
           <ActivityRowView
             key={String(a.activityId)}
             activity={a}
+            questLock={questLockOf(unit, String(a.activityId))}
             onNavigate={onNavigate}
             onRename={a.isCurrent ? onRename : undefined}
             onToggleComplete={a.isCurrent ? onToggleComplete : undefined}
@@ -567,12 +577,14 @@ function ActivitiesList({
 
 function ActivityRowView({
   activity,
+  questLock,
   onNavigate,
   onRename,
   onToggleComplete,
   isCurrentDone,
 }: {
   activity: ActivityRow;
+  questLock: QuestLock | null;
   onNavigate: (sessionId: Id<"sessions">) => void;
   onRename?: () => void;
   onToggleComplete?: () => void;
@@ -590,9 +602,12 @@ function ActivityRowView({
   // the scholar back into their working project. Inside the drawer
   // this is effectively a no-op (we're already on that project, the
   // drawer just closes) but it's harmless.
-  const canClick = !!activity.sessionId;
-  const StatusIcon =
-    activity.status === "passed"
+  // B6 (TRA-519): a Quest build step waiting on its learning step is shown
+  // locked with WHY — and no tap action (a forecast, not a CTA).
+  const canClick = !!activity.sessionId && !questLock;
+  const StatusIcon = questLock
+    ? Lock
+    : activity.status === "passed"
       ? CheckCircle
       : activity.status === "in-progress"
         ? Play
@@ -614,6 +629,11 @@ function ActivityRowView({
           </Box>
         }
         label={activity.title}
+        sublabel={
+          questLock
+            ? questBuildLockLabel(questLock.prerequisiteTitle)
+            : undefined
+        }
         selected={activity.isCurrent}
         /* 🏠 chip dropped — homework is now a property of the push, not the activity. */
         onClick={

@@ -168,6 +168,56 @@ export async function canUserAccessScholar(
 }
 
 /**
+ * The learning-record form of `canUserAccessScholar`: the same target-bound
+ * boundary MINUS the `school:operations` capability path. Use it for reads of
+ * a scholar's WORK (portfolio, scored offline work, rubric feedback) that
+ * teachers, school admins and platform admins may see but operations staff
+ * may not — account and device admin is not a licence to browse a child's
+ * work (Andy's ruling: portfolio browsing is "a bridge too far").
+ *
+ * Why not `canReadScholarAsTeacher`: that one resolves through
+ * `accessibleScholarIds`, which only lists `scholar`-role members, so it
+ * would silently drop a teacher's access to an adult learner that
+ * `canUserAccessScholar` admits today. This keeps the teacher path identical
+ * to the school-operations resolver's own teacher branch.
+ */
+export async function canUserReadScholarWork(
+  ctx: QueryCtx | MutationCtx,
+  user: Pick<Doc<"users">, "_id" | "role">,
+  scholarId: Id<"users">,
+): Promise<boolean> {
+  if (user._id === scholarId) return true;
+  if (!(await canUserAccessScholar(ctx, user, scholarId))) return false;
+  if (isPlatformAdminRole(user.role)) return true;
+  const institutionId = await scholarInstitutionId(ctx, scholarId);
+  if (!institutionId) return false;
+  const memberships = await ctx.db
+    .query("memberships")
+    .withIndex("by_user", (q) => q.eq("userId", user._id))
+    .collect();
+  return (
+    memberships.some(
+      (membership) =>
+        membership.institutionId === institutionId &&
+        (membership.role === ROLES.TEACHER ||
+          membership.role === ROLES.SCHOOL_ADMIN),
+    ) &&
+    (await hasActiveStaffMembershipAtInstitution(ctx, user._id, institutionId))
+  );
+}
+
+/** Throwing form of `canUserReadScholarWork`. */
+export async function requireScholarWorkAccess(
+  ctx: QueryCtx | MutationCtx,
+  user: Pick<Doc<"users">, "_id" | "role">,
+  scholarId: Id<"users">,
+): Promise<void> {
+  if (!(await canUserReadScholarWork(ctx, user, scholarId))) {
+    throw new Error("Forbidden: teaching access required for scholar work");
+  }
+}
+
+/**
  * Whether a STAFF user may read a specific scholar's sensitive per-scholar
  * signals (reading trend, tutor readability, feed metrics, node readings)
  * through one of their TEACHER-role memberships. The membership-loop core

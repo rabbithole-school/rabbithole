@@ -4,7 +4,7 @@
  *   ANTHROPIC_API_KEY=... npx tsx evals/observer/run.ts [flags]
  *
  * Flags:
- *   --models sonnet,opus      models to run (default: sonnet,opus)
+ *   --models observer,opus    models to run (default: observer,opus)
  *   --fixtures-only           skip dev transcripts, run hand-authored cases only
  *   --with-dev                include dev transcripts (default on if data file exists)
  *   --dev-limit N             cap dev cases (default 8)
@@ -17,7 +17,7 @@
 import { readFileSync, readdirSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MODELS, JUDGE_MODEL } from "../../convex/lib/models";
+import { MODELS, JUDGE_MODEL, OBSERVER_MODEL } from "../../convex/lib/models";
 import { fmt, mean, parseEvalArgs, runPool, writeRunArtifacts } from "../lib/harness";
 import { runObserver, type TranscriptCase, type ObserverRun } from "./lib/runObserver";
 import {
@@ -33,13 +33,14 @@ import type { ObserverResult } from "../../convex/lib/observerShared";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const MODEL_MAP: Record<string, string> = {
+  observer: OBSERVER_MODEL,
   sonnet: MODELS.SONNET,
   opus: MODELS.OPUS,
   haiku: MODELS.HAIKU,
 };
 
 const args = parseEvalArgs({
-  models: { default: "sonnet,opus", valueWhenMissing: "true" },
+  models: { default: "observer,opus", valueWhenMissing: "true" },
   devLimit: { flag: "dev-limit", default: 8, parse: (value) => parseInt(value, 10), valueWhenMissing: "true" },
   concurrency: { default: 4, parse: (value) => parseInt(value, 10), valueWhenMissing: "true" },
   out: { default: join(HERE, "out"), valueWhenMissing: "true" },

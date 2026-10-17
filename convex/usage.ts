@@ -81,6 +81,17 @@ export const resolveSharedScholarInstitution = internalQuery({
   },
 });
 
+/**
+ * The previous tutor turn's last Anthropic response id for this session, sent
+ * as `diagnostics.previous_message_id` (lib/cacheDiagnostics.ts). Null on the
+ * session's first diagnosed turn.
+ */
+export const tutorPreviousResponseId = internalQuery({
+  args: { sessionId: v.id("sessions") },
+  handler: async (ctx, { sessionId }) =>
+    (await ctx.db.get(sessionId))?.tutorLastResponseId ?? null,
+});
+
 /** Resolve a normal tutor/world session through its scholar owner. */
 export const resolveSessionInstitution = internalQuery({
   args: { sessionId: v.id("sessions") },
@@ -112,8 +123,13 @@ export const record = internalMutation({
     characters: v.optional(v.number()),
     images: v.optional(v.number()),
     sessionId: v.optional(v.id("sessions")),
+    // Tutor turns: the cache-diagnostics result (lib/cacheDiagnostics.ts) and
+    // the turn's last Anthropic response id, which advances the session's
+    // diagnostics chain. The id is not stored on the usage row.
+    cacheMissAt: v.optional(v.string()),
+    responseId: v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
+  handler: async (ctx, { responseId, ...args }) => {
     // Skip no-op events so the table (and the report) isn't diluted by
     // zero-token rows (e.g. a call that failed before any usage).
     if (
@@ -131,6 +147,9 @@ export const record = internalMutation({
     if (args.sessionId) {
       const session = await ctx.db.get(args.sessionId);
       if (session?.institutionId) institutionId = session.institutionId;
+      if (session && responseId && session.tutorLastResponseId !== responseId) {
+        await ctx.db.patch(args.sessionId, { tutorLastResponseId: responseId });
+      }
     }
     await ctx.db.insert("usageEvents", {
       ...args,
@@ -153,6 +172,9 @@ export async function recordUsage(
     model: string;
     usage: UsageBreakdown;
     sessionId?: Id<"sessions"> | null;
+    /** Tutor turns: see `record`'s args and lib/cacheDiagnostics.ts. */
+    cacheMissAt?: string;
+    responseId?: string;
   },
 ): Promise<void> {
   if (!hasUsage(args.usage)) return;
@@ -168,6 +190,8 @@ export async function recordUsage(
       cacheReadTokens: args.usage.cacheReadTokens,
       outputTokens: args.usage.outputTokens,
       sessionId: args.sessionId ?? undefined,
+      ...(args.cacheMissAt ? { cacheMissAt: args.cacheMissAt } : {}),
+      ...(args.responseId ? { responseId: args.responseId } : {}),
     });
   } catch (err) {
     console.error("[usage] recordUsage failed (non-fatal):", err);

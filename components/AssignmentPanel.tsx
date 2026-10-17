@@ -84,6 +84,20 @@ import {
 } from "@/components/ScholarsStillWorkingNotice";
 import { ScheduleActivityDialog } from "@/components/ScheduleActivityDialog";
 import { DeliverableWorkActions } from "@/components/DeliverableWorkActions";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { isTeacherRole } from "@/convex/lib/roles";
+
+/**
+ * Whether this viewer reads the cohort's LEARNING RECORD here — the class
+ * digests, understanding grid, practice mastery, share-back synthesis,
+ * grading, family sharing and transcript links. Teachers do. A curriculum:run
+ * holder (base staff running a unit she built) does not: her Run page is the
+ * schedule, completion, and what scholars handed in — nothing more.
+ */
+function useReadsLearningRecord(): boolean {
+  const { user } = useCurrentUser();
+  return !!user && isTeacherRole(user.role);
+}
 
 export function AssignmentPanel({
   assignmentId,
@@ -179,10 +193,13 @@ function AssignmentPageBody({
     lesson.activities.some((activity) => activity.kind === "simulator"),
   );
   // Understanding tab only renders when the unit has EQs/EUs to track.
-  const coverage = useQuery(api.granuleEvidence.coverageForAssignment, {
-    assignmentId,
-  });
-  const hasGranules = (coverage?.granules.length ?? 0) > 0;
+  const readsLearningRecord = useReadsLearningRecord();
+  const coverage = useQuery(
+    api.granuleEvidence.coverageForAssignment,
+    readsLearningRecord ? { assignmentId } : "skip",
+  );
+  const hasGranules =
+    readsLearningRecord && (coverage?.granules.length ?? 0) > 0;
   const archive = useMutation(api.assignments.archive);
   const pushActivity = useMutation(api.assignments.pushActivity);
   const [starting, setStarting] = useState(false);
@@ -338,15 +355,17 @@ function AssignmentPageBody({
                     Start now
                   </Button>
                 )}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  color="charcoal.400"
-                  fontFamily="heading"
-                  onClick={onArchive}
-                >
-                  Archive
-                </Button>
+                {readsLearningRecord && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    color="charcoal.400"
+                    fontFamily="heading"
+                    onClick={onArchive}
+                  >
+                    Archive
+                  </Button>
+                )}
               </HStack>
             ) : null
           }
@@ -356,12 +375,12 @@ function AssignmentPageBody({
             hairline-separated line (not a standalone banner). The DRY twin
             of the per-activity digest; auto-generates, full view a click
             away. */}
-        {!isArchived && (
+        {!isArchived && readsLearningRecord && (
           <Box mt={4} pt={4} borderTopWidth="1px" borderColor="gray.100">
             <ClassDigestInline scope="cohort" assignmentId={assignmentId} />
           </Box>
         )}
-        {!isArchived && hasWorld && (
+        {!isArchived && hasWorld && readsLearningRecord && (
           <Box mt={4} pt={4} borderTopWidth="1px" borderColor="gray.100">
             <SimulatorAssignControls assignmentId={assignmentId} />
           </Box>
@@ -374,7 +393,9 @@ function AssignmentPageBody({
         items={[
           { value: "outline", label: "Lessons & activities" },
           { value: "roster", label: `Roster (${data.roster.length})` },
-          ...(!isArchived ? [{ value: "debrief", label: "Debrief" }] : []),
+          ...(!isArchived && readsLearningRecord
+            ? [{ value: "debrief", label: "Debrief" }]
+            : []),
           ...(hasGranules ? [{ value: "understanding", label: "Understanding" }] : []),
         ]}
       >
@@ -391,7 +412,7 @@ function AssignmentPageBody({
         <Tabs.Content value="roster" pt={4}>
           <RosterSection roster={data.roster} unitTitle={data.unitTitle} />
         </Tabs.Content>
-        {!isArchived && (
+        {!isArchived && readsLearningRecord && (
           <Tabs.Content value="debrief" pt={2}>
             {/* Per-run, act-now read for THIS cohort — named scholars, log
                 observations / plant seeds / spin up a Share-Back. The
@@ -1104,6 +1125,7 @@ function ActivityRow({
   const [editScheduleOpen, setEditScheduleOpen] = useState(false);
   const pushActivity = useMutation(api.assignments.pushActivity);
   const clearActivityMut = useMutation(api.assignments.clearActivity);
+  const readsLearningRecord = useReadsLearningRecord();
   const isShareBack = kind === "shareBack";
   const isOnline = kind === "online";
   // Use the shared Phosphor icon set (DRY with curriculum / outline /
@@ -1485,12 +1507,12 @@ function ActivityRow({
               </Text>
             </Stack>
           )}
-          {isShareBack ? (
+          {isShareBack && !readsLearningRecord ? null : isShareBack ? (
             <ShareBackActivityPanel
               assignmentId={assignmentId}
               activityId={activityId}
             />
-          ) : kind === "problem_set" ? (
+          ) : kind === "problem_set" && !readsLearningRecord ? null : kind === "problem_set" ? (
             // Problem-set activities: show per-scholar practice mastery
             // instead of the submissions panel (practice sessions don't
             // produce deliverables — mastery progress is the signal).
@@ -1505,7 +1527,7 @@ function ActivityRow({
               {/* Digest covers online + offline (scanned) work; web
                   activities have no transcript/deliverable to synthesize.
                   A quiet line above the submissions, hairline-separated. */}
-              {kind !== "web" && (
+              {kind !== "web" && readsLearningRecord && (
                 <Box pb={3} borderBottomWidth="1px" borderColor="gray.100">
                   <ClassDigestInline
                     scope="activity"
@@ -1559,6 +1581,7 @@ function DoneNames({
   timeZone: string | null;
 }) {
   const unmark = useMutation(api.activityCompletions.unmarkComplete);
+  const readsLearningRecord = useReadsLearningRecord();
   const [undoing, setUndoing] = useState<string | null>(null);
   const completed = new Set(completedScholarIds.map(String));
   const done = roster.filter((s) => completed.has(String(s.scholarId)));
@@ -1602,7 +1625,7 @@ function DoneNames({
                   day: "numeric",
                   ...(timeZone ? { timeZone } : {}),
                 }).format(new Date(mark.completedAt))}
-                <chakra.button
+                {readsLearningRecord && (<chakra.button
                   type="button"
                   color="violet.600"
                   fontWeight="600"
@@ -1613,7 +1636,7 @@ function DoneNames({
                   onClick={() => void onUndo(s.scholarId, s.name)}
                 >
                   Undo
-                </chakra.button>
+                </chakra.button>)}
               </Badge>
             )}
           </Fragment>
@@ -1766,6 +1789,10 @@ function SubmissionsActivityPanel({
     activityId,
     assignmentId,
   });
+  // A curriculum:run owner sees the hand-in itself; grading, family sharing,
+  // scan assessment and the transcript drill-in stay with the teacher (the
+  // server already withholds the session id from her).
+  const readsLearningRecord = useReadsLearningRecord();
   if (rows === undefined) {
     return (
       <Flex justify="center" py={3}>
@@ -1805,7 +1832,11 @@ function SubmissionsActivityPanel({
         // Scanned work drills into the scan itself (most useful for the
         // teacher); digital work drills into the project.
         const drillHref =
-          isPortfolio && r.fileUrl ? r.fileUrl : `/scholar/${r.sessionId}`;
+          isPortfolio && r.fileUrl
+            ? r.fileUrl
+            : r.sessionId
+              ? `/scholar/${r.sessionId}`
+              : null;
         const drillExternal = isPortfolio && !!r.fileUrl;
         const inner = (
           <Stack
@@ -1875,13 +1906,15 @@ function SubmissionsActivityPanel({
           >
             {/* Interactive verdict: teachers grade here (the only assessment
                 path for scanned work; an override for AI-graded work). */}
-            <Box flexShrink={0}>
-              <DeliverableGradeControl
-                deliverableId={r._id}
-                overall={r.rubricPassed === true ? "full" : r.overall}
-                rubricFeedback={r.rubricFeedback ?? undefined}
-              />
-            </Box>
+            {readsLearningRecord && (
+              <Box flexShrink={0}>
+                <DeliverableGradeControl
+                  deliverableId={r._id}
+                  overall={r.rubricPassed === true ? "full" : r.overall}
+                  rubricFeedback={r.rubricFeedback ?? undefined}
+                />
+              </Box>
+            )}
             {isPortfolio && (r.videoThumbUrl || r.thumbUrl) && (
               // A capture video renders its poster still + duration badge — the
               // same vocabulary as the uploads queue and the kiosk gallery
@@ -1921,7 +1954,11 @@ function SubmissionsActivityPanel({
                 )}
               </Box>
             )}
-            {drillExternal ? (
+            {drillHref === null ? (
+              <Box flex={1} minW={0}>
+                {inner}
+              </Box>
+            ) : drillExternal ? (
               <a
                 href={drillHref}
                 target="_blank"
@@ -1938,13 +1975,15 @@ function SubmissionsActivityPanel({
                 {inner}
               </Link>
             )}
-            <DeliverableWorkActions
-              deliverableId={r._id}
-              scholarName={r.scholarName}
-              mapContent={r.mapContent}
-              familyVisibility={r.familyVisibility}
-              familyShareable={r.familyShareable}
-            />
+            {readsLearningRecord && (
+              <DeliverableWorkActions
+                deliverableId={r._id}
+                scholarName={r.scholarName}
+                mapContent={r.mapContent}
+                familyVisibility={r.familyVisibility}
+                familyShareable={r.familyShareable}
+              />
+            )}
             {r.contentKind === "text" && r.textContent && (
               <Button
                 size="2xs"
@@ -1961,7 +2000,7 @@ function SubmissionsActivityPanel({
                 <Download size={12} />
               </Button>
             )}
-            {isPortfolio && (
+            {isPortfolio && readsLearningRecord && (
               <AssessScanButton deliverableId={r._id} label="" />
             )}
             {(r.contentKind === "file" || isPortfolio) && r.fileUrl && (

@@ -94,7 +94,7 @@ describe("App designer G4: recordWorkshopTurn", () => {
         sessionId,
         messageId,
         callerUserId: teacherId,
-        sessionMode: "vibecode",
+        appBuild: true,
         workshopMode: "play",
         baselineRevision: -1,
       }),
@@ -103,7 +103,7 @@ describe("App designer G4: recordWorkshopTurn", () => {
     expect(await revisionRows(t, sessionId)).toHaveLength(0);
   });
 
-  test("a non-vibecode session is a no-op", async () => {
+  test("a turn that worked on no app (appBuild false) is a no-op", async () => {
     const t = convexTest(schema, modules);
     const { teacherId, sessionId, messageId } = await seedFixture(t, {
       sessionMode: "conversation",
@@ -114,13 +114,34 @@ describe("App designer G4: recordWorkshopTurn", () => {
         sessionId,
         messageId,
         callerUserId: teacherId,
-        sessionMode: "conversation",
+        appBuild: false,
         workshopMode: "edit",
         baselineRevision: -1,
       }),
     ).resolves.toBeNull();
 
     expect(await revisionRows(t, sessionId)).toHaveLength(0);
+  });
+
+  test("a chat session's app turn records a version too (TRA-519)", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, sessionId, messageId } = await seedFixture(t, {
+      sessionMode: "conversation",
+      artifactRevision: 2,
+    });
+
+    await expect(
+      t.action(internal.vibecodeStarterActions.recordWorkshopTurn, {
+        sessionId,
+        messageId,
+        callerUserId: teacherId,
+        appBuild: true,
+        workshopMode: "edit",
+        baselineRevision: -1,
+      }),
+    ).resolves.toBeNull();
+
+    expect(await revisionRows(t, sessionId)).toHaveLength(1);
   });
 
   test("no change (revision == baseline) records nothing", async () => {
@@ -136,7 +157,7 @@ describe("App designer G4: recordWorkshopTurn", () => {
         sessionId,
         messageId,
         callerUserId: teacherId,
-        sessionMode: "vibecode",
+        appBuild: true,
         workshopMode: "edit",
         baselineArtifactId: artifactId,
         baselineRevision: 3,
@@ -158,7 +179,7 @@ describe("App designer G4: recordWorkshopTurn", () => {
         sessionId,
         messageId,
         callerUserId: teacherId,
-        sessionMode: "vibecode",
+        appBuild: true,
         workshopMode: "edit",
         baselineRevision: -1,
       }),
@@ -188,7 +209,7 @@ describe("App designer G4: recordWorkshopTurn", () => {
         sessionId,
         messageId,
         callerUserId: teacherId,
-        sessionMode: "vibecode",
+        appBuild: true,
         workshopMode: "edit",
         baselineRevision: -1,
       }),

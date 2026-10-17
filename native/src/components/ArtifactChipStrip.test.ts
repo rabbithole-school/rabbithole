@@ -125,7 +125,7 @@ describe("ArtifactChipStrip", () => {
     expect(selectionAsync).not.toHaveBeenCalled();
   });
 
-  it("uses the code glyph for code artifacts and a doc glyph otherwise", () => {
+  it("uses the app glyph for code artifacts and a doc glyph otherwise", () => {
     const tree = render({
       artifacts: makeArtifacts(),
       activeArtifactId: "memoir" as never,
@@ -136,7 +136,7 @@ describe("ArtifactChipStrip", () => {
     );
     expect(icons).toEqual([
       "doc.text",
-      "chevron.left.forwardslash.chevron.right",
+      "macwindow",
     ]);
   });
 });

@@ -10,6 +10,8 @@ import { v } from "convex/values";
 
 import { internalMutation } from "./_generated/server";
 import { authedMutation } from "./lib/customFunctions";
+import { isAppActivity } from "../shared/appSurface";
+import { defaultAppDeliverable } from "./lib/appActivity";
 import {
   requireActiveLearnerInstitution,
   scholarInstitutionId,
@@ -180,15 +182,17 @@ export const prepareVibecodeAssignmentSmoke = internalMutation({
       .collect();
     let activity =
       lessonActivities.find(
-        (candidate) => candidate.kind === "vibecode" && candidate.title === title,
+        (candidate) => isAppActivity(candidate) && candidate.title === title,
       ) ?? null;
     if (!activity) {
       const activityId = await ctx.db.insert("activities", {
         lessonId: lesson._id,
         title,
         order: 0,
-        kind: "vibecode",
+        kind: "online",
+        appActivity: true,
         systemPrompt: TEACHING_GAME_BRIEF,
+        deliverable: defaultAppDeliverable({}),
       });
       activity = (await ctx.db.get(activityId))!;
     }

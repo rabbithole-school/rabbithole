@@ -66,6 +66,18 @@ function splitTrailingUrlPunctuation(url: string): [string, string] {
   return [url.slice(0, end), url.slice(end)];
 }
 
+// An address: starts alphanumeric and may end before an underscore, so
+// `_a@b.com_` italics keep their underscores; it ends at a whole top-level
+// domain, never partway through one (`a@sub.example.c`).
+const EMAIL = String.raw`[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9-]|\.[A-Za-z0-9-])`;
+/** `mailto:<address>` and nothing else: anything fancier passes through untouched. */
+const MAILTO_ADDRESS = new RegExp(`^mailto:(${EMAIL})$`);
+
+/** A mailto link that shows the address (or `label`), never the "mailto:" scheme. */
+function mailtoLink(address: string, label?: string): string {
+  return `<mailto:${address}|${(label ?? address).replace(/[|>]/g, "")}>`;
+}
+
 /**
  * Slack's markdown_text autolinker can absorb punctuation and following prose.
  * Convert outbound URLs to Slack's explicit link form after the model is done.
@@ -76,11 +88,52 @@ export function normalizeSlackLinks(text: string): string {
   let changed = false;
 
   while (cursor < text.length) {
+    // Code is literal in markdown_text: copy a code span or block untouched.
+    if (text[cursor] === "`") {
+      const fence = /^`+/.exec(text.slice(cursor))![0];
+      const close = text.indexOf(fence, cursor + fence.length);
+      if (close !== -1) {
+        output += text.slice(cursor, close + fence.length);
+        cursor = close + fence.length;
+        continue;
+      }
+    }
+
     if (text[cursor] === "<") {
       const end = text.indexOf(">", cursor + 1);
-      if (end !== -1 && /^https?:\/\//.test(text.slice(cursor + 1, end))) {
+      const inner = end === -1 ? "" : text.slice(cursor + 1, end);
+      if (end !== -1 && (/^https?:\/\//.test(inner) || (inner.startsWith("mailto:") && !MAILTO_ADDRESS.test(inner)))) {
         output += text.slice(cursor, end + 1);
         cursor = end + 1;
+        continue;
+      }
+      // An unlabeled <mailto:x> renders as "mailto:x"; label it with the address.
+      const mailto = end === -1 ? null : MAILTO_ADDRESS.exec(inner);
+      if (mailto) {
+        output += mailtoLink(mailto[1]!);
+        cursor = end + 1;
+        changed = true;
+        continue;
+      }
+    }
+
+    const markdownMailto = /^\[([^\]\n]*)\]\(mailto:([^)\s]+)\)/.exec(text.slice(cursor));
+    if (markdownMailto) {
+      const [whole, label, address] = markdownMailto;
+      output += mailtoLink(address!, label!.replace(/^mailto:/, "") || undefined);
+      cursor += whole.length;
+      changed = true;
+      continue;
+    }
+
+    // A bare address (or "mailto:address"): Slack's autolinker can store it
+    // unlabeled, which shows the "mailto:" scheme.
+    if (!/[A-Za-z0-9.%+-]/.test(text[cursor - 1] ?? "")) {
+      const email = new RegExp(`^(?:mailto:)?(${EMAIL})`).exec(text.slice(cursor));
+      if (email) {
+        output += mailtoLink(email[1]!);
+        cursor += email[0].length;
+        changed = true;
         continue;
       }
     }

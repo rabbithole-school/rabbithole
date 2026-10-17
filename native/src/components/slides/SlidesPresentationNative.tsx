@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   Alert,
-  AppState,
   LayoutChangeEvent,
   Pressable,
   ScrollView,
@@ -26,15 +25,16 @@ import {
   clipsOverflow,
   verticalAlignToJustify,
 } from "../../../vendor/shared/slidesRenderContract";
-import { usePresentationAsam } from "@/contexts/AsamControllerContext";
+import { usePresentationSystemUI } from "@/hooks/usePresentationSystemUI";
 import {
+  CONNECT_TV_GUIDANCE,
+  CONNECT_TV_LABEL,
   getPresentationDisplayState,
   type ExternalScreen,
 } from "@/lib/presentationExternalDisplay";
 import { fonts, useColors } from "@/theme";
 import { SlideElementContentNative } from "./SlideElementContentNative";
 
-const SYSTEM_UI_RELEASE_TIMEOUT_MS = 30_000;
 const NO_PLAYING_VIDEOS: ReadonlySet<string> = new Set();
 
 export type SlidesPresentationNativeProps = {
@@ -60,7 +60,7 @@ export function SlidesPresentationNative({
   useKeepAwake();
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { releaseForSystemUI, restoreAfterSystemUI } = usePresentationAsam();
+  const { requestSystemUI, restoreSystemUI } = usePresentationSystemUI();
   const [uncontrolledIndex, setUncontrolledIndex] = useState(initialSlideIndex);
   const [printing, setPrinting] = useState(false);
   const [videoPlayback, setVideoPlayback] = useState<{
@@ -69,9 +69,6 @@ export function SlidesPresentationNative({
   }>(() => ({ slideId: null, ids: NO_PLAYING_VIDEOS }));
   const [showConnectionGuidance, setShowConnectionGuidance] = useState(false);
   const previousConnected = useRef<boolean | null>(null);
-  const awaitingSystemUIReturn = useRef(false);
-  const systemUIBecameInactive = useRef(false);
-  const systemUIReleaseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const screens: Readonly<Record<string, ExternalScreen>> = useExternalDisplay();
   const index = clampIndex(slideIndex ?? uncontrolledIndex, deck.slides.length);
   const currentSlide = deck.slides[index];
@@ -87,16 +84,6 @@ export function SlidesPresentationNative({
     canPrintNotes,
     mainScreenMode,
   } = getPresentationDisplayState(screens);
-
-  const restoreSystemUI = useCallback(() => {
-    awaitingSystemUIReturn.current = false;
-    systemUIBecameInactive.current = false;
-    if (systemUIReleaseTimer.current) {
-      clearTimeout(systemUIReleaseTimer.current);
-      systemUIReleaseTimer.current = null;
-    }
-    restoreAfterSystemUI();
-  }, [restoreAfterSystemUI]);
 
   const setIndex = useCallback(
     (nextIndex: number) => {
@@ -143,21 +130,6 @@ export function SlidesPresentationNative({
     }
   }, [connected, restoreSystemUI]);
 
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", (state) => {
-      if (!awaitingSystemUIReturn.current) return;
-      if (state === "inactive" || state === "background") {
-        systemUIBecameInactive.current = true;
-      } else if (state === "active" && systemUIBecameInactive.current) {
-        restoreSystemUI();
-      }
-    });
-    return () => {
-      subscription.remove();
-      restoreSystemUI();
-    };
-  }, [restoreSystemUI]);
-
   const swipe = useMemo(
     () =>
       Gesture.Pan()
@@ -191,16 +163,9 @@ export function SlidesPresentationNative({
   }, [canPrintNotes, deck, printing]);
 
   const connectTV = useCallback(() => {
-    awaitingSystemUIReturn.current = true;
-    systemUIBecameInactive.current = false;
-    releaseForSystemUI();
-    if (systemUIReleaseTimer.current) clearTimeout(systemUIReleaseTimer.current);
-    systemUIReleaseTimer.current = setTimeout(
-      restoreSystemUI,
-      SYSTEM_UI_RELEASE_TIMEOUT_MS,
-    );
+    requestSystemUI();
     setShowConnectionGuidance(true);
-  }, [releaseForSystemUI, restoreSystemUI]);
+  }, [requestSystemUI]);
 
   const finish = useCallback(() => {
     Alert.alert(
@@ -278,7 +243,7 @@ export function SlidesPresentationNative({
                   : "On this iPad only"}
             </Text>
             {!hasExternalScreen && (
-              <PresentationButton label="Connect TV" onPress={connectTV} colors={colors} />
+              <PresentationButton label={CONNECT_TV_LABEL} onPress={connectTV} colors={colors} />
             )}
             <PresentationButton
               disabled={printing}
@@ -377,8 +342,7 @@ export function SlidesPresentationNative({
                     { color: colors.fgMuted, fontFamily: fonts.regular },
                   ]}
                 >
-                  Open Control Center from the top-right of this iPad, choose
-                  Screen Mirroring, then select the classroom TV.
+                  {CONNECT_TV_GUIDANCE}
                 </Text>
               )}
               <View testID="slides-ipad-presentation" style={styles.onDeviceStage}>

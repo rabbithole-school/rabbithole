@@ -3,7 +3,11 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, internalQuery } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { authedQuery, teacherMutation, teacherQuery } from "./lib/customFunctions";
-import { filterToAccessibleScholars, requireActiveScholarAccess } from "./lib/access";
+import {
+  filterToAccessibleScholars,
+  requireActiveScholarAccess,
+  requireScholarWorkAccess,
+} from "./lib/access";
 import {
   practiceScopeAllowsCheckpoint,
   resolvePracticeScope,
@@ -235,7 +239,10 @@ export const myPlan = authedQuery({
   handler: async (ctx, args) => {
     const scholarId = args.scholarId ?? ctx.user._id;
     if (scholarId !== ctx.user._id) {
+      // A scholar's plan + placement checkpoint is learning record: teaching
+      // staff only, not operations staff (who pass the plain boundary).
       await requireActiveScholarAccess(ctx, ctx.user, scholarId);
+      await requireScholarWorkAccess(ctx, ctx.user, scholarId);
     }
     const { practiceScope, source: scopeSource } = await resolvePracticeScope(ctx, scholarId);
     const effective = await resolveEffectiveCheckpoint(ctx, scholarId);

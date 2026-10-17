@@ -19,6 +19,7 @@ import { SymbolView } from "expo-symbols";
 
 import { MAX_RECORDING_MS } from "@/hooks/useVoiceDictation";
 import { fonts, useColors } from "@/theme";
+import { DICTATION_CONNECTING_LABEL } from "../../vendor/shared/realtimeTranscriptionProtocol";
 
 const BARS = 13;
 // Bell curve weights: tallest in the centre, like a real voice meter.
@@ -62,6 +63,7 @@ function WaveBar({
  * The recording bar — replaces the composer row while the scholar is speaking.
  *
  * States:
+ *  - isConnecting: spinner + "Getting ready…" + cancel — audio isn't flowing yet
  *  - recording: live waveform + timer + cancel (✕) / stop (✓) buttons
  *  - isMaxed: 2-min cap reached; waveform replaced with a prompt to tap ✓
  *  - isTranscribing: native spinner + "Transcribing…" text
@@ -74,6 +76,7 @@ export function RecordingBar({
   level,
   durationMs,
   isTranscribing,
+  isConnecting = false,
   isMaxed = false,
   onCancel,
   onStop,
@@ -81,6 +84,8 @@ export function RecordingBar({
   level: number;
   durationMs: number;
   isTranscribing: boolean;
+  /** Streaming dictation is still starting up (useStreamingDictation). */
+  isConnecting?: boolean;
   isMaxed?: boolean;
   onCancel: () => void;
   onStop: () => void;
@@ -115,6 +120,29 @@ export function RecordingBar({
         <View style={styles.centered}>
           <ActivityIndicator color={colors.violet} size="small" />
           <Text style={styles.statusText}>Transcribing…</Text>
+        </View>
+      </View>
+    );
+  }
+
+  // ── Connecting ───────────────────────────────────────────────────────────────
+  // Tapped, but audio isn't reaching the transcriber yet — never show the
+  // waveform here, or a scholar starts talking and loses their first words.
+  if (isConnecting) {
+    return (
+      <View style={styles.bar}>
+        <Pressable
+          onPress={onCancel}
+          hitSlop={12}
+          style={styles.cancel}
+          accessibilityRole="button"
+          accessibilityLabel="Cancel recording"
+        >
+          <SymbolView name="xmark" size={18} tintColor={colors.charcoalMuted} />
+        </Pressable>
+        <View style={styles.centered}>
+          <ActivityIndicator color={colors.charcoalMuted} size="small" />
+          <Text style={styles.connectingText}>{DICTATION_CONNECTING_LABEL}</Text>
         </View>
       </View>
     );
@@ -220,6 +248,11 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     minHeight: 50,
   },
   statusText: { fontSize: 16, fontFamily: fonts.semibold, color: c.violet },
+  connectingText: {
+    fontSize: 16,
+    fontFamily: fonts.semibold,
+    color: c.charcoalMuted,
+  },
   maxedContent: {
     flex: 1,
     flexDirection: "row",

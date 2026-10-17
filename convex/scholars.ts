@@ -476,8 +476,8 @@ export interface LevelSignalRow {
  *
  * ⚠️ This is the single writer for `users.readingLevelSuggestion`. It is named
  * for the stored field, but what it stores is an estimate produced entirely from
- * the scholar's own TYPED writing (plus OCR-transcribed handwritten work for the
- * teacher-run analysis). Nothing in its evidence chain observes what the scholar
+ * the scholar's own TYPED tutor-chat writing (both the observer and the
+ * teacher-run analysis; handwriting is not read). Nothing in its evidence chain observes what the scholar
  * can READ. It is not a Lexile measure, not a normed assessment, not a screener
  * result. See `convex/lib/readingLevels.ts` for the full record of what the two
  * reading-level values are and are not.

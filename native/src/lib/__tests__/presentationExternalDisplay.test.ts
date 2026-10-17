@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EXTERNAL_DISPLAY_SCENE,
+  getAppPresentDisplayState,
   getPresentationDisplayState,
 } from "../presentationExternalDisplay";
 
@@ -46,4 +47,27 @@ describe("presentation external-display privacy", () => {
       });
     });
   }
+});
+
+describe("app present mode on the classroom TV", () => {
+  it("offers Connect TV until a TV is attached", () => {
+    expect(getAppPresentDisplayState({})).toEqual({
+      offerConnect: true,
+      tvNotMirroring: false,
+    });
+  });
+
+  it("is quiet while the TV mirrors this iPad", () => {
+    expect(getAppPresentDisplayState(screens(true))).toEqual({
+      offerConnect: false,
+      tvNotMirroring: false,
+    });
+  });
+
+  it("says so when the TV is attached but not mirroring this iPad", () => {
+    expect(getAppPresentDisplayState(screens(false))).toEqual({
+      offerConnect: false,
+      tvNotMirroring: true,
+    });
+  });
 });

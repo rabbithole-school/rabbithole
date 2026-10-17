@@ -1,0 +1,52 @@
+[
+  {
+    "id": "bridge-sag-build",
+    "topic": "Why do long bridges sag in the middle?",
+    "domain": "Engineering",
+    "rationale": "Builds bridges out of blocks and keeps loading toy trucks on them.",
+    "connectionTo": "Crossing a long bridge on a family drive",
+    "learningGoal": "Understand that for the same beam and load, a longer span bends more, and that adding supports or a deeper beam reduces the sag.",
+    "readingLevel": "Grade 4",
+    "path": { "title": "Build a simulation", "blurb": "Figure out how it works, then build a simulation that shows it.", "shape": "build" }
+  },
+  {
+    "id": "compound-interest-build",
+    "topic": "How does money in a savings account grow by itself?",
+    "domain": "Math",
+    "rationale": "Counts the coins in a piggy bank every week and asks about banks.",
+    "connectionTo": "Opening a first savings account",
+    "learningGoal": "Understand that interest is a percentage of what is already there, so each period's growth is bigger than the last (compounding).",
+    "readingLevel": "Grade 5",
+    "path": { "title": "Build a simulation", "blurb": "Figure out how it works, then build a simulation that shows it.", "shape": "build" }
+  },
+  {
+    "id": "predator-prey-build",
+    "topic": "Why do fox and rabbit numbers go up and down together?",
+    "domain": "Biology",
+    "rationale": "Loves animal documentaries and asks what happens when one animal disappears.",
+    "connectionTo": "A nature show about foxes in the snow",
+    "learningGoal": "Understand that more prey feeds more predators, more predators then eat down the prey, and the lag between them makes the two populations rise and fall in cycles.",
+    "readingLevel": "Grade 4",
+    "path": { "title": "Build a simulation", "blurb": "Figure out how it works, then build a simulation that shows it.", "shape": "build" }
+  },
+  {
+    "id": "pendulum-build",
+    "topic": "What makes a swing go faster or slower?",
+    "domain": "Physics",
+    "rationale": "Times swings on the playground and argues about who goes fastest.",
+    "connectionTo": "Racing friends on the playground swings",
+    "learningGoal": "Understand that a pendulum's time per swing depends on its length, not on how heavy it is or (for small swings) how far it is pulled back.",
+    "readingLevel": "Grade 3",
+    "path": { "title": "Build a simulation", "blurb": "Figure out how it works, then build a simulation that shows it.", "shape": "build" }
+  },
+  {
+    "id": "ice-melt-build",
+    "topic": "Why does salt make ice melt on the road?",
+    "domain": "Chemistry",
+    "rationale": "Asks how winter roads get cleared and experiments with ice cubes.",
+    "connectionTo": "A trip to the mountains in winter",
+    "learningGoal": "Understand that dissolved salt lowers the temperature at which water freezes, so salty ice melts at temperatures where plain ice stays frozen.",
+    "readingLevel": "Grade 5",
+    "path": { "title": "Build a simulation", "blurb": "Figure out how it works, then build a simulation that shows it.", "shape": "build" }
+  }
+]

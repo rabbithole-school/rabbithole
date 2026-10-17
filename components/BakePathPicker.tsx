@@ -25,6 +25,7 @@ import { Check } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import {
   accentForIndex,
+  BUILD_PATH,
   type BakePathSource,
   ENDLESS_CHAT,
   FALLBACK_PATHS,
@@ -182,8 +183,9 @@ function OptionCard({
   );
 }
 
-// Selection is the bot-path index, the endless-chat sentinel, or null (none yet).
-type Selection = number | typeof ENDLESS_CHAT | null;
+// Selection is the bot-path index, the endless-chat sentinel, the fixed build
+// card, or null (none yet).
+type Selection = number | typeof ENDLESS_CHAT | "build" | null;
 
 type PickerProps = {
   source: BakePathSource;
@@ -318,6 +320,18 @@ function PathPicker({ source, onSelect }: PickerProps) {
             />
           ))
         )}
+
+        {/* Build a simulation — fixed after the live suggestions and always
+            offered (like Endless chat, it doesn't wait on the bot). Its
+            `shape: "build"` rides the chosen path into the bake. */}
+        <OptionCard
+          emoji={BUILD_PATH.emoji}
+          title={BUILD_PATH.title}
+          blurb={BUILD_PATH.blurb}
+          tileBg="violet.50"
+          selected={selected === "build"}
+          onClick={() => pick("build", BUILD_PATH)}
+        />
       </Stack>
     </Stack>
   );

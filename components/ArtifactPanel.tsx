@@ -38,7 +38,7 @@ import type { AppTutorRequest } from "@/shared/appTutorRequest";
 export { flushAllArtifactSaves } from "./artifactSaveRegistry";
 import { ProcessPanel } from "./ProcessPanel";
 import type { ProcessDefinition, ProcessStep } from "./ProcessPanel";
-import { CodeArtifactViewer } from "./CodeArtifactViewer";
+import { AppCard } from "./AppCard";
 import { DictationMicButton } from "./DictationMicButton";
 import { ArtifactDeliverableButton } from "./ArtifactDeliverableButton";
 import { PhotoDeliverablePanel } from "./PhotoDeliverablePanel";
@@ -46,6 +46,7 @@ import { MapArtifactView } from "./geomap/MapArtifactView";
 import { SlidesArtifactView, EmptyDeckSlidesEditor } from "./slides/SlidesArtifactView";
 import { ManipulativeArtifactView } from "./manipulative/ManipulativeArtifactView";
 import { parseStoredMapArtifact } from "@/lib/geomap/stored";
+import { looksLikeHtml } from "@/lib/vibecode/helpers";
 import {
   activityResourceEmbedUrl,
   youtubeVideoId,
@@ -133,6 +134,13 @@ interface ArtifactPanelProps {
    *  surface as the scholar's own live event; an observer's chips stay static,
    *  matching the transcript notice, which never animates for them either. */
   animateFlairArrivals?: boolean;
+  /** The full-screen builder for this session's apps (TRA-519). Every app
+   *  card gets Open — naming its own app, so an older app opens itself — and
+   *  its own version. */
+  appBuilder?: {
+    sessionId: import("@/convex/_generated/dataModel").Id<"sessions">;
+    onOpen: (appId: string) => void;
+  };
 }
 
 export type ArtifactSaveResult =
@@ -172,6 +180,7 @@ export function ArtifactPanel({
   onMapCommit,
   kickoffBlocksSending = false,
   animateFlairArrivals = true,
+  appBuilder,
 }: ArtifactPanelProps) {
   const hasProcess = !!(process && processCurrentStep && processSteps);
   const hasArtifacts = artifacts.length > 0;
@@ -595,20 +604,28 @@ export function ArtifactPanel({
                 content={activeArtifact.content}
               />
             ) : activeArtifact.type === "code" ? (
-              <CodeArtifactViewer
+              // One app surface (TRA-519): the app runs live here as a card;
+              // Open takes the same session full screen into the builder,
+              // where its Code and History live.
+              <AppCard
                 key={activeArtifact._id}
                 artifact={activeArtifact}
+                builder={
+                  // Only an app the builder can show (not an empty or
+                  // non-HTML code document) gets Open.
+                  appBuilder && looksLikeHtml(activeArtifact.content)
+                    ? {
+                        sessionId: appBuilder.sessionId,
+                        onOpen: () => appBuilder.onOpen(activeArtifact._id),
+                      }
+                    : undefined
+                }
                 onSave={(updates) =>
                   onSave(activeArtifact._id, {
                     ...updates,
                     baseRevision: updates.baseRevision ?? activeArtifact.revision ?? 0,
                   })
                 }
-                onDelete={() => {
-                  void deleteArtifactSafely(activeArtifact._id).catch(
-                    () => undefined,
-                  );
-                }}
                 onSyncChange={onSyncChange}
                 onSnapshotCaptureReady={onSnapshotCaptureReady}
                 onAskTutor={onAskTutor}
@@ -644,13 +661,19 @@ export function ArtifactPanel({
               tutor dropped mid-chat). A map or slides deliverable's flair and
               check belong to its map/deck only — scoping them to a side
               document open in another tab showed that document's (empty) flair
-              and checked the wrong work (TRA-339). */}
+              and checked the wrong work (TRA-339). Likewise an app the tutor
+              built beside a writing deliverable is a side project, not the
+              writing: its card carries no Check (TRA-519). */}
           {deliverableContext &&
             (deliverableContext.deliverableSpec.kind === "map" ||
             deliverableContext.deliverableSpec.kind === "slides"
               ? activeArtifact.type === deliverableContext.deliverableSpec.kind
               : activeArtifact.type !== "map" &&
-                activeArtifact.type !== "manipulative") && (
+                activeArtifact.type !== "manipulative" &&
+                !(
+                  deliverableContext.deliverableSpec.kind === "text" &&
+                  activeArtifact.type === "code"
+                )) && (
             <Flex justify="center" pt={3} flexShrink={0}>
               <ArtifactDeliverableButton
                 sessionId={deliverableContext.sessionId}

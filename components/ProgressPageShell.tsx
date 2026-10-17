@@ -1,7 +1,8 @@
 "use client";
 
 import { useMutation, useQuery } from "convex/react";
-import { Box, Container, Flex, IconButton, Stack } from "@chakra-ui/react";
+import { Box, Container, Flex, IconButton, Stack, Text } from "@chakra-ui/react";
+import { MISSION_COPY } from "@/shared/missionCopy";
 import { PencilSimple, ArrowClockwise } from "@phosphor-icons/react";
 import Link from "next/link";
 import { curriculumUnitHref } from "@/lib/curriculumHref";
@@ -126,6 +127,21 @@ export function ProgressPageShell({
       <Box flex={1} overflowY="auto">
         <Container maxW="2xl" pt={8} pb={10} px={6}>
           <Stack gap={6}>
+            {/* The Quest's mission (TRA-519 B5) — one line, the scholar's
+                own words, only on their own Quest page (never Home). */}
+            {isMyIsUnit && unit?.mission?.text ? (
+              <Text
+                fontSize="sm"
+                fontFamily="heading"
+                color="charcoal.600"
+                lineHeight="1.4"
+              >
+                <Text as="span" fontWeight="700" color="navy.500">
+                  {MISSION_COPY.missionPrefix}
+                </Text>{" "}
+                {unit.mission.text}
+              </Text>
+            ) : null}
             <BigPictureContent
               sessionId={sessionId}
               sessionTitle={session.title}

@@ -2,6 +2,8 @@ import { describe, expect, test } from "vitest";
 import type { Id } from "./_generated/dataModel";
 import {
   buildBakeInstruction,
+  isBuildPath,
+  orderLearnBeforeBuild,
   parseBakeStageMarker,
   type BakeSpec,
 } from "./bakeUnitFromSeed";
@@ -53,5 +55,67 @@ describe("parseBakeStageMarker", () => {
     expect(parseBakeStageMarker("Requires a real comparison table.")).toBeNull();
     expect(parseBakeStageMarker("[bake-stage:watch] Explain a video.")).toBeNull();
     expect(parseBakeStageMarker("[bake-stage:commit]")).toBeNull();
+  });
+});
+
+describe("build-path bake (TRA-519 B4)", () => {
+  test("a build path asks for exactly 4 activities ending in an app build", () => {
+    const instruction = buildBakeInstruction({
+      ...spec("Why do bridges sag?"),
+      path: {
+        title: "Build a simulation",
+        blurb: "Figure it out, then build it.",
+        shape: "build",
+      },
+    });
+    expect(instruction).toContain("EXACTLY 4 activities");
+    expect(instruction).toContain('kind:"app"');
+    expect(instruction).toContain("The mechanism runs once with default settings.");
+    expect(instruction).toContain("NEVER for the app activity");
+  });
+
+  test("the same title without the shape is an ordinary bake", () => {
+    const instruction = buildBakeInstruction({
+      ...spec("Why do bridges sag?"),
+      path: { title: "Build a simulation", blurb: "Figure it out, then build it." },
+    });
+    expect(instruction).toContain("3-4 ONLINE activities");
+    expect(instruction).not.toContain('kind:"app"');
+    expect(isBuildPath({ title: "Build a simulation", blurb: "x" })).toBe(false);
+  });
+});
+
+describe("orderLearnBeforeBuild (TRA-519 B6)", () => {
+  const learn = (id: string) => ({
+    _id: id,
+    kind: "online",
+    deliverable: { kind: "text" },
+  });
+  const app = (id: string) => ({
+    _id: id,
+    kind: "online",
+    appActivity: true,
+    deliverable: { kind: "artifact" },
+  });
+  const ids = (xs: Array<{ _id: string }>) => xs.map((x) => x._id);
+
+  test("an app activity ahead of the first learning step moves right after it", () => {
+    expect(ids(orderLearnBeforeBuild([app("a"), learn("b"), learn("c")]))).toEqual([
+      "b",
+      "a",
+      "c",
+    ]);
+  });
+
+  test("a legacy vibecode row counts as an app; relative order is kept", () => {
+    const legacy = { _id: "v", kind: "vibecode" };
+    expect(
+      ids(orderLearnBeforeBuild([legacy, app("a"), learn("b"), learn("c")])),
+    ).toEqual(["b", "v", "a", "c"]);
+  });
+
+  test("an already-valid order and a unit with no learning step are untouched", () => {
+    expect(ids(orderLearnBeforeBuild([learn("a"), app("b")]))).toEqual(["a", "b"]);
+    expect(ids(orderLearnBeforeBuild([app("a"), app("b")]))).toEqual(["a", "b"]);
   });
 });

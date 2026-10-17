@@ -71,6 +71,8 @@ import { AideMessageBubble } from "@/components/AideThread";
 import { stemPreviewText } from "@/shared/practiceStemBlocks";
 import { DebriefMoments } from "@/components/DebriefMoments";
 import { JudgeTeacherValidation } from "@/components/JudgeTeacherValidation";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { isTeacherRole } from "@/convex/lib/roles";
 // The stored experiment mode (the orchestrator's state machine — kept as
 // is; renaming the backend enum is the deferred schema churn). The UI no
 // longer surfaces these as four tabs: it's a Rehearse / Debrief view with
@@ -975,41 +977,80 @@ function DebriefView({
   activityId: Id<"activities">;
   askAi?: (prompt: string) => void;
 }) {
+  const canDebrief = useQuery(api.curriculumExperiments.canDebrief, {
+    activityId,
+  });
   const ground = useMutation(api.curriculumExperiments.groundExperiment);
+  // A curriculum:run holder (base staff) has no grounding standing, but her
+  // Debrief still shows the Key Moments of the runs she OWNS (scoped
+  // server-side in keyMoments) — never the sims-vs-real comparison.
+  const { user } = useCurrentUser();
+  const runsCurriculum =
+    !!user && !isTeacherRole(user.role) && user.hasCurriculumRunAccess === true;
   const [grounding, setGrounding] = useState(false);
+  const [groundError, setGroundError] = useState<string | null>(null);
   const groundingResult = detail?.experiment.grounding as
     | GroundingResult
     | undefined;
   const handleGround = async () => {
     if (!detail) return;
     setGrounding(true);
+    setGroundError(null);
     try {
       await ground({ experimentId: detail.experiment._id });
+    } catch (err) {
+      setGroundError(
+        err instanceof Error ? err.message : "Couldn't start the comparison — try again.",
+      );
     } finally {
       setGrounding(false);
     }
   };
+  // Everything below reads real scholar sessions, which the server limits to
+  // teachers and admins at this unit's school (canGroundUnit). A curriculum
+  // designer, a `curriculum:edit` staff member, or a teacher from another
+  // school can open this tab, so tell them why it is empty instead of firing
+  // queries that would only be refused.
+  if (canDebrief === undefined) return null;
+  if (!canDebrief && !runsCurriculum) {
+    return (
+      <Text fontSize="sm" color="charcoal.500">
+        Debrief compares rehearsals against real scholar sessions, so it&rsquo;s
+        limited to teachers and admins at this school.
+      </Text>
+    );
+  }
   return (
     <Stack gap={6} flex="1" minH="0" overflowY="auto">
       {/* Calibration: do the sims track real scholars? Only when a sim
-          rehearsal exists to compare against. */}
-      {detail ? (
-        <Debrief
-          grounding={groundingResult}
-          onGround={handleGround}
-          loading={grounding}
-        />
-      ) : (
-        <Text fontSize="xs" color="charcoal.400">
-          Run a Rehearse to also compare the sims against real scholars.
-        </Text>
-      )}
+          rehearsal exists to compare against, and only with grounding
+          standing (canDebrief) — never for a curriculum:run holder. */}
+      {canDebrief &&
+        (detail ? (
+          <>
+            <Debrief
+              grounding={groundingResult}
+              onGround={handleGround}
+              loading={grounding}
+            />
+            {groundError && (
+              <Text fontSize="xs" color="red.500">
+                {groundError}
+              </Text>
+            )}
+          </>
+        ) : (
+          <Text fontSize="xs" color="charcoal.400">
+            Run a Rehearse to also compare the sims against real scholars.
+          </Text>
+        ))}
       {/* Judge ↔ teacher validation: blind pairwise picks over the real
           sessions the judge scored during grounding, correlated with the
           judge's ranking → our own r/agreement (sim-realism adoptable #2). */}
-      <JudgeTeacherValidation activityId={activityId} />
+      {canDebrief && <JudgeTeacherValidation activityId={activityId} />}
       {/* The substantive half: real-scholar Key Moments to catch + action,
-          and design moves — independent of whether a sim ran. */}
+          and design moves — independent of whether a sim ran. A
+          curriculum:run holder's deck is only her own runs. */}
       <DebriefMoments activityId={activityId} askAi={askAi} />
     </Stack>
   );

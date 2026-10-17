@@ -19,28 +19,28 @@ describe("resolveTutorModel", () => {
 
 describe("tutorRuntime", () => {
   test("Sonnet 5 keeps its runtime: no effort, no fallback", () => {
-    expect(tutorRuntime(MODELS.SONNET, "vibecode")).toEqual({
+    expect(tutorRuntime(MODELS.SONNET, { appBuild: true })).toEqual({
       maxTokens: 4096,
       effort: undefined,
       refusalFallback: false,
     });
   });
 
-  test("Fable uses a larger ceiling only for Vibecode sessions", () => {
-    expect(tutorRuntime(MODELS.FABLE, "vibecode")).toEqual({
+  test("Fable uses a larger ceiling only for a turn that builds an app", () => {
+    expect(tutorRuntime(MODELS.FABLE, { appBuild: true })).toEqual({
       maxTokens: 64000,
       effort: "medium",
       refusalFallback: true,
     });
-    expect(tutorRuntime(MODELS.FABLE, "conversation")).toEqual({
+    expect(tutorRuntime(MODELS.FABLE, { appBuild: false })).toEqual({
       maxTokens: 16000,
       effort: "medium",
       refusalFallback: true,
     });
   });
 
-  test("Opus 5.5 gets Fable's larger Vibecode ceiling: a whole app must fit", () => {
-    expect(tutorRuntime(MODELS.OPUS_5_5, "vibecode")).toEqual({
+  test("Opus 5.5 gets Fable's larger app-build ceiling: a whole app must fit", () => {
+    expect(tutorRuntime(MODELS.OPUS_5_5, { appBuild: true })).toEqual({
       maxTokens: 64000,
       effort: "low",
       refusalFallback: true,
@@ -48,7 +48,7 @@ describe("tutorRuntime", () => {
   });
 
   test("the Opus 5.5 default runs at low effort with the refusal fallback", () => {
-    expect(tutorRuntime(MODELS.OPUS_5_5, "conversation")).toEqual({
+    expect(tutorRuntime(MODELS.OPUS_5_5, { appBuild: false })).toEqual({
       maxTokens: 16000,
       effort: "low",
       refusalFallback: true,

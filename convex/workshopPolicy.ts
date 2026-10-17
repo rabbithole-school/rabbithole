@@ -69,9 +69,16 @@ export const resolveTurnModeForStream = internalQuery({
           : 0,
     };
 
-    // Only a vibecode session has a Play: every other session runs its full
-    // tool set whatever the body says, and stamps nothing.
-    if (session.sessionMode !== "vibecode") {
+    // A chat-primary session (TRA-519 one app surface) runs its full tool set
+    // whatever the body says and stamps nothing — unless the mutation that
+    // opened this turn stamped the placeholder because the builder view sent
+    // an explicit mode for an app that is the session's work
+    // (sessions.resolveTurnForSession). Then that stamp is the turn's mode of
+    // record, clamped by the verdict below exactly as in a builder-primary
+    // session. The body's requested mode never opens a thread here.
+    const stamped = placeholder.thread ?? null;
+    const builderPrimary = session.sessionMode === "vibecode";
+    if (!builderPrimary && stamped === null) {
       return {
         effectiveEditAccess: "allowed" as const,
         mode: "edit" as const,
@@ -95,7 +102,6 @@ export const resolveTurnModeForStream = internalQuery({
     // verdict that is not `allowed`, the turn is Play whatever the stamp says
     // (a stored `thread: "designer"` cannot buy back code tools once the
     // teacher has hidden or locked Edit).
-    const stamped = placeholder.thread ?? null;
     const requested: WorkshopMode =
       stamped === null
         ? args.requestedMode

@@ -11,7 +11,7 @@ import {
   planObserverRun,
   type PendingObserverRun,
 } from "./lib/observerShared";
-import { maybeRaiseAppOffTrackAlert } from "./appOffTrackAlert";
+import { maybeRaiseOffMissionAlert } from "./appOffTrackAlert";
 import { validTalkJudgment } from "./lib/levelEvidence";
 
 /**
@@ -57,9 +57,9 @@ export const saveAnalysis = internalMutation({
       pulseScore: args.pulseScore,
     });
 
-    // App-build sessions: page the owning teacher when this reading makes it
-    // two off-track readings in a row (TRA-481). Never throws.
-    await maybeRaiseAppOffTrackAlert(ctx, args.sessionId);
+    // Sessions with a mission: page the owning teacher when this reading makes
+    // it two off-track readings in a row (TRA-481, TRA-519 B3). Never throws.
+    await maybeRaiseOffMissionAlert(ctx, args.sessionId);
   },
 });
 

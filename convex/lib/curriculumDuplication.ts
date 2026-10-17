@@ -6,6 +6,11 @@ import { granuleTexts, toKeyedGranules } from "./granules";
 import { institutionIdForUnitAuthor } from "./unitAccess";
 import { normalizeStoredTutorModel } from "./tutorModel";
 import { isUsableVibecodeStarterApp } from "./vibecodeStarter";
+import {
+  defaultAppDeliverable,
+  resolveActivityWriteTarget,
+  storedShapeFields,
+} from "./appActivity";
 
 export function duplicateUnitDesign(
   source: Doc<"units">,
@@ -82,11 +87,15 @@ export function duplicateActivityDesign(
   order: number,
   title = source.title,
 ) {
+  // A copy is a new write: it stores the folded app shape (TRA-519 A4) even
+  // when the source is a legacy kind:"vibecode" row.
+  const shape = storedShapeFields(resolveActivityWriteTarget(source, {}));
+  const isApp = shape.appActivity === true;
   return {
     lessonId,
     title,
     description: source.description,
-    kind: source.kind,
+    ...shape,
     webUrl: source.webUrl,
     webAllowedHosts: source.webAllowedHosts
       ? [...source.webAllowedHosts]
@@ -102,15 +111,14 @@ export function duplicateActivityDesign(
       ? [...source.probeSkillKeys]
       : undefined,
     game: source.game ? { ...source.game } : undefined,
-    tutorModel:
-      source.kind === "vibecode"
+    tutorModel: isApp
         ? normalizeStoredTutorModel(source.tutorModel)
         : undefined,
     starterAppId: source.starterAppId,
     scholarsStartFrom: source.scholarsStartFrom,
     // The model contract travels with the design (duplicate AND fork).
     buildContract:
-      source.kind === "vibecode" && source.buildContract
+      isApp && source.buildContract
         ? {
             invariants: [...source.buildContract.invariants],
             freedoms: [...source.buildContract.freedoms],
@@ -119,8 +127,7 @@ export function duplicateActivityDesign(
               : {}),
           }
         : undefined,
-    allowSilence:
-      source.kind === "vibecode" ? source.allowSilence : undefined,
+    allowSilence: isApp ? source.allowSilence : undefined,
     hasScholarAngles: source.hasScholarAngles,
     assessesWritingMechanics: source.assessesWritingMechanics,
     defaultMode: source.defaultMode,
@@ -131,7 +138,9 @@ export function duplicateActivityDesign(
             ...criterion,
           })),
         }
-      : undefined,
+      : isApp && !source.advanceRubric
+        ? defaultAppDeliverable(source)
+        : undefined,
     advanceRubric: source.advanceRubric
       ? {
           criteria: source.advanceRubric.criteria.map((criterion) => ({

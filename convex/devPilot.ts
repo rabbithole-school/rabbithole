@@ -18,6 +18,7 @@ import { DEFAULT_TIMEZONE, PREP_TIME_KEY, dayKeyForTimezone } from "./lib/metaBl
 import { ONBOARDING_UNIT_SLUG, ONBOARDING_SYSTEM_USERNAME } from "./onboardingData";
 import { PRACTICE_DOMAINS } from "./lib/practice/domains";
 import { FLUENT_REPS } from "./lib/practice/scheduler";
+import { effectiveActivityKind } from "../shared/appSurface";
 
 const DAY_MS = 86_400_000;
 const PILOT_STANDING_TITLE = "Pilot 6 completion-arbiter block";
@@ -87,7 +88,7 @@ async function ensureWelcomeAssignment(ctx: MutationCtx, userId: Id<"users">) {
       .withIndex("by_lesson", (q) => q.eq("lessonId", lesson._id))
       .collect();
     const online = activities
-      .filter((a) => a.kind === "online")
+      .filter((a) => effectiveActivityKind(a) === "online")
       .sort((a, b) => a.order - b.order);
     if (online[0]) {
       firstActivity = online[0]._id;

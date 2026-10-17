@@ -4,11 +4,14 @@
 // the shared shape + the visual accents the menu cycles through.
 
 import type { Id } from "@/convex/_generated/dataModel";
+import { BUILD_SIMULATION_PATH } from "@/shared/missionCopy";
 
 export interface SuggestedPath {
   emoji: string;
   title: string;
   blurb: string;
+  /** "build" marks the fixed "Build a simulation" card; the bake keys on it. */
+  shape?: "build";
 }
 
 /**
@@ -29,6 +32,23 @@ export const PATH_SUGGEST_TIMEOUT_MS = 15_000;
 
 /** What the scholar picked in the path menu: a curated path or endless chat. */
 export type PathChoice = SuggestedPath | typeof ENDLESS_CHAT;
+
+/** The always-offered build path (TRA-519 B4), as a pickable path. */
+export const BUILD_PATH: SuggestedPath = { ...BUILD_SIMULATION_PATH };
+
+/** The `bakePath` argument a launch sends for a choice; none for endless chat.
+ * Carries `shape` so the bake can key on it (never on the title). Native twin:
+ * `bakePathArg` in native/src/components/BakePathPicker.tsx. */
+export function bakePathArg(
+  choice: PathChoice,
+): { title: string; blurb: string; shape?: "build" } | undefined {
+  if (choice === ENDLESS_CHAT) return undefined;
+  return {
+    title: choice.title,
+    blurb: choice.blurb,
+    ...(choice.shape ? { shape: choice.shape } : {}),
+  };
+}
 
 /**
  * Where the path picker sources its suggestions. A topic SEED the scholar owns
@@ -55,9 +75,10 @@ export function accentForIndex(i: number): string {
 }
 
 // Shown only if the live suggestion call errors/times out, so the menu never
-// dead-ends. Kept concrete (not the old abstract archetypes).
+// dead-ends. Kept concrete (not the old abstract archetypes). The old third
+// entry ("Make something that shows it") is replaced by the fixed BUILD_PATH
+// card the picker always renders after the list (TRA-519 B4).
 export const FALLBACK_PATHS: SuggestedPath[] = [
   { emoji: "🔍", title: "Get to the bottom of it", blurb: "Chase the one big 'why' behind it until it really clicks." },
   { emoji: "🔗", title: "Find the surprising links", blurb: "See what this secretly connects to in your own world." },
-  { emoji: "🛠️", title: "Make something that shows it", blurb: "Build a little explainer or diagram that proves you get it." },
 ];

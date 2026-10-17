@@ -6,6 +6,10 @@ import type { Doc, Id } from "../_generated/dataModel";
 import { createStreamStopPredicate } from "../lib/aideStream";
 import { renderStoppedAssistantContent } from "../../shared/stoppedTurn";
 import { shouldPersistStreamContent } from "../sessionStreamHelpers";
+import {
+  assembleProjectStreamApiMessages,
+  WITHDRAWN_REQUEST_LABEL,
+} from "../lib/projectStreamMessages";
 
 const modules = (
   import.meta as ImportMeta & {
@@ -625,5 +629,292 @@ describe("shouldPersistStreamContent", () => {
     expect(shouldPersistStreamContent(1, 0)).toBe(true);
     // Once something is stored, short additions wait for the next interval.
     expect(shouldPersistStreamContent(60, 30)).toBe(false);
+  });
+});
+
+describe("a stopped request is not carried out on the next send (TRA-530)", () => {
+  // A scholar stopped the designer before it showed anything, then sent a new
+  // ask. The empty stopped reply was deleted, the model saw two scholar turns
+  // in a row, and it built both. Each case drives the real send/stop
+  // mutations and the stream's own finalize, then reads the tutor's history.
+  const setup = async (username: string) => {
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t, "scholar", username);
+    const sessionId = await t.run((ctx) =>
+      ctx.db.insert("sessions", {
+        userId: scholarId,
+        title: "Stopped request",
+        isArchived: false,
+      }),
+    );
+    return { t, sessionId, asScholar: await withUser(t, scholarId) };
+  };
+
+  type SchemaTest = Awaited<ReturnType<typeof setup>>["t"];
+
+  const placeholderOf = (
+    t: SchemaTest,
+    sessionId: Id<"sessions">,
+  ) =>
+    t.run(async (ctx) => {
+      const rows = await ctx.db
+        .query("messages")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .collect();
+      return rows.filter((m) => m.role === "assistant" && m.streamId).at(-1)!
+        ._id;
+    });
+
+  // The stream ends a turn that never wrote text by deleting its row.
+  const finalizeEmpty = async (
+    t: SchemaTest,
+    sessionId: Id<"sessions">,
+    messageId: Id<"messages">,
+  ) =>
+    t.mutation(internal.sessionHelpers.finalizeStream, {
+      messageId,
+      sessionId,
+      content: "",
+    });
+
+  const userTurns = async (
+    t: SchemaTest,
+    sessionId: Id<"sessions">,
+  ) => {
+    const context = await t.query(internal.sessionHelpers.getSessionContext, {
+      sessionId,
+    });
+    return context!.chatHistory.filter((m) => m.sourceRole === "user");
+  };
+
+  test("Stop before any text, then a new send: the first ask is marked withdrawn", async () => {
+    const { t, sessionId, asScholar } = await setup("scholar-withdrawn");
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "add fall damage",
+    });
+    const stoppedId = await placeholderOf(t, sessionId);
+    await asScholar.mutation(api.sessions.requestStop, { sessionId });
+    await finalizeEmpty(t, sessionId, stoppedId);
+    expect(await t.run((ctx) => ctx.db.get(stoppedId))).toBeNull();
+
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "add a research lab",
+    });
+    const [stopped, current] = await userTurns(t, sessionId);
+    expect(stopped.replyStopped).toBe(true);
+    expect(current.replyStopped).toBeUndefined();
+
+    const apiMessages = await assembleProjectStreamApiMessages({
+      chatHistory: await t
+        .query(internal.sessionHelpers.getSessionContext, { sessionId })
+        .then((context) => context!.chatHistory),
+      resolveImagePart: async () => null,
+    });
+    expect(apiMessages.map((m) => m.content)).toEqual([
+      `${WITHDRAWN_REQUEST_LABEL} add fall damage`,
+      "add a research lab",
+    ]);
+  });
+
+  test("a steer (send mid-turn) withdraws the ask it cut off", async () => {
+    const { t, sessionId, asScholar } = await setup("scholar-steer-withdrawn");
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "make the walls red",
+    });
+    const cutOffId = await placeholderOf(t, sessionId);
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "no, blue",
+    });
+    // Before the cut-off stream finalizes, its empty stopped row still stands.
+    expect((await userTurns(t, sessionId))[0].replyStopped).toBe(true);
+    await finalizeEmpty(t, sessionId, cutOffId);
+    expect((await userTurns(t, sessionId))[0].replyStopped).toBe(true);
+  });
+
+  test("a crashed turn is not a stop: its ask is still owed", async () => {
+    const { t, sessionId, asScholar } = await setup("scholar-crashed");
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "add fall damage",
+    });
+    await finalizeEmpty(t, sessionId, await placeholderOf(t, sessionId));
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "add a research lab",
+    });
+    expect(
+      (await userTurns(t, sessionId)).map((m) => m.replyStopped),
+    ).toEqual([undefined, undefined]);
+  });
+
+  test("a send after a crashed stream is not a stop: its ask is still owed", async () => {
+    vi.useFakeTimers();
+    const { t, sessionId, asScholar } = await setup("scholar-dead-orphan");
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "add fall damage",
+    });
+    // The action dies: no finalize, and the heartbeat goes stale.
+    vi.advanceTimersByTime(60_000);
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "add a research lab",
+    });
+    expect(
+      (await userTurns(t, sessionId)).map((m) => m.replyStopped),
+    ).toEqual([undefined, undefined]);
+  });
+
+  test("a pressed Stop withdraws the ask even before its stream has a heartbeat", async () => {
+    vi.useFakeTimers();
+    const { t, sessionId, asScholar } = await setup("scholar-slow-prep-stop");
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "add fall damage",
+    });
+    // The client is still uploading a snapshot; no stream has opened yet.
+    vi.advanceTimersByTime(30_000);
+    await asScholar.mutation(api.sessions.requestStop, { sessionId });
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "add a research lab",
+    });
+    expect((await userTurns(t, sessionId))[0].replyStopped).toBe(true);
+  });
+
+  test("a long designer turn's tool rows don't hide the ask it stopped", async () => {
+    const { t, sessionId, asScholar } = await setup("scholar-tool-heavy");
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "add realistic textures",
+    });
+    const firstPlaceholder = await placeholderOf(t, sessionId);
+    // Textless tool splits: each leaves a tool row, its empty placeholder is
+    // deleted, and a fresh placeholder carries on.
+    await t.run(async (ctx) => {
+      await ctx.db.delete(firstPlaceholder);
+      for (let i = 0; i < 25; i++) {
+        await ctx.db.insert("messages", {
+          sessionId,
+          role: "tool",
+          content: "",
+          toolAction: "Edited document",
+          flagged: false,
+        });
+      }
+      await ctx.db.insert("messages", {
+        sessionId,
+        role: "assistant",
+        content: "",
+        streamId: "split",
+        flagged: false,
+        lastStreamActivityAt: Date.now(),
+      });
+    });
+    await asScholar.mutation(api.sessions.requestStop, { sessionId });
+    await finalizeEmpty(t, sessionId, await placeholderOf(t, sessionId));
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "make the lab open",
+    });
+    expect((await userTurns(t, sessionId))[0].replyStopped).toBe(true);
+  });
+
+  test("an image the stopped turn left is not a reply to the ask", async () => {
+    const { t, sessionId, asScholar } = await setup("scholar-image-stop");
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "draw a cell and explain it",
+    });
+    const placeholderId = await placeholderOf(t, sessionId);
+    await asScholar.mutation(api.sessions.requestStop, { sessionId });
+    await t.run(async (ctx) => {
+      const imageId = await ctx.storage.store(new Blob(["png"]));
+      await ctx.db.insert("messages", {
+        sessionId,
+        role: "tool",
+        content: "a cell",
+        imageId,
+        flagged: false,
+      });
+    });
+    await finalizeEmpty(t, sessionId, placeholderId);
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "never mind",
+    });
+    expect((await userTurns(t, sessionId))[0].replyStopped).toBe(true);
+  });
+
+  test("a reply stopped after it showed text keeps its ask answered", async () => {
+    const { t, sessionId, asScholar } = await setup("scholar-partial-answer");
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "add fall damage",
+    });
+    const placeholderId = await placeholderOf(t, sessionId);
+    await t.mutation(internal.sessionHelpers.updateStreamContent, {
+      messageId: placeholderId,
+      content: "Adding fall damage now.",
+    });
+    await asScholar.mutation(api.sessions.requestStop, { sessionId });
+    await t.mutation(internal.sessionHelpers.finalizeStream, {
+      messageId: placeholderId,
+      sessionId,
+      content: "Adding fall damage now.",
+    });
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "add a research lab",
+    });
+    expect((await userTurns(t, sessionId))[0].replyStopped).toBeUndefined();
+  });
+
+  test("a stopped kickoff withdraws nothing", async () => {
+    const { t, sessionId, asScholar } = await setup("scholar-kickoff-stop");
+    const askId = await t.run(async (ctx) => {
+      const askId = await ctx.db.insert("messages", {
+        sessionId,
+        role: "user",
+        content: "an old ask whose reply crashed",
+        flagged: false,
+      });
+      await ctx.db.insert("messages", {
+        sessionId,
+        role: "assistant",
+        content: "",
+        streamId: "kickoff",
+        streamTrigger: "activityKickoff",
+        flagged: false,
+        lastStreamActivityAt: Date.now(),
+      });
+      return askId;
+    });
+    await asScholar.mutation(api.sessions.requestStop, { sessionId });
+    expect(
+      (await t.run((ctx) => ctx.db.get(askId)))?.replyStoppedAt,
+    ).toBeUndefined();
+  });
+
+  test("retrying a stopped ask makes it owed again", async () => {
+    vi.useFakeTimers();
+    const { t, sessionId, asScholar } = await setup("scholar-retry-stopped");
+    await asScholar.mutation(api.sessions.sendMessage, {
+      sessionId,
+      message: "add fall damage",
+    });
+    const stoppedId = await placeholderOf(t, sessionId);
+    await asScholar.mutation(api.sessions.requestStop, { sessionId });
+    await finalizeEmpty(t, sessionId, stoppedId);
+    expect((await userTurns(t, sessionId))[0].replyStopped).toBe(true);
+
+    expect(
+      await asScholar.mutation(api.sessions.retryAssistantTurn, { sessionId }),
+    ).not.toBeNull();
+    expect((await userTurns(t, sessionId))[0].replyStopped).toBeUndefined();
   });
 });

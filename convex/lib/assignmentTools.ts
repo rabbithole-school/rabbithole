@@ -112,7 +112,13 @@ async function resolveAssignmentGroup(
 export function makeAssignmentCohortResolver(
   ctx: ActionCtx,
   allowedScholarIds?: ReadonlySet<Id<"users">>,
+  opts: {
+    // false for a curriculum:run holder: a group lookup would reveal group
+    // names and membership she has no read of. She names scholars instead.
+    allowGroups?: boolean;
+  } = {},
 ) {
+  const allowGroups = opts.allowGroups ?? true;
   return async (
     input: AssignmentCohortInput,
   ): Promise<AssignmentCohortResolution> => {
@@ -130,6 +136,13 @@ export function makeAssignmentCohortResolver(
         ok: false,
         message:
           "Provide either a groupName (scholar group) or scholarNames (individual scholars).",
+      };
+    }
+    if (hasGroup && !allowGroups) {
+      return {
+        ok: false,
+        message:
+          "Scholar groups aren't available to you here. Name the scholars instead (scholarNames). No assignment created.",
       };
     }
     if (hasGroup) {
@@ -306,17 +319,30 @@ export async function makeAssignmentTools(
     // global aide, which has no unit in scope.
     currentUnit?: { id: Id<"units">; title: string } | null;
     allowedScholarIds?: ReadonlySet<Id<"users">>;
+    // The institution lens the caller picked (the in-app aide), so unit
+    // titles resolve within the units their Curriculum page shows.
+    institutionScope?: string;
+    // A non-teacher holding curriculum:run (lib/curriculumRun.ts). She gets the
+    // RUNNER subset only — assign a unit she can edit, read and edit the
+    // agenda of assignments she owns — and `allowedScholarIds` must be her
+    // assignee lens (scholars at her run schools), never a record-read lens.
+    curriculumRunner?: boolean;
   },
 ) {
   // Reads the roster + edits the agenda, so teacher/admin only — the same
-  // gate assembleCurriculumTools applied when these lived inline.
-  if (!isTeacherRole(opts.role)) return [];
+  // gate assembleCurriculumTools applied when these lived inline — plus the
+  // curriculum:run subset below. Every backing function re-checks ownership
+  // and, for a runner, the unit + same-school boundary.
+  const runnerMode =
+    !isTeacherRole(opts.role) && opts.curriculumRunner === true;
+  if (!isTeacherRole(opts.role) && !runnerMode) return [];
 
   const {
     callerUserId,
     linkBase = "",
     currentUnit,
     allowedScholarIds,
+    institutionScope,
   } = opts;
 
   const { betaTool } = await import(
@@ -335,7 +361,11 @@ export async function makeAssignmentTools(
   // Shared strict unit resolver (lib/aideResolvers.ts) — the SAME
   // implementation the curriculum tools use, so "Elements of Culture" resolves
   // identically whichever surface the teacher is standing on.
-  const resolveUnitStrict = makeUnitResolver(ctx);
+  const resolveUnitStrict = makeUnitResolver(
+    ctx,
+    callerUserId,
+    institutionScope,
+  );
 
   // When a unit is already in scope, tell each assign tool which identifier its
   // own schema accepts so "this unit" needs no lookup or invalid retry.
@@ -349,6 +379,7 @@ export async function makeAssignmentTools(
   const resolveCohort = makeAssignmentCohortResolver(
     ctx,
     allowedScholarIds,
+    { allowGroups: !runnerMode },
   );
   const resolveScholars = (names: string[]) =>
     resolveAssignmentScholars(ctx, names, allowedScholarIds);
@@ -1288,6 +1319,25 @@ export async function makeAssignmentTools(
       });
     },
   });
+
+  if (runnerMode) {
+    // curriculum:run: run the units she can edit. Deliberately NOT here:
+    // publish_unit (a design decision for the unit's school), the granule
+    // coverage grid (per-scholar understanding evidence — learning record),
+    // roster edits and archive (teacher lifecycle), and resources (design).
+    return [
+      assignUnitTool,
+      assignActivityNowTool,
+      listAssignmentsTool,
+      getScheduleTool,
+      getAssignmentTool,
+      getAssignmentProgressTool,
+      scheduleActivityTool,
+      rescheduleActivityTool,
+      clearActivityTool,
+      pushActivityNowTool,
+    ];
+  }
 
   return [
     assignUnitTool,

@@ -1,5 +1,10 @@
 import { describe, expect, test, vi } from "vitest";
 import {
+  isSecretUsable,
+  isSessionReadyForTurn,
+  SECRET_REFRESH_AHEAD_MS,
+  SECRET_USABLE_MARGIN_MS,
+  shouldPrefetchSecret,
   parseRealtimeTranscriptionEvent,
   reduceTranscriptAssembly,
   type TranscriptAssembly,
@@ -131,5 +136,68 @@ describe("Realtime transcription events", () => {
     expect(
       parseRealtimeTranscriptionEvent({ type: "rate_limits.updated" }),
     ).toEqual({ kind: "ignored" });
+  });
+});
+
+// The mic may only say "listening" once audio is actually transcribed under
+// the turn's real config — before this, the first words of a take were lost.
+describe("startup readiness", () => {
+  const created = parseRealtimeTranscriptionEvent({ type: "session.created" });
+  const updated = parseRealtimeTranscriptionEvent({ type: "session.updated" });
+
+  test("tells session.created from session.updated", () => {
+    expect(created).toEqual({ kind: "sessionReady", phase: "created" });
+    expect(updated).toEqual({ kind: "sessionReady", phase: "updated" });
+  });
+
+  test("tap-to-talk waits for the ack of its VAD-off session.update", () => {
+    expect(isSessionReadyForTurn(created, false)).toBe(false);
+    expect(isSessionReadyForTurn(updated, false)).toBe(true);
+  });
+
+  test("a hands-free take is ready at the first session event", () => {
+    expect(isSessionReadyForTurn(created, true)).toBe(true);
+    expect(isSessionReadyForTurn(updated, true)).toBe(true);
+  });
+
+  test("no other event makes a take ready", () => {
+    expect(
+      isSessionReadyForTurn(
+        parseRealtimeTranscriptionEvent({
+          type: "input_audio_buffer.speech_started",
+        }),
+        true,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("client-secret cache", () => {
+  const now = 1_000_000;
+  const expiringIn = (ms: number) => ({ expiresAtMs: now + ms });
+
+  test("nothing cached: unusable, and a prefetch should mint", () => {
+    expect(isSecretUsable(null, now)).toBe(false);
+    expect(shouldPrefetchSecret(null, now)).toBe(true);
+  });
+
+  test("a fresh secret is used as-is and not re-minted", () => {
+    const fresh = expiringIn(10 * 60_000);
+    expect(isSecretUsable(fresh, now)).toBe(true);
+    expect(shouldPrefetchSecret(fresh, now)).toBe(false);
+  });
+
+  test("near expiry: still usable for this tap, refreshed in the background", () => {
+    const aging = expiringIn(SECRET_REFRESH_AHEAD_MS - 1);
+    expect(isSecretUsable(aging, now)).toBe(true);
+    expect(shouldPrefetchSecret(aging, now)).toBe(true);
+  });
+
+  test("too close to expiry to outlive a handshake: not usable", () => {
+    expect(isSecretUsable(expiringIn(SECRET_USABLE_MARGIN_MS), now)).toBe(false);
+    expect(isSecretUsable(expiringIn(SECRET_USABLE_MARGIN_MS + 1), now)).toBe(
+      true,
+    );
+    expect(isSecretUsable(expiringIn(-1), now)).toBe(false);
   });
 });

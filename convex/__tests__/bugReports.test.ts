@@ -920,3 +920,120 @@ describe("scholar-filed reports on the Workshop board", () => {
   });
 
 });
+
+describe("automatic iPad reports (crash / quit / freeze)", () => {
+  test("files without a Workshop card and posts under its own headline", async () => {
+    const t = convexTest(schema, modules);
+    const admin = await seedUser(t, "platform_admin", "avery");
+    await bindChannel(t, admin);
+    const institutionId = await seedTestInstitution(t, { slug: "auto-school" });
+    const scholar = await seedScholarInInstitution(t, {
+      institutionId,
+      username: "hoku",
+    });
+
+    const result = await (await withUser(t, scholar)).mutation(
+      api.bugReports.submit,
+      {
+        surface: "native",
+        trigger: "unclean_exit",
+        url: "/session/abc",
+        clientReportId: "launch-1:unclean_exit",
+        description: "Rabbithole quit unexpectedly while it was on screen.",
+        deviceModel: "iPad (A16)",
+        osVersion: "26.1",
+      },
+    );
+    if (!result.ok) throw new Error(result.error);
+
+    const report = await t.run((ctx) => ctx.db.get(result.reportId));
+    expect(report).toMatchObject({ trigger: "unclean_exit", status: "received" });
+    const cards = await t.run((ctx) =>
+      ctx.db.query("scholarSuggestions").collect(),
+    );
+    expect(cards).toEqual([]);
+
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    const slack = stubSlack();
+    await t.action(internal.bugReports.processReport, {
+      reportId: result.reportId,
+    });
+    const root = slack.calls.find((call) => call.method === "chat.postMessage");
+    const rootText = String(root?.body);
+    expect(rootText).toContain("quit unexpectedly on an iPad");
+    expect(rootText).toContain("iPad (A16)");
+    expect(rootText).not.toContain("New Rabbithole bug report");
+  });
+
+  test("one automatic report per trigger per window; other triggers still file", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedTestInstitution(t, { slug: "loop-school" });
+    const scholar = await seedScholarInInstitution(t, {
+      institutionId,
+      username: "keoni",
+    });
+    const asScholar = await withUser(t, scholar);
+    const submit = (trigger: "js_crash" | "stall", id: string) =>
+      asScholar.mutation(api.bugReports.submit, {
+        surface: "native",
+        trigger,
+        url: "/",
+        clientReportId: id,
+        description: `${trigger} ${id}`,
+      });
+
+    const first = await submit("js_crash", "launch-1:js_crash");
+    const repeat = await submit("js_crash", "launch-2:js_crash");
+    const stall = await submit("stall", "launch-2:stall:1");
+    if (!first.ok || !repeat.ok || !stall.ok) throw new Error("submit failed");
+
+    expect(repeat.reportId).toBe(first.reportId);
+    expect(stall.reportId).not.toBe(first.reportId);
+    const reports = await t.run((ctx) => ctx.db.query("bugReports").collect());
+    expect(reports.map((report) => report.trigger).sort()).toEqual([
+      "js_crash",
+      "stall",
+    ]);
+  });
+
+  test("keeps line breaks so the Slack post quotes the diagnostic line by line", async () => {
+    const t = convexTest(schema, modules);
+    const scholar = await seedUser(t, "scholar", "nalu");
+    const result = await (await withUser(t, scholar)).mutation(
+      api.bugReports.submit,
+      {
+        surface: "native",
+        trigger: "js_crash",
+        url: "/",
+        description: "Rabbithole crashed.\r\n\nTypeError: x\tat frame",
+      },
+    );
+    if (!result.ok) throw new Error(result.error);
+    const report = await t.run((ctx) => ctx.db.get(result.reportId));
+    expect(report?.description).toBe("Rabbithole crashed.\n\nTypeError: x at frame");
+  });
+
+  test("a fleet-wide flood stops filing after the cap and raises one alert", async () => {
+    const t = convexTest(schema, modules);
+    for (let i = 0; i < 11; i += 1) {
+      const scholar = await seedUser(t, "scholar", `flood${i}`);
+      const result = await (await withUser(t, scholar)).mutation(
+        api.bugReports.submit,
+        {
+          surface: "native",
+          trigger: "stall",
+          url: "/",
+          clientReportId: `launch-${i}:stall:1`,
+          description: "froze",
+        },
+      );
+      expect(result.ok).toBe(true);
+    }
+    const reports = await t.run((ctx) => ctx.db.query("bugReports").collect());
+    expect(reports).toHaveLength(10);
+    const alerts = await t.run((ctx) => ctx.db.query("alerts").collect());
+    expect(
+      alerts.filter((alert) => alert.kind === "auto_bug_report_flood"),
+    ).toHaveLength(1);
+  });
+});
