@@ -21,6 +21,7 @@ import { moveLessonToUnitCore } from "./lessons";
 import type { Doc, Id } from "./_generated/dataModel";
 import { normalizeStoredTutorModel } from "./lib/tutorModel";
 import { buildContractValidator } from "./lib/buildContract";
+import { isAppActivity } from "../shared/appSurface";
 import { requirePeriodForScholar } from "./reportingPeriods";
 
 /**
@@ -366,8 +367,9 @@ export const createScholarLesson = internalMutation({
  *
  * ACL note: unlike `lessons.moveToUnit`, this mutation does NOT call
  * `requireUnitEditAccess` itself — like `createScholarLesson` above, it
- * trusts the aide tool's role gate (the `canSeeScholarData` group in
- * `lib/aideTools.ts`, teacher/admin only) as the auth boundary, since an
+ * trusts the aide tool as the auth boundary: `lib/aideTools.ts` runs
+ * `curriculumAssistant.checkUnitEditAccessForAide` (the UI's unit-edit
+ * check, as the caller) on BOTH the source and target unit first, since an
  * internal mutation invoked from an aide tool doesn't carry the original
  * caller's identity.
  */
@@ -414,8 +416,8 @@ export const createScholarActivity = internalMutation({
     description: v.optional(v.string()),
     scholarDescription: v.optional(v.string()),
     // Activity kind. Defaults to "online" (an AI-tutor session). "offline" is
-    // a classroom task; "vibecode" is a full-screen app-builder workshop whose
-    // systemPrompt IS the build brief. Only these three are safe from the
+    // a classroom task; "vibecode" is an app activity (stored as online +
+    // appActivity, TRA-519) whose systemPrompt IS the build brief. Only these three are safe from the
     // global aide — game/web/world/shareBack/problem_set need extra payload.
     // World/problem_set use dedicated global tools; the catalog-backed kinds
     // remain an Edit-surface hand-off until their lookup tools ship.
@@ -489,7 +491,7 @@ export const createScholarActivity = internalMutation({
       kind,
       systemPrompt: args.systemPrompt,
       tutorModel:
-        kind === "vibecode"
+        isAppActivity({ kind })
           ? normalizeStoredTutorModel(args.tutorModel)
           : undefined,
       starterAppId: args.starterAppId,
@@ -688,7 +690,8 @@ export const updateScholarDossier = internalMutation({
  * Set (or clear) any of a scholar's three levels (TRA-503). Mirrors
  * `scholars.updateReadingLevel` / `updateReadLevel` / `updateWriteMode`:
  * validates, patches the user, records a teacher-sourced history row per
- * changed dimension. A TALK change also clears any pending AI suggestion. Each
+ * changed dimension. A TALK change leaves the info-only AI estimate
+ * (`readingLevelSuggestion`) alone. Each
  * arg is optional (omit = leave alone); `null` clears that level. Role gating
  * (teacher/admin) is in the assembler.
  */

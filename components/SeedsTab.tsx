@@ -75,11 +75,14 @@ function SeedCard({
       ? { label: "Teacher", color: "teal" }
       : seed.origin === "badge_follow"
         ? { label: "Trail", color: "amber" }
-        : seed.suggestionType === "frontier"
-          ? { label: "Frontier", color: "cyan" }
-          : seed.suggestionType === "depth_probe"
-            ? { label: "Depth Probe", color: "violet" }
-            : { label: "Explore", color: "blue" };
+        : seed.origin === "parked"
+          ? // A parked idea the scholar made a Quest of (TRA-519 B2).
+            { label: "Saved idea", color: "purple" }
+          : seed.suggestionType === "frontier"
+            ? { label: "Frontier", color: "cyan" }
+            : seed.suggestionType === "depth_probe"
+              ? { label: "Depth Probe", color: "violet" }
+              : { label: "Explore", color: "blue" };
 
   return (
     <Box

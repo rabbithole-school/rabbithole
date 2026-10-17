@@ -19,6 +19,7 @@
  */
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import type { Doc } from "../_generated/dataModel";
+import { effectiveActivityKind } from "../../shared/appSurface";
 
 /**
  * Is this activity completable via the conversation-completion path?
@@ -59,7 +60,8 @@ export async function isConversationCompletable(
 export function isConversationCompletableActivityShape(
   activity: Doc<"activities">,
 ): boolean {
-  return (
-    activity.kind === "online" && !activity.advanceRubric
-  );
+  // Opt-in (TRA-519): an app activity (either shape) completes through the
+  // same conversation path — its deliverable is the app itself.
+  const kind = effectiveActivityKind(activity);
+  return (kind === "online" || kind === "vibecode") && !activity.advanceRubric;
 }

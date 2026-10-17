@@ -1,14 +1,25 @@
 import { v } from "convex/values";
 import { talkLevelOf } from "./lib/readingLevels";
 import { publishUnitOnAssign } from "./lib/unitPublication";
+import { requireUnitAccessForUser } from "./lib/unitAccess";
 import { internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
 import {
   authedMutation,
   authedQuery,
+  curriculumRunMutation,
+  curriculumRunQuery,
   teacherMutation,
   teacherQuery,
 } from "./lib/customFunctions";
+import {
+  canRunAssignments,
+  curriculumRunInstitutionIds,
+  requireCanRunOwnedAssignment,
+  requireRunnableUnit,
+  requireScholarsAtInstitution,
+  runnerAssignableScholars,
+} from "./lib/curriculumRun";
 import { ROLES, isTeacherRole } from "./lib/roles";
 import {
   syncScheduleMirror,
@@ -74,6 +85,7 @@ import {
   type ComingUpHomework,
   type ComingUpPlanned,
 } from "../shared/comingUp";
+import { effectiveActivityKind } from "../shared/appSurface";
 
 /**
  * Assignments — execution instances of a Unit.
@@ -637,7 +649,7 @@ async function enrichScheduleEntryForScholar(
     // its label but stops being headlined as work that can hold the scholar
     // in. That split keeps a slipped clear job from becoming a lockout.
     soloStartableByMe: activity
-      ? SCHOLAR_SOLO_STARTABLE_KINDS.has(activity.kind) &&
+      ? SCHOLAR_SOLO_STARTABLE_KINDS.has(effectiveActivityKind(activity)) &&
         isEntryBlocking(entry, Date.now())
       : false,
   };
@@ -966,14 +978,24 @@ export const endProgramActivity = authedMutation({
  * activities stay dormant — the teacher pushes them from the Run page
  * when ready.
  */
-export const create = teacherMutation({
+export const create = curriculumRunMutation({
   args: {
     unitId: v.id("units"),
     scholarIds: v.array(v.id("users")),
     title: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    await requireScholarsAccessible(ctx, ctx.user, args.scholarIds);
+    if (isTeacherRole(ctx.user.role)) {
+      await requireScholarsAccessible(ctx, ctx.user, args.scholarIds);
+    } else {
+      // curriculum:run — a unit she can edit, scholars at that unit's school.
+      const { institutionId } = await requireRunnableUnit(
+        ctx,
+        ctx.user,
+        args.unitId,
+      );
+      await requireScholarsAtInstitution(ctx, args.scholarIds, institutionId);
+    }
     const teacherId = ctx.user._id;
     const now = Date.now();
     // Assigning a unit publishes it (TRA-490).
@@ -1096,11 +1118,33 @@ export async function coreAssignWork(
 ): Promise<{ assignmentId: Id<"assignments">; created: boolean }> {
   const teacher = await ctx.db.get(args.teacherId);
   if (!teacher) throw new Error("Teacher not found");
-  const unit = await ctx.db.get(args.unitId);
-  const institutionId =
-    unit?.institutionId ??
-    (await resolveActiveMembership(ctx, teacher))?.institutionId;
-  await requireScholarsAccessible(ctx, teacher, args.scholarIds);
+  let institutionId: Id<"institutions"> | undefined;
+  if (isTeacherRole(teacher.role)) {
+    // The unit must be one this teacher may reach — another school's unit (or
+    // a Quest of a scholar they can't read) is refused, rather than assigned
+    // and published into a foreign tenant. Covers the UI, the aide's
+    // assign_unit (which accepts a raw unitId) and every other caller.
+    const unit = await requireUnitAccessForUser(ctx, teacher, args.unitId);
+    institutionId =
+      unit.institutionId ??
+      (await resolveActiveMembership(ctx, teacher))?.institutionId;
+    await requireScholarsAccessible(ctx, teacher, args.scholarIds);
+  } else {
+    // curriculum:run (lib/curriculumRun.ts): a unit she can edit, at a school
+    // where she holds the grant; every assignee at that school; and a
+    // lesson/activity target that actually belongs to the unit.
+    const runnable = await requireRunnableUnit(ctx, teacher, args.unitId);
+    institutionId = runnable.institutionId;
+    await requireScholarsAtInstitution(ctx, args.scholarIds, institutionId);
+    if (args.target.kind === "lesson") {
+      const lesson = await ctx.db.get(args.target.lessonId);
+      if (!lesson || lesson.unitId !== args.unitId) {
+        throw new Error("Lesson is not part of this unit");
+      }
+    } else if (args.target.kind === "activity") {
+      await assertActivityInUnitStrict(ctx, args.unitId, args.target.activityId);
+    }
+  }
   const roster = Array.from(new Set(args.scholarIds));
   if (roster.length === 0) throw new Error("Pick at least one scholar.");
   // Assigning a unit publishes it (TRA-490) — on reuse too, so assigning
@@ -1229,7 +1273,7 @@ export const anyAssignmentReferencesActivityInternal = internalQuery({
   },
 });
 
-export const assignWork = teacherMutation({
+export const assignWork = curriculumRunMutation({
   args: {
     unitId: v.id("units"),
     scholarIds: v.array(v.id("users")),
@@ -1273,7 +1317,7 @@ export const addScholars = teacherMutation({
  * its mode + timing get updated (idempotent — flipping in/out modes
  * works). endsAt is for classFocus auto-clear; dueAt is for homework.
  */
-export const pushActivity = teacherMutation({
+export const pushActivity = curriculumRunMutation({
   args: {
     assignmentId: v.id("assignments"),
     activityId: v.id("activities"),
@@ -1286,6 +1330,7 @@ export const pushActivity = teacherMutation({
   handler: async (ctx, args) => {
     const a = await requireOwnedAssignment(ctx, args.assignmentId);
     if (!a) return;
+    await requireRunnerScope(ctx, a, args.activityId);
     await applyPushActivity(ctx, a, {
       ...args,
       dueAt:
@@ -1317,7 +1362,7 @@ export const pushActivity = teacherMutation({
  * scholars is a separate, deliberate act (wrap/clear), never a side effect
  * of re-timing.
  */
-export const scheduleActivity = teacherMutation({
+export const scheduleActivity = curriculumRunMutation({
   args: {
     assignmentId: v.id("assignments"),
     activityId: v.id("activities"),
@@ -1331,6 +1376,7 @@ export const scheduleActivity = teacherMutation({
   handler: async (ctx, args) => {
     const a = await requireOwnedAssignment(ctx, args.assignmentId);
     if (!a) return;
+    await requireRunnerScope(ctx, a, args.activityId);
     await applyScheduleActivity(ctx, a, args);
   },
 });
@@ -1342,7 +1388,7 @@ export const scheduleActivity = teacherMutation({
  * live (setAt stamped), this only moves its agenda position — it does
  * not un-push it.
  */
-export const rescheduleActivity = teacherMutation({
+export const rescheduleActivity = curriculumRunMutation({
   args: {
     assignmentId: v.id("assignments"),
     activityId: v.id("activities"),
@@ -1351,13 +1397,14 @@ export const rescheduleActivity = teacherMutation({
   handler: async (ctx, args) => {
     const a = await requireOwnedAssignment(ctx, args.assignmentId);
     if (!a) return;
+    await requireRunnerScope(ctx, a, args.activityId);
     await applyRescheduleActivity(ctx, a, args);
   },
 });
 
 /** Remove an activity from the schedule (clears both class focus and
  *  homework state for that activity within this Assignment). */
-export const clearActivity = teacherMutation({
+export const clearActivity = curriculumRunMutation({
   args: {
     assignmentId: v.id("assignments"),
     activityId: v.id("activities"),
@@ -1365,6 +1412,7 @@ export const clearActivity = teacherMutation({
   handler: async (ctx, { assignmentId, activityId }) => {
     const a = await requireOwnedAssignment(ctx, assignmentId);
     if (!a) return;
+    await requireRunnerScope(ctx, a, activityId);
     await applyClearActivity(ctx, a, activityId);
   },
 });
@@ -1394,16 +1442,20 @@ export const unarchive = teacherMutation({
  * for a list view: unit info, scholar count, project count, active
  * push counts (classFocus / homework).
  */
-export const listForTeacher = teacherQuery({
+export const listForTeacher = curriculumRunQuery({
   args: { includeArchived: v.optional(v.boolean()) },
   handler: async (ctx, { includeArchived }) => {
     const now = Date.now();
     const timeZone = await timeZoneForStaff(ctx, ctx.user._id);
     const todayDayKey = dayKeyForTimezone(now, timeZone);
-    const rows = await ctx.db
-      .query("assignments")
-      .withIndex("by_teacher", (q) => q.eq("teacherId", ctx.user._id))
-      .collect();
+    const rows = await runnableOwnedRows(
+      ctx,
+      ctx.user,
+      await ctx.db
+        .query("assignments")
+        .withIndex("by_teacher", (q) => q.eq("teacherId", ctx.user._id))
+        .collect(),
+    );
     // This list view is unit-mode (unit info, activity push counts). Standing
     // (unitId-less) practice assignments have no unit/schedule to show here and
     // get their own surface, so they're filtered out. Ad-hoc dispatches
@@ -1475,7 +1527,7 @@ export const listForTeacher = teacherQuery({
  *
  * Same per-row shape as `listForTeacher` so the row UI is shared.
  */
-export const listForUnit = teacherQuery({
+export const listForUnit = curriculumRunQuery({
   args: { unitId: v.id("units") },
   handler: async (ctx, { unitId }) => {
     const now = Date.now();
@@ -1488,7 +1540,11 @@ export const listForUnit = teacherQuery({
     // Scope to the calling teacher — assignments are per-teacher, same
     // as listForTeacher. (Role-based model: a teacher only manages
     // their own runs.)
-    const mine = rows.filter((r) => r.teacherId === ctx.user._id);
+    const mine = await runnableOwnedRows(
+      ctx,
+      ctx.user,
+      rows.filter((r) => r.teacherId === ctx.user._id),
+    );
     // Active first (newest → oldest), then archived (newest → oldest).
     mine.sort((a, b) => {
       const aArch = a.archivedAt ? 1 : 0;
@@ -1542,6 +1598,32 @@ export const listForUnit = teacherQuery({
           facepile,
         };
       }),
+    );
+  },
+});
+
+/**
+ * The assignee picker for a curriculum:run holder (lib/curriculumRun.ts):
+ * identity only — name, username, avatar, enrolled vs Extended Education —
+ * for scholars at the school that owns `unitId` (or every school where she
+ * holds the grant, before a unit is picked). Teachers keep `users.listScholars`;
+ * this returns [] for them so the two pickers never mix.
+ */
+export const assignableScholarsForRunner = curriculumRunQuery({
+  args: { unitId: v.optional(v.id("units")) },
+  handler: async (ctx, { unitId }) => {
+    if (isTeacherRole(ctx.user.role)) return [];
+    if (unitId) {
+      const { institutionId } = await requireRunnableUnit(
+        ctx,
+        ctx.user,
+        unitId,
+      );
+      return await runnerAssignableScholars(ctx, [institutionId]);
+    }
+    return await runnerAssignableScholars(
+      ctx,
+      await curriculumRunInstitutionIds(ctx, ctx.user._id),
     );
   },
 });
@@ -1634,14 +1716,17 @@ const LINGERING_WINDOW_MS = 15 * 60 * 1000;
  * The caller decides WHEN to show this (typically right after a push
  * disappears from `activePushesForTeacher` — "just turned").
  */
-export const lingeringScholarsForPush = teacherQuery({
+export const lingeringScholarsForPush = curriculumRunQuery({
   args: {
     assignmentId: v.id("assignments"),
     activityId: v.id("activities"),
   },
   handler: async (ctx, { assignmentId, activityId }) => {
+    // Names of her own cohort still mid-activity — progress on an assignment
+    // she owns, so a curriculum:run owner reads it too.
     const a = await requireOwnedAssignment(ctx, assignmentId);
     if (!a) return [];
+    if (!(await ownedAssignmentForRead(ctx, assignmentId))) return [];
     const now = Date.now();
     const sessions = await ctx.db
       .query("sessions")
@@ -1786,14 +1871,15 @@ export const scheduleForTeacher = teacherQuery({
 });
 
 /** Full read of an Assignment — roster + unit + scheduling state. */
-export const get = teacherQuery({
+export const get = curriculumRunQuery({
   args: { assignmentId: v.id("assignments") },
   handler: async (ctx, { assignmentId }) => {
     const now = Date.now();
     const focusTimeZone = await timeZoneForStaff(ctx, ctx.user._id);
     const todayDayKey = dayKeyForTimezone(now, focusTimeZone);
-    const a = await ctx.db.get(assignmentId);
-    if (!a || a.teacherId !== ctx.user._id) return null;
+    const owned = await ownedAssignmentForRead(ctx, assignmentId);
+    if (!owned) return null;
+    const { a, isTeacher } = owned;
     // A standing (unitId-less) assignment has no unit to resolve.
     const unit = a.unitId ? await ctx.db.get(a.unitId) : null;
     const sessions = (await ctx.db
@@ -1830,11 +1916,15 @@ export const get = teacherQuery({
           name: s?.name ?? s?.username ?? "(unknown)",
           username: s?.username ?? null,
           image: s?.image ?? null,
-          readingLevel: talkLevelOf(s?.readingLevel),
-          sessionId: session?._id ?? null,
+          // Teacher-only: reading level is learning record, and the session
+          // id + message preview open the transcript. A curriculum:run owner
+          // gets progress (started / last active / completions), not those.
+          readingLevel: isTeacher ? talkLevelOf(s?.readingLevel) : null,
+          sessionId: isTeacher ? (session?._id ?? null) : null,
           sessionStartedAt: session?._creationTime ?? null,
           lastMessageAt: lastMsg?._creationTime ?? null,
-          lastMessagePreview: lastMsg ? lastMsg.content.slice(0, 120) : null,
+          lastMessagePreview:
+            isTeacher && lastMsg ? lastMsg.content.slice(0, 120) : null,
           completedActivityCount: completions.length,
         };
       }),
@@ -1911,7 +2001,7 @@ export const get = teacherQuery({
 });
 
 /** Institution-calendar due-date choices for the Run page and full editor. */
-export const homeworkDueDateOptions = teacherQuery({
+export const homeworkDueDateOptions = curriculumRunQuery({
   args: {
     assignmentId: v.id("assignments"),
     nowMs: v.number(),
@@ -1919,6 +2009,7 @@ export const homeworkDueDateOptions = teacherQuery({
   handler: async (ctx, { assignmentId, nowMs }) => {
     const assignment = await requireOwnedAssignment(ctx, assignmentId);
     if (!assignment) return null;
+    if (!(await ownedAssignmentForRead(ctx, assignmentId))) return null;
     return await homeworkDueDateOptionsForRoster(
       ctx,
       assignment.scholarIds,
@@ -1933,11 +2024,12 @@ export const homeworkDueDateOptions = teacherQuery({
  * current schedule entry (or null) for each activity. Drives the Run
  * page's outline with push/clear controls.
  */
-export const activityProgress = teacherQuery({
+export const activityProgress = curriculumRunQuery({
   args: { assignmentId: v.id("assignments") },
   handler: async (ctx, { assignmentId }) => {
-    const a = await ctx.db.get(assignmentId);
-    if (!a || a.teacherId !== ctx.user._id) return null;
+    const owned = await ownedAssignmentForRead(ctx, assignmentId);
+    if (!owned) return null;
+    const { a } = owned;
     const schedule = a.activitySchedule ?? [];
     const scheduleByActivity = new Map(
       schedule.map((e) => [String(e.activityId), e]),
@@ -2592,6 +2684,93 @@ async function requireOwnedAssignment(
   if (!a) return null;
   if (a.teacherId !== ctx.user._id) throw new Error("Not your assignment");
   return a;
+}
+
+/**
+ * The curriculum:run half of an owned-assignment write. A teacher passes
+ * untouched (teachers are unchanged); anyone else must still be able to run
+ * the assignment's unit, and the activity must be one of that unit's own
+ * lesson activities. Call AFTER the ownership check, never instead of it.
+ */
+async function requireRunnerScope(
+  ctx: QueryCtx & { user: Doc<"users"> },
+  a: Doc<"assignments">,
+  activityId: Id<"activities">,
+) {
+  if (isTeacherRole(ctx.user.role)) return;
+  await requireCanRunOwnedAssignment(ctx, ctx.user, a);
+  await assertActivityInUnitStrict(ctx, a.unitId!, activityId);
+}
+
+/** Like assertActivityInUnit, but a quest-only (lesson-less) activity fails. */
+async function assertActivityInUnitStrict(
+  ctx: { db: QueryCtx["db"] },
+  unitId: Id<"units">,
+  activityId: Id<"activities">,
+) {
+  const act = await ctx.db.get(activityId);
+  const lesson = act?.lessonId ? await ctx.db.get(act.lessonId) : null;
+  if (!lesson || lesson.unitId !== unitId) {
+    throw new Error("Activity is not part of this assignment's unit");
+  }
+}
+
+/**
+ * The LIST form of the runner gate: a teacher's owned rows pass untouched; a
+ * non-teacher keeps only the owned rows she can still run (unit runnable,
+ * curriculum:run held at the unit's school). Ownership alone is not enough:
+ * an ex-teacher, a revoked grant, or a row on a unit at a school she holds no
+ * grant at must not keep listing those cohorts' names. Results per unit are
+ * cached so a long list costs one check per unit.
+ */
+async function runnableOwnedRows(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  rows: Doc<"assignments">[],
+): Promise<Doc<"assignments">[]> {
+  if (isTeacherRole(user.role)) return rows;
+  const byUnit = new Map<string, boolean>();
+  const out: Doc<"assignments">[] = [];
+  for (const row of rows) {
+    if (row.teacherId !== user._id || !row.unitId) continue;
+    const key = String(row.unitId);
+    let ok = byUnit.get(key);
+    if (ok === undefined) {
+      try {
+        await requireCanRunOwnedAssignment(ctx, user, row);
+        ok = true;
+      } catch {
+        ok = false;
+      }
+      byUnit.set(key, ok);
+    }
+    if (ok) out.push(row);
+  }
+  return out;
+}
+
+/**
+ * Read gate for an assignment's own progress views: the assignment when the
+ * caller OWNS it and (if not a teacher) may still run its unit; null
+ * otherwise — the existing not-yours shape. `isTeacher` tells the caller
+ * whether to include the teacher-only fields (reading level, transcript
+ * previews, session links), which a curriculum:run holder never receives.
+ */
+async function ownedAssignmentForRead(
+  ctx: QueryCtx & { user: Doc<"users"> },
+  assignmentId: Id<"assignments">,
+): Promise<{ a: Doc<"assignments">; isTeacher: boolean } | null> {
+  const a = await ctx.db.get(assignmentId);
+  if (!a || a.teacherId !== ctx.user._id) return null;
+  const isTeacher = isTeacherRole(ctx.user.role);
+  if (!isTeacher) {
+    try {
+      await requireCanRunOwnedAssignment(ctx, ctx.user, a);
+    } catch {
+      return null;
+    }
+  }
+  return { a, isTeacher };
 }
 
 /**
@@ -3315,7 +3494,9 @@ export async function coreAideAssignWork(
   },
 ): Promise<{ assignmentId: Id<"assignments">; created: boolean }> {
   const u = await ctx.db.get(callerUserId);
-  if (!u || !isTeacherRole(u.role as never)) {
+  // Teacher/admin, or a curriculum:run holder — coreAssignWork then enforces
+  // the runner's unit + same-school-assignee boundary itself.
+  if (!u || !(await canRunAssignments(ctx, u))) {
     throw new Error("Assign is teacher/admin only");
   }
   return coreAssignWork(ctx, { ...args, teacherId: callerUserId });
@@ -3420,14 +3601,45 @@ async function gatherUnitActivities(
 // teacher-UI uses. Tool gating to teacher/admin happens in lib/aideTools.
 
 async function requireOwnedAssignmentBy(
-  ctx: { db: QueryCtx["db"] },
+  ctx: QueryCtx,
   assignmentId: Id<"assignments">,
   callerUserId: Id<"users">,
+  activityId?: Id<"activities">,
 ): Promise<Doc<"assignments"> | null> {
   const a = await ctx.db.get(assignmentId);
   if (!a) return null;
   if (a.teacherId !== callerUserId) throw new Error("Not your assignment");
+  // A non-teacher owner is a curriculum:run holder (the aide only offers her
+  // the run tools): she must still be able to run the unit, and any named
+  // activity must be one of its lesson activities. Teachers are unchanged.
+  const caller = await ctx.db.get(callerUserId);
+  if (!caller) throw new Error("Not your assignment");
+  if (!isTeacherRole(caller.role)) {
+    await requireCanRunOwnedAssignment(ctx, caller, a);
+    if (activityId) await assertActivityInUnitStrict(ctx, a.unitId!, activityId);
+  }
   return a;
+}
+
+/**
+ * Which view of an OWNED assignment an aide read may return: "teacher" (the
+ * full view), "runner" (a curriculum:run holder who can still run the unit —
+ * no transcript links), or null (refuse, the existing not-yours shape).
+ */
+async function aideAssignmentReadRole(
+  ctx: QueryCtx,
+  callerUserId: Id<"users">,
+  a: Doc<"assignments">,
+): Promise<"teacher" | "runner" | null> {
+  const caller = await ctx.db.get(callerUserId);
+  if (!caller) return null;
+  if (isTeacherRole(caller.role)) return "teacher";
+  try {
+    await requireCanRunOwnedAssignment(ctx, caller, a);
+    return "runner";
+  } catch {
+    return null;
+  }
 }
 
 // ── Aide cores (the single implementation) ──────────────────────────────
@@ -3466,11 +3678,17 @@ export async function coreAideListAssignments(
   ctx: QueryCtx,
   callerUserId: Id<"users">,
 ) {
+  const caller = await ctx.db.get(callerUserId);
+  if (!caller) return [];
   const rows = (
-    await ctx.db
-      .query("assignments")
-      .withIndex("by_teacher", (q) => q.eq("teacherId", callerUserId))
-      .collect()
+    await runnableOwnedRows(
+      ctx,
+      caller,
+      await ctx.db
+        .query("assignments")
+        .withIndex("by_teacher", (q) => q.eq("teacherId", callerUserId))
+        .collect(),
+    )
   )
     .filter((r) => !r.archivedAt)
     // Unit-mode only — the aide maps cohorts to units/activities here;
@@ -3523,10 +3741,16 @@ export async function coreAideSchedule(
   to?: number,
 ) {
   const now = Date.now();
-  const rows = await ctx.db
-    .query("assignments")
-    .withIndex("by_teacher", (q) => q.eq("teacherId", callerUserId))
-    .collect();
+  const caller = await ctx.db.get(callerUserId);
+  if (!caller) return [];
+  const rows = await runnableOwnedRows(
+    ctx,
+    caller,
+    await ctx.db
+      .query("assignments")
+      .withIndex("by_teacher", (q) => q.eq("teacherId", callerUserId))
+      .collect(),
+  );
   const out: Array<{
     assignmentId: Id<"assignments">;
     assignmentTitle: string | null;
@@ -3613,6 +3837,7 @@ export async function coreAideGetAssignment(
 ) {
   const a = await ctx.db.get(assignmentId);
   if (!a || a.teacherId !== callerUserId) return null;
+  if ((await aideAssignmentReadRole(ctx, callerUserId, a)) === null) return null;
   // A standing (unitId-less) assignment has no unit to resolve.
   const unit = a.unitId ? await ctx.db.get(a.unitId) : null;
   const roster = await Promise.all(
@@ -3709,6 +3934,8 @@ export async function coreAideProgress(
 ) {
   const a = await ctx.db.get(assignmentId);
   if (!a || a.teacherId !== callerUserId) return null;
+  const readRole = await aideAssignmentReadRole(ctx, callerUserId, a);
+  if (readRole === null) return null;
   const now = Date.now();
   // A standing (unitId-less) assignment has no unit to resolve.
   const unit = a.unitId ? await ctx.db.get(a.unitId) : null;
@@ -3757,7 +3984,9 @@ export async function coreAideProgress(
       return {
         scholarId: sid,
         name: s?.name ?? s?.username ?? "(unknown)",
-        sessionId: session?._id ?? null,
+        // The session id is the transcript deep link — teacher-only. A
+        // curriculum:run owner gets started/last-active, not the transcript.
+        sessionId: readRole === "teacher" ? (session?._id ?? null) : null,
         started: !!session,
         lastMessageAt: lastMsg?._creationTime ?? null,
         completedActivityCount: completedCountByScholar.get(String(sid)) ?? 0,
@@ -3877,7 +4106,7 @@ export async function coreAideScheduleActivity(
   callerUserId: Id<"users">,
   args: AideScheduleArgs,
 ): Promise<{ ok: true }> {
-  const a = await requireOwnedAssignmentBy(ctx, args.assignmentId, callerUserId);
+  const a = await requireOwnedAssignmentBy(ctx, args.assignmentId, callerUserId, args.activityId);
   if (!a) throw new Error("Assignment not found");
   if (a.archivedAt) throw new Error("Assignment is archived");
   await assertActivityInUnit(ctx, a, args.activityId);
@@ -3890,7 +4119,7 @@ export async function coreAideRescheduleActivity(
   callerUserId: Id<"users">,
   args: { assignmentId: Id<"assignments">; activityId: Id<"activities">; startsAt: number },
 ): Promise<{ ok: boolean; found: boolean }> {
-  const a = await requireOwnedAssignmentBy(ctx, args.assignmentId, callerUserId);
+  const a = await requireOwnedAssignmentBy(ctx, args.assignmentId, callerUserId, args.activityId);
   if (!a) throw new Error("Assignment not found");
   // No archived-assignment reject here (unlike schedule/push/set/add scholars):
   // archiving empties `activitySchedule`, so reschedule/clear are harmless no-ops
@@ -3904,7 +4133,7 @@ export async function coreAideClearActivity(
   callerUserId: Id<"users">,
   args: { assignmentId: Id<"assignments">; activityId: Id<"activities"> },
 ): Promise<{ ok: boolean; removed: boolean }> {
-  const a = await requireOwnedAssignmentBy(ctx, args.assignmentId, callerUserId);
+  const a = await requireOwnedAssignmentBy(ctx, args.assignmentId, callerUserId, args.activityId);
   if (!a) throw new Error("Assignment not found");
   // No archived-assignment reject here — see the note on coreAideRescheduleActivity.
   const removed = await applyClearActivity(ctx, a, args.activityId);
@@ -3919,7 +4148,7 @@ export async function coreAidePushActivityNow(
   callerUserId: Id<"users">,
   args: AidePushArgs,
 ): Promise<{ ok: true }> {
-  const a = await requireOwnedAssignmentBy(ctx, args.assignmentId, callerUserId);
+  const a = await requireOwnedAssignmentBy(ctx, args.assignmentId, callerUserId, args.activityId);
   if (!a) throw new Error("Assignment not found");
   if (a.archivedAt) throw new Error("Assignment is archived");
   await assertActivityInUnit(ctx, a, args.activityId);
@@ -3937,7 +4166,10 @@ export async function coreAideSetScholars(
   if (!a) throw new Error("Assignment not found");
   if (a.archivedAt) throw new Error("Assignment is archived");
   const caller = await ctx.db.get(callerUserId);
-  if (!caller) throw new Error("Teacher not found");
+  // Roster edits stay a teacher act; a curriculum:run owner is refused.
+  if (!caller || !isTeacherRole(caller.role)) {
+    throw new Error("Roster edits are teacher/admin only");
+  }
   await requireScholarsAccessible(ctx, caller, scholarIds);
   await applySetScholars(ctx, a, scholarIds);
   return { ok: true, rosterSize: new Set(scholarIds).size };
@@ -3953,7 +4185,10 @@ export async function coreAideAddScholars(
   if (!a) throw new Error("Assignment not found");
   if (a.archivedAt) throw new Error("Assignment is archived");
   const caller = await ctx.db.get(callerUserId);
-  if (!caller) throw new Error("Teacher not found");
+  // Roster edits stay a teacher act; a curriculum:run owner is refused.
+  if (!caller || !isTeacherRole(caller.role)) {
+    throw new Error("Roster edits are teacher/admin only");
+  }
   await requireScholarsAccessible(ctx, caller, scholarIds);
   await applyAddScholars(ctx, a, scholarIds);
   return {
@@ -3967,6 +4202,12 @@ export async function coreAideArchive(
   callerUserId: Id<"users">,
   assignmentId: Id<"assignments">,
 ): Promise<{ ok: true; alreadyArchived: boolean }> {
+  // Archive stays a teacher act (the run tools don't offer it); owning the
+  // assignment as a curriculum:run holder is not enough.
+  const caller = await ctx.db.get(callerUserId);
+  if (!caller || !isTeacherRole(caller.role)) {
+    throw new Error("Archive is teacher/admin only");
+  }
   const a = await requireOwnedAssignmentBy(ctx, assignmentId, callerUserId);
   if (!a) throw new Error("Assignment not found");
   if (a.archivedAt) return { ok: true, alreadyArchived: true };
@@ -3978,6 +4219,24 @@ export async function coreAideArchive(
 // Thin delegators to the cores above — the HTTP-action aide has no ctx.db,
 // so it reaches these registered functions via ctx.runQuery/runMutation.
 // (The MCP path calls the cores directly; see convex/mcp.ts.)
+
+/**
+ * The aide's curriculum:run scope for a NON-teacher caller: null when she
+ * holds no usable grant (no run tools), else the scholar ids she may name as
+ * assignees — scholars at the schools where she holds curriculum:run +
+ * curriculum:edit. This is the assignee lens only; it opens no record read.
+ */
+export const aideCurriculumRunScope = internalQuery({
+  args: { callerUserId: v.id("users") },
+  handler: async (ctx, { callerUserId }) => {
+    const caller = await ctx.db.get(callerUserId);
+    if (!caller || isTeacherRole(caller.role)) return null;
+    const institutionIds = await curriculumRunInstitutionIds(ctx, callerUserId);
+    if (institutionIds.size === 0) return null;
+    const scholars = await runnerAssignableScholars(ctx, institutionIds);
+    return { scholarIds: scholars.map((scholar) => scholar.id) };
+  },
+});
 
 export const aideListAssignments = internalQuery({
   args: { callerUserId: v.id("users") },

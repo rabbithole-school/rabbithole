@@ -38,6 +38,7 @@ import { RehearseBody } from "./nodeEditor/RehearsePanel";
 import type { RehearseFixField } from "./nodeEditor/rehearseResult";
 import { SimulatorPreflightPanel } from "./simulatorTeacher/SimulatorPreflightPanel";
 import { SimulatorDebrief } from "./simulatorTeacher/SimulatorDebrief";
+import { effectiveActivityKind } from "@/shared/appSurface";
 
 export function RehearsePane({
   activityId,
@@ -114,7 +115,7 @@ export function RehearsePane({
     }
 
     autoLaunchHandledRef.current = true;
-    if (launching || !isRehearsableActivityKind(activity.kind)) return;
+    if (launching || !isRehearsableActivityKind(effectiveActivityKind(activity))) return;
 
     // Deferred so the launch (which sets state and navigates) is not a
     // synchronous setState inside the effect body. No cleanup on purpose: the
@@ -143,7 +144,7 @@ export function RehearsePane({
   if (activity === null) {
     return <RehearseEmpty title="Activity not found" body="" />;
   }
-  const surface = rehearsalSurfaceForActivityKind(activity.kind);
+  const surface = rehearsalSurfaceForActivityKind(effectiveActivityKind(activity));
 
   // A Simulator meets its Preflight (achievability + red-team) and Debrief (digest +
   // decks + gallery) surfaces here — the same tab strip, Simulator-native content

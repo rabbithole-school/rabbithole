@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Stack } from "expo-router";
+import { compassHeaderRight } from "@/components/HeaderCompassButton";
 import Constants from "expo-constants";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
@@ -22,6 +23,9 @@ import { AsamHybridHost } from "@/components/AsamHybridHost";
 import { NativeAppLaunchProvider } from "@/contexts/NativeAppLaunchContext";
 import { BadgeAwardOverlay } from "@/components/BadgeAwardOverlay";
 import { BugReportGate } from "@/components/bugreport/BugReportGate";
+import { AppHealthBoundary } from "@/components/AppHealthBoundary";
+import { AppHealthReporter } from "@/components/AppHealthReporter";
+import { startAppHealthMonitor } from "@/lib/appHealthMonitor";
 import { ExternalAppHost } from "@/components/ExternalAppHost";
 import { NativeManipulativeHost } from "@/components/manipulatives/NativeManipulativeHost";
 import { GameHost } from "@/components/games/GameHost";
@@ -55,6 +59,10 @@ import { authGateScreen } from "./authGateState";
 import { captureStationEnrollmentToken } from "@/lib/captureStationToken";
 import { CaptureStationScreen } from "@/components/CaptureStationScreen";
 import { useAssignedDeviceCaptureStation } from "@/hooks/useAssignedDeviceCaptureStation";
+
+// Crash / freeze / quit detection starts before the first render so a crash
+// in the first screen is still caught (lib/appHealth.ts).
+startAppHealthMonitor();
 
 const showBuildStamp = process.env.EXPO_PUBLIC_SHOW_BUILD_STAMP === "1";
 const buildStamp = process.env.EXPO_PUBLIC_BUILD_STAMP ?? "local-dev";
@@ -359,6 +367,30 @@ export default function RootLayout() {
             <Stack.Screen name="account" options={{ title: "Account details" }} />
             <Stack.Screen name="how-it-works" options={{ title: "How it works" }} />
             <Stack.Screen name="unit-progress" options={{ title: "Where you are" }} />
+            <Stack.Screen
+              name="session/[id]"
+              // Stepping between a unit's activities (SessionActivityNav, which
+              // passes navDir) REPLACES the session. A quick crossfade instead of
+              // a slide: the header, back button and activity bar are the same
+              // on both screens, so they stay put and only the title and the
+              // content change.
+              // The title comes from the route too: the screen sets its own
+              // title only after it renders, and until then iPadOS 26 draws an
+              // empty Liquid Glass title capsule for a frame or two.
+              options={({ route }) => {
+                const params = route.params as
+                  | { navDir?: string; title?: string }
+                  | undefined;
+                return {
+                  ...(params?.title ? { title: params.title } : {}),
+                  // The same stable compass item the screen uses.
+                  ...(params?.navDir ? { headerRight: compassHeaderRight } : {}),
+                  ...(params?.navDir
+                    ? { animation: "fade" as const, animationDuration: 150 }
+                    : {}),
+                };
+              }}
+            />
             <Stack.Screen name="dev-hdr-stars" options={{ title: "HDR stars (spike)" }} />
             <Stack.Screen name="dev-slides" options={{ title: "Slides (harness)" }} />
             <Stack.Screen
@@ -437,25 +469,30 @@ export default function RootLayout() {
       }}
     >
       <ConvexAuthProvider client={convex} storage={secureTokenStorage}>
-        <BugReportGate>
-          {/* ASAM "best of both" hybrid host — wraps the entire app subtree so the
-              4-finger hold GestureDetector (inside AsamParentGate) is full-screen.
-              Must be inside ConvexAuthProvider (uses useAsamController) but wraps
-              AuthGate so Device settings is reachable even from the sign-in screen.
-              When the MDM runtime gate is absent, appContent renders plainly. */}
-          {captureStation ? (
-            <CaptureStationScreen source={{ kind: "static" }} />
-          ) : ASAM_HYBRID_ENABLED ? (
-            <AsamHybridHost>
+        <AppHealthReporter />
+        {/* The reporter sits outside the boundary, so a render crash cannot
+            unmount the sender. */}
+        <AppHealthBoundary>
+          <BugReportGate>
+            {/* ASAM "best of both" hybrid host — wraps the entire app subtree so the
+                4-finger hold GestureDetector (inside AsamParentGate) is full-screen.
+                Must be inside ConvexAuthProvider (uses useAsamController) but wraps
+                AuthGate so Device settings is reachable even from the sign-in screen.
+                When the MDM runtime gate is absent, appContent renders plainly. */}
+            {captureStation ? (
+              <CaptureStationScreen source={{ kind: "static" }} />
+            ) : ASAM_HYBRID_ENABLED ? (
+              <AsamHybridHost>
+                <NativeAppLaunchProvider>{appContent}</NativeAppLaunchProvider>
+              </AsamHybridHost>
+            ) : (
+              // Managed-app visibility is an MDM policy independent of ASAM.
+              // Keep the unlock gate mounted even when the ASAM opt-in is absent;
+              // its presentation controller is safely a no-op in that posture.
               <NativeAppLaunchProvider>{appContent}</NativeAppLaunchProvider>
-            </AsamHybridHost>
-          ) : (
-            // Managed-app visibility is an MDM policy independent of ASAM.
-            // Keep the unlock gate mounted even when the ASAM opt-in is absent;
-            // its presentation controller is safely a no-op in that posture.
-            <NativeAppLaunchProvider>{appContent}</NativeAppLaunchProvider>
-          )}
-        </BugReportGate>
+            )}
+          </BugReportGate>
+        </AppHealthBoundary>
       </ConvexAuthProvider>
       {showBuildStamp && (
         <View

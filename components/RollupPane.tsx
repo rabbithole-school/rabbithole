@@ -22,6 +22,7 @@ import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 import { ActivityKindIcon } from "@/components/ActivityKindIcon";
 import { ReadinessInline } from "@/components/curriculumDoc/ReadinessGate";
 import { SessionsInline } from "@/components/curriculumDoc/SessionsSignal";
+import { effectiveActivityKind } from "@/shared/appSurface";
 
 const COPY = {
   preflight: {
@@ -87,7 +88,7 @@ export function RollupPane({
 
   // Every activity with a real Preflight/Rehearse surface participates. "Done"
   // is read from the same canonical signals used elsewhere in the curriculum UI.
-  const rehearsable = all.filter((a) => isRehearsableActivityKind(a.kind));
+  const rehearsable = all.filter((a) => isRehearsableActivityKind(effectiveActivityKind(a)));
   const isDone = (id: string): boolean =>
     op === "debrief"
       ? (sessionsData?.activities[id]?.meanFitness ?? null) !== null
@@ -174,7 +175,7 @@ export function RollupPane({
                     textDecoration="none"
                     _hover={{ bg: "gray.50", borderColor: `${accent}.300` }}
                   >
-                    <ActivityKindIcon kind={a.kind} />
+                    <ActivityKindIcon kind={effectiveActivityKind(a)} />
                     <Text
                       fontFamily="heading"
                       fontWeight="600"

@@ -1,9 +1,11 @@
 import { describe, expect, test } from "vitest";
 import {
   OBSERVER_TOOL,
+  buildObserverRequest,
   buildObserverUserMessage,
   buildObserverTranscript,
   buildObserverTranscriptBlocks,
+  createObserverMessage,
   groundAlertExcerpt,
   groundSessionSignalEvidence,
   parseObserverResponse,
@@ -13,6 +15,7 @@ import {
   type ObserverHistoryMessage,
 } from "../observerShared";
 import type { ImageContentPart } from "../imageBytes";
+import { MODELS, OBSERVER_EFFORT, OBSERVER_MODEL } from "../models";
 import { SCHOLAR_NAME_PRONOUN_HINT } from "../scholarPronouns";
 
 /** Build a base64 image content block with a distinctive payload per test. */
@@ -576,6 +579,35 @@ describe("parseObserverResponse", () => {
     expect(result?.observations[0].conceptLabel).toBe("tension");
   });
 
+  test("drops an observation missing a score the mastery write requires", () => {
+    const good = {
+      conceptLabel: "tension",
+      domain: "physics",
+      masteryLevel: 3.2,
+      confidenceScore: 0.8,
+      evidenceSummary: "explained load paths",
+      evidenceType: "direct_demonstration",
+      attemptContext: "conversation",
+      studentInitiated: true,
+      transcriptExcerpt: "...",
+    };
+    const { confidenceScore: _omitted, ...noConfidence } = good;
+    const result = parseObserverResponse([
+      {
+        type: "tool_use",
+        input: {
+          pulse: fullPulse,
+          observations: [
+            { ...noConfidence, conceptLabel: "no confidence" },
+            { ...good, conceptLabel: "string mastery", masteryLevel: "3" },
+            good,
+          ],
+        },
+      },
+    ]);
+    expect(result?.observations.map((o) => o.conceptLabel)).toEqual(["tension"]);
+  });
+
   test("picks the tool_use block even when text precedes it", () => {
     const result = parseObserverResponse([
       { type: "text" },
@@ -902,5 +934,74 @@ describe("parseObserverResponse — talkLevel (TRA-515)", () => {
     expect(parse(3)).toBe("3"); // a bare number from the model
     expect(parse({ grade: 3 })).toBeUndefined();
     expect(parse(undefined)).toBeUndefined();
+  });
+});
+
+describe("buildObserverRequest", () => {
+  test("offers the observer tool with auto choice on OBSERVER_MODEL", () => {
+    const req = buildObserverRequest({ system: "sys", userContent: "transcript" });
+    expect(req.model).toBe(OBSERVER_MODEL);
+    // OBSERVER_MODEL rejects forced tool_choice ("tool"/"any") with a 400.
+    expect(req.tool_choice).toEqual({ type: "auto" });
+    expect(req.tools).toEqual([OBSERVER_TOOL]);
+    expect(req.output_config).toEqual({ effort: OBSERVER_EFFORT });
+    expect(req.messages).toEqual([{ role: "user", content: "transcript" }]);
+  });
+
+  test("another model gets the same request without an effort override", () => {
+    const req = buildObserverRequest({
+      model: MODELS.OPUS,
+      system: "sys",
+      userContent: "transcript",
+    });
+    expect(req.model).toBe(MODELS.OPUS);
+    expect("output_config" in req).toBe(false);
+  });
+});
+
+describe("createObserverMessage", () => {
+  type Reply = { stop_reason: string | null; content: Array<{ type: string }> };
+  const toolReply: Reply = { stop_reason: "tool_use", content: [{ type: "tool_use" }] };
+  const textReply: Reply = { stop_reason: "end_turn", content: [{ type: "text" }] };
+
+  function sender(replies: Reply[]) {
+    let calls = 0;
+    return {
+      send: async () => replies[Math.min(calls++, replies.length - 1)],
+      calls: () => calls,
+    };
+  }
+
+  test("a tool call on the first reply is returned without a retry", async () => {
+    const s = sender([toolReply]);
+    expect(await createObserverMessage(s.send)).toBe(toolReply);
+    expect(s.calls()).toBe(1);
+  });
+
+  test("a clean reply with no tool call is asked once more", async () => {
+    const s = sender([textReply, toolReply]);
+    const seen: Reply[] = [];
+    expect(
+      await createObserverMessage(s.send, (r) => {
+        seen.push(r);
+      }),
+    ).toBe(toolReply);
+    // Usage is recorded for both calls, not just the one that answered.
+    expect(seen).toEqual([textReply, toolReply]);
+  });
+
+  test("gives up after the second toolless reply", async () => {
+    const s = sender([textReply, textReply, toolReply]);
+    expect(await createObserverMessage(s.send)).toBe(textReply);
+    expect(s.calls()).toBe(2);
+  });
+
+  test("a refusal or truncation is not retried", async () => {
+    for (const stop of ["refusal", "max_tokens"]) {
+      const reply: Reply = { stop_reason: stop, content: [{ type: "text" }] };
+      const s = sender([reply, toolReply]);
+      expect(await createObserverMessage(s.send)).toBe(reply);
+      expect(s.calls()).toBe(1);
+    }
   });
 });

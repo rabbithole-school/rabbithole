@@ -258,7 +258,9 @@ describe("curriculum node duplication", () => {
       lessonId: result.lessonId,
       title: "Force explorer",
       description: "Explore how force changes motion.",
-      kind: "vibecode",
+      // A copy stores the folded app shape (TRA-519).
+      kind: "online",
+      appActivity: true,
       systemPrompt: "Ask for a prediction before each trial.",
       appRequest: "Build a cart simulator.",
       tutorModel: "fable",

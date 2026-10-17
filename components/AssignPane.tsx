@@ -55,8 +55,8 @@ export function AssignPane({
             <Text fontSize="sm" color="charcoal.500" maxW="560px">
               Send {nodeLabel === "unit" ? "the whole unit" : `this ${nodeLabel}`}{" "}
               to a cohort — push activities to the class or send homework from
-              the Run page. This is the bridge to a Debrief: real-scholar work
-              is what the sims get checked against.
+              the Run page. Once scholars have worked an activity, its Debrief
+              tab gathers the key moments from their work.
             </Text>
           </Stack>
           <Button

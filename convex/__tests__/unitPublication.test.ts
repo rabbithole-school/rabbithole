@@ -308,7 +308,7 @@ describe("unit publication", () => {
 
     const listed = await t.query(
       internal.curriculumAssistant.listUnitsInternal,
-      {},
+      { callerUserId: school.teacher.id },
     );
     expect(listed.find((u) => u.id === unitId)?.unpublished).toBe(true);
     const details = await t.query(

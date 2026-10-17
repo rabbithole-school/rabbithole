@@ -61,9 +61,12 @@ async function seedUnitWithActivity(
   teacherId: Id<"users">,
   title = "Test Unit",
 ) {
+  // Same fixture school seedUser puts the teacher in.
+  const institutionId = await seedTestInstitution(t);
   return await t.run(async (ctx) => {
     const unitId = await ctx.db.insert("units", {
       teacherId,
+      institutionId,
       title,
       isActive: true,
     });

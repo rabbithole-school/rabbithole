@@ -37,6 +37,10 @@ import type { AideEmit } from "../lib/aideStream";
 import { emptyDeck } from "../../shared/slidesScene";
 import { getFunctionName, type FunctionReturnType } from "convex/server";
 import { toolsForWorkshopMode } from "../sessionStreamHelpers";
+import {
+  sessionAppContextFor,
+  type SessionAppContext,
+} from "../../shared/appSurface";
 
 type DirectableCharacter = NonNullable<
   FunctionReturnType<
@@ -73,6 +77,7 @@ function state(): TutorToolSessionState {
     rubricPreToolClosingIsValid: false,
     suppressCompletionFollowUp: false,
     activityCompletedThisStream: false,
+    createdCodeArtifact: false,
   };
 }
 
@@ -84,7 +89,11 @@ async function toolsFor(
   overrides: Partial<Parameters<typeof makeTutorSessionTools>[2]> = {},
   emit: (data: Record<string, unknown>) => void = () => {},
   character: DirectableCharacter | null = null,
-  sessionExtras: { isTestDrive?: boolean } = {},
+  sessionExtras: {
+    isTestDrive?: boolean;
+    appContext?: SessionAppContext;
+    unitContext?: { questBuildLocked?: string | null; questBuildOpen?: string | null };
+  } = {},
 ) {
   // The factory looks up the app's character for a vibecode owner; answer that
   // one query here and pass every other call through to the test's own ctx.
@@ -840,7 +849,7 @@ describe("edit_document cross-session guard error contract", () => {
     expect(runMutation).not.toHaveBeenCalled();
   });
 
-  test("returns re-view guidance for a stale document revision", async () => {
+  test("a retired code edit is pointed at the app editor and writes nothing", async () => {
     const runQuery = vi.fn().mockResolvedValue({
       _id: ARTIFACT_ID,
       title: "Doc",
@@ -848,10 +857,7 @@ describe("edit_document cross-session guard error contract", () => {
       type: "code",
       revision: 2,
     });
-    const runMutation = vi.fn().mockResolvedValue({
-      kind: "conflict",
-      artifact: { revision: 3, content: "newer" },
-    });
+    const runMutation = vi.fn();
     const tool = await editDocumentTool(
       { runQuery, runMutation } as unknown as ActionCtx,
     );
@@ -864,12 +870,9 @@ describe("edit_document cross-session guard error contract", () => {
       base_revision: 2,
     } as never);
 
-    expect(result).toContain("Re-view");
-    expect(result).toContain("base_revision 3");
-    expect(runMutation).toHaveBeenCalledWith(
-      internal.artifacts.aiStrReplace,
-      expect.objectContaining({ baseRevision: 2 }),
-    );
+    expect(result).toContain("str_replace_based_edit_tool");
+    expect(result).toContain("/apps/artifact.html");
+    expect(runMutation).not.toHaveBeenCalled();
   });
 
   test("view tells the model what the line-number prefix is, inside the tool result", async () => {
@@ -916,28 +919,6 @@ describe("edit_document cross-session guard error contract", () => {
       command: "rename",
       document_id: CROSS_SESSION_DOC,
       title: "New title",
-    } as never);
-
-    expect(result).toContain("does not belong to this session");
-  });
-
-  test("insert mutation guard throw becomes a structured tool error", async () => {
-    const runQuery = vi.fn().mockResolvedValue({
-      _id: CROSS_SESSION_DOC,
-      title: "Doc",
-      content: "hello",
-      type: "code",
-    });
-    const runMutation = vi.fn().mockRejectedValue(new Error(GUARD_ERROR));
-    const tool = await editDocumentTool(
-      { runQuery, runMutation } as unknown as ActionCtx,
-    );
-
-    const result = await tool.run({
-      command: "insert",
-      document_id: CROSS_SESSION_DOC,
-      insert_line: 0,
-      insert_text: "x",
     } as never);
 
     expect(result).toContain("does not belong to this session");
@@ -1068,6 +1049,95 @@ describe("choosing between the two image tools", () => {
     expect(generate?.description).toContain("/app-assets/");
     expect(search?.description).toContain("/app-assets/");
     expect(await toolNames("conversation", OWNER)).not.toContain("charm_icon");
+  });
+
+  test("a chat session with an app gets the builder features (TRA-519)", async () => {
+    const actions = [
+      { name: "seedScenario", description: "Load the level-three scenario." },
+    ];
+    const sideApp = sessionAppContextFor({
+      sessionMode: "conversation",
+      role: "side",
+      hasApp: true,
+    });
+    const tools = (await toolsFor(
+      "conversation",
+      OWNER,
+      {} as ActionCtx,
+      actions,
+      {},
+      () => {},
+      null,
+      { appContext: sideApp },
+    )) as unknown as AuthoredTool[];
+    const names = tools.map((tool) => tool.name);
+    expect(names).toContain("charm_icon");
+    expect(names).toContain("run_app_action");
+    expect(
+      tools.find((tool) => tool.name === "generate_image")?.description,
+    ).toContain("/app-assets/");
+    // Teacher-authored app AI stays a builder-primary test drive's tool.
+    expect(names).not.toContain("define_character");
+
+    const noApp = sessionAppContextFor({
+      sessionMode: "conversation",
+      role: "side",
+      hasApp: false,
+    });
+    const before = (
+      await toolsFor("conversation", OWNER, {} as ActionCtx, actions, {}, () => {}, null, {
+        appContext: noApp,
+      })
+    ).map((tool) => tool.name);
+    expect(before).not.toContain("charm_icon");
+    expect(before).not.toContain("run_app_action");
+  });
+
+  test("a Quest step whose build step is locked is offered no create_code; edit_document stays (TRA-519 B6)", async () => {
+    const offered = async (
+      sessionMode: "conversation" | "vibecode",
+      questBuildLocked: string | null | undefined,
+    ) =>
+      (
+        await toolsFor(sessionMode, OWNER, {} as ActionCtx, [], {}, () => {}, null, {
+          unitContext:
+            questBuildLocked === undefined ? undefined : { questBuildLocked },
+        })
+      ).map((tool) => tool.name);
+    for (const mode of ["conversation", "vibecode"] as const) {
+      const locked = await offered(mode, "Build the simulation");
+      expect(locked).not.toContain("create_code");
+      expect(locked).toContain("edit_document");
+      expect(await offered(mode, null)).toContain("create_code");
+      expect(await offered(mode, undefined)).toContain("create_code");
+    }
+  });
+
+  test("a Quest step whose build step is OPEN is offered no create_code either: the app is built there (TRA-519 B6)", async () => {
+    for (const mode of ["conversation", "vibecode"] as const) {
+      const names = (
+        await toolsFor(mode, OWNER, {} as ActionCtx, [], {}, () => {}, null, {
+          unitContext: { questBuildOpen: "Build the simulation" },
+        })
+      ).map((tool) => tool.name);
+      expect(names).not.toContain("create_code");
+      expect(names).toContain("edit_document");
+    }
+  });
+
+  test("create_code marks the turn as having built an app", async () => {
+    const runMutation = vi.fn().mockResolvedValue("new-id");
+    const toolState = state();
+    const tools = (await toolsFor(
+      "conversation",
+      OWNER,
+      { runMutation } as unknown as ActionCtx,
+      [],
+      { state: toolState },
+    )) as unknown as Array<{ name: string; run: (input: never) => Promise<unknown> }>;
+    const create = tools.find((tool) => tool.name === "create_code")!;
+    await create.run({ title: "Toy", code: "<html></html>" } as never);
+    expect(toolState.createdCodeArtifact).toBe(true);
   });
 
   test("the tools reference each other, so the shared selection rule reaches both", async () => {
@@ -1928,5 +1998,248 @@ describe("app character tools", () => {
       expect.objectContaining({ sessionId: SESSION_ID, callerUserId: OWNER }),
     );
     expect(String(result)).not.toContain(persona);
+  });
+});
+
+describe("app editor (str_replace_based_edit_tool) on code artifacts", () => {
+  const APP_ID = "app1" as Id<"artifacts">;
+  const APP_PATH = "/apps/app1.html";
+  const APP_CODE = "<html>\n<body>\n<p>Score: 0</p>\n</body>\n</html>";
+  type EditorTool = {
+    name: string;
+    type?: string;
+    input_schema?: unknown;
+    parse: (input: unknown) => unknown;
+    run: (input: unknown) => Promise<unknown>;
+  };
+
+  function appRow(overrides: Record<string, unknown> = {}) {
+    return {
+      _id: APP_ID,
+      title: "Clicker",
+      content: APP_CODE,
+      type: "code",
+      revision: 2,
+      lastEditedBy: "ai",
+      ...overrides,
+    };
+  }
+
+  async function editor(
+    ctx: Partial<ActionCtx>,
+    {
+      seenRevision = 2,
+      emit = vi.fn(),
+      splitAfterTool = vi.fn(),
+    }: {
+      seenRevision?: number | null;
+      emit?: ReturnType<typeof vi.fn>;
+      splitAfterTool?: ReturnType<typeof vi.fn>;
+    } = {},
+  ) {
+    const tools = await toolsFor(
+      "vibecode",
+      OWNER,
+      ctx as ActionCtx,
+      [],
+      { splitAfterTool: splitAfterTool as never },
+      emit as never,
+      null,
+      {
+        // The snapshot the DOCUMENTS section was built from.
+        ...(seenRevision === null
+          ? {}
+          : {
+              artifactData: [
+                { id: APP_ID, title: "Clicker", content: APP_CODE, lastEditedBy: "ai", type: "code", revision: seenRevision },
+              ],
+            }),
+      } as never,
+    );
+    const tool = tools.find(
+      (candidate) => candidate.name === "str_replace_based_edit_tool",
+    ) as unknown as EditorTool;
+    // What the SDK tool runner does: parse, then run.
+    const call = (input: unknown) => tool.run(tool.parse(input));
+    return { tool, tools, call, emit, splitAfterTool };
+  }
+
+  test("is the schema-less Anthropic text editor, right after edit_document, and Play drops it", async () => {
+    const { tool, tools } = await editor({});
+    expect(tool.type).toBe("text_editor_20250728");
+    expect(tool.input_schema).toBeUndefined();
+    const names = tools.map((candidate) => candidate.name);
+    expect(names.indexOf("str_replace_based_edit_tool")).toBe(
+      names.indexOf("edit_document") + 1,
+    );
+    expect(
+      toolsForWorkshopMode(tools, "play").map((candidate) => candidate.name),
+    ).not.toContain("str_replace_based_edit_tool");
+    // Offered with no app yet too, so the tool list never changes mid-session.
+    const plain = await toolNames("conversation", OWNER);
+    expect(plain).toContain("str_replace_based_edit_tool");
+  });
+
+  test("view shows the app at its path with numbered lines and honors view_range", async () => {
+    const runQuery = vi.fn().mockResolvedValue(appRow());
+    const { call, emit } = await editor({ runQuery });
+
+    const full = String(await call({ command: "view", path: APP_PATH }));
+    expect(full).toContain(`${APP_PATH} "Clicker" (revision 2, 5 lines)`);
+    expect(full).toContain(VIEW_LINE_NUMBER_NOTE);
+    expect(full).toContain("3: <p>Score: 0</p>");
+    expect(emit).toHaveBeenCalledWith({
+      toolComplete: { name: "edit_document", result: 'Viewed "Clicker"' },
+    });
+
+    const part = String(
+      await call({ command: "view", path: APP_PATH, view_range: [2, -1] }),
+    );
+    expect(part).toContain("lines 2-5 of 5");
+    expect(part).not.toContain("1: <html>");
+    await expect(
+      call({ command: "view", path: APP_PATH, view_range: [9, 10] }),
+    ).rejects.toThrow("INVALID_RANGE");
+  });
+
+  test("str_replace writes against the revision the model saw and reports the edited lines", async () => {
+    const runQuery = vi.fn().mockResolvedValue(appRow());
+    const runMutation = vi.fn().mockResolvedValue({
+      kind: "success",
+      artifact: appRow({ content: APP_CODE.replace("Score", "Carrots"), revision: 3 }),
+    });
+    const { call, emit, splitAfterTool } = await editor({ runQuery, runMutation });
+
+    const result = String(
+      await call({ command: "str_replace", path: APP_PATH, old_str: "Score", new_str: "Carrots" }),
+    );
+
+    expect(runMutation).toHaveBeenCalledWith(internal.artifacts.aiStrReplace, {
+      sessionId: SESSION_ID,
+      artifactId: APP_ID,
+      oldStr: "Score",
+      newStr: "Carrots",
+      baseRevision: 2,
+    });
+    expect(result).toContain(`${APP_PATH} has been edited (revision 3)`);
+    expect(result).toContain("3: <p>Carrots: 0</p>");
+    expect(emit).toHaveBeenCalledWith({ artifactUpdate: true });
+    expect(emit).toHaveBeenCalledWith({
+      toolComplete: { name: "edit_document", result: "Text replaced" },
+    });
+    expect(splitAfterTool).toHaveBeenCalledWith("Edited document");
+
+    // Its own edit advanced the revision: the next write is bound to 3.
+    await call({ command: "insert", path: APP_PATH, insert_line: 0, insert_text: "<!-- v2 -->" });
+    expect(runMutation).toHaveBeenLastCalledWith(
+      internal.artifacts.aiInsert,
+      expect.objectContaining({ baseRevision: 3, insertLine: 0 }),
+    );
+  });
+
+  test("a stale write is refused, and the next write must follow a fresh view", async () => {
+    const runQuery = vi.fn().mockResolvedValue(appRow({ revision: 4 }));
+    const runMutation = vi
+      .fn()
+      .mockResolvedValueOnce({ kind: "conflict", artifact: appRow({ revision: 4 }) })
+      .mockResolvedValue({ kind: "success", artifact: appRow({ revision: 5 }) });
+    const { call } = await editor({ runQuery, runMutation });
+    const edit = { command: "str_replace", path: APP_PATH, old_str: "Score", new_str: "Points" };
+
+    await expect(call(edit)).rejects.toThrow(
+      `STALE_FILE: ${APP_PATH} changed after you last saw it (it is now revision 4)`,
+    );
+    await expect(call(edit)).rejects.toThrow(`READ_REQUIRED: view ${APP_PATH}`);
+    expect(runMutation).toHaveBeenCalledTimes(1);
+
+    await call({ command: "view", path: APP_PATH });
+    await call(edit);
+    expect(runMutation).toHaveBeenLastCalledWith(
+      internal.artifacts.aiStrReplace,
+      expect.objectContaining({ baseRevision: 4 }),
+    );
+  });
+
+  test("never writes into a scholar's writing box, even by its id", async () => {
+    const runQuery = vi.fn().mockResolvedValue(
+      appRow({ type: "text", title: "My story", content: "Once upon a time" }),
+    );
+    const runMutation = vi.fn();
+    const { call, emit } = await editor({ runQuery, runMutation });
+
+    for (const input of [
+      { command: "str_replace", path: APP_PATH, old_str: "Once", new_str: "Twice" },
+      { command: "insert", path: APP_PATH, insert_line: 1, insert_text: "The end." },
+    ]) {
+      await expect(call(input)).rejects.toThrow("This is the scholar's writing.");
+    }
+    await expect(call({ command: "view", path: APP_PATH })).rejects.toThrow(
+      "NOT_AN_APP",
+    );
+    expect(runMutation).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  test("create, foreign ids and non-app paths are refused without a write", async () => {
+    const runMutation = vi.fn();
+    const { call } = await editor({
+      runQuery: vi.fn().mockRejectedValue(new Error("Artifact does not belong to session")),
+      runMutation,
+    });
+    await expect(
+      call({ command: "str_replace", path: APP_PATH, old_str: "a", new_str: "b" }),
+    ).rejects.toThrow("is not an app in this session");
+    await expect(
+      call({ command: "view", path: "/home/notes.txt" }),
+    ).rejects.toThrow("INVALID_PATH");
+    expect(runMutation).not.toHaveBeenCalled();
+
+    const own = await editor({ runQuery: vi.fn().mockResolvedValue(appRow()), runMutation });
+    await expect(
+      own.call({ command: "create", path: APP_PATH, file_text: "<html></html>" }),
+    ).rejects.toThrow("CREATE_UNAVAILABLE");
+    expect(runMutation).not.toHaveBeenCalled();
+  });
+
+  test("an old_str that is missing or ambiguous gets the editor's recovery text", async () => {
+    const runQuery = vi.fn().mockResolvedValue(appRow());
+    const runMutation = vi
+      .fn()
+      .mockResolvedValueOnce({ kind: "refused", reason: "not_found", error: "x" })
+      .mockResolvedValueOnce({ kind: "refused", reason: "many", error: "x" });
+    const { call } = await editor({ runQuery, runMutation });
+    const edit = { command: "str_replace", path: APP_PATH, old_str: "p", new_str: "q" };
+    await expect(call(edit)).rejects.toThrow("did not appear verbatim");
+    await expect(call(edit)).rejects.toThrow("occurs more than once");
+  });
+
+  test("viewing /apps lists only this session's apps", async () => {
+    const runQuery = vi.fn().mockResolvedValue([
+      appRow(),
+      appRow({ _id: "doc1", type: "text", title: "Notes" }),
+    ]);
+    const { call } = await editor({ runQuery });
+    const listing = String(await call({ command: "view", path: "/apps" }));
+    expect(listing).toContain(`${APP_PATH} "Clicker" (revision 2, 5 lines)`);
+    expect(listing).not.toContain("Notes");
+  });
+
+  test("create_code's new app is editable straight away at its path", async () => {
+    const runMutation = vi
+      .fn()
+      .mockResolvedValueOnce("fresh")
+      .mockResolvedValueOnce("next-message")
+      .mockResolvedValue({ kind: "success", artifact: appRow({ _id: "fresh", revision: 1 }) });
+    const runQuery = vi.fn().mockResolvedValue(appRow({ _id: "fresh", revision: 0 }));
+    const { tools, call } = await editor({ runQuery, runMutation }, { seenRevision: null });
+    const create = tools.find((candidate) => candidate.name === "create_code")!;
+    const created = String(await create.run({ title: "New", code: "<p>hi</p>" } as never));
+    expect(created).toContain("Path: /apps/fresh.html");
+
+    await call({ command: "str_replace", path: "/apps/fresh.html", old_str: "Score", new_str: "Hops" });
+    expect(runMutation).toHaveBeenLastCalledWith(
+      internal.artifacts.aiStrReplace,
+      expect.objectContaining({ artifactId: "fresh", baseRevision: 0 }),
+    );
   });
 });

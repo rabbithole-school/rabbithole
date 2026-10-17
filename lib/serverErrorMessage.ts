@@ -24,3 +24,14 @@ export function serverErrorMessage(error: unknown, fallback = ""): string {
   if (!match && fallback && /\bServer Error\s*$/.test(raw)) return fallback;
   return (match?.[1] ?? raw).trim() || fallback;
 }
+
+/** The sentence of a deliberate server REFUSAL (a ConvexError whose data is a
+ * sentence, e.g. a locked Quest build step), or null for anything else — a
+ * network failure or a redacted crash, where the caller's own generic
+ * "check your connection" copy is the right thing to show. */
+export function serverRefusal(error: unknown): string | null {
+  if (error instanceof ConvexError && typeof error.data === "string") {
+    return error.data.trim() || null;
+  }
+  return null;
+}

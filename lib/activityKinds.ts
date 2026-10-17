@@ -11,6 +11,8 @@
  * The `emoji` field is kept for non-React contexts (AI prompt strings).
  */
 
+import { effectiveActivityKind } from "../shared/appSurface";
+
 export type ActivityKind =
   | "online"
   | "offline"
@@ -33,6 +35,15 @@ export function sessionModeForActivityKind(kind: ActivityKind | undefined) {
   if (kind === "simulator") return "workbench" as const;
   if (kind === "vibecode") return "vibecode" as const;
   return undefined;
+}
+
+/** The session mode an activity opens in, for either app-activity shape
+ * (TRA-519: { kind: "online", appActivity: true } or legacy "vibecode"). */
+export function sessionModeForActivity(
+  activity: { kind: ActivityKind; appActivity?: boolean | null } | null | undefined,
+) {
+  if (!activity) return undefined;
+  return sessionModeForActivityKind(effectiveActivityKind(activity));
 }
 
 export const ACTIVITY_KIND = {
@@ -86,12 +97,16 @@ export const ACTIVITY_KIND = {
     description:
       "A simulator activity: the scholar authors a prompt deck over code-owned physics and iterates runs at the bench. Criterion scores describe the deck, never the scholar.",
   },
+  // The effective kind of an app activity (TRA-519): an online activity with
+  // app settings, or a row still stored with the legacy kind "vibecode".
+  // Teachers make one with the online editor's "Scholars build or use an app"
+  // switch, so this entry labels app activities but is never a kind to pick.
   vibecode: {
     emoji: "🛠️",
-    label: "Vibecode",
-    longLabel: "Vibecode workshop",
+    label: "App",
+    longLabel: "App activity",
     description:
-      "A full-screen app-builder workshop: the scholar describes what to build and directs the AI to generate + iterate a live web app. The build brief drives the AI builder; the app is the artifact.",
+      "An online activity where scholars build or use an app. The scholar describes what to build and directs the AI to make and refine a live web app; the build brief drives the AI builder, and the app is the deliverable.",
   },
 } as const satisfies Record<
   ActivityKind,

@@ -18,6 +18,11 @@ import { openWebActivity } from "@/lib/externalAppHost";
 import { openGameActivity } from "@/lib/gameHost";
 import { webEmbedUrlError } from "@/lib/webEmbedConfig";
 import { fonts, palette, useColors } from "@/theme";
+import { questLockOf, type QuestLock } from "@/lib/missionApi";
+import {
+  MISSION_COPY,
+  questBuildLockLabel,
+} from "../../vendor/shared/missionCopy";
 import {
   ResourceShareCard,
   type ResourceShare,
@@ -91,6 +96,8 @@ function stateMeta(c: ReturnType<typeof useColors>): Record<
 type ActivityItem = {
   activity: ActivityRowData;
   state: ActivityState;
+  /** B6: a Quest build step waiting on its learning step (no tap action). */
+  lock: QuestLock | null;
 };
 
 type LessonSection = {
@@ -115,7 +122,7 @@ function kindLabel(kind: ActivityRowData["kind"]): string {
     case "simulator":
       return "Simulator";
     case "vibecode":
-      return "Vibecode";
+      return "App";
   }
 }
 
@@ -136,6 +143,7 @@ export default function UnitProgressScreen() {
     : null;
 
   const unit = useQuery(api.units.get, unitId ? { id: unitId } : "skip");
+  const me = useQuery(api.users.currentUser, {});
   const lessons = useQuery(
     api.lessons.listByUnitPublic,
     unitId ? { unitId } : "skip",
@@ -202,12 +210,12 @@ export default function UnitProgressScreen() {
             } else {
               state = "not-started";
             }
-            return { activity, state };
+            return { activity, state, lock: questLockOf(unit, String(activity._id)) };
           }),
         };
       })
       .filter((section) => section.activities.length > 0);
-  }, [activities, completedSet, lessons]);
+  }, [activities, completedSet, lessons, unit]);
 
   const activityTotal = outline.reduce(
     (sum, section) => sum + section.activities.length,
@@ -238,7 +246,8 @@ export default function UnitProgressScreen() {
           item.activity.kind === "vibecode" ||
           item.activity.kind === "web" ||
           item.activity.kind === "game") &&
-        !completedSet.has(String(item.activity._id)),
+        !completedSet.has(String(item.activity._id)) &&
+        !item.lock,
     );
   const openWebActivityRow = async (activity: ActivityRowData) => {
     Haptics.selectionAsync();
@@ -333,6 +342,13 @@ export default function UnitProgressScreen() {
     }
   };
   const screenTitle = unit?.title ?? title ?? "Unit progress";
+  const missionText =
+    unit?.mission?.text &&
+    me &&
+    unit.authorScholarId &&
+    String(unit.authorScholarId) === String(me._id)
+      ? unit.mission.text
+      : null;
   const loading =
     !!unitId &&
     (unit === undefined ||
@@ -391,6 +407,16 @@ export default function UnitProgressScreen() {
             <Text style={styles.title} numberOfLines={2}>
               {screenTitle}
             </Text>
+            {/* The Quest's mission (TRA-519 B5): one line, only on the
+                scholar's own Quest page (never Home). */}
+            {missionText ? (
+              <Text style={styles.missionLine} numberOfLines={2}>
+                <Text style={styles.missionPrefix}>
+                  {MISSION_COPY.missionPrefix}
+                </Text>{" "}
+                {missionText}
+              </Text>
+            ) : null}
           </View>
         </View>
         <View style={styles.progressRow}>
@@ -505,7 +531,7 @@ function ActivityProgressRow({
 
   const isWeb = item.activity.kind === "web";
   const isGame = item.activity.kind === "game";
-  const openable = isWeb || isGame;
+  const openable = (isWeb || isGame) && !item.lock;
   return (
     <View>
       <Pressable
@@ -527,7 +553,11 @@ function ActivityProgressRow({
         ]}
       >
         <View style={styles.stateIconWrap}>
-          <SymbolView name={meta.icon} size={22} tintColor={meta.tint} />
+          <SymbolView
+            name={item.lock ? "lock.fill" : meta.icon}
+            size={22}
+            tintColor={meta.tint}
+          />
         </View>
         <View style={styles.activityText}>
           <View style={styles.activityTitleRow}>
@@ -544,6 +574,11 @@ function ActivityProgressRow({
               {meta.label}
             </Text>
           </View>
+          {item.lock ? (
+            <Text style={styles.lockLine}>
+              {questBuildLockLabel(item.lock.prerequisiteTitle)}
+            </Text>
+          ) : null}
           {item.activity.description && (
             <Text style={styles.activityDescription} numberOfLines={2}>
               {item.activity.description}
@@ -553,7 +588,7 @@ function ActivityProgressRow({
             <Text style={styles.activityMeta}>{detail.join(" · ")}</Text>
           )}
         </View>
-        {isWeb ? <Text style={styles.webOpen}>Open ›</Text> : null}
+        {openable && isWeb ? <Text style={styles.webOpen}>Open ›</Text> : null}
       </Pressable>
       {item.activity.resources.length > 0 ? (
         <View style={styles.activityResources}>
@@ -634,6 +669,14 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     fontFamily: fonts.bold,
     color: c.navy,
   },
+  missionLine: {
+    marginTop: 4,
+    fontSize: 15,
+    lineHeight: 21,
+    fontFamily: fonts.regular,
+    color: c.charcoalMuted,
+  },
+  missionPrefix: { fontFamily: fonts.bold, color: c.navy },
   progressRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -773,6 +816,12 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     textTransform: "uppercase",
     letterSpacing: 0.6,
     marginTop: 2,
+  },
+  lockLine: {
+    fontSize: 13.5,
+    lineHeight: 19,
+    fontFamily: fonts.semibold,
+    color: c.charcoalMuted,
   },
   activityDescription: {
     fontSize: 14,

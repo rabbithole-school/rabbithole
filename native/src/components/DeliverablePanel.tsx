@@ -60,13 +60,17 @@ import { api, type Doc, type Id } from "@/lib/convex";
 import { appStatusBus } from "@/lib/appStatusBus";
 import { getNativeTTS } from "@/lib/nativeTTS";
 import { fonts, useColors } from "@/theme";
-import {
-  CodeArtifactWebView,
-  type CodeArtifactWebViewHandle,
-} from "@/components/CodeArtifactWebView";
+import type { CodeArtifactWebViewHandle } from "@/components/CodeArtifactWebView";
 import type { AppTutorRequest } from "../../vendor/shared/appTutorRequest";
 import { SlidesDeliverable } from "./slides/SlidesDeliverable";
-import { FlairChips } from "./FlairChips";
+import {
+  DeliverableFooter,
+  criteriaFor,
+  useDeliverableSetup,
+  type Criterion,
+  type DeliverableMode,
+} from "./DeliverableFooter";
+import { AppCard } from "./AppCard";
 import { AppTextInput } from "@/components/AppTextInput";
 import { RecordingBar } from "@/components/RecordingBar";
 import { ArtifactChipStrip } from "./ArtifactChipStrip";
@@ -80,7 +84,6 @@ import {
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-type Criterion = { id: string; label: string; description?: string };
 type DeliverableKind =
   | "photo"
   | "artifact"
@@ -88,7 +91,6 @@ type DeliverableKind =
   | "text"
   | "audio"
   | "map";
-type DeliverableMode = "manual" | "auto" | "none";
 
 export type DeliverablePanelProps = {
   sessionId: Id<"sessions">;
@@ -114,6 +116,12 @@ export type DeliverablePanelProps = {
    * where it pinned itself above the composer and crowded out the tutor's text.
    */
   map?: ReactNode;
+  /**
+   * The "Your work" sheet in the app builder (TRA-519): the session's writing,
+   * slides and map without the app, which is already the screen behind the
+   * sheet. Fills the sheet's width rather than being the 410pt side panel.
+   */
+  hideCode?: boolean;
 };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -151,12 +159,12 @@ export function DeliverablePanel({
   onAppAiTurn,
   appAiEnabled,
   map,
+  hideCode = false,
 }: DeliverablePanelProps) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const [selectedArtifactId, setSelectedArtifactId] = useState<Id<"artifacts"> | null>(null);
   const [busy, setBusy] = useState(false);
-  const [setupRepairFailed, setSetupRepairFailed] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
   const scrollOffsetRef = useRef(0);
   const scrollHeightRef = useRef<number | undefined>(undefined);
@@ -255,29 +263,22 @@ export function DeliverablePanel({
   const createArtifact = useMutation(api.artifacts.scholarCreate);
   const updateArtifact = useMutation(api.artifacts.scholarUpdate);
   const submitDeliverable = useMutation(api.deliverables.submit);
-  const retrySetup = useMutation(api.sessions.ensureActivitySetup);
   const assessPhoto = useAction(api.deliverableAssess.assessSubmittedDeliverable);
   const { attach, uploading } = useImageAttachment();
 
-  useEffect(() => {
-    if (
-      activity?.deliverable?.mode !== "auto" ||
-      snapshot?.status !== null
-    ) {
-      return;
-    }
-    void retrySetup({ sessionId }).catch((error) => {
-      console.warn("[deliverable-setup] repair failed", error);
-      setSetupRepairFailed(true);
-    });
-  }, [activity?.deliverable?.mode, retrySetup, sessionId, snapshot?.status]);
+  const { setupRepairFailed, retry: retrySetup } = useDeliverableSetup({
+    sessionId,
+    mode: activity?.deliverable?.mode,
+    snapshotStatus: snapshot?.status,
+  });
 
   const artifacts = useMemo(
     () =>
       [...(artifactsResult ?? [])]
         .filter(isTextArtifact)
+        .filter((artifact) => !hideCode || artifact.type !== "code")
         .sort((a, b) => a._creationTime - b._creationTime),
-    [artifactsResult],
+    [artifactsResult, hideCode],
   );
 
   // Auto-select an artifact that APPEARS after the panel's first loaded render
@@ -419,15 +420,6 @@ export function DeliverablePanel({
     spec?.mode === "auto" &&
     (snapshot?.status === "error" || setupRepairFailed);
   const isPhoto = spec?.kind === "photo";
-  // The footer button swaps its navy fill for a light gray one whenever it is
-  // unavailable — busy included. Derive that state ONCE per footer so the
-  // spinner, the symbol, and the label always share a foreground that reads on
-  // whichever fill is actually painted (a white spinner on the gray fill was
-  // effectively invisible).
-  const photoCheckMuted =
-    !criteriaFailed && (checkDisabled || busy || criteriaPending);
-  const textCheckMuted =
-    !criteriaFailed && (textCheckDisabled || busy || criteriaPending);
   // Slides now have a real in-app editor (SlidesDeliverable). Audio still has
   // no capture path, so it keeps the honest empty state.
   const isSlides = spec?.kind === "slides";
@@ -467,8 +459,7 @@ export function DeliverablePanel({
     if (busy || !criteriaFailed) return;
     setBusy(true);
     try {
-      await retrySetup({ sessionId, retryErroredCriteria: true });
-      setSetupRepairFailed(false);
+      await retrySetup();
     } catch (error) {
       Alert.alert(
         "Couldn't prepare the check",
@@ -517,7 +508,9 @@ export function DeliverablePanel({
     // Animated.View with paddingBottom = keyboard.height drives the panel shrink
     // on the UI thread, keeping the editor and footer visible above the keyboard.
     // (KeyboardAvoidingView's frame-based heuristic breaks in a two-pane layout.)
-    <Animated.View style={[styles.panel, keyboardInsetStyle]}>
+    <Animated.View
+      style={[styles.panel, hideCode && styles.panelInSheet, keyboardInsetStyle]}
+    >
       <ScrollView
         ref={scrollRef}
         style={styles.scroll}
@@ -559,7 +552,8 @@ export function DeliverablePanel({
             style={styles.editorSection}
             onLayout={(event) => handleEditorLayout(event.nativeEvent.layout.y)}
           >
-          <Text style={styles.sectionLabel}>Your work</Text>
+          {/* Inside the builder's "Your work" sheet the sheet title already says it. */}
+          {!hideCode && <Text style={styles.sectionLabel}>Your work</Text>}
           {!isSlides && !isPendingKind && !isPhoto && artifacts.length >= 2 && (
             <ArtifactChipStrip
               artifacts={artifacts}
@@ -640,17 +634,10 @@ export function DeliverablePanel({
             )
           ) : activeArtifact ? (
             activeArtifact.type === "code" ? (
-              <CodeArtifactDeliverable
+              <AppCard
                 key={activeArtifact._id}
+                sessionId={sessionId}
                 artifact={activeArtifact}
-                onSave={(content, baseRevision) =>
-                  updateArtifact({
-                    artifactId: activeArtifact._id,
-                    content,
-                    baseRevision,
-                  })
-                }
-                onFocus={handleEditorFocus}
                 codeArtifactRef={codeArtifactRef}
                 onAskTutor={onAskTutor}
                 onAppAiTurn={onAppAiTurn}
@@ -699,149 +686,42 @@ export function DeliverablePanel({
       {spec && !isMap && (isPhoto
         ? fileUrl &&
           (criteria.length > 0 || criteriaPending || criteriaFailed) && (
-            <View style={styles.footer}>
-              <FlairChips
-                // Keyed by the work this panel is showing, so switching
-                // documents can never treat the other one's flair as arriving.
-                key={activeArtifact?._id ?? activityId}
-                flairEarned={deliverable?.flairEarned}
-                criteria={criteria}
-                deliverableId={deliverable?._id}
-                resolved={deliverable !== undefined}
-              />
-              <Pressable
-                onPress={
-                  criteriaFailed
-                    ? handleRetrySetup
-                    : checkDisabled || busy || criteriaPending
-                      ? undefined
-                      : handleCheckPhoto
-                }
-                style={({ pressed }) => [
-                  styles.checkBtn,
-                  photoCheckMuted && styles.checkBtnDisabled,
-                  pressed &&
-                    !checkDisabled &&
-                    !busy &&
-                    !criteriaPending &&
-                    styles.checkBtnPressed,
-                ]}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  criteriaFailed
-                    ? "Try preparing the photo check again"
-                    : "Check my work"
-                }
-                accessibilityState={{
-                  disabled:
-                    !criteriaFailed && (checkDisabled || busy || criteriaPending),
-                }}
-              >
-                {busy || criteriaPending ? (
-                  <ActivityIndicator
-                    color={
-                      photoCheckMuted ? colors.charcoalMuted : colors.white
-                    }
-                  />
-                ) : criteriaFailed ? (
-                  <SymbolView
-                    name="exclamationmark.triangle.fill"
-                    size={17}
-                    tintColor={
-                      photoCheckMuted ? colors.charcoalMuted : colors.white
-                    }
-                  />
-                ) : null}
-                <Text
-                  style={[
-                    styles.checkBtnText,
-                    photoCheckMuted && styles.checkBtnTextDisabled,
-                  ]}
-                >
-                  {criteriaFailed
-                    ? "Try preparing check again"
-                    : criteriaPending
-                      ? "Preparing check…"
-                      : "Check my work"}
-                </Text>
-              </Pressable>
-            </View>
+            <DeliverableFooter
+              kind="photo"
+              mode={spec.mode}
+              flairKey={activeArtifact?._id ?? activityId ?? ""}
+              flairEarned={deliverable?.flairEarned}
+              criteria={criteria}
+              deliverableId={deliverable?._id}
+              resolved={deliverable !== undefined}
+              criteriaPending={criteriaPending}
+              criteriaFailed={criteriaFailed}
+              disabled={checkDisabled}
+              busy={busy}
+              onCheck={handleCheckPhoto}
+              onRetry={handleRetrySetup}
+            />
           )
-        : activeArtifact && (
-            <View style={styles.footer}>
-              <FlairChips
-                // Keyed by the work this panel is showing, so switching
-                // documents can never treat the other one's flair as arriving.
-                key={activeArtifact?._id ?? activityId}
-                flairEarned={deliverable?.flairEarned}
-                criteria={criteria}
-                deliverableId={deliverable?._id}
-                resolved={deliverable !== undefined}
-              />
-              <Pressable
-                onPress={
-                  criteriaFailed
-                    ? handleRetrySetup
-                    : textCheckDisabled || criteriaPending || busy
-                      ? undefined
-                      : handleAskCheck
-                }
-                style={({ pressed }) => [
-                  styles.checkBtn,
-                  textCheckMuted && styles.checkBtnDisabled,
-                  pressed &&
-                    !textCheckDisabled &&
-                    !criteriaPending &&
-                    !busy &&
-                    styles.checkBtnPressed,
-                ]}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  criteriaFailed
-                    ? "Try preparing the rubric check again"
-                    : spec.mode === "none"
-                      ? "Send this work"
-                      : "Check my work"
-                }
-                accessibilityState={{
-                  disabled:
-                    !criteriaFailed &&
-                    (textCheckDisabled || criteriaPending || busy),
-                }}
-              >
-                {busy || criteriaPending ? (
-                  <ActivityIndicator
-                    color={textCheckMuted ? colors.charcoalMuted : colors.white}
-                  />
-                ) : criteriaFailed || spec.mode === "none" ? (
-                  <SymbolView
-                    name={
-                      criteriaFailed
-                        ? "exclamationmark.triangle.fill"
-                        : "paperplane.fill"
-                    }
-                    size={17}
-                    tintColor={
-                      textCheckMuted ? colors.charcoalMuted : colors.white
-                    }
-                  />
-                ) : null}
-                <Text
-                  style={[
-                    styles.checkBtnText,
-                    textCheckMuted && styles.checkBtnTextDisabled,
-                  ]}
-                >
-                  {criteriaFailed
-                    ? "Try preparing check again"
-                    : criteriaPending
-                      ? "Preparing check…"
-                      : spec.mode === "none"
-                        ? "Send it"
-                        : "Check my work"}
-                </Text>
-              </Pressable>
-            </View>
+        : activeArtifact &&
+          // A side app is not the deliverable: Check my work belongs to the
+          // writing, so it is not offered while the app's chip is selected
+          // (web hides it on the app card the same way).
+          !(activeArtifact.type === "code" && spec.kind !== "artifact") && (
+            <DeliverableFooter
+              kind="text"
+              mode={spec.mode}
+              flairKey={activeArtifact._id}
+              flairEarned={deliverable?.flairEarned}
+              criteria={criteria}
+              deliverableId={deliverable?._id}
+              resolved={deliverable !== undefined}
+              criteriaPending={criteriaPending}
+              criteriaFailed={criteriaFailed}
+              disabled={textCheckDisabled}
+              busy={busy}
+              onCheck={handleAskCheck}
+              onRetry={handleRetrySetup}
+            />
           ))}
     </Animated.View>
   );
@@ -849,9 +729,9 @@ export function DeliverablePanel({
 
 // ─── Preview / Code toggle ───────────────────────────────────────────────────
 // The one native control for flipping a code artifact between its running app
-// and its HTML source. Shared by a tutor session's code deliverable and the
-// app builder's Edit mode, so the iPad has a single rendering of it (T1) — the
-// native twin of the web CodeArtifactViewer toolbar.
+// and its HTML source, in the app builder's Edit mode — the native twin of the
+// web CodeArtifactViewer toolbar. (A chat-primary session shows the app as an
+// AppCard instead and opens the builder for the source: TRA-519.)
 export type CodeView = "preview" | "code";
 
 export function CodeViewToggle({
@@ -895,76 +775,6 @@ export function CodeViewToggle({
           Code
         </Text>
       </Pressable>
-    </View>
-  );
-}
-
-// ─── Code artifact: live preview + source toggle ─────────────────────────────
-// Native twin of the web CodeArtifactViewer (Preview / Code). Preview runs the
-// artifact in the canonical native HTML host (CodeArtifactWebView) so a code
-// artifact behaves the same for a scholar on iPad as on web; Code drops to the
-// shared ArtifactEditor for hand-editing the source. Defaults to Preview.
-function CodeArtifactDeliverable({
-  artifact,
-  onSave,
-  onFocus,
-  codeArtifactRef,
-  onAskTutor,
-  onAppAiTurn,
-  appAiEnabled,
-}: {
-  artifact: Doc<"artifacts">;
-  onSave: (content: string, baseRevision: number) => Promise<ArtifactSaveResult>;
-  onFocus: () => void;
-  codeArtifactRef?: Ref<CodeArtifactWebViewHandle>;
-  onAskTutor?: (request: AppTutorRequest) => void | Promise<void>;
-  onAppAiTurn?: () => void;
-  appAiEnabled?: boolean;
-}) {
-  const colors = useColors();
-  const styles = useMemo(() => makeStyles(colors), [colors]);
-  const [view, setView] = useState<CodeView>("preview");
-  const isEmpty = (artifact.content ?? "").trim() === "";
-
-  return (
-    <View style={styles.codeDeliverableWrap}>
-      <CodeViewToggle view={view} onChange={setView} />
-
-      {view === "preview" ? (
-        isEmpty ? (
-          <View style={styles.codeEmpty}>
-            <SymbolView
-              name="chevron.left.forwardslash.chevron.right"
-              size={28}
-              tintColor={colors.violet}
-            />
-            <Text style={styles.emptyTitle}>Nothing here yet</Text>
-            <Text style={styles.emptyHint}>
-              Build your app with your tutor — it will show up here.
-            </Text>
-          </View>
-        ) : (
-          <View style={styles.codePreviewFrame}>
-            <CodeArtifactWebView
-              ref={codeArtifactRef}
-              key={artifact._id}
-              scope={{ kind: "session", artifactId: artifact._id }}
-              content={artifact.content ?? ""}
-              onAskTutor={onAskTutor}
-              onAppAiTurn={onAppAiTurn}
-              appAiEnabled={appAiEnabled}
-            />
-          </View>
-        )
-      ) : (
-        <ArtifactEditor
-          key={`${artifact._id}:code`}
-          artifact={artifact}
-          onSave={onSave}
-          onFocus={onFocus}
-          code
-        />
-      )}
     </View>
   );
 }
@@ -1091,13 +901,14 @@ function WritingToolbar({
     dictation.cancel();
   }, [dictation]);
 
-  if (dictation.isRecording || dictation.isTranscribing) {
+  if (dictation.isConnecting || dictation.isRecording || dictation.isTranscribing) {
     return (
       <View style={styles.editorDictationBar}>
         <RecordingBar
           level={dictation.level}
           durationMs={dictation.durationMs}
           isTranscribing={dictation.isTranscribing}
+          isConnecting={dictation.isConnecting}
           onCancel={onDictateCancel}
           onStop={onDictateStop}
         />
@@ -1412,17 +1223,6 @@ function PanelSkeleton() {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function criteriaFor(
-  spec: { mode: DeliverableMode; criteria: Criterion[] },
-  snapshot: { status: string | null; criteria: Criterion[] | null } | null,
-): Criterion[] {
-  if (spec.mode === "none") return [];
-  if (spec.mode === "auto") {
-    return snapshot?.status === "ready" && snapshot.criteria ? snapshot.criteria : [];
-  }
-  return spec.criteria;
-}
-
 function kindLabel(kind: DeliverableKind) {
   switch (kind) {
     case "photo":
@@ -1526,6 +1326,12 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     textTransform: "uppercase",
     color: c.charcoalSubtle,
     marginBottom: 2,
+  },
+
+  panelInSheet: {
+    width: "100%",
+    flex: 1,
+    borderLeftWidth: 0,
   },
 
   // ── Editor section ──
@@ -1747,41 +1553,6 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     fontFamily: fonts.semibold,
     fontSize: 14.5,
     color: c.violetSolid,
-  },
-
-  // ── Footer / check action ──
-  footer: {
-    gap: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: c.border,
-    backgroundColor: c.white,
-  },
-  checkBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    backgroundColor: c.navy,
-    paddingVertical: 12,
-    borderRadius: 14,
-  },
-  checkBtnDisabled: {
-    backgroundColor: c.gray100,
-  },
-  checkBtnPressed: {
-    opacity: 0.82,
-  },
-  checkBtnText: {
-    fontFamily: fonts.semibold,
-    fontSize: 15,
-    color: c.white,
-  },
-  checkBtnTextDisabled: {
-    // Reads on the gray `checkBtnDisabled` fill in BOTH themes; the old
-    // charcoalSubtle was ~2.3:1 on the light fill.
-    color: c.charcoalMuted,
   },
 
   // ── Skeleton ──

@@ -26,6 +26,7 @@ import { isConversationCompletable } from "./lib/activityCompletionEligibility";
 import type { Id, Doc } from "./_generated/dataModel";
 import { fanOutScholarEvent, fanOutClassEvent, scholarDeepLink } from "./slackNotifications";
 import { resolveAssignmentClass } from "./classResolver";
+import { effectiveActivityKind } from "../shared/appSurface";
 
 /**
  * List the scholar's completed activities within a unit. Returns an array of
@@ -296,7 +297,9 @@ export const markCompleteFromTool = internalMutation({
     // granular refusals (they give the tutor actionable next steps), then defer
     // the lesson-vs-ad-hoc anchoring decision to the shared eligibility gate so
     // it can never drift from the tool-exposure gate in sessionHelpers.
-    if (activity.kind !== "online") {
+    // Opt-in (TRA-519): an app activity (either shape) completes here too.
+    const effectiveKind = effectiveActivityKind(activity);
+    if (effectiveKind !== "online" && effectiveKind !== "vibecode") {
       return refuse(
         "not_conversation_activity",
         "This isn't a conversation activity you can mark complete this way. Keep going.",
@@ -947,7 +950,7 @@ export const summaryForScholarInUnit = internalQuery({
         lessonId: c.lessonId,
         completedAt: c.completedAt,
         title: a.title,
-        kind: a.kind,
+        kind: effectiveActivityKind(a),
         description: a.description ?? null,
         lessonTitle: l.title,
         note: c.note ?? null,

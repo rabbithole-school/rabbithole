@@ -102,8 +102,9 @@ export default function ScholarsLayout({
   const { hasSchoolOperationsAccess } = useSchoolOperationsAccess(user, !!user);
 
   // School-operations staff only see non-sensitive scholar sub-tabs: the Feed overview,
-  // Portfolio (the accumulated record — portfolio items), Documents (the
-  // health-record half only), and Settings (identity + password + parents).
+  // Documents (administrative kinds + health records), and Settings (identity +
+  // password + parents). No Portfolio: a scholar's work is a learning record;
+  // operations staff file scans from the scanner inbox instead.
   //
   // TRI-STATE, deliberately: `hasSchoolOperationsAccess` is `undefined` until the
   // active-institution query resolves (it's skipped until `user` loads, then
@@ -118,7 +119,7 @@ export default function ScholarsLayout({
       : hasSchoolOperationsAccess === true && user?.role === "staff";
   const operationsModeKnown = isOperationsOnly !== undefined;
   const validScholarTabs: ScholarTabKey[] = isOperationsOnly
-    ? ["feed", "portfolio", "documents", "settings"]
+    ? ["feed", "documents", "settings"]
     : ["feed", "map", "quests", "skills", "dossier", "documents", "now", "portfolio", "guidance", "settings"];
 
   const { scholarSlug: rawScholar, stab: rawStab } = parseScholarsPath(pathname);
@@ -139,9 +140,9 @@ export default function ScholarsLayout({
   // memberships.resolveActiveInstitution and users.listScholars before it ever
   // becomes an institution id.
   // Old `work` deep-links (the pre-split single tab) degrade gracefully: a
-  // teacher lands on the live "now" snapshot, an operations staffer on "portfolio"
-  // (their only slice of the old Work tab).
-  const mappedStab = rawStab === "work" ? (isOperationsOnly ? "portfolio" : "now") : rawStab;
+  // teacher lands on the live "now" snapshot, an operations staffer on the Feed
+  // (no slice of the old Work tab is theirs any more).
+  const mappedStab = rawStab === "work" ? (isOperationsOnly ? "feed" : "now") : rawStab;
   const scholarSubTab: ScholarTabKey = validScholarTabs.includes(mappedStab as ScholarTabKey)
     ? (mappedStab as ScholarTabKey)
     : "feed";

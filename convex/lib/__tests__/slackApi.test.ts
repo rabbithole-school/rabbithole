@@ -163,6 +163,35 @@ describe("outbound Slack link normalization", () => {
     );
   });
 
+  test("labels email links with the address, never the mailto: scheme", () => {
+    expect(normalizeSlackLinks("Ana Lee (<mailto:ana@example.com>) is a parent")).toBe(
+      "Ana Lee (<mailto:ana@example.com|ana@example.com>) is a parent",
+    );
+    expect(normalizeSlackLinks("[mailto:ana@example.com](mailto:ana@example.com) or [Ana](mailto:ana@example.com)")).toBe(
+      "<mailto:ana@example.com|ana@example.com> or <mailto:ana@example.com|Ana>",
+    );
+    expect(normalizeSlackLinks("Write ana.lee+x@example.com. Or mailto:bo@example.org")).toBe(
+      "Write <mailto:ana.lee+x@example.com|ana.lee+x@example.com>. Or <mailto:bo@example.org|bo@example.org>",
+    );
+  });
+
+  test("leaves labeled mail links, mentions and addresses inside URLs alone", () => {
+    const text =
+      "<mailto:ana@example.com|Ana> <@U123> <https://mail.example/?u=ana@example.com|Oct 7> <https://x.example/a@b.com>";
+    expect(normalizeSlackLinks(text)).toBe(text);
+  });
+
+  test("leaves code, italics and malformed mail markup intact", () => {
+    for (const text of [
+      "`a@b.com` and ```\nx a@b.com\n```",
+      "<mailto:a@b.com?subject=hi there>",
+      "a@sub.example.c and a@b.com-x",
+    ]) {
+      expect(normalizeSlackLinks(text)).toBe(text);
+    }
+    expect(normalizeSlackLinks("_a@b.com_")).toBe("_<mailto:a@b.com|a@b.com>_");
+  });
+
   test("keeps trailing closing parentheses out of a GitHub URL", () => {
     expect(
       normalizeSlackLinks("(https://github.example/org/site/pull/56))"),

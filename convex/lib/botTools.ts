@@ -88,20 +88,23 @@ export const VIBECODE_BUILD_BRIEF_DESCRIPTION =
   "The BUILD BRIEF must state (a) what the app must let the scholar demonstrate, (b) the learning arc — what the scholar should DISCOVER by building and observing, in what order, (c) what NOT to reveal up front (formula names, etc.), and (d) that the scholar chooses their own scenario/setting where applicable.";
 
 /**
- * The MODEL CONTRACT a vibecode activity carries alongside its build brief
- * (schema.ts activities.buildContract). One description, shared by every
- * aide/unit tool that writes a vibecode activity, so the App designer is
- * steered the same way whichever surface authored the activity. Translating a
- * scholar's off-topic idea into its domain twin is the designer's DEFAULT —
- * never a teacher setting, so the description tells the aide not to ask.
+ * The MISSION an online activity carries (schema.ts activities.buildContract;
+ * TRA-519 B1). One description, shared by every aide/unit tool that writes an
+ * activity, so the tutor and the App designer are steered the same way
+ * whichever surface authored it. Every online activity with a deliverable
+ * gets a gate + freedoms; only an app activity also gets invariants (the
+ * MODEL CONTRACT). Parking or translating a scholar's off-topic idea is the
+ * default steering — never a teacher setting, so the description tells the
+ * aide not to ask.
  */
-export const VIBECODE_BUILD_CONTRACT_DESCRIPTION =
-  "The MODEL CONTRACT the App designer steers by — write one for EVERY vibecode activity, in addition to the build brief. " +
-  "`invariants` (\"must be true\"): 2–3 things the scholar's app must be TRUE about, stated as testable MECHANICS (a cause and its effect you could check by running the app), never as topics. " +
-  "`freedoms` (\"scholar owns\"): what the scholar decides outright — setting, characters, genre, visuals, side quests; anything that doesn't break an invariant. " +
-  "`gate`: ONE thing that must exist and have been run once before cosmetic requests are built — usually \"the core model, run once without the intervention\". " +
-  "Do NOT ask the teacher whether off-topic scholar ideas should be translated, parked, or allowed: the designer translates them into the subject by default and parks the rest for free play. " +
-  "Example (a seed-dispersal build): invariants [\"How far a seed travels depends on its shape and weight — winged seeds drift with the wind, heavy seeds fall near the parent\", \"Seeds that land in the parent's shade sprout less often than seeds that land in open ground\"]; freedoms [\"setting — any island, planet, or backyard\", \"the plants' names, looks, and story\", \"genre — game, toy, or simulation\", \"visuals and sound\", \"side quests and extra features — anything\"]; gate \"one generation of seeds dropped and sprouted with the default seed, before the scholar redesigns it\".";
+export const MISSION_DESCRIPTION =
+  "The activity's MISSION — write one for EVERY online activity with a deliverable. " +
+  "`gate`: ONE thing that must exist before side ideas get built — for writing, usually \"a first draft of X exists\"; for an app activity, \"the core model, run once without the intervention\". " +
+  "`freedoms` (\"scholar owns\"): what the scholar decides outright — topic choice, characters, setting, genre, look; anything that doesn't break the work. " +
+  "`invariants` (\"must be true\"): ONLY for an app activity, where they are REQUIRED — 2–3 things the app must be TRUE about, stated as testable MECHANICS (a cause and its effect you could check by running the app), never as topics. On any other activity leave invariants out: its must-be-true items belong in the deliverable's criteria, and a non-app mission with invariants is refused. " +
+  "Do NOT ask the teacher whether off-topic scholar ideas should be translated, parked, or allowed: the tutor translates them into the subject by default and saves the rest for later. " +
+  "Example (a narrative essay): gate \"a first draft of the whole story exists, however rough\"; freedoms [\"which moment you pick\", \"the characters' names\", \"funny or serious\"]. " +
+  "Example (a seed-dispersal app build): invariants [\"How far a seed travels depends on its shape and weight — winged seeds drift with the wind, heavy seeds fall near the parent\", \"Seeds that land in the parent's shade sprout less often than seeds that land in open ground\"]; freedoms [\"setting — any island, planet, or backyard\", \"the plants' names, looks, and story\", \"genre — game, toy, or simulation\", \"visuals and sound\"]; gate \"one generation of seeds dropped and sprouted with the default seed, before the scholar redesigns it\".";
 
 export const VIBECODE_ALLOW_SILENCE_DESCRIPTION =
   "kind=vibecode only. Set true whenever you write a buildContract: the App designer may then stay silent until the scholar actually answers the learning question it asked, instead of building past it. Omit (false) when there is no contract.";
@@ -110,13 +113,13 @@ export const VIBECODE_ALLOW_SILENCE_DESCRIPTION =
 export function buildContractSchemaFragment() {
   return {
     type: "object" as const,
-    description: VIBECODE_BUILD_CONTRACT_DESCRIPTION,
+    description: MISSION_DESCRIPTION,
     properties: {
       invariants: {
         type: "array" as const,
         items: { type: "string" as const },
         description:
-          "1–5 (aim for 2–3) testable mechanics the app must be true about; each ≤ 240 characters.",
+          "App activities only (required there): 1–5 (aim for 2–3) testable mechanics the app must be true about; each ≤ 240 characters. Omit for any other activity.",
       },
       freedoms: {
         type: "array" as const,
@@ -127,10 +130,10 @@ export function buildContractSchemaFragment() {
       gate: {
         type: "string" as const,
         description:
-          "The one thing that must exist and have been run once before cosmetics (≤ 240 characters).",
+          "The one thing that must exist before side ideas get built (≤ 240 characters).",
       },
     },
-    required: ["invariants", "freedoms"] as const,
+    required: ["freedoms"] as const,
   };
 }
 

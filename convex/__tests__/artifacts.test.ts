@@ -14,7 +14,7 @@ async function makeArtifact(
   options: {
     content: string;
     revision?: number;
-    type?: "map" | "slides";
+    type?: "map" | "slides" | "code";
   },
 ) {
   return await t.run(async (ctx) => {
@@ -98,10 +98,35 @@ describe("text artifact revisions", () => {
     });
   });
 
+  test("AI content writes never land in a scholar's writing box", async () => {
+    const t = convexTest(schema, modules);
+    const { sessionId, artifactId } = await makeArtifact(t, {
+      content: "my own words", revision: 3,
+    });
+    // Refused even with the right revision and an exact match, and even when
+    // the caller names no artifact (the first-text-artifact fallback).
+    for (const result of [
+      await t.mutation(internal.artifacts.aiStrReplace, {
+        sessionId, artifactId, oldStr: "own", newStr: "tutor's", baseRevision: 3,
+      }),
+      await t.mutation(internal.artifacts.aiInsert, {
+        sessionId, artifactId, insertLine: 1, insertText: "tutor line", baseRevision: 3,
+      }),
+      await t.mutation(internal.artifacts.aiStrReplace, {
+        sessionId, oldStr: "own", newStr: "tutor's", baseRevision: 3,
+      }),
+    ]) {
+      expect(result).toMatchObject({ kind: "refused", reason: "scholar_writing" });
+    }
+    expect(await t.run(async (ctx) => ctx.db.get(artifactId))).toMatchObject({
+      content: "my own words", revision: 3, lastEditedBy: "scholar",
+    });
+  });
+
   test("CAS edits increment once and preserve stale content", async () => {
     const t = convexTest(schema, modules);
     const { sessionId, artifactId } = await makeArtifact(t, {
-      content: "first draft", revision: 0,
+      content: "first draft", revision: 0, type: "code",
     });
     const success = await t.mutation(internal.artifacts.aiStrReplace, {
       sessionId, artifactId, oldStr: "first", newStr: "final", baseRevision: 0,

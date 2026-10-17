@@ -38,8 +38,8 @@ transcripts ──► observer (per model) ──► LLM judge ──► report.
 ## Run
 
 ```bash
-# Full comparison (Sonnet vs Opus, fixtures + dev, blind pairwise)
-./evals/observer/run.sh --models sonnet,opus --with-dev
+# Full comparison (live observer model vs Opus, fixtures + dev, blind pairwise)
+./evals/observer/run.sh --models observer,opus --with-dev
 
 # Fast iteration while tuning the prompt (fixtures only, one model, no pairwise)
 ./evals/observer/run.sh --fixtures-only --models sonnet --no-pairwise
@@ -56,13 +56,16 @@ runner directly: `ANTHROPIC_API_KEY=... npx tsx evals/observer/run.ts [flags]`.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--models a,b` | `sonnet,opus` | models to run (`sonnet`/`opus`/`haiku` or a raw id) |
+| `--models a,b` | `observer,opus` | models to run (`observer`/`sonnet`/`opus`/`haiku` or a raw id) |
 | `--fixtures-only` | off | skip dev transcripts |
 | `--with-dev` | auto | include dev transcripts if the data file exists |
 | `--dev-limit N` | 8 | cap on real dev cases |
 | `--no-pairwise` | off | skip blind A/B (saves judge calls) |
 | `--concurrency N` | 4 | parallel API calls |
 | `--out DIR` | `out/` | output directory |
+
+Env `OBSERVER_EFFORT_OVERRIDE=low|medium|high` overrides the request's effort for an
+effort sweep (eval-only; applied to every model in the run).
 
 ### Outputs (in `--out`)
 
@@ -91,9 +94,11 @@ It also snapshots what production already wrote for each project, so you can com
 3. Re-run into a fresh `--out` dir and diff the rubric averages + error lists.
 4. When satisfied, push to dev (`CONVEX_DEPLOYMENT=dev:... npx convex dev --once`).
 
-To switch the live observer's model, set the `OBSERVER_MODEL` env var in the Convex
-dashboard to a model id (e.g. `claude-opus-4-8`); it defaults to Sonnet. No code
-change or redeploy required.
+The live observer's model is the `OBSERVER_MODEL` code constant in
+`convex/lib/models.ts` (with `OBSERVER_EFFORT`); the old `OBSERVER_MODEL` env var no
+longer affects the observer. A model change is a reviewed one-line PR — and the
+request shape is model-specific (`buildObserverRequest` in
+`convex/lib/observerShared.ts`), so eval the new model here first.
 
 ## Fixtures are the regression suite
 
@@ -119,6 +124,6 @@ deterministic enough to run after every observer-prompt edit:
   `FINDINGS-rigor.md`.
 
 ```bash
-evals/observer/rigor-check.sh             # sonnet (the live observer model)
+evals/observer/rigor-check.sh             # observer (the live observer model)
 MODEL=opus RUNS=3 evals/observer/rigor-check.sh
 ```

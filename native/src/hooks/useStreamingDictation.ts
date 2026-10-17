@@ -1,6 +1,7 @@
 import { useAction, useMutation } from "convex/react";
+import * as Haptics from "expo-haptics";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert } from "react-native";
+import { Alert, AppState } from "react-native";
 import {
   mediaDevices,
   MediaStream,
@@ -12,12 +13,18 @@ import { api, type Id } from "@/lib/convex";
 import { appStatusBus } from "@/lib/appStatusBus";
 import { voiceMark } from "@/lib/voicePerf";
 import {
+  isSecretUsable,
+  isSessionReadyForTurn,
   parseRealtimeTranscriptionEvent,
   reduceTranscriptAssembly,
+  shouldPrefetchSecret,
   type TranscriptAssembly,
 } from "../../vendor/shared/realtimeTranscriptionProtocol";
 
-type DictationState = "idle" | "recording" | "transcribing";
+// "connecting" is the tap → audio-reaches-OpenAI window (secret, mic, WebRTC
+// handshake, session ack). Nothing said during it is transcribed, so the UI
+// shows "Getting ready…" and only says "listening" once state is "recording".
+type DictationState = "idle" | "connecting" | "recording" | "transcribing";
 
 type MintedSecret = {
   clientSecret: string;
@@ -31,7 +38,6 @@ const OPENAI_REALTIME_URL = "https://api.openai.com/v1/realtime/calls";
 const STARTUP_TIMEOUT_MS = 3_500;
 const TRANSCRIPT_TIMEOUT_MS = 8_000;
 const NO_SPEECH_TIMEOUT_MS = 10_000;
-const SECRET_EXPIRY_SKEW_MS = 5_000;
 const LEVEL_POLL_MS = 100;
 const PLACEHOLDER_LEVEL_DELAY_MS = 700;
 
@@ -105,6 +111,7 @@ export function useStreamingDictation(
   const stateRef = useRef<DictationState>("idle");
   const streamingDisabledRef = useRef(false);
   const secretRef = useRef<MintedSecret | null>(null);
+  const mintInFlightRef = useRef<Promise<MintedSecret> | null>(null);
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const channelRef = useRef<DataChannel | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -119,6 +126,7 @@ export function useStreamingDictation(
   const turnEndedRef = useRef(false);
   const finishedRef = useRef(false);
   const failureInProgressRef = useRef(false);
+  const attemptRef = useRef(0);
   const micOwnerRef = useRef(
     appStatusBus.createMicOwner("streaming-dictation"),
   );
@@ -226,19 +234,44 @@ export function useStreamingDictation(
     }, LEVEL_POLL_MS);
   }, []);
 
-  const getSecret = useCallback(async () => {
+  // One mint at a time per screen; a tap that lands mid-prefetch awaits it.
+  const mintSecret = useCallback((): Promise<MintedSecret> => {
+    const inFlight = mintInFlightRef.current;
+    if (inFlight) return inFlight;
+    const pending = mintTranscriptionSecret({}).then((minted) => {
+      secretRef.current = minted;
+      return minted;
+    });
+    mintInFlightRef.current = pending;
+    const settle = () => {
+      if (mintInFlightRef.current === pending) mintInFlightRef.current = null;
+    };
+    pending.then(settle, settle);
+    return pending;
+  }, [mintTranscriptionSecret]);
+
+  // Mint ahead of the tap so starting a take waits only on the WebRTC
+  // handshake. Failures are silent (the tap path mints again and reports
+  // them), and nothing retries: a tripped budget breaker costs one call per
+  // mount / foreground / take, never a loop.
+  const prefetchSecret = useCallback(() => {
+    if (streamingDisabledRef.current) return;
+    if (!shouldPrefetchSecret(secretRef.current, Date.now())) return;
+    mintSecret().catch(() => {});
+  }, [mintSecret]);
+
+  const getSecret = useCallback(async (): Promise<MintedSecret> => {
     const cached = secretRef.current;
-    if (cached && cached.expiresAtMs - SECRET_EXPIRY_SKEW_MS > Date.now()) {
+    if (cached && isSecretUsable(cached, Date.now())) {
+      prefetchSecret();
       return cached;
     }
-    const minted = await withTimeout(
-      mintTranscriptionSecret({}),
+    return withTimeout(
+      mintSecret(),
       STARTUP_TIMEOUT_MS,
       "Realtime secret mint timed out.",
     );
-    secretRef.current = minted;
-    return minted;
-  }, [mintTranscriptionSecret]);
+  }, [mintSecret, prefetchSecret]);
 
   const stopLegacyRecording = useCallback(() => {
     void legacy.stop().then((text) => {
@@ -260,6 +293,11 @@ export function useStreamingDictation(
       if (stateRef.current !== "idle") return;
 
       const latched = !!opts?.latched;
+      // A take cancelled mid-handshake leaves its awaits pending; when they
+      // settle they must not touch a newer take that reset finishedRef.
+      const attempt = ++attemptRef.current;
+      const isStale = () =>
+        finishedRef.current || attemptRef.current !== attempt;
       finishedRef.current = false;
       failureInProgressRef.current = false;
       speechStartedRef.current = false;
@@ -273,7 +311,7 @@ export function useStreamingDictation(
       setDurationMs(0);
       setIsMaxed(false);
       appStatusBus.setMicOwned(micOwnerRef.current, true);
-      setDictationState("recording");
+      setDictationState("connecting");
 
       let sessionReadyResolve: (() => void) | null = null;
       const sessionReady = new Promise<void>((resolve) => {
@@ -281,7 +319,7 @@ export function useStreamingDictation(
       });
 
       const finishWithTranscript = (rawText: string) => {
-        if (finishedRef.current) return;
+        if (isStale()) return;
         const transcript = rawText.trim();
         finishedRef.current = true;
         stopInputCapture();
@@ -301,7 +339,7 @@ export function useStreamingDictation(
       };
 
       const failStreamingTurn = async (cause?: unknown) => {
-        if (finishedRef.current || failureInProgressRef.current) return;
+        if (isStale() || failureInProgressRef.current) return;
         failureInProgressRef.current = true;
         streamingDisabledRef.current = true;
         finishedRef.current = true;
@@ -367,7 +405,7 @@ export function useStreamingDictation(
             .catch(() => {});
           throw cause;
         }
-        if (finishedRef.current) {
+        if (isStale()) {
           stopMediaStream(mediaStream);
           return;
         }
@@ -379,7 +417,6 @@ export function useStreamingDictation(
         }
 
         streamRef.current = mediaStream;
-        captureStartRef.current = Date.now();
 
         const peer = new RTCPeerConnection();
         const channel = peer.createDataChannel("oai-events");
@@ -387,12 +424,6 @@ export function useStreamingDictation(
         channelRef.current = channel;
         peer.addTrack(audioTrack, mediaStream);
         startLevelMonitor(peer);
-        maxTimerRef.current = setTimeout(() => {
-          if (stateRef.current !== "recording") return;
-          setDurationMs(MAX_RECORDING_MS);
-          setIsMaxed(true);
-          stopInputCapture();
-        }, MAX_RECORDING_MS);
 
         const channelOpen = new Promise<void>((resolve, reject) => {
           channel.onopen = () => {
@@ -411,7 +442,7 @@ export function useStreamingDictation(
           };
           channel.onclose = () => {
             reject(new Error("Realtime data channel closed during startup."));
-            if (!finishedRef.current && stateRef.current !== "idle") {
+            if (!isStale() && stateRef.current !== "idle") {
               void failStreamingTurn();
             }
           };
@@ -426,7 +457,7 @@ export function useStreamingDictation(
           }
           const event = parseRealtimeTranscriptionEvent(value);
           if (event.kind === "sessionReady") {
-            sessionReadyResolve?.();
+            if (isSessionReadyForTurn(event, latched)) sessionReadyResolve?.();
             return;
           }
           if (event.kind === "speechStarted") {
@@ -470,7 +501,7 @@ export function useStreamingDictation(
         peer.onconnectionstatechange = () => {
           if (
             peer.connectionState === "failed" &&
-            !finishedRef.current &&
+            !isStale() &&
             stateRef.current !== "idle"
           ) {
             void failStreamingTurn();
@@ -520,6 +551,21 @@ export function useStreamingDictation(
           "Realtime session handshake timed out.",
         );
         emitDiagnostic("session-ready");
+        // Cancelled or unmounted mid-handshake: the transport is already
+        // closed, so don't resurrect the take.
+        if (isStale()) return;
+
+        // Audio reaches the transcriber from here on — only now may the UI
+        // say "listening", and only now do the duration and cap clocks start.
+        captureStartRef.current = Date.now();
+        maxTimerRef.current = setTimeout(() => {
+          if (stateRef.current !== "recording") return;
+          setDurationMs(MAX_RECORDING_MS);
+          setIsMaxed(true);
+          stopInputCapture();
+        }, MAX_RECORDING_MS);
+        setDictationState("recording");
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
 
         if (latched && !speechStartedRef.current) {
           noSpeechTimerRef.current = setTimeout(() => {
@@ -545,9 +591,28 @@ export function useStreamingDictation(
     ],
   );
 
+  const cancelRecording = useCallback(() => {
+    if (streamingDisabledRef.current) {
+      void legacy.cancel();
+      return;
+    }
+    if (stateRef.current === "idle") return;
+    finishedRef.current = true;
+    stopInputCapture();
+    closeTransport();
+    setIsMaxed(false);
+    setDurationMs(0);
+    setDictationState("idle");
+  }, [closeTransport, legacy, setDictationState, stopInputCapture]);
+
   const stopRecording = useCallback(() => {
     if (streamingDisabledRef.current) {
       stopLegacyRecording();
+      return;
+    }
+    if (stateRef.current === "connecting") {
+      // Nothing has reached the transcriber yet, so there is no turn to send.
+      cancelRecording();
       return;
     }
     if (stateRef.current !== "recording") return;
@@ -571,21 +636,12 @@ export function useStreamingDictation(
         new Error("Realtime data channel was not ready."),
       );
     }
-  }, [setDictationState, stopInputCapture, stopLegacyRecording]);
-
-  const cancelRecording = useCallback(() => {
-    if (streamingDisabledRef.current) {
-      void legacy.cancel();
-      return;
-    }
-    if (stateRef.current === "idle") return;
-    finishedRef.current = true;
-    stopInputCapture();
-    closeTransport();
-    setIsMaxed(false);
-    setDurationMs(0);
-    setDictationState("idle");
-  }, [closeTransport, legacy, setDictationState, stopInputCapture]);
+  }, [
+    cancelRecording,
+    setDictationState,
+    stopInputCapture,
+    stopLegacyRecording,
+  ]);
 
   const toggleRecording = useCallback(async () => {
     if (streamingDisabledRef.current) {
@@ -594,8 +650,8 @@ export function useStreamingDictation(
       return;
     }
     if (stateRef.current === "transcribing") return;
-    if (stateRef.current === "recording") stopRecording();
-    else await startRecording();
+    if (stateRef.current === "idle") await startRecording();
+    else stopRecording();
   }, [legacy, startRecording, stopLegacyRecording, stopRecording]);
 
   useEffect(() => {
@@ -608,6 +664,18 @@ export function useStreamingDictation(
     };
   }, [closeTransport, stopInputCapture]);
 
+  // Keep a usable secret ready whenever the mic is idle: on mount, after each
+  // take, and on return to the foreground (an iPad that slept past the TTL).
+  useEffect(() => {
+    if (state === "idle") prefetchSecret();
+  }, [state, prefetchSecret]);
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (next) => {
+      if (next === "active" && stateRef.current === "idle") prefetchSecret();
+    });
+    return () => subscription.remove();
+  }, [prefetchSecret]);
+
   if (fallbackActive) {
     const fallbackState: DictationState = legacy.isTranscribing
       ? "transcribing"
@@ -619,6 +687,7 @@ export function useStreamingDictation(
       error,
       hasSpeech: legacy.level > 0.02,
       isTooLoud: false,
+      isConnecting: false,
       isRecording: legacy.isRecording,
       isTranscribing: legacy.isTranscribing,
       isMaxed: legacy.isMaxed,
@@ -639,6 +708,7 @@ export function useStreamingDictation(
     error,
     hasSpeech,
     isTooLoud,
+    isConnecting: state === "connecting",
     isRecording: state === "recording",
     isTranscribing: state === "transcribing",
     isMaxed,

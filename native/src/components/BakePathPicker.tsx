@@ -10,16 +10,36 @@ import {
 
 import { api, type Id } from "@/lib/convex";
 import { fonts, useColors } from "@/theme";
+import { BUILD_SIMULATION_PATH } from "../../vendor/shared/missionCopy";
 import { withTimeout } from "../../vendor/shared/withTimeout";
 
 export interface SuggestedPath {
   emoji: string;
   title: string;
   blurb: string;
+  /** "build" marks the fixed "Build a simulation" card; the bake keys on it. */
+  shape?: "build";
 }
 
 export const ENDLESS_CHAT = "endless-chat" as const;
 export type PathChoice = SuggestedPath | typeof ENDLESS_CHAT;
+
+/** The always-offered build path (TRA-519 B4), as a pickable path. */
+export const BUILD_PATH: SuggestedPath = { ...BUILD_SIMULATION_PATH };
+
+/** The `bakePath` argument a launch sends for a choice; none for endless chat.
+ * Carries `shape` so the bake can key on it (never on the title). Web twin:
+ * `bakePathArg` in lib/bakePaths.ts. */
+export function bakePathArg(
+  choice: PathChoice,
+): { title: string; blurb: string; shape?: "build" } | undefined {
+  if (choice === ENDLESS_CHAT) return undefined;
+  return {
+    title: choice.title,
+    blurb: choice.blurb,
+    ...(choice.shape ? { shape: choice.shape } : {}),
+  };
+}
 
 /**
  * The Convex client queues a call while its socket is down and never gives up
@@ -44,12 +64,9 @@ const FALLBACK_PATHS: SuggestedPath[] = [
     title: "Find the surprising links",
     blurb: "See what this secretly connects to in your own world.",
   },
-  {
-    emoji: "🛠️",
-    title: "Make something that shows it",
-    blurb: "Build a little explainer or diagram that proves you get it.",
-  },
 ];
+// The third fallback ("Make something that shows it") is gone: the fixed
+// "Build a simulation" card below every list replaces it (TRA-519 B4).
 
 const LOADING_MESSAGES = [
   "✨ Finding a few ways into this…",
@@ -60,7 +77,11 @@ const LOADING_MESSAGES = [
 
 const SUGGESTION_CACHE = new Map<string, SuggestedPath[]>();
 
-type Selection = number | typeof ENDLESS_CHAT | null;
+type Selection =
+  | number
+  | typeof ENDLESS_CHAT
+  | typeof BUILD_SIMULATION_PATH.shape
+  | null;
 
 function cacheKey(source: BakePathSource): string {
   return source.kind === "seed"
@@ -274,6 +295,17 @@ export function BakePathPicker({
           />
         ))
       )}
+
+      {/* Build a simulation — fixed after the live suggestions, always
+          offered (like Endless chat, it doesn't wait on the bot). */}
+      <OptionCard
+        emoji={BUILD_PATH.emoji}
+        title={BUILD_PATH.title}
+        blurb={BUILD_PATH.blurb}
+        tileBg={colors.violetSubtle}
+        selected={selected === BUILD_SIMULATION_PATH.shape}
+        onPress={() => pick(BUILD_SIMULATION_PATH.shape, BUILD_PATH)}
+      />
     </View>
   );
 }

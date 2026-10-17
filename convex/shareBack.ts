@@ -12,6 +12,7 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
+import { effectiveActivityKind } from "../shared/appSurface";
 
 // ─────────────────────────────────────────────────────────────────────
 // Share Back activity — backend.
@@ -155,17 +156,19 @@ export const listSourceCandidates = curriculumQuery({
           // Share Backs can't source other Share Backs (incl. themselves).
           // Web activities have no transcripts/deliverables to digest, and
           // problem sets are adaptive practice (no deliverable to share back).
+          // Effective kind: an app activity stored as online is still an app.
+          const kind = effectiveActivityKind(a);
           if (
-            a.kind === "shareBack" ||
-            a.kind === "web" ||
-            a.kind === "problem_set" ||
+            kind === "shareBack" ||
+            kind === "web" ||
+            kind === "problem_set" ||
             // A game's evidence lives in its digest, not a deliverable, so it
             // is not a share-back source. A simulator's exhibition path is its own
-            // gallery submission (plan §8), not this digest. A vibecode app is
-            // its own artifact, likewise not a share-back deliverable.
-            a.kind === "game" ||
-            a.kind === "simulator" ||
-            a.kind === "vibecode"
+            // gallery submission (plan §8), not this digest. An app is its own
+            // artifact, likewise not a share-back deliverable.
+            kind === "game" ||
+            kind === "simulator" ||
+            kind === "vibecode"
           )
             continue;
           const deliverables = await ctx.db
@@ -175,7 +178,7 @@ export const listSourceCandidates = curriculumQuery({
           rows.push({
             _id: a._id,
             title: a.title,
-            kind: a.kind,
+            kind,
             unitId: unit._id,
             unitTitle: unit.title,
             unitEmoji: unit.emoji ?? null,

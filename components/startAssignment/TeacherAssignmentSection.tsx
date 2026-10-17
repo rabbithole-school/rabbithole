@@ -8,7 +8,8 @@
 
 import { Box, Button, Flex, HStack, Text } from "@chakra-ui/react";
 import { Warning } from "@phosphor-icons/react";
-import { ScholarPicker } from "@/components/ScholarPicker";
+import { ScholarPicker, ScholarPickerContent } from "@/components/ScholarPicker";
+import type { RosterScholar } from "@/hooks/useScholarRoster";
 import {
   SimulatorRunBudgetFields,
   type SimulatorRunBudgetValue,
@@ -19,6 +20,7 @@ import { DateTimeInput, PlainSelect, SubLabel } from "./primitives";
 
 export function TeacherSettings({
   scholarSel,
+  runnerRoster,
   onScholarSelChange,
   hasWorldTarget,
   worldBudget,
@@ -42,6 +44,9 @@ export function TeacherSettings({
   targetKind,
 }: {
   scholarSel: Set<string>;
+  /** A curriculum:run holder's assignee roster (identity only). When set, the
+   *  pickers render it instead of the teacher roster, which she cannot read. */
+  runnerRoster?: RosterScholar[];
   onScholarSelChange: (selection: Set<string>) => void;
   hasWorldTarget: boolean;
   worldBudget: SimulatorRunBudgetValue;
@@ -78,12 +83,25 @@ export function TeacherSettings({
         >
           Scholars
         </Text>
-        <ScholarPicker
-          mode="multi"
-          selected={scholarSel}
-          onChange={onScholarSelChange}
-          maxH="220px"
-        />
+        {runnerRoster ? (
+          <ScholarPickerContent
+            mode="multi"
+            scholars={runnerRoster}
+            selected={scholarSel}
+            onChange={onScholarSelChange}
+            showGroups={false}
+            showAffinityToggle={false}
+            maxH="220px"
+            emptyHint="No scholars at this unit's school."
+          />
+        ) : (
+          <ScholarPicker
+            mode="multi"
+            selected={scholarSel}
+            onChange={onScholarSelChange}
+            maxH="220px"
+          />
+        )}
       </Box>
 
       {/* World run budget + season — per-scholar execution policy for the
@@ -273,6 +291,23 @@ export function TeacherSettings({
 
             {effectiveForSel !== null && (
               <Box mt={3}>
+                {runnerRoster ? (
+                  <ScholarPickerContent
+                    mode="multi"
+                    scholars={runnerRoster}
+                    selected={effectiveForSel}
+                    onChange={handleForSelChange}
+                    scholarIds={forScholarIds}
+                    showGroups={false}
+                    showAffinityToggle={false}
+                    maxH="180px"
+                    emptyHint={
+                      scholarSel.size === 0
+                        ? "Pick scholars above first."
+                        : "No scholars in this assignment."
+                    }
+                  />
+                ) : (
                 <ScholarPicker
                   mode="multi"
                   selected={effectiveForSel}
@@ -285,6 +320,7 @@ export function TeacherSettings({
                       : "No scholars in this assignment."
                   }
                 />
+                )}
               </Box>
             )}
 

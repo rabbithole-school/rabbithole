@@ -10,10 +10,14 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { buildSystemPromptParts } from "../../../convex/sessionHelpers";
-import { appendTurnContext } from "../../../convex/sessionStreamHelpers";
+import { layoutTutorRequest } from "../../../convex/sessionStreamHelpers";
 import type { ModelId } from "../../../convex/lib/models";
 import type { AideEffort } from "../../../convex/lib/aideModel";
-import { TUTOR_DEFAULT_MODEL, tutorRuntime } from "../../../convex/lib/tutorModel";
+import {
+  TUTOR_DEFAULT_MODEL,
+  supportsMidConversationSystem,
+  tutorRuntime,
+} from "../../../convex/lib/tutorModel";
 import type { ScholarContext, Turn, TutorCase } from "./types";
 
 const anthropic = new Anthropic();
@@ -43,9 +47,10 @@ export function resetTokenUsage() {
 
 /**
  * Assemble the production tutor prompt with the params this eval varies, split
- * the way /session-stream sends it: `system` is stable + dynamic, and the
- * minute-varying turn context (clock, pacing) rides at the end of the latest
- * user message (TRA-407).
+ * the way /session-stream sends it (layoutTutorRequest): stable, turn-1 and
+ * documents parts as `system`, the per-turn session state as a trailing
+ * role:"system" message, and the clock/pacing turn context at the end of the
+ * latest user message (TRA-407).
  */
 export function assemblePrompt(
   scholar: ScholarContext,
@@ -54,8 +59,8 @@ export function assemblePrompt(
   masteryContext: TutorCase["masteryContext"] = undefined,
   practiceSkillsContext: TutorCase["practiceSkillsContext"] = undefined,
   offersWrapUp = false,
-): { system: string; turnContext: string } {
-  const { stable, dynamic, turnContext } = buildSystemPromptParts(
+): ReturnType<typeof buildSystemPromptParts> {
+  return buildSystemPromptParts(
     null, // teacherWhisper
     scholar.readingLevel, // readingLevel
     scholar.name, // scholarName
@@ -76,7 +81,6 @@ export function assemblePrompt(
     // The open-exploration "Wrap up" note (TRA-371), off unless the case asks.
     offersWrapUp,
   );
-  return { system: stable + dynamic, turnContext };
 }
 
 /**
@@ -91,7 +95,7 @@ export async function generateAssistantTurn(
   offersWrapUp = false,
 ): Promise<string> {
   const isFirstTurn = history.length === 1 && history[0]?.content === "<start>";
-  const { system, turnContext } = assemblePrompt(
+  const parts = assemblePrompt(
     scholar,
     isFirstTurn,
     /* isFirstSession */ false,
@@ -126,11 +130,17 @@ export async function generateAssistantTurn(
   // Streamed, like the live tutor, so time-to-first-text is measurable.
   const started = Date.now();
   let firstTextMs: number | null = null;
+  const request = layoutTutorRequest({
+    ...parts,
+    messages,
+    midConversationSystem: supportsMidConversationSystem(tutorModel),
+  });
   const stream = anthropic.beta.messages.stream({
     model: tutorModel,
     max_tokens: runtime.maxTokens,
-    system,
-    messages: appendTurnContext(messages, turnContext),
+    system: request.system,
+    // The trailing role:"system" message postdates the pinned SDK's types.
+    messages: request.messages as typeof messages,
     ...(tutorEffort ? { output_config: { effort: tutorEffort } } : {}),
   });
   stream.on("text", () => {

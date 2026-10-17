@@ -1,4 +1,5 @@
-import { sessionModeForActivityKind } from "../../lib/activityKinds";
+import { sessionModeForActivity } from "../../lib/activityKinds";
+import { isAppActivity } from "../../shared/appSurface";
 import { internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
@@ -52,7 +53,7 @@ export async function ensureSessionActivitySetup(
   }
 
   const patch: Record<string, unknown> = {};
-  const desiredMode = sessionModeForActivityKind(args.activity.kind);
+  const desiredMode = sessionModeForActivity(args.activity);
   if (session.sessionMode !== desiredMode) {
     patch.sessionMode = desiredMode;
   }
@@ -87,9 +88,15 @@ export async function ensureSessionActivitySetup(
     await ctx.db.patch(args.sessionId, patch);
   }
 
+  // An app activity's "artifact" deliverable is the app the scholar builds:
+  // never seed an empty code artifact for it, or a blank build opens on an
+  // empty app instead of "Describe the app" and the first build adds a second
+  // app (TRA-519). Its starter, when the teacher set one, is seeded below.
+  const isApp = isAppActivity(args.activity);
   const needsCanvas =
-    args.activity.deliverable?.kind === "text" ||
-    args.activity.deliverable?.kind === "artifact";
+    !isApp &&
+    (args.activity.deliverable?.kind === "text" ||
+      args.activity.deliverable?.kind === "artifact");
   let starterSnapshot:
     | {
         title: string;
@@ -99,10 +106,7 @@ export async function ensureSessionActivitySetup(
         appAi?: Doc<"customApps">["appAi"];
       }
     | undefined;
-  if (
-    args.activity.kind === "vibecode" &&
-    args.activity.scholarsStartFrom === "starter"
-  ) {
+  if (isApp && args.activity.scholarsStartFrom === "starter") {
     if (args.activity.starterAppId) {
       const starterApp = await ctx.db.get(args.activity.starterAppId);
       if (isUsableVibecodeStarterApp(starterApp)) {

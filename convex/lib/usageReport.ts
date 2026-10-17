@@ -320,7 +320,38 @@ export interface UsageEventRow {
   // question ("did this kid's whole session run degraded?"), which the call
   // counts in `byModel` cannot answer. See the voice-transport block below.
   sessionId?: string | null;
+  // Tutor turns only: where the prompt prefix diverged from the previous
+  // turn's (lib/cacheDiagnostics.ts). Grouped by the tutor cache section.
+  cacheMissAt?: string | null;
   createdAt: number;
+}
+
+// ─── Tutor cache misses ──────────────────────────────────────────────────────
+//
+// The By model table shows THAT tutor cache writes are high; it cannot show
+// WHY. Each tutor turn's usage row carries the cache-diagnostics verdict on
+// where its prompt prefix diverged from the previous turn's, so this section
+// groups tutor turns by that verdict with the cache tokens they moved.
+const TUTOR_CACHE_SOURCES = new Set(["tutor", "tutor-test-drive"]);
+
+const CACHE_MISS_LABEL: Record<string, string> = {
+  first: "First diagnosed turn (nothing to compare)",
+  none: "No divergence",
+  pending: "Comparison still pending",
+  model_changed: "Model changed",
+  system_changed: "System prompt changed",
+  tools_changed: "Tools changed",
+  messages_changed: "Earlier history changed",
+  previous_message_not_found: "Previous turn not found",
+  unavailable: "Unavailable",
+};
+
+export interface TutorCacheMissRow {
+  cacheMissAt: string;
+  label: string;
+  turns: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
 }
 
 // ─── Voice transport health ──────────────────────────────────────────────────
@@ -442,6 +473,7 @@ export interface UsageReport {
   unpricedModels: string[]; // models seen with no rate card entry
   totalTokens: TokenTotals;
   voice: VoiceTransportSummary; // per-session dictation transport mix
+  tutorCacheMisses: TutorCacheMissRow[]; // diagnosed tutor turns, descending cache-write
 }
 
 function pct(cur: number, prior: number): number | null {
@@ -476,6 +508,8 @@ export interface UsageAccumulator {
    * by the row count, so it stays safe to fold a whole window through.
    */
   voiceBySession: Map<string, { realtime: number; whisper: number }>;
+  /** cacheMissAt → diagnosed tutor turns (bounded by the small vocabulary). */
+  tutorCacheMisses: Map<string, TutorCacheMissRow>;
 }
 
 const UNATTRIBUTED_KEY = "__unattributed__";
@@ -495,6 +529,7 @@ export function createUsageAccumulator(): UsageAccumulator {
     unpriced: new Set(),
     eventCount: 0,
     voiceBySession: new Map(),
+    tutorCacheMisses: new Map(),
   };
 }
 
@@ -553,6 +588,23 @@ export function accumulateUsage(acc: UsageAccumulator, rows: UsageEventRow[]): v
       }
       if (row.source === VOICE_REALTIME_SOURCE) mix.realtime += 1;
       else mix.whisper += 1;
+    }
+
+    if (row.cacheMissAt && TUTOR_CACHE_SOURCES.has(row.source)) {
+      let miss = acc.tutorCacheMisses.get(row.cacheMissAt);
+      if (!miss) {
+        miss = {
+          cacheMissAt: row.cacheMissAt,
+          label: CACHE_MISS_LABEL[row.cacheMissAt] ?? row.cacheMissAt,
+          turns: 0,
+          cacheWriteTokens: 0,
+          cacheReadTokens: 0,
+        };
+        acc.tutorCacheMisses.set(row.cacheMissAt, miss);
+      }
+      miss.turns += 1;
+      miss.cacheWriteTokens += row.cacheWriteTokens;
+      miss.cacheReadTokens += row.cacheReadTokens;
     }
 
     addInto(acc.totalTokens, row);
@@ -688,6 +740,11 @@ export function finalizeUsageReport(
     unpricedModels: [...acc.unpriced].sort(),
     totalTokens: acc.totalTokens,
     voice: summarizeVoiceTransport(acc),
+    tutorCacheMisses: [...acc.tutorCacheMisses.values()].sort(
+      (a, b) =>
+        b.cacheWriteTokens - a.cacheWriteTokens ||
+        a.cacheMissAt.localeCompare(b.cacheMissAt),
+    ),
   };
 }
 
@@ -865,6 +922,24 @@ export function renderUsageReportMarkdown(r: UsageReport): string {
     }
     lines.push(
       "_Voice rows are grouped by session; no session or scholar is named. A bug report filed with audio also transcribes through Whisper against its session, so it reads here as one fallback turn._",
+    );
+    lines.push("");
+  }
+
+  // Tutor cache misses. Skipped when no tutor turn was diagnosed.
+  if (r.tutorCacheMisses.length > 0) {
+    lines.push("## Tutor cache misses");
+    lines.push("");
+    lines.push("| Where the prompt diverged from the previous turn | Turns | Cache-write | Cache-read |");
+    lines.push("| --- | ---: | ---: | ---: |");
+    for (const m of r.tutorCacheMisses) {
+      lines.push(
+        `| ${m.label} | ${int(m.turns)} | ${compact(m.cacheWriteTokens)} | ${compact(m.cacheReadTokens)} |`,
+      );
+    }
+    lines.push("");
+    lines.push(
+      "_From Anthropic cache diagnostics, one verdict per tutor turn (the first changed section wins). Large cache writes under **No divergence** mean the prompt was unchanged but the cache missed anyway: the entry expired, or the previous turn added more than 20 content blocks and pushed its cache breakpoint out of the 20-block lookback window._",
     );
     lines.push("");
   }

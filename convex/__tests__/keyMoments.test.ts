@@ -113,7 +113,7 @@ describe("keyMoments.forActivity", () => {
     await seedMastery(t, teacher, driveSession, "misconception_signal", 1);
 
     const asTeacher = await withUser(t, teacher);
-    const deck = await asTeacher.query(api.keyMoments.forActivity, { activityId });
+    const deck = (await asTeacher.query(api.keyMoments.forActivity, { activityId }))!;
 
     expect(deck.sessionCount).toBe(1); // test-drive excluded
     expect(deck.pending.length).toBe(2); // the two real moments
@@ -138,7 +138,7 @@ describe("keyMoments.forActivity", () => {
       activityId, source: "mastery", sourceId: m2, verdict: "dismissed",
     });
 
-    const deck = await asTeacher.query(api.keyMoments.forActivity, { activityId });
+    const deck = (await asTeacher.query(api.keyMoments.forActivity, { activityId }))!;
     expect(deck.pending.length).toBe(0); // both triaged
     expect(deck.kept.length).toBe(1); // only the kept one
     expect(deck.kept[0].sourceId).toBe(m1);

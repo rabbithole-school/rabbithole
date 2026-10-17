@@ -23,7 +23,15 @@ import { internalMutation, internalQuery } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import { requireUnitEditAccess } from "./lib/auth";
+import {
+  canGroundUnit,
+  requireGroundingAccess,
+  requireUnitEditAccess,
+} from "./lib/auth";
+import { canReadScholarAsTeacher } from "./lib/access";
+import { isPlatformAdminRole } from "./lib/roles";
+import { MIN_REAL_N_WITHOUT_GROUNDING } from "./lib/curriculumGround";
+import { hasCurriculumRunAccess } from "./lib/curriculumRun";
 import {
   resolveActivityScopedContext,
   type ActivityResourceContext,
@@ -40,6 +48,7 @@ import {
 } from "./sessionStreamHelpers";
 import { DEFAULT_CAST } from "./lib/curriculumSimShared";
 import { isPlayOnlyApp } from "../shared/workshopMode";
+import { effectiveActivityKind, isAppActivity } from "../shared/appSurface";
 import { preflightResultValidator } from "./lib/curriculumPreflightResult";
 import { meanProbe } from "./lib/curriculumProbe";
 import { MAX_TURNS, turnsForMinutes } from "./lib/rehearsalBudget";
@@ -141,7 +150,7 @@ async function resolveActivityMeta(
   });
   return {
     title: activity.title,
-    kind: activity.kind,
+    kind: effectiveActivityKind(activity),
     systemPrompt,
     learningGoal,
     deliverablePrompt: activity.deliverable?.prompt ?? null,
@@ -199,10 +208,10 @@ async function ensureDefaultCast(
 function simRehearsalUnavailableMessage(
   activity: Pick<
     Doc<"activities">,
-    "kind" | "title" | "editAccess" | "starterAppId"
+    "kind" | "appActivity" | "title" | "editAccess" | "starterAppId"
   >,
 ): string {
-  if (activity.kind === "vibecode") {
+  if (isAppActivity(activity)) {
     // An app scholars only play: no mention of building (TRA-477).
     if (
       isPlayOnlyApp({
@@ -248,7 +257,8 @@ async function coreStart(
 ): Promise<{ experimentId: Id<"curriculumExperiments"> }> {
   const activity = await ctx.db.get(args.activityId);
   if (!activity) throw new Error("Activity not found");
-  if (activity.kind !== "online") {
+  // Effective kind: an app activity is not a sim-rehearsable online activity.
+  if (effectiveActivityKind(activity) !== "online") {
     throw new Error(simRehearsalUnavailableMessage(activity));
   }
 
@@ -437,6 +447,7 @@ export const promoteVariant = authedMutation({
 async function coreGround(
   ctx: MutationCtx,
   experimentId: Id<"curriculumExperiments">,
+  groundedBy: Id<"users">,
 ): Promise<{ ok: true }> {
   const exp = await ctx.db.get(experimentId);
   if (!exp) throw new Error("Experiment not found");
@@ -455,6 +466,7 @@ async function coreGround(
   });
   await ctx.scheduler.runAfter(0, internal.curriculumSim.runGrounding, {
     experimentId,
+    groundedBy,
   });
   return { ok: true };
 }
@@ -464,8 +476,13 @@ export const groundExperiment = authedMutation({
   handler: async (ctx, args) => {
     const exp = await ctx.db.get(args.experimentId);
     if (!exp) throw new Error("Experiment not found");
-    await requireUnitEditAccess(ctx, { activityId: exp.activityId });
-    return coreGround(ctx, args.experimentId);
+    const { user, unit } = await requireUnitEditAccess(ctx, {
+      activityId: exp.activityId,
+    });
+    // Grounding judges REAL scholar transcripts; unit-edit access alone is
+    // not enough (see canGroundUnit).
+    await requireGroundingAccess(ctx, user, unit);
+    return coreGround(ctx, args.experimentId, user._id);
   },
 });
 
@@ -507,7 +524,11 @@ async function findActivityInUnit(
       if (a.title.toLowerCase().includes(lower)) matches.push(a);
     }
   }
-  return matches.find((a) => a.kind === "online") ?? matches[0] ?? null;
+  return (
+    matches.find((a) => effectiveActivityKind(a) === "online") ??
+    matches[0] ??
+    null
+  );
 }
 
 /**
@@ -515,8 +536,9 @@ async function findActivityInUnit(
  * real (non-test-drive, non-offline) sessions. Lets the Debrief kickoff tell
  * the teacher how much scholar feedback the grounding is about to weigh.
  *
- * Mirrors getGroundInput's session selection EXACTLY — same `hasScholar &&
- * hasTutor` gate and the same MAX_REAL_SESSIONS cap — so the number the
+ * Mirrors getGroundInput's session selection EXACTLY — same caller-access
+ * filter, same `hasScholar && hasTutor` gate and the same MAX_REAL_SESSIONS
+ * cap — so the number the
  * kickoff message states matches the `scholarFeedback.count` the grounding
  * later stores and the Debrief card renders. (messageFlags only ever sit on
  * assistant turns, so per-session `flags.length` == flagged judged turns.)
@@ -524,6 +546,7 @@ async function findActivityInUnit(
 async function countActivityScholarFlags(
   ctx: MutationCtx,
   activity: Doc<"activities">,
+  caller: Doc<"users">,
 ): Promise<number> {
   const lessonId = activity.lessonId;
   if (!lessonId) return 0;
@@ -536,6 +559,7 @@ async function countActivityScholarFlags(
   for (const p of sessions) {
     if (p.activityId !== activity._id) continue;
     if (p.isTestDrive || p.isOffline) continue;
+    if (!(await canReadScholarAsTeacher(ctx, caller, p.userId))) continue;
     const msgs = await ctx.db
       .query("messages")
       .withIndex("by_session", (q) => q.eq("sessionId", p._id))
@@ -585,7 +609,7 @@ export const aideStartRehearsal = internalMutation({
         message: `No activity matching "${args.activityTitle}" in this unit.`,
       };
     }
-    if (activity.kind !== "online") {
+    if (effectiveActivityKind(activity) !== "online") {
       return {
         ok: false,
         message: simRehearsalUnavailableMessage(activity),
@@ -602,7 +626,7 @@ export const aideStartRehearsal = internalMutation({
       activityDetails: {
         id: activity._id,
         title: activity.title,
-        kind: activity.kind,
+        kind: effectiveActivityKind(activity),
         systemPrompt: activity.systemPrompt ?? null,
         deliverable: activity.deliverable ?? null,
       },
@@ -617,6 +641,18 @@ export const aideGroundLatest = internalMutation({
     callerUserId: v.id("users"),
   },
   handler: async (ctx, args): Promise<AideResult> => {
+    // Same teacher-only gate as the public groundExperiment: the unit-edit
+    // check the aide tool runs first admits curriculum designers and
+    // `curriculum:edit` staff, who carry no scholar-data access.
+    const caller = await ctx.db.get(args.callerUserId);
+    const unit = await ctx.db.get(args.unitId);
+    if (!caller || !unit || !(await canGroundUnit(ctx, caller, unit))) {
+      return {
+        ok: false,
+        message:
+          "Debrief compares against real scholar sessions, so it's limited to teachers and admins.",
+      };
+    }
     const activity = await findActivityInUnit(ctx, args.unitId, args.activityTitle);
     if (!activity) {
       return {
@@ -647,8 +683,8 @@ export const aideGroundLatest = internalMutation({
     if (latestDone.grounding?.status === "running") {
       return { ok: false, message: `A debrief is already running on "${activity.title}".` };
     }
-    await coreGround(ctx, latestDone._id);
-    const flagCount = await countActivityScholarFlags(ctx, activity);
+    await coreGround(ctx, latestDone._id, caller._id);
+    const flagCount = await countActivityScholarFlags(ctx, activity, caller);
     const flagNote =
       flagCount > 0
         ? ` Heads up: scholars flagged ${flagCount} tutor response${
@@ -685,7 +721,7 @@ export const getRunInput = internalQuery({
       baseline?.systemPrompt ?? activityDoc.systemPrompt ?? null;
     const activity = {
       title: activityDoc.title,
-      kind: activityDoc.kind,
+      kind: effectiveActivityKind(activityDoc),
       systemPrompt,
       learningGoal: exp.config.learningGoal,
       deliverablePrompt: activityDoc.deliverable?.prompt ?? null,
@@ -835,12 +871,27 @@ const MAX_REAL_SESSIONS = 12;
  * level. Empty `realSessions` ⇒ the action records a "no real data" grounding.
  */
 export const getGroundInput = internalQuery({
-  args: { experimentId: v.id("curriculumExperiments") },
+  args: {
+    experimentId: v.id("curriculumExperiments"),
+    // The teacher who started the grounding. Only their accessible scholars'
+    // sessions are judged. Optional so a run scheduled before this arg
+    // existed still validates; without it no real session is read.
+    groundedBy: v.optional(v.id("users")),
+  },
   handler: async (ctx, args) => {
     const exp = await ctx.db.get(args.experimentId);
     if (!exp) throw new Error("Experiment not found");
     const activityDoc = await ctx.db.get(exp.activityId);
     if (!activityDoc) throw new Error("Activity not found");
+    // Re-check grounding rights when the job RUNS, not just at kickoff: a
+    // teacher who lost standing (or a school suspended) in between reads none.
+    const groundedBy = args.groundedBy ? await ctx.db.get(args.groundedBy) : null;
+    const lesson = activityDoc.lessonId
+      ? await ctx.db.get(activityDoc.lessonId)
+      : null;
+    const unit = lesson ? await ctx.db.get(lesson.unitId) : null;
+    const canGround =
+      !!groundedBy && !!unit && (await canGroundUnit(ctx, groundedBy, unit));
     const baseline = exp.baselineVariantId
       ? await ctx.db.get(exp.baselineVariantId)
       : null;
@@ -849,7 +900,7 @@ export const getGroundInput = internalQuery({
       baseline?.systemPrompt ?? activityDoc.systemPrompt ?? null;
     const activity = {
       title: activityDoc.title,
-      kind: activityDoc.kind,
+      kind: effectiveActivityKind(activityDoc),
       systemPrompt,
       learningGoal: exp.config.learningGoal,
       deliverablePrompt: activityDoc.deliverable?.prompt ?? null,
@@ -876,10 +927,15 @@ export const getGroundInput = internalQuery({
     }[] = [];
     // Roll-up of scholar flags across the real sessions, for the stored
     // debrief result (count + a few examples to show the teacher/bot).
-    const scholarFeedbackExamples: { snippet: string; reason: string | null }[] =
-      [];
+    // Each example keeps its scholar so reads can filter per scholar.
+    const scholarFeedbackExamples: {
+      snippet: string;
+      reason: string | null;
+      scholarId: Id<"users">;
+      sessionId: Id<"sessions">;
+    }[] = [];
     let scholarFlagCount = 0;
-    if (activityDoc.lessonId) {
+    if (groundedBy && canGround && activityDoc.lessonId) {
       const sessions = await ctx.db
         .query("sessions")
         .withIndex("by_lesson", (q) => q.eq("lessonId", activityDoc.lessonId))
@@ -887,6 +943,7 @@ export const getGroundInput = internalQuery({
       for (const p of sessions) {
         if (p.activityId !== exp.activityId) continue;
         if (p.isTestDrive || p.isOffline) continue;
+        if (!(await canReadScholarAsTeacher(ctx, groundedBy, p.userId))) continue;
         const msgs = await ctx.db
           .query("messages")
           .withIndex("by_session", (q) => q.eq("sessionId", p._id))
@@ -923,6 +980,8 @@ export const getGroundInput = internalQuery({
                 scholarFeedbackExamples.push({
                   snippet: m.content.replace(/\s+/g, " ").trim().slice(0, 140),
                   reason,
+                  scholarId: p.userId,
+                  sessionId: p._id,
                 });
               }
               return {
@@ -1193,12 +1252,98 @@ export const finalize = internalMutation({
 
 // ─── Teacher-facing reads ────────────────────────────────────────────
 
+/**
+ * The stored grounding as `user` may see it.
+ *
+ * - `scholarFeedback.examples` carry scholar-written flag reasons and tutor
+ *   snippets from real sessions. They are filtered PER SCHOLAR at read time,
+ *   like judgeValidation's verdicts, so a grounding run by someone with wider
+ *   reach (a platform admin) or a later loss of access never exposes a scholar
+ *   the viewer can't read. Viewers without grounding rights see none, and a
+ *   legacy example with no stamped scholar is shown only to a platform admin.
+ * - Viewers without grounding rights also lose the real aggregate and the
+ *   calibration numbers when fewer than MIN_REAL_N_WITHOUT_GROUNDING real
+ *   sessions back them: below that, the "mean" is one scholar's score.
+ */
+async function groundingForViewer(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  canGround: boolean,
+  exp: Doc<"curriculumExperiments">,
+): Promise<Doc<"curriculumExperiments">> {
+  const grounding = exp.grounding;
+  if (!grounding) return exp;
+  const next = { ...grounding };
+  if (grounding.scholarFeedback) {
+    const examples: unknown[] = [];
+    if (canGround) {
+      for (const example of grounding.scholarFeedback.examples ?? []) {
+        const visible = example.scholarId
+          ? await canReadScholarAsTeacher(ctx, user, example.scholarId)
+          : isPlatformAdminRole(user.role);
+        if (visible) examples.push(example);
+      }
+    }
+    next.scholarFeedback = { ...grounding.scholarFeedback, examples };
+  }
+  const realN: number = grounding.realN ?? grounding.realAggregate?.n ?? 0;
+  // A curriculum:run holder never sees the real aggregate at any n: it pools
+  // every cohort's sessions, and her Debrief is scoped to her own runs.
+  const runnerViewer =
+    !canGround && (await hasCurriculumRunAccess(ctx, user));
+  if (
+    !canGround &&
+    grounding.status === "done" &&
+    (realN < MIN_REAL_N_WITHOUT_GROUNDING || runnerViewer)
+  ) {
+    for (const key of [
+      "realAggregate",
+      "perDim",
+      "fitnessDelta",
+      "threshold",
+      "trustworthy",
+      "goalAttainmentDelta",
+      "goalAttainmentThreshold",
+      "goalAttainmentOptimistic",
+      "goalAttainmentNote",
+    ]) {
+      delete next[key];
+    }
+    next.note = runnerViewer
+      ? "The comparison with real scholars is limited to teachers at this school."
+      : `Fewer than ${MIN_REAL_N_WITHOUT_GROUNDING} real sessions — the comparison is limited to teachers at this school.`;
+  }
+  return { ...exp, grounding: next };
+}
+
+/**
+ * Whether the caller may use the Debrief view on this activity: run a
+ * grounding and read its real-scholar results (canGroundUnit). Never throws,
+ * so the Debrief panel can gate on it without an error boundary.
+ */
+export const canDebrief = authedQuery({
+  args: { activityId: v.id("activities") },
+  handler: async (ctx, args): Promise<boolean> => {
+    try {
+      const { user, unit } = await requireUnitEditAccess(ctx, {
+        activityId: args.activityId,
+      });
+      return await canGroundUnit(ctx, user, unit);
+    } catch {
+      return false;
+    }
+  },
+});
+
 export const get = authedQuery({
   args: { experimentId: v.id("curriculumExperiments") },
   handler: async (ctx, args) => {
     const exp = await ctx.db.get(args.experimentId);
     if (!exp) return null;
-    await requireUnitEditAccess(ctx, { activityId: exp.activityId });
+    const { user, unit } = await requireUnitEditAccess(ctx, {
+      activityId: exp.activityId,
+    });
+    const canGround = await canGroundUnit(ctx, user, unit);
 
     const sessions = await ctx.db
       .query("simulatedSessions")
@@ -1241,7 +1386,7 @@ export const get = authedQuery({
     }
 
     return {
-      experiment: exp,
+      experiment: await groundingForViewer(ctx, user, canGround, exp),
       baselineVariant: baseline,
       variants,
       probeByVariant,
@@ -1266,12 +1411,18 @@ export const get = authedQuery({
 export const listByActivity = authedQuery({
   args: { activityId: v.id("activities") },
   handler: async (ctx, args) => {
-    await requireUnitEditAccess(ctx, { activityId: args.activityId });
-    return await ctx.db
+    const { user, unit } = await requireUnitEditAccess(ctx, {
+      activityId: args.activityId,
+    });
+    const canGround = await canGroundUnit(ctx, user, unit);
+    const experiments = await ctx.db
       .query("curriculumExperiments")
       .withIndex("by_activity", (q) => q.eq("activityId", args.activityId))
       .order("desc")
       .collect();
+    return await Promise.all(
+      experiments.map((exp) => groundingForViewer(ctx, user, canGround, exp)),
+    );
   },
 });
 

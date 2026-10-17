@@ -5,6 +5,7 @@
 import { v } from "convex/values";
 import { authedQuery } from "./lib/customFunctions";
 import { requireUnitEditAccess } from "./lib/auth";
+import { curriculumRunnerScopeForUnit } from "./lib/curriculumRun";
 import {
   activityNodeStatus,
   computeUnitMaturity,
@@ -18,11 +19,21 @@ import {
   type Readiness,
 } from "./lib/unitMaturity";
 import { granuleTexts } from "./lib/granules";
+import { effectiveActivityKind } from "../shared/appSurface";
 
 export const getForUnit = authedQuery({
   args: { unitId: v.id("units") },
   handler: async (ctx, args): Promise<ReturnType<typeof computeUnitMaturity>> => {
-    const { unit } = await requireUnitEditAccess(ctx, { unitId: args.unitId });
+    const { user, unit } = await requireUnitEditAccess(ctx, {
+      unitId: args.unitId,
+    });
+    // curriculum:run: her lamps count only her own runs, and grounding (a
+    // sims-vs-real comparison she has no standing for) never lights.
+    const runnerScope = await curriculumRunnerScopeForUnit(
+      ctx,
+      user,
+      args.unitId,
+    );
 
     const lessons = await ctx.db
       .query("lessons")
@@ -39,7 +50,7 @@ export const getForUnit = authedQuery({
           .collect(),
       ),
     );
-    const online = activityLists.flat().filter((a) => a.kind === "online");
+    const online = activityLists.flat().filter((a) => effectiveActivityKind(a) === "online");
 
     let passing = 0;
     let grounded = 0;
@@ -63,7 +74,7 @@ export const getForUnit = authedQuery({
       const groundedExps = experiments.filter(
         (e) => e.grounding && typeof e.grounding === "object",
       );
-      if (groundedExps.length > 0) {
+      if (groundedExps.length > 0 && runnerScope === null) {
         grounded++;
         if (
           groundedExps.some(
@@ -85,7 +96,11 @@ export const getForUnit = authedQuery({
       .query("assignments")
       .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
       .collect();
-    const activeCount = assignments.filter((a) => !a.archivedAt).length;
+    const activeCount = assignments.filter(
+      (a) =>
+        !a.archivedAt &&
+        (runnerScope === null || runnerScope.has(String(a._id))),
+    ).length;
 
     const input: MaturityInput = {
       unit: {
@@ -130,7 +145,16 @@ export const getNodeStatuses = authedQuery({
       activities: Record<string, Readiness>;
     };
   }> => {
-    const { unit } = await requireUnitEditAccess(ctx, { unitId: args.unitId });
+    const { user, unit } = await requireUnitEditAccess(ctx, {
+      unitId: args.unitId,
+    });
+    // curriculum:run: "assigned" and the unit's active-run count read only
+    // her own runs; the grounded/trustworthy lamps stay dark for her.
+    const runnerScope = await curriculumRunnerScopeForUnit(
+      ctx,
+      user,
+      args.unitId,
+    );
 
     const lessons = await ctx.db
       .query("lessons")
@@ -185,7 +209,7 @@ export const getNodeStatuses = authedQuery({
       let lessonPassing = 0;
       let lessonRehearsalRunning = false;
       for (const a of activityLists[i]) {
-        const isOnline = a.kind === "online";
+        const isOnline = effectiveActivityKind(a) === "online";
         const contributesToRollup = a.archivedAt == null;
         let bestFitness: number | null = null;
         let isGrounded = false;
@@ -231,7 +255,7 @@ export const getNodeStatuses = authedQuery({
           const groundedExps = experiments.filter(
             (e) => e.grounding && typeof e.grounding === "object",
           );
-          if (groundedExps.length > 0) {
+          if (groundedExps.length > 0 && runnerScope === null) {
             isGrounded = true;
             isTrustworthy = groundedExps.some(
               (e) =>
@@ -246,7 +270,7 @@ export const getNodeStatuses = authedQuery({
           // "Assigned" for an online activity = a real scholar has worked on
           // it (a non-test-drive session). The bridge fact for its Debrief
           // rung. Cheap existence check via the by_activity index.
-          const realSession = await ctx.db
+          const realSessions = ctx.db
             .query("sessions")
             .withIndex("by_activity", (q) => q.eq("activityId", a._id))
             .filter((q) =>
@@ -254,8 +278,15 @@ export const getNodeStatuses = authedQuery({
                 q.neq(q.field("isTestDrive"), true),
                 q.neq(q.field("isOffline"), true),
               ),
-            )
-            .first();
+            );
+          const realSession =
+            runnerScope === null
+              ? await realSessions.first()
+              : ((await realSessions.collect()).find(
+                  (s) =>
+                    !!s.assignmentId &&
+                    runnerScope.has(String(s.assignmentId)),
+                ) ?? null);
           activitiesAssigned[String(a._id)] = realSession !== null;
         }
         const status = activityNodeStatus({
@@ -307,7 +338,11 @@ export const getNodeStatuses = authedQuery({
       .query("assignments")
       .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
       .collect();
-    const activeAssignments = unitAssignments.filter((a) => !a.archivedAt).length;
+    const activeAssignments = unitAssignments.filter(
+      (a) =>
+        !a.archivedAt &&
+        (runnerScope === null || runnerScope.has(String(a._id))),
+    ).length;
 
     const maturityInput: MaturityInput = {
       unit: {

@@ -1,8 +1,18 @@
-// The vibecode MODEL CONTRACT (schema.ts activities.buildContract): one
-// validator + one normalizer so every writer (web editor, aide tools, unit
-// tools, duplicate/fork) enforces the same limits. The contract is not
-// secret — it is a design-time steering note, read alongside the brief.
+// The activity's MISSION, stored as `activities.buildContract` (schema.ts):
+// one validator + one normalizer so every writer (web editor, aide tools, unit
+// tools, duplicate/fork) enforces the same limits. It is not secret — it is a
+// design-time steering note, read alongside the brief.
+//
+// Shape per activity (TRA-519 B1):
+//   • App activity: the builder's MODEL CONTRACT — 1–5 "must be true"
+//     invariants, 0–8 freedoms, optional gate; 0–5 invariants when it has a
+//     gate (a mission of gate + freedoms, e.g. a Quest co-design app step).
+//   • Any other online activity: gate + freedoms only. Its "must be true"
+//     items belong in the deliverable's criteria, so invariants must be empty.
+//   • Every other kind (offline, game, web, …): no mission — no tutor session
+//     to steer.
 import { v } from "convex/values";
+import { isAppActivity } from "../../shared/appSurface";
 
 export const BUILD_CONTRACT_LIMITS = {
   minInvariants: 1,
@@ -35,15 +45,31 @@ function cleanList(items: readonly string[], label: string): string[] {
   return cleaned;
 }
 
-export function normalizeBuildContract(raw: BuildContract): BuildContract {
+export function normalizeBuildContract(
+  raw: BuildContract,
+  opts: { appActivity?: boolean } = { appActivity: true },
+): BuildContract {
+  const appActivity = opts.appActivity !== false;
   const invariants = cleanList(raw.invariants, "\"must be true\"");
   const freedoms = cleanList(raw.freedoms, "\"scholar owns\"");
-  if (
-    invariants.length < BUILD_CONTRACT_LIMITS.minInvariants ||
-    invariants.length > BUILD_CONTRACT_LIMITS.maxInvariants
-  ) {
+  if (appActivity) {
+    // An app mission with a gate may carry no invariants (a Quest co-design
+    // app step: "what it does first" + what the scholar owns); without a gate
+    // the invariants ARE the mission, so at least one is required.
+    const minInvariants = raw.gate?.trim()
+      ? 0
+      : BUILD_CONTRACT_LIMITS.minInvariants;
+    if (
+      invariants.length < minInvariants ||
+      invariants.length > BUILD_CONTRACT_LIMITS.maxInvariants
+    ) {
+      throw new Error(
+        `A model contract needs ${minInvariants}–${BUILD_CONTRACT_LIMITS.maxInvariants} "must be true" invariants (got ${invariants.length}).`,
+      );
+    }
+  } else if (invariants.length > 0) {
     throw new Error(
-      `A model contract needs ${BUILD_CONTRACT_LIMITS.minInvariants}–${BUILD_CONTRACT_LIMITS.maxInvariants} "must be true" invariants (got ${invariants.length}).`,
+      "For a non-app activity, put 'must be true' items in the deliverable's criteria; a mission here is a gate plus freedoms.",
     );
   }
   if (freedoms.length > BUILD_CONTRACT_LIMITS.maxFreedoms) {
@@ -58,6 +84,15 @@ export function normalizeBuildContract(raw: BuildContract): BuildContract {
     );
   }
   return { invariants, freedoms, ...(gate ? { gate } : {}) };
+}
+
+/** True when a normalized non-app mission carries nothing worth storing. */
+function isEmptyMission(contract: BuildContract): boolean {
+  return (
+    contract.invariants.length === 0 &&
+    contract.freedoms.length === 0 &&
+    !contract.gate
+  );
 }
 
 /** Coerce a model-authored tool argument (loose JSON) into the contract
@@ -79,23 +114,37 @@ export function parseBuildContractArg(raw: unknown): BuildContract | undefined {
   };
 }
 
+/** The activity shape a write leaves the row in: legacy { kind: "vibecode" }
+ * or { kind: "online", appActivity: true } are both app activities. */
+export type ContractTarget = { kind: string; appActivity?: boolean | null };
+
+/** Whether the activity can carry a mission: any online activity (app
+ * activities included). */
+export function canCarryMission(target: ContractTarget | null | undefined): boolean {
+  return isAppActivity(target) || target?.kind === "online";
+}
+
 export function assertContractKind(
-  kind: string,
+  target: ContractTarget | null | undefined,
   fields: { buildContract?: unknown; allowSilence?: boolean },
 ): void {
-  if (kind === "vibecode") return;
-  if (fields.buildContract != null || fields.allowSilence === true) {
+  if (fields.allowSilence === true && !isAppActivity(target)) {
+    throw new Error("allowSilence applies only to app (build-an-app) activities.");
+  }
+  if (fields.buildContract != null && !canCarryMission(target)) {
     throw new Error(
-      "A model contract and allowSilence apply only to vibecode (build-an-app) activities.",
+      "A mission (gate and freedoms) applies only to online activities, which have a tutor session to steer.",
     );
   }
 }
 
 /**
- * The patch a writer applies for the two contract fields, given the kind the
+ * The patch a writer applies for the two contract fields, given the shape the
  * row will have AFTER the write. `undefined` = not supplied (leave as is),
- * `null` = clear. Throws on a non-vibecode kind so a contract can never be
- * stranded on an activity the designer never runs. `allowSilence: false` is
+ * `null` = clear. Throws on a kind with no tutor session so a mission can
+ * never be stranded on an activity nobody steers by; a non-app mission with
+ * invariants throws (they belong in the deliverable's criteria), and an empty
+ * non-app mission is stored as absent. `allowSilence: false` is
  * stored as absent (false is the default).
  *
  * allowSilence only means something under a contract (stay_silent is offered
@@ -104,7 +153,7 @@ export function assertContractKind(
  * current row; omit on create). Clearing the contract clears it too.
  */
 export function buildContractPatch(
-  targetKind: string | undefined,
+  target: ContractTarget | null | undefined,
   fields: {
     buildContract?: BuildContract | null;
     allowSilence?: boolean | null;
@@ -119,15 +168,19 @@ export function buildContractPatch(
     fields.buildContract !== undefined && fields.buildContract !== null;
   const settingSilence = fields.allowSilence === true;
   if (settingContract || settingSilence) {
-    assertContractKind(targetKind ?? "", {
+    assertContractKind(target, {
       buildContract: settingContract ? fields.buildContract : undefined,
       allowSilence: settingSilence,
     });
   }
   if (fields.buildContract !== undefined) {
-    patch.buildContract = fields.buildContract
-      ? normalizeBuildContract(fields.buildContract)
+    const normalized = fields.buildContract
+      ? normalizeBuildContract(fields.buildContract, {
+          appActivity: isAppActivity(target),
+        })
       : undefined;
+    patch.buildContract =
+      normalized && !isEmptyMission(normalized) ? normalized : undefined;
   }
   const resultingContract =
     fields.buildContract !== undefined

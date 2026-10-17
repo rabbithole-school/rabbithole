@@ -18,7 +18,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { MAX_KID_ACTIONS, createAppRunner, describeKidAction, describeScreen, parseKidAction, summarizeState } from "./appRunner.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -324,9 +324,9 @@ async function assignAndOpen(env, setup, scholarName, activityId = setup.activit
 }
 
 /** POST /session-stream as VibecodeWorkshop does (Edit = the designer thread) and read the SSE to the end. */
-async function streamTurn(env, scholarName, prepared) {
+async function streamTurn(env, scholarName, prepared, { mode = "edit" } = {}) {
   const started = Date.now();
-  const body = { sessionId: prepared.sessionId, streamId: prepared.streamId, assistantMsgId: prepared.assistantMsgId, platform: "web", mode: "edit" };
+  const body = { sessionId: prepared.sessionId, streamId: prepared.streamId, assistantMsgId: prepared.assistantMsgId, platform: "web", ...(mode ? { mode } : {}) };
   const segments = [""];
   const tools = [];
   let done = null;
@@ -934,10 +934,22 @@ async function main() {
   const env = command === "judge" ? null : readEnv();
   await fn(env, flags);
 }
-main().then(
-  () => process.exit(0),
-  (e) => {
-    out({ error: e instanceof HarnessError ? e.message : cleanError(e) });
-    process.exit(1);
-  },
-);
+// Importable by other harnesses (evals/mission-steer): main() runs only when
+// this file is the entry point.
+const isEntry = (() => {
+  try {
+    return !!process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+})();
+export { assignAndOpen, HarnessError, out, sleep, str, readDotEnv, anthropicClient, cleanError, q, m, sha, signedIn, runPaths, acquireLock, writeJson, readJson, readTurns, readLines, streamTurn, currentApp };
+if (isEntry) {
+  main().then(
+    () => process.exit(0),
+    (e) => {
+      out({ error: e instanceof HarnessError ? e.message : cleanError(e) });
+      process.exit(1);
+    },
+  );
+}

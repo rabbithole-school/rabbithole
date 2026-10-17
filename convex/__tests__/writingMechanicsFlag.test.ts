@@ -359,6 +359,7 @@ describe("the policy reaches every assessor", () => {
       angleTitle: null,
       angleDescription: null,
       assessesWritingMechanics: false,
+      isAppDeliverable: false,
     };
     expect(buildCriteriaGenUserMessage(bundle)).toContain(
       WRITING_MECHANICS_CRITERIA_FORBIDDEN,

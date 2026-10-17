@@ -7,6 +7,7 @@ import {
   buildTutorSystemPrompt,
   buildTutorSystemPromptParts,
   appendTurnContext,
+  layoutTutorRequest,
   TURN_CONTEXT_PREFIX,
   injectPendingWhisper,
   rubricCheckInstruction,
@@ -19,13 +20,15 @@ import {
   RENDER_CHECK_MAX_PER_TURN,
   type TutorPromptContext,
 } from "../sessionStreamHelpers";
-import { buildSystemPrompt } from "../sessionHelpers";
+import { buildSystemPrompt, joinTutorPromptParts } from "../sessionHelpers";
 import {
   buildTalkLevelSection,
   buildToolsSection,
+  FIRST_DOCUMENT_TUTOR_SECTION,
   FIRST_DYNAMIC_TUTOR_SECTION,
   TUTOR_PROMPT_SECTION_ORDER,
   TUTOR_TURN_CONTEXT_SECTIONS,
+  TUTOR_TURN_SYSTEM_SECTIONS,
 } from "../prompts";
 import { withConversationCacheBreakpoint } from "../lib/aideStream";
 
@@ -133,32 +136,32 @@ describe("parseSessionStreamBody", () => {
       expect(canRequestRenderCheck(RENDER_CHECK_MAX_PER_TURN + 1)).toBe(false);
     });
 
-    test("requires a capable web or native Vibecode host", () => {
+    test("requires a capable web or native builder host in a session with an app", () => {
       expect(
         renderChecksEnabled({
           supportsRenderCheck: true,
           platform: "web",
-          sessionMode: "vibecode",
+          builderFeatures: true,
         }),
       ).toBe(true);
       expect(
         renderChecksEnabled({
           supportsRenderCheck: true,
           platform: "native",
-          sessionMode: "vibecode",
+          builderFeatures: true,
         }),
       ).toBe(true);
       expect(
         renderChecksEnabled({
           supportsRenderCheck: true,
           platform: "web",
-          sessionMode: "conversation",
+          builderFeatures: false,
         }),
       ).toBe(false);
       expect(
         renderChecksEnabled({
           platform: "web",
-          sessionMode: "vibecode",
+          builderFeatures: true,
         }),
       ).toBe(false);
     });
@@ -674,9 +677,7 @@ describe("buildTutorSystemPrompt", () => {
 
 describe("buildTutorSystemPromptParts (prompt-cache split)", () => {
   test("all parts are byte-identical to the full prompt", () => {
-    const { stable, dynamic, turnContext } =
-      buildTutorSystemPromptParts(baseCtx);
-    expect(stable + dynamic + "\n\n" + turnContext).toBe(
+    expect(joinTutorPromptParts(buildTutorSystemPromptParts(baseCtx))).toBe(
       buildTutorSystemPrompt(baseCtx),
     );
   });
@@ -700,15 +701,13 @@ describe("buildTutorSystemPromptParts (prompt-cache split)", () => {
       isFirstTurn: true,
       isFirstSession: true,
     };
-    const { stable, dynamic, turnContext } =
-      buildTutorSystemPromptParts(rich);
-    expect(stable + dynamic + "\n\n" + turnContext).toBe(
+    expect(joinTutorPromptParts(buildTutorSystemPromptParts(rich))).toBe(
       buildTutorSystemPrompt(rich),
     );
   });
 
-  test("the cached stable prefix carries the base prompt, not the dynamic suffix", () => {
-    const { stable, dynamic } = buildTutorSystemPromptParts({
+  test("the cached stable prefix carries the base prompt, not the per-turn state", () => {
+    const { stable, dynamic, turnSystem } = buildTutorSystemPromptParts({
       ...baseCtx,
       teacherWhisper: "watch for cognitive offloading",
       teacherDirectives: [{ label: "Pacing", content: "Slow down on fractions." }],
@@ -716,9 +715,10 @@ describe("buildTutorSystemPromptParts (prompt-cache split)", () => {
     // The large, session-stable base prompt is in the cached prefix…
     expect(stable).toContain("plain prose");
     expect(stable.length).toBeGreaterThan(1000);
-    // …while per-turn-varying sections live in the uncached suffix.
+    // …while per-turn-varying sections ride in the per-turn session state.
     expect(stable).not.toContain("Teacher directives for this scholar");
-    expect(dynamic).toContain("Teacher directives for this scholar");
+    expect(dynamic).not.toContain("Teacher directives for this scholar");
+    expect(turnSystem).toContain("Teacher directives for this scholar");
   });
 });
 
@@ -825,15 +825,19 @@ describe("buildTutorSystemPromptParts — stable prefix is identical on turn 1 a
     return { turn1, turn2 };
   }
 
-  test("first-ever session: FIRST MESSAGE + intro live only in the dynamic tail", () => {
+  test("first-ever session: FIRST MESSAGE + intro live only after the cached prefix", () => {
     const { turn1, turn2 } = turns({ isFirstSession: true, lastSessionAt: null });
     expect(turn1.stable).toBe(turn2.stable);
     expect(turn1.stable).not.toContain("FIRST MESSAGE");
     expect(turn1.stable).not.toContain("Introduce yourself");
     expect(turn1.dynamic).toContain("FIRST MESSAGE:");
-    expect(turn1.dynamic).toContain("## Introduce yourself");
+    // The intro stays LAST for recency: the end of the per-turn session state.
+    expect(turn1.turnSystem.trimEnd().endsWith(
+      turn1.turnSystem.slice(turn1.turnSystem.indexOf("## Introduce yourself")).trimEnd(),
+    )).toBe(true);
+    expect(turn1.turnSystem).toContain("## Introduce yourself");
     expect(turn2.dynamic).not.toContain("FIRST MESSAGE");
-    expect(turn2.dynamic).not.toContain("## Introduce yourself");
+    expect(turn2.turnSystem).not.toContain("## Introduce yourself");
   });
 
   test("returning scholar, new session after a gap: fresh-start guard only in the dynamic tail", () => {
@@ -935,9 +939,7 @@ describe("buildTutorSystemPromptParts — session-stable sections join the cache
   };
 
   test("all parts are still byte-identical to the full prompt", () => {
-    const { stable, dynamic, turnContext } =
-      buildTutorSystemPromptParts(rich);
-    expect(stable + dynamic + "\n\n" + turnContext).toBe(
+    expect(joinTutorPromptParts(buildTutorSystemPromptParts(rich))).toBe(
       buildTutorSystemPrompt(rich),
     );
   });
@@ -959,8 +961,8 @@ describe("buildTutorSystemPromptParts — session-stable sections join the cache
     expect(dynamic).not.toContain(buildToolsSection());
   });
 
-  test("per-turn scholar record, verdicts, whisper and seeds stay in the dynamic system tail", () => {
-    const { stable, dynamic, turnContext } =
+  test("per-turn scholar record, verdicts, whisper and seeds ride in the per-turn session state", () => {
+    const { stable, dynamic, documents, turnSystem, turnContext } =
       buildTutorSystemPromptParts(rich);
     for (const marker of [
       "area conservation", // mastery
@@ -969,8 +971,8 @@ describe("buildTutorSystemPromptParts — session-stable sections join the cache
       "arches", // seeds
       "[c1] → half", // current verdicts
     ]) {
-      expect(dynamic).toContain(marker);
-      expect(stable).not.toContain(marker);
+      expect(turnSystem).toContain(marker);
+      expect(stable + dynamic + documents).not.toContain(marker);
     }
     expect(turnContext.startsWith("Current date and time:")).toBe(true);
     expect(stable).not.toContain("Current date and time:");
@@ -997,19 +999,227 @@ describe("buildTutorSystemPromptParts — session-stable sections join the cache
       dossierContent: "Updated by the observer.",
     });
     expect(turnB.stable).toBe(turnA.stable);
-    expect(turnB.dynamic).not.toBe(turnA.dynamic);
+    expect(turnB.dynamic).toBe(turnA.dynamic);
+    expect(turnB.documents).toBe(turnA.documents);
+    expect(turnB.turnSystem).not.toBe(turnA.turnSystem);
   });
 
   test("the section order constant is exhaustive and the breakpoint key is in it", () => {
     const idx = TUTOR_PROMPT_SECTION_ORDER.indexOf(FIRST_DYNAMIC_TUTOR_SECTION);
     expect(idx).toBeGreaterThan(0);
+    expect(TUTOR_PROMPT_SECTION_ORDER.indexOf(FIRST_DOCUMENT_TUTOR_SECTION)).toBeGreaterThan(idx);
     const allSections = [
       ...TUTOR_PROMPT_SECTION_ORDER,
+      ...TUTOR_TURN_SYSTEM_SECTIONS,
       ...TUTOR_TURN_CONTEXT_SECTIONS,
     ];
     expect(new Set(allSections).size).toBe(
       allSections.length,
     );
+  });
+});
+
+describe("buildTutorSystemPromptParts — documents are their own cached part", () => {
+  const app = {
+    id: "art1" as Id<"artifacts">,
+    title: "Volcano sim",
+    content: "<html>\n<body>lava</body>\n</html>",
+    type: "code",
+    revision: 3,
+    lastEditedBy: "tutor",
+  } as unknown as NonNullable<TutorPromptContext["artifactData"]>[number];
+  const ctx: TutorPromptContext = { ...baseCtx, artifactData: [app] };
+
+  test("the line-numbered DOCUMENTS section is in `documents`, nowhere else", () => {
+    const parts = buildTutorSystemPromptParts(ctx);
+    expect(parts.documents).toContain("DOCUMENTS (1):");
+    expect(parts.documents).toContain("2: <body>lava</body>");
+    expect(parts.documents).toContain("regenerated FRESH on every turn");
+    for (const other of [parts.stable, parts.dynamic, parts.turnSystem, parts.turnContext]) {
+      expect(other).not.toContain("DOCUMENTS (1):");
+    }
+  });
+
+  test("the observer churning the record leaves documents byte-identical", () => {
+    const a = buildTutorSystemPromptParts({ ...ctx, dossierContent: "v1" });
+    const b = buildTutorSystemPromptParts({
+      ...ctx,
+      dossierContent: "v2 — rewritten by the observer",
+      teacherWhisper: "new whisper",
+    });
+    expect(b.stable).toBe(a.stable);
+    expect(b.documents).toBe(a.documents);
+    expect(b.turnSystem).not.toBe(a.turnSystem);
+  });
+
+  test("an edit to the app changes only `documents`", () => {
+    const a = buildTutorSystemPromptParts(ctx);
+    const b = buildTutorSystemPromptParts({
+      ...ctx,
+      artifactData: [{ ...app, content: "<html>\n<body>magma</body>\n</html>", revision: 4 }],
+    });
+    expect(b.stable).toBe(a.stable);
+    expect(b.documents).not.toBe(a.documents);
+    expect(b.documents).toContain("2: <body>magma</body>");
+  });
+});
+
+describe("layoutTutorRequest — breakpoints and placement on every request path", () => {
+  type Msg = {
+    role: "user" | "assistant";
+    content: string | Array<{ type: string } & Record<string, unknown>>;
+  };
+  const parts = {
+    stable: "STABLE",
+    dynamic: "",
+    documents: "DOCS",
+    turnSystem: "SESSION STATE",
+    turnContext: "Current date and time: now",
+  };
+  const history: Msg[] = [
+    { role: "user", content: "hi" },
+    { role: "assistant", content: "hello" },
+    { role: "user", content: "make the lava faster" },
+  ];
+
+  function breakpoints(r: ReturnType<typeof layoutTutorRequest<Msg>>): number {
+    const blocks: unknown[] = [
+      ...r.system,
+      ...r.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])),
+    ];
+    return blocks.filter(
+      (b) => (b as { cache_control?: unknown }).cache_control !== undefined,
+    ).length;
+  }
+  function cachedTexts(r: ReturnType<typeof layoutTutorRequest<Msg>>): string[] {
+    return r.system.filter((b) => b.cache_control).map((b) => b.text);
+  }
+
+  test("ordinary turn: stable [bp] → docs [bp] → history [bp] → clock → system message", () => {
+    const r = layoutTutorRequest({ ...parts, messages: history, midConversationSystem: true });
+    expect(cachedTexts(r)).toEqual(["STABLE", "DOCS"]);
+    expect(r.system.map((b) => b.text)).toEqual(["STABLE", "DOCS"]);
+    expect(breakpoints(r)).toBe(3);
+    const lastUser = r.messages[2];
+    expect(lastUser.role).toBe("user");
+    const blocks = lastUser.content as Array<Record<string, unknown>>;
+    expect(blocks[0]).toMatchObject({ text: "make the lava faster", cache_control: { type: "ephemeral" } });
+    expect(blocks[1]).toEqual({ type: "text", text: TURN_CONTEXT_PREFIX + parts.turnContext });
+    expect(r.messages[3]).toEqual({ role: "system", content: "SESSION STATE" });
+    expect(r.messages).toHaveLength(4);
+    // Inputs untouched.
+    expect(history[2].content).toBe("make the lava faster");
+  });
+
+  test("the turn-1 remainder sits between the two cached blocks, uncached", () => {
+    const r = layoutTutorRequest({
+      ...parts,
+      dynamic: "FIRST MESSAGE: …",
+      messages: history,
+      midConversationSystem: true,
+    });
+    expect(r.system.map((b) => [b.text, !!b.cache_control])).toEqual([
+      ["STABLE", true],
+      ["FIRST MESSAGE: …", false],
+      ["DOCS", true],
+    ]);
+    expect(breakpoints(r)).toBe(3);
+  });
+
+  test("no documents: no second breakpoint", () => {
+    const r = layoutTutorRequest({ ...parts, documents: "", messages: history, midConversationSystem: true });
+    expect(r.system).toHaveLength(1);
+    expect(breakpoints(r)).toBe(2);
+  });
+
+  test("app update: keeps the caller's breakpoint before its instruction", () => {
+    const placed = withConversationCacheBreakpoint(history);
+    const msgs: Msg[] = [...placed, { role: "user", content: "APP UPDATE INSTRUCTION" }];
+    const r = layoutTutorRequest({
+      ...parts,
+      messages: msgs,
+      conversationBreakpointPlaced: true,
+      midConversationSystem: true,
+    });
+    expect(breakpoints(r)).toBe(3);
+    const instruction = r.messages[3].content as Array<Record<string, unknown>>;
+    expect(instruction[0]).toEqual({ type: "text", text: "APP UPDATE INSTRUCTION" });
+    expect(instruction[0]).not.toHaveProperty("cache_control");
+    expect(r.messages[4]).toEqual({ role: "system", content: "SESSION STATE" });
+  });
+
+  test("kickoff / rubric check / whisper: the model-only user turn carries the breakpoint", () => {
+    // A whisper is a user message inserted before the last user turn; kickoff
+    // and rubric check push one at the end. Either way the marker lands on the
+    // last user message and the system message follows it.
+    const msgs: Msg[] = [
+      { role: "user", content: "[TEACHER WHISPER — private]: nudge" },
+      { role: "user", content: "KICKOFF" },
+    ];
+    const r = layoutTutorRequest({ ...parts, messages: msgs, midConversationSystem: true });
+    expect(breakpoints(r)).toBe(3);
+    expect((r.messages[1].content as Array<Record<string, unknown>>)[0]).toMatchObject({
+      text: "KICKOFF",
+      cache_control: { type: "ephemeral" },
+    });
+    expect(r.messages[2]).toEqual({ role: "system", content: "SESSION STATE" });
+  });
+
+  test("a model without mid-conversation system messages gets the state as turn-context text", () => {
+    const r = layoutTutorRequest({ ...parts, messages: history, midConversationSystem: false });
+    expect(r.messages.some((m) => m.role === "system")).toBe(false);
+    const blocks = r.messages[2].content as Array<Record<string, unknown>>;
+    expect(blocks[1]).toEqual({
+      type: "text",
+      text: `${TURN_CONTEXT_PREFIX}${parts.turnContext}\n\nSESSION STATE`,
+    });
+    expect(breakpoints(r)).toBe(3);
+  });
+
+  test("history ending on an assistant turn: no system message (the API would reject it)", () => {
+    const msgs: Msg[] = [...history, { role: "assistant", content: "…" }];
+    const r = layoutTutorRequest({ ...parts, messages: msgs, midConversationSystem: true });
+    expect(r.messages.some((m) => m.role === "system")).toBe(false);
+    const blocks = r.messages[2].content as Array<Record<string, unknown>>;
+    expect(blocks[blocks.length - 1].text).toContain("SESSION STATE");
+  });
+
+  test("no user message: clock and state end the top-level system, after the last breakpoint", () => {
+    const r = layoutTutorRequest({ ...parts, messages: [], midConversationSystem: true });
+    expect(r.messages).toEqual([]);
+    expect(r.system.map((b) => [b.text, !!b.cache_control])).toEqual([
+      ["STABLE", true],
+      ["DOCS", true],
+      [`${parts.turnContext}\n\nSESSION STATE`, false],
+    ]);
+    const noDocs = layoutTutorRequest({ ...parts, documents: "", dynamic: "TURN1", messages: [], midConversationSystem: true });
+    expect(noDocs.system.map((b) => [b.text, !!b.cache_control])).toEqual([
+      ["STABLE", true],
+      [`TURN1\n\n${parts.turnContext}\n\nSESSION STATE`, false],
+    ]);
+  });
+
+  test("an empty session state adds no system message", () => {
+    const r = layoutTutorRequest({ ...parts, turnSystem: "  ", messages: history, midConversationSystem: true });
+    expect(r.messages).toHaveLength(3);
+  });
+
+  test("a turn that changes neither the app nor the history keeps every cached byte", () => {
+    const a = layoutTutorRequest({ ...parts, messages: history, midConversationSystem: true });
+    const b = layoutTutorRequest({
+      ...parts,
+      turnSystem: "SESSION STATE (the observer rewrote the dossier)",
+      turnContext: "Current date and time: a minute later",
+      messages: history,
+      midConversationSystem: true,
+    });
+    expect(b.system).toEqual(a.system);
+    // Everything up to and including the breakpointed block is identical.
+    const upToBreakpoint = (r: typeof a) => {
+      const last = r.messages[2].content as Array<Record<string, unknown>>;
+      return [r.messages[0], r.messages[1], last[0]];
+    };
+    expect(upToBreakpoint(b)).toEqual(upToBreakpoint(a));
   });
 });
 

@@ -129,7 +129,7 @@ describe("model contract on activities", () => {
     expect(row?.allowSilence).toBe(true);
   });
 
-  test("non-vibecode kinds reject a contract and allowSilence", async () => {
+  test("kinds with no tutor session reject a mission; allowSilence is app-only", async () => {
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher", "contract-kind-teacher");
     const { lessonId } = await seedLesson(t, teacherId);
@@ -142,7 +142,7 @@ describe("model contract on activities", () => {
         kind: "offline",
         buildContract: CONTRACT,
       }),
-    ).rejects.toThrow(/vibecode/);
+    ).rejects.toThrow(/only to online activities/);
     await expect(
       asTeacher.mutation(api.activities.create, {
         lessonId,
@@ -150,7 +150,7 @@ describe("model contract on activities", () => {
         kind: "offline",
         allowSilence: true,
       }),
-    ).rejects.toThrow(/vibecode/);
+    ).rejects.toThrow(/app \(build-an-app\) activities/);
 
     const offlineId = await asTeacher.mutation(api.activities.create, {
       lessonId,
@@ -162,7 +162,7 @@ describe("model contract on activities", () => {
         id: offlineId,
         buildContract: CONTRACT,
       }),
-    ).rejects.toThrow(/vibecode/);
+    ).rejects.toThrow(/only to online activities/);
     await expect(
       t.mutation(internal.activities.upsertInternal, {
         parent: { kind: "lesson", lessonId },
@@ -170,7 +170,55 @@ describe("model contract on activities", () => {
         kind: "offline",
         buildContract: CONTRACT,
       }),
-    ).rejects.toThrow(/vibecode/);
+    ).rejects.toThrow(/only to online activities/);
+  });
+
+  test("a non-app online activity carries a gate + freedoms mission, never invariants (TRA-519 B1)", async () => {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher", "mission-teacher");
+    const { lessonId } = await seedLesson(t, teacherId);
+    const asTeacher = await withUser(t, teacherId);
+    const deliverable = {
+      kind: "text" as const,
+      prompt: "Write your story",
+      mode: "none" as const,
+      criteria: [],
+    };
+
+    await t.mutation(internal.activities.upsertInternal, {
+      parent: { kind: "lesson", lessonId },
+      title: "Narrative draft",
+      kind: "online",
+      deliverable,
+      buildContract: {
+        invariants: [],
+        freedoms: ["  which moment you pick  "],
+        gate: "a first draft of the whole story exists",
+      },
+    });
+    const id = (await activityByTitle(t, "Narrative draft"))!._id;
+    expect((await asTeacher.query(api.activities.get, { id }))?.buildContract).toEqual({
+      invariants: [],
+      freedoms: ["which moment you pick"],
+      gate: "a first draft of the whole story exists",
+    });
+
+    await expect(
+      asTeacher.mutation(api.activities.update, {
+        id,
+        buildContract: { invariants: ["the hero wins"], freedoms: [] },
+      }),
+    ).rejects.toThrow(/deliverable's criteria/);
+    await expect(
+      asTeacher.mutation(api.activities.update, { id, allowSilence: true }),
+    ).rejects.toThrow(/app \(build-an-app\) activities/);
+
+    // An empty mission on a non-app activity stores as absent.
+    await asTeacher.mutation(api.activities.update, {
+      id,
+      buildContract: { invariants: [], freedoms: ["  "] },
+    });
+    expect((await asTeacher.query(api.activities.get, { id }))?.buildContract).toBeUndefined();
   });
 
   test("update sets, clears with null, and a kind flip drops both fields", async () => {
@@ -399,7 +447,7 @@ describe("model contract via the aide and unit tools", () => {
       buildContract: CONTRACT,
       allowSilence: true,
     });
-    expect(JSON.parse(reply).kind).toBe("vibecode");
+    expect(JSON.parse(reply).kind).toBe("app");
     const row = await activityByTitle(t, "Seed launcher");
     expect(row?.buildContract).toEqual(CONTRACT);
     expect(row?.allowSilence).toBe(true);
@@ -444,7 +492,8 @@ describe("model contract via the aide and unit tools", () => {
       allowSilence: true,
     });
     const row = await activityByTitle(t, "Bridge loader");
-    expect(row?.kind).toBe("vibecode");
+    // TRA-519: an app activity is stored as online + appActivity.
+    expect(row).toMatchObject({ kind: "online", appActivity: true });
     expect(row?.buildContract).toEqual(CONTRACT);
     expect(row?.allowSilence).toBe(true);
   });
@@ -541,7 +590,7 @@ describe("scholar edit policy via the aide and unit tools", () => {
         ...(scholarEdit ? { scholarEdit } : {}),
       });
       const row = await activityByTitle(t, title);
-      expect(row?.kind).toBe("vibecode");
+      expect(row).toMatchObject({ kind: "online", appActivity: true });
       expect(row?.editAccess).toBe(stored);
     }
   });
@@ -556,7 +605,7 @@ describe("scholar edit policy via the aide and unit tools", () => {
       kind: "offline",
       scholarEdit: "play",
     });
-    expect(JSON.parse(reply).error).toMatch(/vibecode activities only/);
+    expect(JSON.parse(reply).error).toMatch(/app activities only/);
     expect(await activityByTitle(t, "Seed walk")).toBeFalsy();
   });
 
@@ -586,7 +635,7 @@ describe("scholar edit policy via the aide and unit tools", () => {
         id: offline.activityId,
         editAccess: "never",
       }),
-    ).rejects.toThrow(/vibecode activities only/);
+    ).rejects.toThrow(/app activities only/);
     expect((await activityByTitle(t, "Spelling walk"))?.editAccess).toBeUndefined();
     await expect(
       t.mutation(internal.activities.upsertInternal, {
@@ -595,7 +644,7 @@ describe("scholar edit policy via the aide and unit tools", () => {
         kind: "offline",
         editAccess: "never",
       }),
-    ).rejects.toThrow(/vibecode activities only/);
+    ).rejects.toThrow(/app activities only/);
 
     await t.mutation(internal.activities.updateInternal, {
       id: vibe.activityId,

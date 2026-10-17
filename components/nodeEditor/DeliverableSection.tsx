@@ -46,6 +46,7 @@ import { DeliverableKindIcon } from "@/components/DeliverableKindIcon";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { CriteriaEditor } from "../CriteriaEditor";
 import { Field } from "./shared";
+import { isAppActivity } from "@/shared/appSurface";
 
 type DeliverableKind =
   | "text"
@@ -67,6 +68,8 @@ const KIND_OPTIONS: Array<{ value: DeliverableKind; label: string }> = [
 
 const kindLabel = (kind: DeliverableKind) =>
   KIND_OPTIONS.find((o) => o.value === kind)?.label ?? "Deliverable";
+/** An app activity's deliverable: the app the scholar builds or plays. */
+const APP_DELIVERABLE_LABEL = "App";
 
 export function DeliverableSection({
   activityId,
@@ -77,7 +80,10 @@ export function DeliverableSection({
 
   const deliverable = activity?.deliverable ?? null;
   const enabled = !!deliverable;
-  const kind = (deliverable?.kind ?? "text") as DeliverableKind;
+  // An app activity's deliverable is always the app (TRA-519).
+  const isApp = isAppActivity(activity);
+  const kind = (isApp ? "artifact" : (deliverable?.kind ?? "text")) as DeliverableKind;
+  const label = isApp ? APP_DELIVERABLE_LABEL : kindLabel(kind);
 
   // Rubric half of the summary line.
   const summary = (() => {
@@ -124,7 +130,7 @@ export function DeliverableSection({
                   fontSize="sm"
                   color="navy.500"
                 >
-                  {kindLabel(kind)}
+                  {label}
                 </Text>
                 <Text fontSize="2xs" color="charcoal.400" fontFamily="heading">
                   · {summary}
@@ -147,7 +153,7 @@ export function DeliverableSection({
               colorPalette="violet"
               fontFamily="heading"
               flexShrink={0}
-              aria-label={`Edit ${kindLabel(kind).toLowerCase()} deliverable`}
+              aria-label={`Edit ${label.toLowerCase()} deliverable`}
               onClick={() => setOpen(true)}
             >
               Edit
@@ -194,10 +200,15 @@ function DeliverableEditorModal({
   const activity = useQuery(api.activities.get, { id: activityId });
   const update = useMutation(api.activities.update);
   const deliverable = activity?.deliverable ?? null;
+  // An app activity's deliverable is always the app: no kind choice, and it
+  // can't be removed (TRA-519).
+  const isApp = isAppActivity(activity);
 
   // Local draft state mirrors the inline editor's local state — load
   // from the activity, flush on blur of each field.
-  const initialKind = (deliverable?.kind ?? "text") as DeliverableKind;
+  const initialKind = (
+    isApp ? "artifact" : (deliverable?.kind ?? "text")
+  ) as DeliverableKind;
   const [kind, setKind] = useState<DeliverableKind>(initialKind);
   // The kind picker is open by default only while creating. On an
   // existing deliverable it takes a deliberate "Change kind" — the
@@ -378,6 +389,7 @@ function DeliverableEditorModal({
               overflowY="auto"
             >
               <Stack gap={4}>
+                {!isApp && (
                 <Field
                   label="Kind"
                   hint="What the scholar produces. Document = writing in Rabbithole; Artifact = code / interactive; Map = pins on a tutor-opened map; Photo / Slides / Audio = media."
@@ -456,6 +468,7 @@ function DeliverableEditorModal({
                     </HStack>
                   )}
                 </Field>
+                )}
 
                 <Field
                   label="Deliverable prompt"
@@ -578,7 +591,7 @@ function DeliverableEditorModal({
               borderColor="gray.100"
             >
               <HStack gap={3} mr="auto" minW={0}>
-                {!isNew && (
+                {!isNew && !isApp && (
                   <Button
                     size="sm"
                     variant="ghost"

@@ -59,6 +59,7 @@ import {
   unitSessionProgressForScholar,
 } from "./lib/scholarReads";
 import { plantTeacherSeed } from "./lib/seeds";
+import { canUnlockQuestBuild, questBuildLocksFor } from "./lib/questBuildLock";
 import {
   homeTitleForIndependentStudyUnit,
   mintIndependentStudyUnit,
@@ -101,9 +102,11 @@ export function unitListNeedsScholarEnumeration({
  * (`authorScholarId`) follow their author scholar's institution. Resolved once
  * per call, so the collect-then-filter callers (`curriculumUnitsInLens`) and
  * the paginated Units browser (`listForBrowser`, which filters its stream
- * BEFORE picking the page) apply the exact same boundary.
+ * BEFORE picking the page) apply the exact same boundary. Also the aide's
+ * unit list and title resolver (`curriculumAssistant.listUnitsInternal`), so
+ * the bot sees exactly the units the caller's Curriculum page does.
  */
-async function curriculumUnitLensPredicate(
+export async function curriculumUnitLensPredicate(
   ctx: QueryCtx & { user?: Doc<"users"> },
   scope?: string,
   explicitUser?: Doc<"users">,
@@ -694,7 +697,21 @@ export const get = authedQuery({
     const unit = await ctx.db.get(args.id);
     if (!unit) return null;
     await requireUnitAccess(ctx, args.id);
-    return unit;
+    // B6 learn-before-you-build (TRA-519), for the scholar viewing their OWN
+    // Quest only: `questLocks` maps each locked build-step activity id to the
+    // learning step that unlocks it (absent entry = open), and
+    // `canUnlockBuild` says the Quest is finished with no build step yet, so
+    // the completion surface may offer to append one. Anyone else (teachers,
+    // a teacher's unit, a remote view) gets `{}` / false: never locked.
+    const questLocks = await questBuildLocksFor(ctx, {
+      unit,
+      scholarId: ctx.user._id,
+    });
+    const canUnlockBuild = await canUnlockQuestBuild(ctx, {
+      unit,
+      scholarId: ctx.user._id,
+    });
+    return { ...unit, questLocks, canUnlockBuild };
   },
 });
 
@@ -1915,6 +1932,62 @@ export const aiUpdateIsUnitMetadata = internalMutation({
       patch.essentialQuestions = toKeyedGranules(
         args.essentialQuestions, unit.essentialQuestions, "eq");
     await ctx.db.patch(args.unitId, patch);
+  },
+});
+
+/** Limits on a Quest's mission (TRA-519 B5): one line plus its gate. */
+export const QUEST_MISSION_LIMITS = { maxText: 140, maxGate: 240 } as const;
+
+/**
+ * Set the MISSION of a scholar's own Quest (TRA-519 B5): ONE line in their
+ * words saying what they are making or finding out, plus the GATE — the first
+ * thing that has to exist. Scholar-authored and locked against drift: once a
+ * mission exists it changes only on the scholar's explicit ask, quoted in
+ * `scholarWords` and kept as `changedBecause`. Unlike `bigIdea` (which the
+ * bake and update_unit_metadata rewrite freely), nothing else writes it.
+ */
+export const aiSetIsUnitMission = internalMutation({
+  args: {
+    unitId: v.id("units"),
+    scholarId: v.id("users"),
+    text: v.string(),
+    gate: v.string(),
+    scholarWords: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const unit = await ctx.db.get(args.unitId);
+    if (!unit) throw new Error("Unit not found");
+    if (unit.authorScholarId !== args.scholarId) {
+      throw new Error("Forbidden: not your IS unit");
+    }
+    const text = args.text.trim().replace(/\s+/g, " ");
+    const gate = args.gate.trim().replace(/\s+/g, " ");
+    if (!text) throw new Error("The mission line can't be empty.");
+    if (!gate) throw new Error("The mission needs a gate: the first thing that has to exist.");
+    if (text.length > QUEST_MISSION_LIMITS.maxText) {
+      throw new Error(
+        `The mission line must be ${QUEST_MISSION_LIMITS.maxText} characters or fewer (got ${text.length}). Shorten it with the scholar.`,
+      );
+    }
+    if (gate.length > QUEST_MISSION_LIMITS.maxGate) {
+      throw new Error(
+        `The gate must be ${QUEST_MISSION_LIMITS.maxGate} characters or fewer (got ${gate.length}).`,
+      );
+    }
+    const scholarWords = args.scholarWords?.trim() || undefined;
+    if (unit.mission && !scholarWords) {
+      throw new Error(
+        "This Quest already has a mission; only change it when the scholar asks to.",
+      );
+    }
+    await ctx.db.patch(args.unitId, {
+      mission: {
+        text,
+        gate,
+        setAt: Date.now(),
+        ...(unit.mission && scholarWords ? { changedBecause: scholarWords } : {}),
+      },
+    });
   },
 });
 

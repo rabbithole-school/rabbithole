@@ -88,6 +88,7 @@ function TeacherDashboardLayoutInner({
     user?.hasProgramPublishingAccess,
     hasSchoolOperationsAccess === true,
     scholarMessagingNav,
+    user?.hasCurriculumRunAccess === true,
   );
   // Where the logo goes, and where a role-forbidden tab bounces to. `/teacher`
   // for an ordinary teacher (their Today inbox) — there is no Today tab, so

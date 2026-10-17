@@ -6,6 +6,7 @@ import {
 import { query, mutation, action } from "../_generated/server";
 import { requireUser, requireTeacher, requirePlatformAdmin, requireSchoolAdmin, requireCurriculumAccess, requireCurriculumAccessSelf, requireStaffSelf, requireScholarAdmin, requireStaff, requireStaffAction, assertCanWrite, assertWritableAction } from "./auth";
 import { Doc } from "../_generated/dataModel";
+import { canRunAssignments } from "./curriculumRun";
 
 // ── Authenticated queries/mutations (any logged-in user) ──────────────
 
@@ -49,6 +50,37 @@ export const teacherMutation = customMutation(mutation, {
   args: {},
   input: async (ctx) => {
     const user = await requireTeacher(ctx);
+    await assertCanWrite(ctx);
+    return { ctx: { ...ctx, user }, args: {} };
+  },
+});
+
+// ── Run-curriculum queries/mutations (teacher OR curriculum:run) ──────
+// The ROLE half only. A curriculum:run holder is not a teacher: every handler
+// on these wrappers must still enforce ownership (a.teacherId === user._id)
+// and, for a non-teacher, requireCanRunOwnedAssignment / requireRunnableUnit
+// (lib/curriculumRun.ts). Never use these for a scholar-record read.
+
+async function requireCurriculumRunner(ctx: Parameters<typeof requireUser>[0]) {
+  const user = await requireUser(ctx);
+  if (!(await canRunAssignments(ctx, user))) {
+    throw new Error("Forbidden: teacher or admin role required");
+  }
+  return user;
+}
+
+export const curriculumRunQuery = customQuery(query, {
+  args: {},
+  input: async (ctx) => {
+    const user = await requireCurriculumRunner(ctx);
+    return { ctx: { ...ctx, user }, args: {} };
+  },
+});
+
+export const curriculumRunMutation = customMutation(mutation, {
+  args: {},
+  input: async (ctx) => {
+    const user = await requireCurriculumRunner(ctx);
     await assertCanWrite(ctx);
     return { ctx: { ...ctx, user }, args: {} };
   },

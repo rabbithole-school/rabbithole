@@ -16,8 +16,15 @@ import {
   type Aggregate,
 } from "./curriculumScore";
 import type { SimTurn } from "./curriculumSimShared";
-
 const ALL_NUMERIC = [...FITNESS_DIMS, ...PROTECTED_DIMS] as const;
+
+/**
+ * Smallest number of real sessions behind an aggregate (a grounding's real
+ * aggregate, an activity's mean judged fitness) that a unit editor WITHOUT
+ * grounding rights may see. Below it the "mean" is one or two identifiable
+ * scholars' scores. A privacy floor, not a quality threshold.
+ */
+export const MIN_REAL_N_WITHOUT_GROUNDING = 3;
 type NumericDim = (typeof ALL_NUMERIC)[number];
 
 /**

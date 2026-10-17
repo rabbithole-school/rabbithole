@@ -61,7 +61,7 @@ export function kindLabel(kind: UnitProgressActivity["kind"]): string {
     case "simulator":
       return "Simulator";
     case "vibecode":
-      return "Vibecode";
+      return "App";
   }
 }
 

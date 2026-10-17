@@ -2,11 +2,15 @@
  * The scholar's PARKING LOT in the Workshop (sessions.parkingLot): ideas the
  * App designer parked for the Free play version instead of building them now
  * (convex/lib/designerTools.ts park_idea). Hidden when empty. Once the
- * assignment version is done (`freePlayEligible`, convex/lib/freePlay.ts), a
- * "Start free play" button beside the label opens the scholar's own version
- * (TRA-489).
+ * activity is done, the builder passes `renderActions` (the done screen's
+ * Build it now + Make it a Quest per idea, TRA-519 B2 —
+ * useSavedForLaterActions) and each idea carries its own buttons; until then
+ * the chips are read-only. `onStartFreePlay` remains for a caller with no
+ * per-idea actions (TRA-489). This strip owns its heading; the chips are the
+ * shared ParkedIdeaList (one rendering of the lot, TRA-519 B1).
  * Web twin: components/vibecode/ParkingLot.tsx — same label and anatomy.
  */
+import type { ReactNode } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -16,19 +20,24 @@ import {
   View,
 } from "react-native";
 
+import { ParkedIdeaList, type ParkedIdea } from "@/components/ParkedIdeaList";
 import { fonts, useColors } from "@/theme";
 
-export type ParkedIdea = { text: string; parkedAt: number; reason?: string };
+export type { ParkedIdea };
 
 export function ParkingLot({
   ideas,
   onStartFreePlay,
   startingFreePlay = false,
+  renderActions,
 }: {
   ideas: readonly ParkedIdea[] | undefined;
-  /** Present only when sessions.startFreePlay would succeed. */
+  /** Present only when sessions.startFreePlay would succeed. Ignored when
+   *  `renderActions` is given (each idea then has its own Build it now). */
   onStartFreePlay?: () => void;
   startingFreePlay?: boolean;
+  /** The done state's per-idea actions (useSavedForLaterActions). */
+  renderActions?: (idea: ParkedIdea) => ReactNode;
 }) {
   const colors = useColors();
   if (!ideas || ideas.length === 0) return null;
@@ -41,7 +50,7 @@ export function ParkingLot({
         <Text style={[styles.label, { color: colors.fgMuted }]}>
           Parking lot · Free play
         </Text>
-        {onStartFreePlay ? (
+        {onStartFreePlay && !renderActions ? (
           <Pressable
             onPress={onStartFreePlay}
             disabled={startingFreePlay}
@@ -58,25 +67,8 @@ export function ParkingLot({
           </Pressable>
         ) : null}
       </View>
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.chips}>
-        {ideas.map((idea) => (
-          <View
-            key={`${idea.parkedAt}-${idea.text}`}
-            style={[
-              styles.chip,
-              { borderColor: colors.border, backgroundColor: colors.bg },
-            ]}
-          >
-            <Text style={[styles.chipText, { color: colors.fg }]}>
-              {idea.text}
-            </Text>
-            {idea.reason ? (
-              <Text style={[styles.caption, { color: colors.fgMuted }]}>
-                {idea.reason}
-              </Text>
-            ) : null}
-          </View>
-        ))}
+      <ScrollView style={renderActions ? styles.scrollWithActions : styles.scroll}>
+        <ParkedIdeaList ideas={ideas} renderActions={renderActions} />
       </ScrollView>
     </View>
   );
@@ -106,14 +98,5 @@ const styles = StyleSheet.create({
   },
   startButtonText: { fontFamily: fonts.semibold, fontSize: 13, color: "#fff" },
   scroll: { maxHeight: 120 },
-  chips: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
-  chip: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    maxWidth: "100%",
-  },
-  chipText: { fontFamily: fonts.semibold, fontSize: 14 },
-  caption: { fontFamily: fonts.regular, fontSize: 12 },
+  scrollWithActions: { maxHeight: 220 },
 });

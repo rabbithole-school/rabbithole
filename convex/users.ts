@@ -75,6 +75,7 @@ export function slugifyInstitutionName(name: string): string {
     .slice(0, 96);
 }
 import { entryTargetsScholar } from "./assignments";
+import { hasCurriculumRunAccess } from "./lib/curriculumRun";
 import { ENROLLMENT_STANDINGS } from "./lib/enrollmentStanding";
 import { normalizePronouns } from "./lib/scholarPronouns";
 import {
@@ -500,6 +501,10 @@ export const currentUser = query({
       ...safeUser,
       hasCurriculumAccess:
         curriculumInstitutions === "all" || curriculumInstitutions.size > 0,
+      // A non-teacher who may RUN the units she can edit (curriculum:run +
+      // curriculum:edit somewhere). Opens Preflight/Assign and her own
+      // assignments' Run page — never a scholar-record surface.
+      hasCurriculumRunAccess: await hasCurriculumRunAccess(ctx, user),
       hasSchoolOperationsAccess:
         operationsInstitutions === "all" || operationsInstitutions.size > 0,
       schoolOperationsInstitutionIds:

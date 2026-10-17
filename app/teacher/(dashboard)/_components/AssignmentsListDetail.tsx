@@ -15,6 +15,8 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { formatTimeAgo } from "@/lib/relativeTime";
 import { ActivityModeBadge } from "@/lib/activityMode";
 import { assignmentIdFromPathname } from "../_components/assignmentsPath";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { isTeacherRole } from "@/convex/lib/roles";
 
 // ─── Assignments list-detail ─────────────────────────────────────────
 //
@@ -29,8 +31,15 @@ export function AssignmentsListDetail({
 }: {
   onStartAssignment: () => void;
 }) {
+  const { user } = useCurrentUser();
+  // Standing practice is teacher-only. A curriculum:run holder (base staff)
+  // sees just the assignments she owns, so that section never mounts for her.
+  const showsStandingPractice = !!user && isTeacherRole(user.role);
   const rows = useQuery(api.assignments.listForTeacher, {});
-  const standingRows = useQuery(api.standingPractice.listForTeacher, {});
+  const standingRows = useQuery(
+    api.standingPractice.listForTeacher,
+    showsStandingPractice ? {} : "skip",
+  );
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -174,6 +183,7 @@ export function AssignmentsListDetail({
 
               {/* ── Standing practice ─────────────────────────────────
                   Existing rows remain visible and read-only during migration. */}
+              {showsStandingPractice && (<>
               <Flex
                 px={3}
                 py={1.5}
@@ -250,6 +260,7 @@ export function AssignmentsListDetail({
                   ))}
                 </Stack>
               )}
+              </>)}
             </Box>
         </Flex>
       </Splitter.Panel>

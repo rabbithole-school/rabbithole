@@ -587,7 +587,9 @@ describe("render check answers", () => {
     ).rejects.toThrow(/forbidden/i);
   });
 
-  test("rejects a non-Vibecode session", async () => {
+  test("accepts an answer in a chat session with an app (TRA-519)", async () => {
+    // One app surface: any session with an app may run a render check; the
+    // checkId/stream match is the gate, not the session's primary view.
     const t = convexTest(schema, modules);
     const turn = await seedTurn(t);
     await requestCheck(t, turn);
@@ -604,7 +606,7 @@ describe("render check answers", () => {
         consoleLines: [],
         stateJson: "{}",
       }),
-    ).rejects.toThrow(/only for Vibecode/i);
+    ).resolves.toMatchObject({ messageId: turn.assistantMsgId });
   });
 
   test("rejects a snapshot that predates the request", async () => {

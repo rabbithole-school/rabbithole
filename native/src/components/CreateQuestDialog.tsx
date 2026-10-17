@@ -17,6 +17,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import {
   BakePathPicker,
+  bakePathArg,
   ENDLESS_CHAT,
   type PathChoice,
 } from "@/components/BakePathPicker";
@@ -104,10 +105,7 @@ export function CreateQuestDialog({
       if (!session?.id) throw new Error("Session was not created");
       if (!live()) return null;
 
-      const bakePath =
-        choice === ENDLESS_CHAT
-          ? undefined
-          : { title: choice.title, blurb: choice.blurb };
+      const bakePath = bakePathArg(choice);
       try {
         await scheduleBake({
           unitId: result.unitId,

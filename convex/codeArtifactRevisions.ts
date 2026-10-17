@@ -15,6 +15,7 @@ import { internalMutation, internalQuery } from "./_generated/server";
 import { isTeacherRole } from "./lib/roles";
 import { requireActiveScholarAccess } from "./lib/access";
 import type { DataModel, Doc, Id } from "./_generated/dataModel";
+import { pickFocusApp, pickTurnRecordApp } from "./lib/focusApp";
 
 type MutationCtx = GenericMutationCtx<DataModel>;
 
@@ -132,6 +133,10 @@ export const recordTurnRevision = internalMutation({
     messageId: v.id("messages"),
     baselineArtifactId: v.optional(v.id("artifacts")),
     baselineRevision: v.number(),
+    // TRA-519: the app the builder had open for this turn. An app created
+    // this turn is still the turn's app; otherwise the open one is versioned,
+    // not the newest. Absent = the newest app (old behavior).
+    focusArtifactId: v.optional(v.id("artifacts")),
   },
   handler: async (
     ctx,
@@ -146,9 +151,13 @@ export const recordTurnRevision = internalMutation({
       .query("artifacts")
       .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
       .collect();
-    const artifact = artifacts
-      .filter((a) => a.type === "code")
-      .sort((a, b) => b._creationTime - a._creationTime)[0];
+    const turnMessage = await ctx.db.get(args.messageId);
+    const artifact = pickTurnRecordApp(
+      artifacts,
+      args.sessionId,
+      args.focusArtifactId,
+      turnMessage?._creationTime ?? null,
+    );
     if (!artifact) return { recorded: false };
 
     const revision = artifact.revision ?? 0;
@@ -227,6 +236,9 @@ export const listForSession = authedQuery({
             : null;
           return {
             id: rev._id,
+            // Which app this version belongs to: a session can hold more
+            // than one, and a builder lists only its app's versions.
+            artifactId: String(rev.artifactId),
             revision: rev.revision,
             version: versionById.get(rev._id) ?? rev.revision,
             createdAt: rev.createdAt,
@@ -248,7 +260,12 @@ export const listForSession = authedQuery({
  * tool runner, so `recordTurnRevision` can tell whether the app changed this
  * turn. Same "newest code artifact by creation time" pick the recorder uses. */
 export const newestCodeArtifactBaseline = internalQuery({
-  args: { sessionId: v.id("sessions") },
+  args: {
+    sessionId: v.id("sessions"),
+    // TRA-519: the app open in the builder this turn; its baseline is the
+    // one recordTurnRevision compares against. Absent = the newest app.
+    focusArtifactId: v.optional(v.id("artifacts")),
+  },
   handler: async (
     ctx,
     args,
@@ -257,9 +274,11 @@ export const newestCodeArtifactBaseline = internalQuery({
       .query("artifacts")
       .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
       .collect();
-    const artifact = artifacts
-      .filter((a) => a.type === "code")
-      .sort((a, b) => b._creationTime - a._creationTime)[0];
+    const artifact = pickFocusApp(
+      artifacts,
+      args.sessionId,
+      args.focusArtifactId,
+    );
     if (!artifact) return null;
     return { artifactId: artifact._id, revision: artifact.revision ?? 0 };
   },

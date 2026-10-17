@@ -22,12 +22,10 @@ import { useImageAttachment } from "@/hooks/useImageAttachment";
 import { api, type Doc, type Id } from "@/lib/convex";
 import { fonts, useColors } from "@/theme";
 import { isTextArtifact } from "../../vendor/shared/textArtifacts";
-import {
-  CodeArtifactWebView,
-  type CodeArtifactWebViewHandle,
-} from "@/components/CodeArtifactWebView";
+import type { CodeArtifactWebViewHandle } from "@/components/CodeArtifactWebView";
 import type { AppTutorRequest } from "../../vendor/shared/appTutorRequest";
 import { SlidesDeliverable } from "./slides/SlidesDeliverable";
+import { AppCard } from "./AppCard";
 import { FlairChips } from "./FlairChips";
 import {
   artifactIdForDeliverableLookup,
@@ -444,17 +442,18 @@ export function DeliverableCard({
             ) : expanded ? (
               activeArtifact?.type === "code" ? (
                 textContent ? (
-                  <View style={styles.codePreviewFrame}>
-                    <CodeArtifactWebView
-                      ref={codeArtifactRef}
-                      key={activeArtifact._id}
-                      scope={{ kind: "session", artifactId: activeArtifact._id }}
-                      content={activeArtifact.content ?? ""}
-                      onAskTutor={onAskTutor}
-                      onAppAiTurn={onAppAiTurn}
-                      appAiEnabled={appAiEnabled}
-                    />
-                  </View>
+                  // The same app card the landscape panel shows (one
+                  // rendering): live preview, version, and Open into the
+                  // full-screen builder (TRA-519).
+                  <AppCard
+                    key={activeArtifact._id}
+                    sessionId={sessionId}
+                    artifact={activeArtifact}
+                    codeArtifactRef={codeArtifactRef}
+                    onAskTutor={onAskTutor}
+                    onAppAiTurn={onAppAiTurn}
+                    appAiEnabled={appAiEnabled}
+                  />
                 ) : (
                   <Text style={[styles.previewText, styles.emptyText]}>No writing yet.</Text>
                 )
@@ -576,6 +575,12 @@ export function DeliverableCard({
               />
             </>
           )
+        ) : activeArtifact &&
+          activeArtifact.type === "code" &&
+          spec.kind !== "artifact" ? (
+          // A side app is not the deliverable: its chip shows the app card,
+          // never the writing's check (same rule as DeliverablePanel).
+          null
         ) : activeArtifact ? (
           <>
             {onOpenArtifact && (

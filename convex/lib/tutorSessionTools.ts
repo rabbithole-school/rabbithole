@@ -112,6 +112,7 @@ import {
   MAX_APP_ASSET_BYTES,
 } from "../../shared/appAssets";
 import { appCharmThemeLabel } from "./themeIconArt";
+import { parseBuildContractArg } from "./buildContract";
 import {
   MAX_CHARACTER_REPLY_CHARS,
   MAX_DIRECTION_CHARS,
@@ -122,6 +123,28 @@ import {
   MAX_RUBRIC_CHARS,
   MAX_VERDICTS,
 } from "../../shared/appAiPolicy";
+import {
+  CODE_EDITOR_CLIENT_TOOL_NAME,
+  CODE_EDITOR_TOOL_NAME,
+  CODE_EDITOR_TOOL_TYPE,
+  codeArtifactPath,
+  createRefusalMessage,
+  editExcerpt,
+  formatAppDirectory,
+  formatAppView,
+  lineCountOf,
+  lineNumberAt,
+  numberDocumentLines,
+  parseCodeArtifactPath,
+  parseCodeEditorInput,
+  PATH_FORMAT_HINT,
+  readRequiredMessage,
+  SCHOLAR_WRITING_REFUSAL,
+  SeenRevisions,
+  staleFileMessage,
+  VIEW_LINE_NUMBER_NOTE,
+  type CodeEditorCommand,
+} from "./tutorCodeEditor";
 
 /**
  * The tutor's director tools. They act on the app's character behind the
@@ -133,6 +156,17 @@ import {
 export const CHARACTER_DIRECTOR_TOOL_NAMES: ReadonlySet<string> = new Set([
   "direct_character",
   "speak_as_character",
+]);
+
+/**
+ * The tools that build or read the app's code. On a builder's Edit turn the
+ * stream drops text written just before one of these (heldTextFateAtTool in
+ * lib/appUpdateTools.ts): it is the builder thinking aloud between edits,
+ * never a line for the scholar.
+ */
+export const APP_BUILD_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "create_code",
+  CODE_EDITOR_TOOL_NAME,
 ]);
 
 /**
@@ -187,29 +221,14 @@ export interface TutorToolSessionState {
   rubricPreToolClosingIsValid: boolean;
   suppressCompletionFollowUp: boolean;
   activityCompletedThisStream: boolean;
+  /** create_code ran this turn (TRA-519): the turn built an app even if the
+   *  session had none when it started, so its version is recorded. */
+  createdCodeArtifact: boolean;
 }
 
-/**
- * How `edit_document` "view" shows a document to the model: every line is
- * prefixed `N: `. The note says so inside the tool_result, so the model never
- * has to work out (and say out loud, where the scholar can read it) whether
- * the space after the colon is part of the code. Live 2026-10-08: a vibecode
- * turn wrote "Lines start with one space." into the scholar-visible
- * transcript, between a view and the edit that followed it.
- */
-export const VIEW_LINE_NUMBER_NOTE =
-  "Each line below starts with its line number, a colon and one space (`N: `). That prefix is not part of the code: leave it out of old_str and new_str.";
-
-export function numberDocumentLines(content: string): {
-  lineCount: number;
-  numbered: string;
-} {
-  const lines = content.split("\n");
-  return {
-    lineCount: lines.length,
-    numbered: lines.map((l, i) => `${i + 1}: ${l}`).join("\n"),
-  };
-}
+// Both document views (edit_document and the app editor) number lines the
+// same way; the helpers live with the editor.
+export { numberDocumentLines, VIEW_LINE_NUMBER_NOTE };
 
 function frameUntrustedAppActionResult(value: unknown): string {
   const suffix = Array.from(crypto.getRandomValues(new Uint8Array(4)), (byte) =>
@@ -303,19 +322,27 @@ export async function makeTutorSessionTools(
     callerUserId === session.scholarId;
   const registeredAppActions = session.appStateContext?.actions ?? [];
   const appActionArtifactId = session.appStateContext?.artifactId;
+  // TRA-519: builder features (app pictures, charm_icon, app actions, the
+  // directable character) follow any session with an app, chat included.
+  // Absent appContext (an older caller) falls back to the builder session.
+  const appBuild =
+    session.appContext?.builderFeatures ?? session.sessionMode === "vibecode";
   const canRunAppAction =
     callerUserId === session.scholarId &&
-    (session.sessionMode === "vibecode" ||
-      session.sessionMode === "workbench") &&
+    (appBuild || session.sessionMode === "workbench") &&
     appActionArtifactId !== undefined &&
     registeredAppActions.length > 0;
-  const isVibecode = session.sessionMode === "vibecode";
+  // The app this turn acts on, when the builder named one (TRA-519): the
+  // character/judge tools address it rather than the newest app.
+  const focusAppArg = session.focusAppId
+    ? { focusArtifactId: session.focusAppId }
+    : {};
   // The scholar's own tutor directs the app's character, when the app has one.
   const directableCharacter =
-    isVibecode && callerUserId === session.scholarId
+    appBuild && callerUserId === session.scholarId
       ? await ctx.runQuery(
           internal.appAiDirector.directableCharacterForSession,
-          { sessionId: projId, callerUserId },
+          { sessionId: projId, callerUserId, ...focusAppArg },
         )
       : null;
 
@@ -326,7 +353,7 @@ export async function makeTutorSessionTools(
     appAssetReference: string | null;
   }> => {
     const storageId = await ctx.storage.store(blob);
-    if (!isVibecode) {
+    if (!appBuild) {
       return { storageId, appAssetReference: null };
     }
     const normalized = await ctx.runAction(
@@ -634,6 +661,7 @@ export async function makeTutorSessionTools(
           {
             sessionId: projId,
             callerUserId,
+            ...focusAppArg,
             character: {
               name: input.name,
               persona: input.persona,
@@ -710,6 +738,7 @@ export async function makeTutorSessionTools(
           {
             sessionId: projId,
             callerUserId,
+            ...focusAppArg,
             judge: {
               id: input.id,
               rubric: input.rubric,
@@ -1347,8 +1376,8 @@ export async function makeTutorSessionTools(
         },
         kind: {
           type: "string" as const,
-          enum: ["online", "offline"] as const,
-          description: "'online' = scholar works with the AI tutor; 'offline' = real-world task. Almost always 'online' for a scholar-authored unit.",
+          enum: ["online", "offline", "app"] as const,
+          description: "'online' = scholar works with the AI tutor; 'offline' = real-world task; 'app' = the scholar builds an interactive app or simulation with you (the systemPrompt is the build brief). Almost always 'online' for a scholar-authored unit. An 'app' activity always comes AFTER at least one 'online' activity with a deliverable where they figure out how the thing works — learn before you build; it is refused as the Quest's first step.",
         },
         systemPrompt: {
           type: "string" as const,
@@ -1369,20 +1398,39 @@ export async function makeTutorSessionTools(
           },
           required: ["prompt"] as const,
         },
+        mission: {
+          type: "object" as const,
+          description: "Optional, for an 'online' or 'app' activity: the step's mission. `gate` = the first thing the scholar must make before side ideas get built (usually 'a first draft of X exists'; for an app, 'the mechanism runs once with default settings'). `freedoms` = what the scholar owns (topic choice, characters, look). `invariants` = ONLY for 'app': 1-5 things that must be true in the app, the mechanism stated as testable cause→effect.",
+          properties: {
+            gate: { type: "string" as const },
+            freedoms: { type: "array" as const, items: { type: "string" as const } },
+            invariants: { type: "array" as const, items: { type: "string" as const } },
+          },
+        },
       },
       required: ["lessonId", "title", "kind", "systemPrompt"] as const,
     },
-    run: async (input: { lessonId: string; title: string; kind: "online" | "offline" | "shareBack"; systemPrompt: string; deliverable?: { prompt: string; notes?: string } }) => {
+    run: async (input: {
+      lessonId: string;
+      title: string;
+      kind: "online" | "offline" | "app";
+      systemPrompt: string;
+      deliverable?: { prompt: string; notes?: string };
+      mission?: { gate?: string; freedoms?: string[]; invariants?: string[] };
+    }) => {
       if (!ownIsUnitId) return "Not allowed: not in an IS unit.";
       try {
+        const contract = parseBuildContractArg(input.mission);
         await ctx.runMutation(internal.activities.aiCreateForIsUnit, {
           lessonId: input.lessonId as Id<"lessons">,
           scholarId: session.scholarId,
           unitId: ownIsUnitId,
           title: input.title,
-          kind: input.kind,
+          kind: input.kind === "app" ? "online" : input.kind,
+          ...(input.kind === "app" ? { appActivity: true } : {}),
           systemPrompt: input.systemPrompt,
           deliverable: input.deliverable,
+          ...(contract ? { mission: contract } : {}),
           sessionId: projId,
         });
         emit({ toolComplete: { name: "create_activity", result: `Created activity "${input.title}"` } });
@@ -1430,6 +1478,47 @@ export async function makeTutorSessionTools(
     },
   });
 
+  const setQuestMissionTool = betaTool({
+    name: "set_quest_mission",
+    description:
+      "Save this Quest's MISSION, co-written with the scholar: ONE line in their words saying what they are making or finding out, and the GATE, the first thing that has to exist. Call it only after you read both back and they said yes. It shows on their Quest page. Once a mission exists, call this again ONLY when the scholar says \"change my mission\" or asks equally explicitly, and quote their ask in scholarWords; never change it on your own.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        text: {
+          type: "string" as const,
+          description: "The mission line, in the scholar's words. 140 characters or fewer.",
+        },
+        gate: {
+          type: "string" as const,
+          description: "The first thing that has to exist (e.g. 'my first sketch of the trap is drawn'). 240 characters or fewer.",
+        },
+        scholarWords: {
+          type: "string" as const,
+          description: "Only when changing an existing mission: the scholar's own words asking to change it, quoted.",
+        },
+      },
+      required: ["text", "gate"] as const,
+    },
+    run: async (input: { text: string; gate: string; scholarWords?: string }) => {
+      if (!ownIsUnitId) return "Not allowed: not in an IS unit.";
+      try {
+        await ctx.runMutation(internal.units.aiSetIsUnitMission, {
+          unitId: ownIsUnitId,
+          scholarId: session.scholarId,
+          text: input.text,
+          gate: input.gate,
+          scholarWords: input.scholarWords,
+        });
+        emit({ toolComplete: { name: "set_quest_mission", result: "Mission saved" } });
+        return `Mission saved: "${input.text.trim()}".`;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return `Failed to set mission: ${message}`;
+      }
+    },
+  });
+
   const setBadgeTool = betaTool({
     name: "set_badge",
     description:
@@ -1462,18 +1551,23 @@ export async function makeTutorSessionTools(
     },
   });
 
+  // The revision of each app the model has seen this turn: the DOCUMENTS
+  // section (built from this same session snapshot), then views and its own
+  // edits. The app editor binds every write to it (see tutorCodeEditor.ts).
+  const seenAppRevisions = new SeenRevisions(session.artifactData ?? []);
+
   const editDocumentTool = betaTool({
     name: "edit_document",
     description:
-      "View or rename any text or code document; create an empty titled text document for the scholar to write in. str_replace and insert work only on code artifacts. Multiple documents can exist, so use document_id to target one.",
+      `View or rename a document (a scholar's writing box or an app); create an empty titled text document for the scholar to write in. It never changes what a document says: the scholar writes their own words, and an app's code is changed with ${CODE_EDITOR_TOOL_NAME}. Multiple documents can exist, so use document_id to target one.`,
     inputSchema: {
       type: "object" as const,
       properties: {
         command: {
           type: "string" as const,
-          enum: ["create", "view", "rename", "str_replace", "insert"] as const,
+          enum: ["create", "view", "rename"] as const,
           description:
-            "create an empty text document; view or rename a text/code document; or edit code with str_replace/insert",
+            "create an empty text document; view or rename a document",
         },
         document_id: {
           type: "string" as const,
@@ -1483,29 +1577,11 @@ export async function makeTutorSessionTools(
         base_revision: {
           type: "number" as const,
           description:
-            "Revision returned by view or shown in DOCUMENTS. Required for rename and code edits on an existing document.",
+            "Revision returned by view or shown in DOCUMENTS. Required for rename.",
         },
         title: {
           type: "string" as const,
           description: "Document title (for create or rename)",
-        },
-        old_str: {
-          type: "string" as const,
-          description:
-            "Code only: exact text to find for str_replace. Must match exactly.",
-        },
-        new_str: {
-          type: "string" as const,
-          description: "Code only: replacement text for str_replace",
-        },
-        insert_line: {
-          type: "number" as const,
-          description:
-            "Code only: line number to insert after (0 = beginning)",
-        },
-        insert_text: {
-          type: "string" as const,
-          description: "Code only: text to insert",
         },
       },
       required: ["command"] as const,
@@ -1513,9 +1589,10 @@ export async function makeTutorSessionTools(
     run: async (input) => {
       const docId = (input as { document_id?: string }).document_id as Id<"artifacts"> | undefined;
       const command = (input as { command?: string }).command;
+      // Retired commands: a caller replaying the old schema is pointed at the
+      // app editor, or refused outright on a writing box.
       const isCodeEdit = command === "str_replace" || command === "insert";
-      const scholarWritingRefusal =
-        "This is the scholar's writing. You can't write in it — they type or dictate into the box themselves. Point them to the box once, then keep the conversation going.";
+      const scholarWritingRefusal = SCHOLAR_WRITING_REFUSAL;
 
       // A document_id from another session trips the artifact↔session
       // membership guard (aiGetContent / aiRename / aiStrReplace /
@@ -1560,6 +1637,11 @@ export async function makeTutorSessionTools(
         if (isCodeEdit && editTarget && editTarget.type !== "code") {
           return scholarWritingRefusal;
         }
+        if (isCodeEdit) {
+          return editTarget
+            ? `edit_document does not change code. Use ${CODE_EDITOR_TOOL_NAME} with command "${command}" on ${codeArtifactPath(String(editTarget._id))}.`
+            : `edit_document does not change code. ${PATH_FORMAT_HINT}`;
+        }
       }
 
       switch (command) {
@@ -1590,6 +1672,9 @@ export async function makeTutorSessionTools(
               artifactId: docId,
             });
             if (!artifact || Array.isArray(artifact)) return "Error: Document not found.";
+            if (artifact.type === "code") {
+              seenAppRevisions.see(String(artifact._id), artifact.revision);
+            }
             const { numbered } = numberDocumentLines(artifact.content);
             emit({ toolComplete: { name: "edit_document", result: `Viewed "${artifact.title}"` } });
             await splitAfterTool("Viewed document");
@@ -1613,6 +1698,9 @@ export async function makeTutorSessionTools(
             return "No documents exist yet. Use create to make one.";
           }
           const docs = docList;
+          for (const doc of docs) {
+            if (doc.type === "code") seenAppRevisions.see(String(doc._id), doc.revision);
+          }
           emit({ toolComplete: { name: "edit_document", result: "Viewed documents" } });
           await splitAfterTool("Viewed document");
           return docs.map((doc: { _id: Id<"artifacts">; title: string; content: string; revision: number }) => {
@@ -1638,89 +1726,18 @@ export async function makeTutorSessionTools(
             return `Conflict: the document changed. Re-view it and retry with base_revision ${result.artifact.revision}.`;
           }
           if (result.kind === "refused") return result.error;
+          // A rename bumps the revision; the model made that change itself,
+          // so its next code edit is not stale.
+          if (result.artifact.type === "code") {
+            seenAppRevisions.see(String(result.artifact._id), result.artifact.revision);
+          }
           emit({ artifactUpdate: true });
           emit({ toolComplete: { name: "edit_document", result: `Renamed to "${newTitle}"` } });
           await splitAfterTool(`Renamed to "${newTitle}"`);
           return `Document renamed to "${newTitle}". Current revision: ${result.artifact.revision}.`;
         }
-        case "str_replace": {
-          const oldStr = (input as { old_str?: string }).old_str;
-          const newStr = (input as { new_str?: string }).new_str;
-          if (!oldStr || newStr === undefined) {
-            return "Error: str_replace requires old_str and new_str parameters.";
-          }
-          let result;
-          try {
-            result = await ctx.runMutation(internal.artifacts.aiStrReplace, {
-              sessionId: projId,
-              oldStr,
-              newStr,
-              baseRevision: (input as { base_revision?: number }).base_revision,
-              ...(docId ? { artifactId: docId } : {}),
-            });
-          } catch (err) {
-            return docGuardError(err);
-          }
-          if (result.kind === "conflict") {
-            return `Conflict: the document changed. Re-view it and retry with base_revision ${result.artifact.revision}.`;
-          }
-          if (result.kind === "refused") return result.error;
-          emit({ artifactUpdate: true });
-          emit({ toolComplete: { name: "edit_document", result: "Text replaced" } });
-          {
-            const newId = await ctx.runMutation(internal.sessionHelpers.splitStream, {
-              currentMessageId: state.assistantMsgId as Id<"messages">,
-              sessionId: projId,
-              contentSoFar: state.fullContent,
-              toolAction: "Edited document",
-            });
-            state.assistantMsgId = newId;
-            state.fullContent = "";
-            state.lastPersistLength = 0;
-            emit({ newAssistantMsg: String(newId) });
-          }
-          return `Successfully replaced text. Current revision: ${result.artifact.revision}.`;
-        }
-        case "insert": {
-          const insertLine = (input as { insert_line?: number }).insert_line ?? 0;
-          const insertText = (input as { insert_text?: string }).insert_text;
-          if (!insertText) {
-            return "Error: insert requires insert_text parameter.";
-          }
-          let result;
-          try {
-            result = await ctx.runMutation(internal.artifacts.aiInsert, {
-              sessionId: projId,
-              insertLine,
-              insertText,
-              baseRevision: (input as { base_revision?: number }).base_revision,
-              ...(docId ? { artifactId: docId } : {}),
-            });
-            if (result.kind === "conflict") {
-              return `Conflict: the document changed. Re-view it and retry with base_revision ${result.artifact.revision}.`;
-            }
-            if (result.kind === "refused") return result.error;
-          } catch (err) {
-            return docGuardError(err);
-          }
-          emit({ artifactUpdate: true });
-          emit({ toolComplete: { name: "edit_document", result: "Text inserted" } });
-          {
-            const newId = await ctx.runMutation(internal.sessionHelpers.splitStream, {
-              currentMessageId: state.assistantMsgId as Id<"messages">,
-              sessionId: projId,
-              contentSoFar: state.fullContent,
-              toolAction: "Edited document",
-            });
-            state.assistantMsgId = newId;
-            state.fullContent = "";
-            state.lastPersistLength = 0;
-            emit({ newAssistantMsg: String(newId) });
-          }
-          return `Text inserted successfully. Current revision: ${result.artifact.revision}.`;
-        }
         default:
-          return "Unknown command. Use create, view, rename, str_replace, or insert.";
+          return "Unknown command. Use create, view, or rename.";
       }
     },
   });
@@ -1750,6 +1767,7 @@ export async function makeTutorSessionTools(
         type: "code",
         language: "html",
       });
+      state.createdCodeArtifact = true;
       emit({ artifactUpdate: true, newArtifactId: String(newArtifactId) });
       emit({ toolComplete: { name: "create_code", result: `Created "${input.title}"` } });
       const newId = await ctx.runMutation(internal.sessionHelpers.splitStream, {
@@ -1762,9 +1780,187 @@ export async function makeTutorSessionTools(
       state.fullContent = "";
       state.lastPersistLength = 0;
       emit({ newAssistantMsg: String(newId) });
-      return `Code artifact created successfully. Document ID: ${String(newArtifactId)}. The scholar can now see the live preview. You can update it using edit_document with str_replace or insert commands using this document_id.`;
+      // Revision 0 is the code the model just wrote, so it may edit it next.
+      seenAppRevisions.see(String(newArtifactId), 0);
+      return `Code artifact created successfully. Document ID: ${String(newArtifactId)}. Path: ${codeArtifactPath(String(newArtifactId))}. The scholar can now see the live preview. Change it with ${CODE_EDITOR_TOOL_NAME} (str_replace or insert) on that path.`;
     },
   });
+
+  // ── The app editor: Anthropic's text editor tool on code artifacts ──
+  // Contract (paths, conflicts, the writing-box refusal): tutorCodeEditor.ts.
+  // Its events go out under the client name `edit_document`
+  // (CODE_EDITOR_CLIENT_TOOL_NAME) so both frontends' chips and build-stage
+  // logic keep working, including on iPads that have not been re-released.
+  const { ToolError } = await import("@anthropic-ai/sdk/lib/tools/ToolError");
+  const editorFailure = (message: string): never => {
+    throw new ToolError(message);
+  };
+  const codeEditorTool = {
+    type: CODE_EDITOR_TOOL_TYPE,
+    name: CODE_EDITOR_TOOL_NAME,
+    parse: parseCodeEditorInput,
+    run: async (input: CodeEditorCommand): Promise<string> => {
+      const target = parseCodeArtifactPath(input.path);
+      if (target.kind === "invalid") return editorFailure(target.error);
+
+      if (target.kind === "directory") {
+        if (input.command !== "view") {
+          return editorFailure(
+            `INVALID_PATH: ${input.path} is the apps directory, not an app. ${PATH_FORMAT_HINT}`,
+          );
+        }
+        const all = await ctx.runQuery(internal.artifacts.aiGetContent, {
+          sessionId: projId,
+        });
+        const apps = (Array.isArray(all) ? all : all ? [all] : [])
+          .filter((doc) => doc.type === "code")
+          .map((doc) => ({
+            id: String(doc._id),
+            title: doc.title,
+            revision: doc.revision,
+            content: doc.content,
+          }));
+        emit({ toolComplete: { name: CODE_EDITOR_CLIENT_TOOL_NAME, result: "Viewed documents" } });
+        await splitAfterTool("Viewed document");
+        return formatAppDirectory(apps);
+      }
+
+      const path = codeArtifactPath(target.artifactId);
+      const artifactId = target.artifactId as Id<"artifacts">;
+      let artifact;
+      try {
+        artifact = await ctx.runQuery(internal.artifacts.aiGetContent, {
+          sessionId: projId,
+          artifactId,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return editorFailure(
+          message.includes("does not belong to session")
+            ? `NOT_FOUND: ${path} is not an app in this session. View /apps to list this session's apps.`
+            : `NOT_FOUND: ${path} could not be read (${message}).`,
+        );
+      }
+      if (!artifact || Array.isArray(artifact)) {
+        return editorFailure(
+          `NOT_FOUND: ${path} does not exist. View /apps to list this session's apps.`,
+        );
+      }
+      if (artifact.type !== "code") {
+        // A writing box (or a map/slides/manipulative) is not a file here.
+        // Writes are refused outright; aiStrReplace/aiInsert refuse them too.
+        return editorFailure(
+          input.command === "view"
+            ? `NOT_AN_APP: ${path} is not an app. Use edit_document to view a document.`
+            : isTextArtifact(artifact)
+              ? SCHOLAR_WRITING_REFUSAL
+              : `NOT_AN_APP: ${path} is not an app; it has its own tool.`,
+        );
+      }
+
+      switch (input.command) {
+        case "view": {
+          const view = formatAppView({
+            path,
+            title: artifact.title,
+            revision: artifact.revision,
+            content: artifact.content,
+            viewRange: input.view_range,
+          });
+          if (!view.ok) return editorFailure(view.error);
+          seenAppRevisions.see(String(artifact._id), artifact.revision);
+          emit({ toolComplete: { name: CODE_EDITOR_CLIENT_TOOL_NAME, result: `Viewed "${artifact.title}"` } });
+          await splitAfterTool("Viewed document");
+          return view.text;
+        }
+        case "create":
+          return editorFailure(createRefusalMessage(path));
+        case "str_replace":
+        case "insert": {
+          const baseRevision = seenAppRevisions.get(String(artifact._id));
+          if (baseRevision === undefined) {
+            return editorFailure(readRequiredMessage(path));
+          }
+          if (
+            input.command === "insert" &&
+            (input.insert_line < 0 ||
+              input.insert_line > lineCountOf(artifact.content))
+          ) {
+            return editorFailure(
+              `INVALID_LINE: insert_line ${input.insert_line} is outside ${path}, which has ${lineCountOf(artifact.content)} lines. Use 0 to insert at the top, or a line number to insert after it.`,
+            );
+          }
+          let result;
+          try {
+            result =
+              input.command === "str_replace"
+                ? await ctx.runMutation(internal.artifacts.aiStrReplace, {
+                    sessionId: projId,
+                    artifactId,
+                    oldStr: input.old_str,
+                    newStr: input.new_str,
+                    baseRevision,
+                  })
+                : await ctx.runMutation(internal.artifacts.aiInsert, {
+                    sessionId: projId,
+                    artifactId,
+                    insertLine: input.insert_line,
+                    insertText: input.insert_text,
+                    baseRevision,
+                  });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return editorFailure(`EDIT_FAILED: ${path} was not changed (${message}).`);
+          }
+          if (result.kind === "conflict") {
+            seenAppRevisions.forget(String(artifact._id));
+            return editorFailure(staleFileMessage(path, result.artifact.revision));
+          }
+          if (result.kind === "refused") {
+            switch (result.reason) {
+              case "not_found":
+                return editorFailure(
+                  `No replacement was performed: old_str did not appear verbatim in ${path}. View it again and copy the exact text, without the line-number prefix.`,
+                );
+              case "many":
+                return editorFailure(
+                  `No replacement was performed: old_str occurs more than once in ${path}. Include more surrounding lines so it is unique.`,
+                );
+              case "empty":
+                return editorFailure("No replacement was performed: old_str must not be empty.");
+              case "scholar_writing":
+                return editorFailure(SCHOLAR_WRITING_REFUSAL);
+              default:
+                return editorFailure(result.error);
+            }
+          }
+          const updated = result.artifact;
+          seenAppRevisions.see(String(updated._id), updated.revision);
+          emit({ artifactUpdate: true });
+          emit({
+            toolComplete: {
+              name: CODE_EDITOR_CLIENT_TOOL_NAME,
+              result: input.command === "str_replace" ? "Text replaced" : "Text inserted",
+            },
+          });
+          await splitAfterTool("Edited document");
+          let firstLine: number;
+          let lastLine: number;
+          if (input.command === "str_replace") {
+            firstLine = lineNumberAt(
+              artifact.content,
+              artifact.content.indexOf(input.old_str),
+            );
+            lastLine = firstLine + lineCountOf(input.new_str) - 1;
+          } else {
+            firstLine = input.insert_line + 1;
+            lastLine = input.insert_line + lineCountOf(input.insert_text);
+          }
+          return `${path} has been edited (revision ${updated.revision}). The edited lines now read:\n${VIEW_LINE_NUMBER_NOTE}\n${editExcerpt(updated.content, firstLine, lastLine)}`;
+        }
+      }
+    },
+  };
 
   // ── show_map: the GeoMap surface (real cartography, governed) ──
   // Creates the session's single map artifact from a full GeoMapSpec, then
@@ -2374,8 +2570,8 @@ export async function makeTutorSessionTools(
     name: "generate_image",
     description:
       "Invent an educational illustration with an AI image model. Use this for pictures that do not exist to be found: analogies and metaphors, imagined scenes, stylized concept art, an arrangement composed for this one explanation. The image comes back to you as well as to the scholar, so look at what was actually generated before describing it — if it does not match what you asked for, call this again with a corrected prompt. You may also call this more than once in the same reply for a genuinely different image (e.g. two things to compare side by side) — there is a shared, limited budget for the whole turn." +
-      (isVibecode
-        ? " In APP BUILDER MODE, the result also includes an /app-assets/... reference. Paste that exact path into the app HTML instead of embedding bytes or using a remote URL."
+      (appBuild
+        ? " For an app, the result also includes an /app-assets/... reference. Paste that exact path into the app HTML instead of embedding bytes or using a remote URL."
         : "") +
       CHOOSING_AN_IMAGE_TOOL,
     inputSchema: {
@@ -2516,8 +2712,8 @@ export async function makeTutorSessionTools(
     name: "search_image",
     description:
       "Find a real photograph or published diagram on the web and show it to the scholar. Use this for anything with one true real-world appearance or structure — molecules, anatomy, maps, real places and people, specific organisms, equipment, labeled scientific diagrams. The image comes back to you as well as to the scholar, so you can look at what the search actually found and check it before you describe it." +
-      (isVibecode
-        ? " In APP BUILDER MODE, the result also includes an /app-assets/... reference. Paste that exact path into the app HTML instead of embedding bytes or using a remote URL."
+      (appBuild
+        ? " For an app, the result also includes an /app-assets/... reference. Paste that exact path into the app HTML instead of embedding bytes or using a remote URL."
         : "") +
       CHOOSING_AN_IMAGE_TOOL,
     inputSchema: {
@@ -2607,7 +2803,7 @@ export async function makeTutorSessionTools(
             // so this keeps the tutor from describing a picture it never saw.
             const mimeType = sniffImageMime(bytes);
             if (!mimeType) continue;
-            const stored = isVibecode
+            const stored = appBuild
               ? await storeTutorImage(toStorageBlob(bytes, mimeType))
               : null;
             picked = {
@@ -3011,24 +3207,35 @@ export async function makeTutorSessionTools(
   // Build tools array based on active features.
   // Scholar-data write audit for test-drive gating:
   //   update_dossier — gated above (returns early when isTestDrive)
-  //   create_code / edit_document / generate_image — artifact/storage writes
+  //   create_code / edit_document / str_replace_based_edit_tool /
+  //     generate_image — artifact/storage writes
   //     only; safe for test drives (teacher needs the full scholar UX)
   //   processStepTool — advances process state scoped to this project; safe
   //   mastery / seeds / sessionSignals — written ONLY via observer.ts
   //     analyzeSession, which already short-circuits on isTestDrive
   return [
     updateDossierTool, // Always enabled
-    createCodeTool, // Always enabled — scholars can build interactive code
+    // Scholars can build interactive code — except in a step of their own
+    // Quest while its build step is still locked (TRA-519 B6 hard lock): the
+    // app waits for the build step. Editing an existing app stays possible.
+    ...(session.unitContext?.questBuildLocked || session.unitContext?.questBuildOpen
+      ? []
+      : [createCodeTool]),
     showMapTool, // Always enabled — real cartography (governed); safe in test drives (writes no learning record)
     showManipulativeTool, // Always enabled — ad-hoc poke-able manipulative; safe in test drives (writes no learning record)
     editSlidesTool, // Always enabled — Rabbit Slides; safe in test drives (writes no learning record)
-    editDocumentTool, // Always enabled — needed to edit code artifacts and create/edit documents
+    editDocumentTool, // Always enabled — view/rename documents, create an empty writing box
+    // Always enabled, right after edit_document, so the tool list stays the
+    // same for the whole session whether or not an app exists yet.
+    codeEditorTool,
     generateImageTool, // Always enabled — AI image generation
     searchImageTool, // Always enabled — real images for real subjects (see CHOOSING_AN_IMAGE_TOOL)
-    ...(isVibecode ? [charmIconTool] : []),
+    ...(appBuild ? [charmIconTool] : []),
     // Build-time app AI, teacher builds only for now: a character's script is
     // authored by staff. Play drops both (WORKSHOP_CODE_TOOL_NAMES).
-    ...(isVibecode && session.isTestDrive === true
+    ...((session.appContext?.builderPrimary ??
+      session.sessionMode === "vibecode") &&
+    session.isTestDrive === true
       ? [defineCharacterTool, defineJudgeTool]
       : []),
     checkWorkTool, // Always enabled — sandboxed self-verification of tutor-composed content
@@ -3044,7 +3251,7 @@ export async function makeTutorSessionTools(
     ...(hasPhysicalEnv ? [suggestPhysicalTaskTool] : []),
     ...(isAngleKickoff ? [setActivityAngleTool] : []),
     ...(isOwnIsUnit
-      ? [createLessonTool, createActivityTool, updateUnitMetadataTool, setBadgeTool]
+      ? [createLessonTool, createActivityTool, updateUnitMetadataTool, setQuestMissionTool, setBadgeTool]
       : []),
     offerInstructionTool,
     // Problems-in-chat (⑮) — GATED: only offered when the kill-switch is

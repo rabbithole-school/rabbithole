@@ -1,5 +1,34 @@
 # Observer Eval — Findings & Decisions
 
+## 2026-10-14 — observer moves Opus 4.8 → Sonnet 5.5 (effort `high`)
+
+Prod had run Opus 4.8 via the `OBSERVER_MODEL` env var since 2026-08-19. Fixtures only
+(15), two rounds per arm (n=30), judged by `JUDGE_MODEL` (Opus 4.8). The Opus arm is
+the pre-change forced-tool call (run on the parent commit — rerunning `--models opus`
+now sends the auto request); the Sonnet arms are the shipped `tool_choice: auto`
+request from `buildObserverRequest`.
+
+| Arm | judge overall | degraded pulse | no tool call | p50 latency | $/run |
+|---|---|---|---|---|---|
+| Opus 4.8 (forced tool, prod before) | 4.37 | 0/30 | 0/30 | 19.2 s | $0.129 |
+| Sonnet 5.5 low | 4.17 | 0/30 | 0/30 | 7.6 s | $0.047 |
+| Sonnet 5.5 medium | 4.30 | 0/30 | 0/30 | 8.0 s | $0.048 |
+| **Sonnet 5.5 high (shipped)** | **4.50** | 0/30 | 0/30 | 9.5 s | $0.051 |
+
+- **Why not structured outputs.** Sonnet 5.5 rejects forced `tool_choice`; the
+  observer schema is too large for `output_config.format` (29 optional params vs a
+  cap of 24, and "compiled grammar is too large" even with five made nullable) and
+  for `strict: true`. So the unchanged tool is offered with `auto`, plus one retry
+  when a reply has no call. No reply lacked a call in 240 Sonnet 5.5 runs.
+- **Non-strict inputs drop required fields.** Before the fix, Sonnet 5.5 left
+  `confidenceScore` off observations in 3 of 90 runs (low/medium; 0 of 30 at high).
+  `parseObserverResponse` now drops such rows rather than letting one abort the
+  whole write path.
+- **Gates:** rigor and fluency both PASS at `high` (misconception capture 3/3,
+  Analyze+ 0/23; fluency recall 4/4, false positives 0/8).
+- **Welfare probe:** two fictional disclosure transcripts × 4 runs — 8/8 raised
+  `safetyAlert` (critical), 0 refusals.
+
 _Eval run 2026-06-01. 14 cases (6 gold fixtures + 8 real dev transcripts) × {Sonnet 4.6, Opus 4.8}, judged blind by Opus 4.8. Full report: `out/baseline/report.md`._
 
 ## TL;DR
@@ -10,7 +39,7 @@ _Eval run 2026-06-01. 14 cases (6 gold fixtures + 8 real dev transcripts) × {So
    misconception handling, seed quality — and occasionally dropped `pulseScore`
    entirely from its structured output. Opus's only clear win was signal usefulness.
    The cost/quality case for Opus here is negative, so the live observer stays on
-   Sonnet (now flippable via the `OBSERVER_MODEL` env var if that ever changes).
+   Sonnet (then flippable via the `OBSERVER_MODEL` env var; superseded 2026-10-14 — the model is now a code constant, see the top section).
 2. **The real wins are in the prompt, not the model.** The judge flagged the *same*
    systematic errors under both models — proof they're prompt issues. I tuned
    `OBSERVER_SYSTEM_PROMPT` against the six highest-frequency ones (below).

@@ -663,9 +663,9 @@ export const requestSessionActionForTutor = internalMutation({
     if (
       session._id !== args.sessionId ||
       session.userId !== args.callerUserId ||
-      artifact.type !== "code" ||
-      (session.sessionMode !== "vibecode" &&
-        session.sessionMode !== "workbench")
+      // Any session's code app (TRA-519 one app surface: a chat session's app
+      // gets run_app_action too); owner + a registered action stay the gate.
+      artifact.type !== "code"
     ) {
       throw new Error("App actions are available only in the owner's live app");
     }
@@ -1029,6 +1029,9 @@ export async function readLatestSessionState(
   sessionId: Id<"sessions">,
   userId: Id<"users">,
   artifacts: Doc<"artifacts">[],
+  /** The app the turn acts on (TRA-519): its state is read first, so the
+   * tutor reads the open app, not a newer one. Absent = newest first. */
+  preferredArtifactId?: Id<"artifacts">,
 ): Promise<{
   artifact: Doc<"artifacts">;
   snapshot: AppStateSnapshot;
@@ -1036,6 +1039,20 @@ export async function readLatestSessionState(
   const codeArtifactsNewestFirst = artifacts
     .filter((artifact) => artifact.type === "code")
     .sort((a, b) => b._creationTime - a._creationTime);
+  const preferred = preferredArtifactId
+    ? codeArtifactsNewestFirst.find((a) => a._id === preferredArtifactId)
+    : undefined;
+  if (preferred) {
+    // The open app's state or none: falling through to another app's state
+    // would hand the tutor (and run_app_action) the wrong app.
+    const snapshot = await readSessionState(
+      ctx,
+      sessionId,
+      userId,
+      preferred._id,
+    );
+    return snapshot ? { artifact: preferred, snapshot } : null;
+  }
   for (const artifact of codeArtifactsNewestFirst) {
     const snapshot = await readSessionState(
       ctx,

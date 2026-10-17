@@ -243,7 +243,7 @@ function ClaudeAndMcpSection({ scope }: { scope: string | undefined }) {
             ))}
             <Text fontFamily="body" fontSize="xs" color="charcoal.400">
               The staff service account holds school operations access: scholar
-              accounts and portfolio, no sensitive data.
+              accounts, devices and scanner filing, no learning records.
             </Text>
           </VStack>
         )}

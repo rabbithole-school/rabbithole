@@ -17,6 +17,7 @@ import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 import { ActivityKindIcon } from "@/components/ActivityKindIcon";
 import { ReadinessInline } from "@/components/curriculumDoc/ReadinessGate";
 import { STRAND_CONFIG } from "@/lib/constants";
+import { effectiveActivityKind } from "@/shared/appSurface";
 
 export function LessonSummary({
   unitId,
@@ -116,7 +117,7 @@ export function LessonSummary({
                     textDecoration="none"
                     _hover={{ bg: "gray.50", borderColor: "violet.300" }}
                   >
-                    <ActivityKindIcon kind={a.kind} />
+                    <ActivityKindIcon kind={effectiveActivityKind(a)} />
                     <Text
                       fontFamily="heading"
                       fontWeight="600"
@@ -128,7 +129,7 @@ export function LessonSummary({
                     >
                       {a.title}
                     </Text>
-                    {a.kind === "online" && readiness && (
+                    {effectiveActivityKind(a) === "online" && readiness && (
                       <ReadinessInline readiness={readiness} w="96px" />
                     )}
                   </HStack>

@@ -63,10 +63,21 @@ import {
   buildContractValidator,
 } from "./lib/buildContract";
 import { markUnitBuiltInSession } from "./lib/independentStudy";
+import { isLearningStep } from "./lib/mission";
 import { generateAppToken } from "./customApps";
 import { isUsableVibecodeStarterApp } from "./lib/vibecodeStarter";
 import { assertInstitutionActive } from "./lib/access";
-import { isCurriculumRole, isTeacherRole } from "./lib/roles";
+import {
+  APP_ONLY_CLEARED_FIELDS,
+  assertAppHasNoAdvanceRubric,
+  defaultAppDeliverable,
+  isUntouchedDefaultAppDeliverable,
+  resolveActivityWriteTarget,
+  storedShapeFields,
+} from "./lib/appActivity";
+import { effectiveActivityKind, isAppActivity } from "../shared/appSurface";
+import { ROLES, isCurriculumRole, isTeacherRole } from "./lib/roles";
+import { requireCanRunOwnedAssignment } from "./lib/curriculumRun";
 
 const kindLiteral = v.union(
   v.literal("online"),
@@ -80,9 +91,11 @@ const kindLiteral = v.union(
   // here — a simulator with no spec is a Draft, same as an online activity with
   // no prompt.
   v.literal("simulator"),
-  // Vibecode app-builder workshop. The activity's systemPrompt IS the build
-  // brief — no dedicated payload field; kind alone routes the scholar into
-  // the full-screen VibecodeScreen (see convex/sessions.ts create).
+  // LEGACY INPUT for an app activity (TRA-519 A4). Still accepted from every
+  // caller, but every writer stores { kind: "online", appActivity: true }
+  // (lib/appActivity.ts resolveActivityWriteTarget). The activity's
+  // systemPrompt IS the build brief; an app activity opens the full-screen
+  // builder (lib/activityKinds.ts sessionModeForActivity).
   v.literal("vibecode"),
 );
 
@@ -104,13 +117,14 @@ const editAccessLiteral = v.union(
 
 /**
  * The scholar edit policy steers the App designer only, so the internal
- * writers (aide + unit tools, TRA-477) refuse it on any other kind rather than
- * strand a setting nothing reads.
+ * writers (aide + unit tools, TRA-477) refuse it on any other activity rather
+ * than strand a setting nothing reads. Judged on the shape the row will have
+ * after the write (either app-activity shape passes).
  */
-function assertEditAccessKind(kind: string | undefined) {
-  if (kind !== "vibecode") {
+function assertEditAccessKind(isApp: boolean) {
+  if (!isApp) {
     throw new Error(
-      "editAccess (scholarEdit) applies to vibecode activities only.",
+      "editAccess (scholarEdit) applies to app activities only.",
     );
   }
 }
@@ -163,7 +177,9 @@ export const listByLessonPublic = authedQuery({
         _id: a._id,
         title: a.title,
         description: a.scholarDescription ?? null,
-        kind: a.kind,
+        // Effective kind: an app activity projects as "vibecode" in either
+        // stored shape, so every client keeps routing it as today.
+        kind: effectiveActivityKind(a),
         durationMinutes: a.durationMinutes ?? null,
         hasPrompt: !!a.systemPrompt?.trim(),
         webUrl: a.webUrl ?? null,
@@ -246,7 +262,8 @@ export const listByUnitPublic = authedQuery({
         lessonId: a.lessonId,
         title: a.title,
         description: a.scholarDescription ?? null,
-        kind: a.kind,
+        // Effective kind (see listByLessonPublic): old iPad builds route on it.
+        kind: effectiveActivityKind(a),
         durationMinutes: a.durationMinutes ?? null,
         order: a.order,
         hasPrompt: !!a.systemPrompt?.trim(),
@@ -354,7 +371,7 @@ export const getPublic = authedQuery({
       lessonId: a.lessonId,
       title: a.title,
       description: a.scholarDescription ?? null,
-      kind: a.kind,
+      kind: effectiveActivityKind(a),
       durationMinutes: a.durationMinutes ?? null,
       hasGoogleSlidesDeck: !!presentations.google,
       hasScholarAngles: a.hasScholarAngles ?? false,
@@ -400,7 +417,7 @@ export const getDetailForTeacher = teacherQuery({
       // Teacher-facing design intent (never the scholar blurb).
       description: a.description ?? null,
       scholarDescription: a.scholarDescription ?? null,
-      kind: a.kind,
+      kind: effectiveActivityKind(a),
       durationMinutes: a.durationMinutes ?? null,
       hasGoogleSlidesDeck: !!presentations.google,
       hasScholarAngles: a.hasScholarAngles ?? false,
@@ -424,6 +441,9 @@ export const create = authedMutation({
     description: v.optional(v.string()),
     scholarDescription: v.optional(v.string()),
     kind: kindLiteral,
+    // TRA-519 A4: an online activity where scholars build or use an app
+    // (kind "vibecode" is the legacy spelling of the same thing).
+    appActivity: v.optional(v.boolean()),
     systemPrompt: v.optional(v.string()),
     tutorModel: v.optional(tutorModelLiteral),
     processId: v.optional(v.id("processes")),
@@ -439,7 +459,7 @@ export const create = authedMutation({
     webAllowedHosts: v.optional(v.array(v.string())),
     externalAppId: v.optional(v.id("externalApps")),
     game: v.optional(gameFieldsValidator),
-    // kind="vibecode" only: the model contract + allowSilence (schema.ts).
+    // App activities only: the model contract + allowSilence (schema.ts).
     buildContract: v.optional(buildContractValidator),
     allowSilence: v.optional(v.boolean()),
     // Explicitly about spelling/typing (schema.ts).
@@ -447,7 +467,11 @@ export const create = authedMutation({
   },
   handler: async (ctx, args) => {
     await requireUnitEditAccess(ctx, { lessonId: args.lessonId });
-    const contract = buildContractPatch(args.kind, {
+    const target = resolveActivityWriteTarget(null, {
+      kind: args.kind,
+      appActivity: args.appActivity,
+    });
+    const contract = buildContractPatch(storedShapeFields(target), {
       buildContract: args.buildContract,
       allowSilence: args.allowSilence,
     });
@@ -461,12 +485,15 @@ export const create = authedMutation({
       title: args.title.trim() || "New activity",
       description: args.description?.trim() || undefined,
       scholarDescription: args.scholarDescription?.trim() || undefined,
-      kind: args.kind,
+      ...storedShapeFields(target),
       systemPrompt: args.systemPrompt?.trim() || undefined,
-      tutorModel:
-        args.kind === "vibecode"
-          ? normalizeStoredTutorModel(args.tutorModel)
-          : undefined,
+      tutorModel: target.isApp
+        ? normalizeStoredTutorModel(args.tutorModel)
+        : undefined,
+      // An app activity's evaluation bar is the app (lib/appActivity.ts).
+      deliverable: target.isApp
+        ? defaultAppDeliverable({ scholarDescription: args.scholarDescription })
+        : undefined,
       processId: args.processId,
       durationMinutes: args.durationMinutes,
       defaultMode: args.defaultMode,
@@ -732,8 +759,8 @@ export const prepareVibecodeStarterFromArtifact = internalQuery({
     });
     const activity = await ctx.db.get(args.activityId);
     if (!activity) throw new Error("Activity not found");
-    if (activity.kind !== "vibecode") {
-      throw new Error("Activity must be vibecode");
+    if (!isAppActivity(activity)) {
+      throw new Error("Activity must be an app activity");
     }
 
     const artifact = await ctx.db.get(args.artifactId);
@@ -902,8 +929,8 @@ export const commitVibecodeStarterFromArtifact = internalMutation({
     });
     const activity = await ctx.db.get(args.activityId);
     if (!activity) throw new Error("Activity not found");
-    if (activity.kind !== "vibecode") {
-      throw new Error("Activity must be vibecode");
+    if (!isAppActivity(activity)) {
+      throw new Error("Activity must be an app activity");
     }
     const artifact = await ctx.db.get(args.artifactId);
     if (
@@ -1002,8 +1029,8 @@ export const setScholarsStartFrom = authedMutation({
     await requireUnitEditAccess(ctx, { activityId: args.activityId });
     const activity = await ctx.db.get(args.activityId);
     if (!activity) throw new Error("Activity not found");
-    if (activity.kind !== "vibecode") {
-      throw new Error("Activity must be vibecode");
+    if (!isAppActivity(activity)) {
+      throw new Error("Activity must be an app activity");
     }
     if (args.value === "starter") {
       const hasUsableStarter = activity.starterAppId
@@ -1031,12 +1058,15 @@ export const update = authedMutation({
     description: v.optional(v.union(v.string(), v.null())),
     scholarDescription: v.optional(v.union(v.string(), v.null())),
     kind: v.optional(kindLiteral),
+    // TRA-519 A4: online activity ⇄ app activity ("Scholars build or use an
+    // app"). Omitted = keep; a bare `kind` means that kind, not an app.
+    appActivity: v.optional(v.boolean()),
     systemPrompt: v.optional(v.union(v.string(), v.null())),
     tutorModel: v.optional(v.union(tutorModelLiteral, v.null())),
     scholarsStartFrom: v.optional(scholarsStartFromLiteral),
-    // kind="vibecode" only: the App designer scholar edit policy (TRA-301).
+    // App activities only: the App designer scholar edit policy (TRA-301).
     editAccess: v.optional(editAccessLiteral),
-    // kind="vibecode" only: the model contract (null clears) + allowSilence.
+    // App activities only: the model contract (null clears) + allowSilence.
     buildContract: v.optional(v.union(buildContractValidator, v.null())),
     allowSilence: v.optional(v.boolean()),
     processId: v.optional(v.union(v.id("processes"), v.null())),
@@ -1087,13 +1117,14 @@ export const update = authedMutation({
     await requireUnitEditAccess(ctx, { activityId: args.id });
     const { id, ...fields } = args;
     const updates: Record<string, unknown> = {};
-    const currentActivity =
-      (fields.tutorModel !== undefined ||
-        fields.buildContract !== undefined ||
-        fields.allowSilence !== undefined) &&
-      fields.kind === undefined
-        ? await ctx.db.get(id)
-        : null;
+    const currentActivity = await ctx.db.get(id);
+    if (!currentActivity) throw new Error("Activity not found");
+    // The shape this write leaves the row in (TRA-519 A4): kind "vibecode"
+    // input and appActivity both resolve here; every gate below reads it.
+    const target = resolveActivityWriteTarget(currentActivity, {
+      kind: fields.kind,
+      appActivity: fields.appActivity,
+    });
     let flairCriteria:
       | Array<{ id: string; label: string; description?: string }>
       | undefined;
@@ -1103,19 +1134,20 @@ export const update = authedMutation({
     if (fields.scholarDescription !== undefined)
       updates.scholarDescription =
         fields.scholarDescription?.trim() || undefined;
-    if (fields.kind !== undefined) updates.kind = fields.kind;
+    if (target.shapeSupplied) Object.assign(updates, storedShapeFields(target));
     if (fields.systemPrompt !== undefined)
       updates.systemPrompt = fields.systemPrompt?.trim() || undefined;
     if (fields.tutorModel !== undefined) {
-      const targetKind = fields.kind ?? currentActivity?.kind;
-      updates.tutorModel =
-        targetKind === "vibecode"
-          ? normalizeStoredTutorModel(fields.tutorModel)
-          : undefined;
+      updates.tutorModel = target.isApp
+        ? normalizeStoredTutorModel(fields.tutorModel)
+        : undefined;
     }
     if (fields.scholarsStartFrom !== undefined)
       updates.scholarsStartFrom = fields.scholarsStartFrom;
-    if (fields.editAccess !== undefined) updates.editAccess = fields.editAccess;
+    if (fields.editAccess !== undefined) {
+      assertEditAccessKind(target.isApp);
+      updates.editAccess = fields.editAccess;
+    }
     if (fields.processId !== undefined)
       updates.processId = fields.processId ?? undefined;
     if (fields.durationMinutes !== undefined)
@@ -1125,10 +1157,7 @@ export const update = authedMutation({
         ? normalizeDeliverable(fields.deliverable)
         : undefined;
       if (normalized) {
-        const existing = await ctx.db.get(id);
-        if (existing) {
-          assertOneEvaluationBar(existing, { deliverable: normalized });
-        }
+        assertOneEvaluationBar(currentActivity, { deliverable: normalized });
       }
       updates.deliverable = normalized;
       flairCriteria = normalized?.criteria;
@@ -1175,53 +1204,54 @@ export const update = authedMutation({
     // When flipping AWAY from kind="shareBack", clear share-back-only
     // fields so they don't dangle (and confuse the next time the user
     // flips it back).
-    if (fields.kind !== undefined && fields.kind !== "shareBack") {
+    if (target.shapeSupplied && target.kind !== "shareBack") {
       updates.shareBackRecipe = undefined;
       updates.sourceActivityIds = undefined;
       updates.facilitationFocus = undefined;
     }
-    // Angles only apply to online activities — clear when flipping away.
-    if (fields.kind !== undefined && fields.kind !== "online") {
+    // Angles only apply to (non-app) online activities — clear when
+    // flipping away.
+    if (target.shapeSupplied && target.effectiveKind !== "online") {
       updates.hasScholarAngles = undefined;
     }
     Object.assign(
       updates,
       buildContractPatch(
-        fields.kind ?? currentActivity?.kind,
+        storedShapeFields(target),
         {
           buildContract: fields.buildContract,
           allowSilence: fields.allowSilence,
         },
-        currentActivity?.buildContract,
+        currentActivity.buildContract,
       ),
     );
-    if (fields.kind !== undefined && fields.kind !== "vibecode") {
-      updates.tutorModel = undefined;
-      // The contract steers the App designer only — drop it on a kind flip.
-      updates.buildContract = undefined;
-      updates.allowSilence = undefined;
+    if (target.shapeSupplied && !target.isApp) {
+      // The model, contract and edit policy steer the App designer only —
+      // drop them when the row stops being an app activity.
+      Object.assign(updates, APP_ONLY_CLEARED_FIELDS);
     }
     // Conversation recipes (baseline/exitTicket) apply to online activities
     // (tutor-run) AND offline activities (the uploaded artifact is assessed
     // — convex/granuleAssessment.ts). Clear only when flipping to a kind that
-    // can't carry one (web / shareBack).
+    // can't carry one (web / shareBack / an app).
     if (
-      fields.kind !== undefined &&
-      fields.kind !== "online" &&
-      fields.kind !== "offline"
+      target.shapeSupplied &&
+      target.effectiveKind !== "online" &&
+      target.effectiveKind !== "offline"
     ) {
       updates.recipe = undefined;
     }
     // Web fields only apply to web activities — clear when flipping away.
-    if (fields.kind !== undefined && fields.kind !== "web") {
+    if (target.shapeSupplied && target.kind !== "web") {
       updates.webUrl = undefined;
       updates.webAllowedHosts = undefined;
       updates.externalAppId = undefined;
     }
     // Same for the game reference.
-    if (fields.kind !== undefined && fields.kind !== "game") {
+    if (target.shapeSupplied && target.kind !== "game") {
       updates.game = undefined;
     }
+    Object.assign(updates, appDeliverablePatch(currentActivity, target, updates));
     // When flipping TO kind="shareBack", seed a sensible default so
     // 80% of the time the teacher doesn't have to touch anything:
     //  - default recipe to "reflection" (if unset)
@@ -1229,7 +1259,7 @@ export const update = authedMutation({
     //    the same unit (if unset). Falls back to no sources when there
     //    isn't one — the warnings banner already nudges the teacher.
     if (fields.kind === "shareBack") {
-      const existing = await ctx.db.get(id);
+      const existing = currentActivity;
       if (!existing?.shareBackRecipe && updates.shareBackRecipe === undefined) {
         updates.shareBackRecipe = "reflection";
       }
@@ -1252,6 +1282,50 @@ export const update = authedMutation({
     }
   },
 });
+
+/**
+ * The deliverable side of an activity write (TRA-519 A4). An app activity's
+ * evaluation bar is the app: a write that leaves an app with neither a
+ * deliverable nor an advanceRubric gets the default app deliverable, and a
+ * write that turns a row with a conversation advance gate into an app is
+ * refused. A row that stops being an app drops the default deliverable it was
+ * given if nobody edited it, so a plain online activity doesn't inherit an
+ * "artifact" deliverable it never asked for.
+ */
+function appDeliverablePatch(
+  current: Doc<"activities">,
+  target: ReturnType<typeof resolveActivityWriteTarget>,
+  updates: Record<string, unknown>,
+): { deliverable?: DeliverableSpec | undefined } {
+  const resultingDeliverable = (
+    "deliverable" in updates ? updates.deliverable : current.deliverable
+  ) as DeliverableSpec | undefined;
+  if (target.isApp) {
+    if (target.becomesApp) {
+      assertAppHasNoAdvanceRubric(true, current.advanceRubric);
+    }
+    if (!resultingDeliverable && !current.advanceRubric) {
+      const scholarDescription = (
+        "scholarDescription" in updates
+          ? updates.scholarDescription
+          : current.scholarDescription
+      ) as string | undefined;
+      return { deliverable: defaultAppDeliverable({ scholarDescription }) };
+    }
+    return {};
+  }
+  if (
+    target.leavesApp &&
+    !("deliverable" in updates) &&
+    isUntouchedDefaultAppDeliverable(
+      current.deliverable,
+      current.scholarDescription,
+    )
+  ) {
+    return { deliverable: undefined };
+  }
+  return {};
+}
 
 /**
  * Find the most-recent ONLINE activity in the same unit that comes
@@ -1287,7 +1361,7 @@ async function findPreviousOnlineActivityInUnit(
         ? acts.filter((a) => a.order < shareBack.order)
         : acts;
     for (let i = pool.length - 1; i >= 0; i--) {
-      if (pool[i].kind === "online") return pool[i];
+      if (effectiveActivityKind(pool[i]) === "online") return pool[i];
     }
   }
   return null;
@@ -1331,11 +1405,30 @@ export const collateDeliverablesForActivity = staffQuery({
     // Read-then-gate mirrors `get` above: a stale activityId returns an empty
     // list, while a live row still enforces the institution lens via
     // requireUnitAccess.
+    //
+    // Base `staff` (operations staff included) passes the unit lens but may
+    // not read scholars' work: a cohort's submissions are the learning record.
+    // Empty rather than a throw, mirroring scholars.rosterPulse — with ONE
+    // exception below: a curriculum:run holder's own runnable assignment.
     const activity = await ctx.db.get(args.activityId);
     if (!activity?.lessonId) return [];
     const lesson = await ctx.db.get(activity.lessonId);
     if (!lesson) return [];
     await requireUnitAccess(ctx, lesson.unitId);
+    // Base `staff` (curriculum:edit / curriculum:run / operations grants) holds
+    // no cohort read: a staffer sees hand-ins only on an assignment she OWNS,
+    // through the same owner + runner gate as the Run page. Teachers and
+    // curriculum roles keep the cohort and lifetime views.
+    if (ctx.user.role === ROLES.STAFF) {
+      if (!args.assignmentId) return [];
+      const assignment = await ctx.db.get(args.assignmentId);
+      if (!assignment || assignment.teacherId !== ctx.user._id) return [];
+      try {
+        await requireCanRunOwnedAssignment(ctx, ctx.user, assignment);
+      } catch {
+        return [];
+      }
+    }
 
     const allDeliverables = await ctx.db
       .query("deliverables")
@@ -1453,7 +1546,10 @@ export const collateDeliverablesForActivity = staffQuery({
             (d.rubricCheckedBy === "ai" ? "check" : "send"),
           familyVisibility: d.familyVisibility ?? "staff_only",
           familyShareable,
-          sessionId: d.sessionId,
+          // The session id is the transcript link. Base `staff` (a
+          // curriculum:run owner) stops at the deliverable itself; teachers and
+          // curriculum designers keep the link they always had.
+          sessionId: ctx.user.role === ROLES.STAFF ? null : d.sessionId,
         };
       }),
     ).then((rows) =>
@@ -1746,6 +1842,9 @@ export const upsertInternal = internalMutation({
     description: v.optional(v.string()),
     scholarDescription: v.optional(v.string()),
     kind: v.optional(kindLiteral),
+    // TRA-519 A4: an online activity where scholars build or use an app
+    // (kind "vibecode" is the legacy spelling; both store the new shape).
+    appActivity: v.optional(v.boolean()),
     systemPrompt: v.optional(v.string()),
     tutorModel: v.optional(tutorModelLiteral),
     // Starter validation lives in resolveStaticAppForCoachedActivity; create_scholar_activity must never expose these args.
@@ -1755,11 +1854,11 @@ export const upsertInternal = internalMutation({
     // hand-off path; never scholar-facing. create_scholar_activity must never
     // expose this arg.
     appRequest: v.optional(v.string()),
-    // kind="vibecode" only: the model contract + allowSilence (schema.ts).
+    // App activities only: the model contract + allowSilence (schema.ts).
     // Supplied = replace; omitted = keep.
     buildContract: v.optional(buildContractValidator),
     allowSilence: v.optional(v.boolean()),
-    // kind="vibecode" only: the scholar edit policy (TRA-301). Supplied =
+    // App activities only: the scholar edit policy (TRA-301). Supplied =
     // replace; omitted = keep (absent on the row reads as "always").
     editAccess: v.optional(editAccessLiteral),
     processId: v.optional(v.id("processes")),
@@ -1777,25 +1876,40 @@ export const upsertInternal = internalMutation({
   },
   handler: async (ctx, args) => {
     const parent = args.parent;
-    const kind = args.kind ?? "online";
+    // The shape an insert would store (a legacy "vibecode" input folds to
+    // online + appActivity, lib/appActivity.ts).
+    const target = resolveActivityWriteTarget(null, {
+      kind: args.kind ?? "online",
+      appActivity: args.appActivity,
+    });
+    const kind = target.kind;
     const tutorModel = normalizeStoredTutorModel(args.tutorModel);
-    const deliverable = normalizeDeliverable(args.deliverable);
+    const suppliedDeliverable = normalizeDeliverable(args.deliverable);
     const advanceRubric = normalizeAdvanceRubric(args.advanceRubric);
-    if (deliverable && advanceRubric) {
+    if (suppliedDeliverable && advanceRubric) {
       throw new Error(
         "An activity takes EITHER a deliverable (document product) OR an " +
           "advanceRubric (conversation-graded, no document) — not both.",
       );
     }
+    assertAppHasNoAdvanceRubric(target.isApp, advanceRubric);
+    // An app activity's evaluation bar is the app itself.
+    const deliverable =
+      suppliedDeliverable ??
+      (target.isApp
+        ? defaultAppDeliverable({ scholarDescription: args.scholarDescription })
+        : undefined);
     if (
       args.position !== undefined &&
       (!Number.isInteger(args.position) || args.position < 0)
     ) {
       throw new Error("position must be a non-negative integer");
     }
-    // Recipes apply to online + offline activities only.
+    // Recipes apply to (non-app) online + offline activities only.
     const recipe =
-      kind === "online" || kind === "offline" ? args.recipe : undefined;
+      target.effectiveKind === "online" || target.effectiveKind === "offline"
+        ? args.recipe
+        : undefined;
 
     requireDeliverableForOnline(kind, deliverable, advanceRubric);
 
@@ -1818,18 +1932,30 @@ export const upsertInternal = internalMutation({
 
     // ── Patch-existing branch ──────────────────────────────────────
     if (existing) {
+      const existingIsApp = isAppActivity(existing);
+      assertAppHasNoAdvanceRubric(existingIsApp, advanceRubric);
+      // The deliverable this retry may attach: what the caller supplied, or
+      // the default app deliverable when the row it found is an app activity.
+      const retryDeliverable =
+        suppliedDeliverable ??
+        (existingIsApp && !existing.advanceRubric
+          ? defaultAppDeliverable(existing)
+          : undefined);
       // Preserve the one-bar invariant across idempotent retries: the
       // current-call check above only compares the two supplied args, so a
       // row that already carries one evaluation shape must be stopped from gaining
       // the other here (e.g. create-with-deliverable, then a retry that
       // supplies only an advanceRubric).
-      assertOneEvaluationBar(existing, { deliverable, advanceRubric });
+      assertOneEvaluationBar(existing, {
+        deliverable: suppliedDeliverable,
+        advanceRubric,
+      });
       const patch: Record<string, unknown> = {};
       // Patch deliverable if the caller supplied one AND it differs
       // (or the existing row had none). This is the path that fixes
       // the bot's "I forgot the deliverable" recovery.
-      if (deliverable && !existing.deliverable) {
-        patch.deliverable = deliverable;
+      if (retryDeliverable && !existing.deliverable) {
+        patch.deliverable = retryDeliverable;
       }
       // Attach an advance (conversation) rubric on recovery too — the
       // path that fixes "I created a bare interactive activity, now add
@@ -1844,10 +1970,13 @@ export const upsertInternal = internalMutation({
       ) {
         patch.systemPrompt = args.systemPrompt.trim() || undefined;
       }
-      if (
-        existing.kind !== "vibecode" ||
-        (args.kind !== undefined && args.kind !== "vibecode")
-      ) {
+      // The patch branch never changes an existing row's shape; a retry is
+      // judged against the shape the row keeps. "Same shape" compares
+      // effective kinds, so a legacy "vibecode" input matches a folded row.
+      const sameShape =
+        (args.kind === undefined && args.appActivity === undefined) ||
+        target.effectiveKind === effectiveActivityKind(existing);
+      if (!existingIsApp || !sameShape) {
         if (existing.tutorModel !== undefined) {
           patch.tutorModel = undefined;
         }
@@ -1869,17 +1998,17 @@ export const upsertInternal = internalMutation({
       ) {
         patch.scholarsStartFrom = args.scholarsStartFrom;
       }
-      // The patch branch never changes an existing row's kind, so the
-      // contract is judged against the kind the row keeps (existing.kind).
-      // A retry naming a DIFFERENT kind (e.g. vibecode + contract against a
-      // row that is online) gets the row as it is: its contract fields are
-      // dropped rather than thrown, so a retry stays a no-throw recovery and
-      // a contract is never stranded on a kind the designer never runs.
-      if (args.kind === undefined || args.kind === existing.kind) {
+      // The contract is judged against the shape the row keeps. A retry
+      // naming a DIFFERENT shape (e.g. vibecode + contract against a row
+      // that is a plain online activity) gets the row as it is: its contract
+      // fields are dropped rather than thrown, so a retry stays a no-throw
+      // recovery and a contract is never stranded on an activity the designer
+      // never runs.
+      if (sameShape) {
         Object.assign(
           patch,
           buildContractPatch(
-            existing.kind,
+            existing,
             {
               buildContract: args.buildContract,
               allowSilence: args.allowSilence,
@@ -1888,7 +2017,7 @@ export const upsertInternal = internalMutation({
           ),
         );
         if (args.editAccess !== undefined) {
-          assertEditAccessKind(existing.kind);
+          assertEditAccessKind(existingIsApp);
           if (args.editAccess !== existing.editAccess) {
             patch.editAccess = args.editAccess;
           }
@@ -1935,11 +2064,11 @@ export const upsertInternal = internalMutation({
       if (Object.keys(patch).length > 0) {
         await ctx.db.patch(existing._id, patch);
       }
-      if (deliverable?.criteria.length) {
+      if (suppliedDeliverable?.criteria.length) {
         await ensureFlairArtForActivity(
           ctx,
           existing._id,
-          deliverable.criteria,
+          suppliedDeliverable.criteria,
         );
       }
       // `existed: true` whenever we found the row — it was already
@@ -1949,17 +2078,18 @@ export const upsertInternal = internalMutation({
       return {
         activityId: existing._id,
         existed: true as const,
-        kind: existing.kind,
+        // Effective kind: an app activity reports "vibecode" in either shape.
+        kind: effectiveActivityKind(existing),
         deliverableAttached:
-          existing.deliverable !== undefined || deliverable !== undefined,
+          existing.deliverable !== undefined || retryDeliverable !== undefined,
         advanceRubricAttached:
           existing.advanceRubric !== undefined || advanceRubric !== undefined,
       };
     }
 
     // ── Insert branch ──────────────────────────────────────────────
-    if (args.editAccess !== undefined) assertEditAccessKind(kind);
-    const contract = buildContractPatch(kind, {
+    if (args.editAccess !== undefined) assertEditAccessKind(target.isApp);
+    const contract = buildContractPatch(storedShapeFields(target), {
       buildContract: args.buildContract,
       allowSilence: args.allowSilence,
     });
@@ -1987,9 +2117,9 @@ export const upsertInternal = internalMutation({
       title: args.title.trim() || "New activity",
       description: args.description?.trim() || undefined,
       scholarDescription: args.scholarDescription?.trim() || undefined,
-      kind,
+      ...storedShapeFields(target),
       systemPrompt: args.systemPrompt?.trim() || undefined,
-      tutorModel: kind === "vibecode" ? tutorModel : undefined,
+      tutorModel: target.isApp ? tutorModel : undefined,
       starterAppId: args.starterAppId,
       scholarsStartFrom: args.scholarsStartFrom,
       appRequest: args.appRequest?.trim() || undefined,
@@ -2010,7 +2140,7 @@ export const upsertInternal = internalMutation({
     return {
       activityId: insertedId,
       existed: false as const,
-      kind,
+      kind: target.effectiveKind,
       deliverableAttached: deliverable !== undefined,
       advanceRubricAttached: advanceRubric !== undefined,
     };
@@ -2025,6 +2155,8 @@ const createInternalArgs = {
   title: v.string(),
   description: v.optional(v.string()),
   kind: kindLiteral,
+  // TRA-519 A4 (kind "vibecode" input stores the same shape).
+  appActivity: v.optional(v.boolean()),
   systemPrompt: v.optional(v.string()),
   tutorModel: v.optional(tutorModelLiteral),
   processId: v.optional(v.id("processes")),
@@ -2041,9 +2173,15 @@ export async function createActivityCore(
   ctx: MutationCtx,
   args: ObjectType<typeof createInternalArgs>,
 ): Promise<Id<"activities">> {
-  const deliverable = normalizeDeliverable(args.deliverable);
-  requireDeliverableForOnline(args.kind, deliverable);
-  const contract = buildContractPatch(args.kind, {
+  const target = resolveActivityWriteTarget(null, {
+    kind: args.kind,
+    appActivity: args.appActivity,
+  });
+  const deliverable =
+    normalizeDeliverable(args.deliverable) ??
+    (target.isApp ? defaultAppDeliverable({}) : undefined);
+  requireDeliverableForOnline(target.kind, deliverable);
+  const contract = buildContractPatch(storedShapeFields(target), {
     buildContract: args.buildContract,
     allowSilence: args.allowSilence,
   });
@@ -2056,12 +2194,11 @@ export async function createActivityCore(
     lessonId: args.lessonId,
     title: args.title.trim() || "New activity",
     description: args.description?.trim() || undefined,
-    kind: args.kind,
+    ...storedShapeFields(target),
     systemPrompt: args.systemPrompt?.trim() || undefined,
-    tutorModel:
-      args.kind === "vibecode"
-        ? normalizeStoredTutorModel(args.tutorModel)
-        : undefined,
+    tutorModel: target.isApp
+      ? normalizeStoredTutorModel(args.tutorModel)
+      : undefined,
     processId: args.processId,
     durationMinutes: args.durationMinutes,
     order: maxOrder + 1,
@@ -2087,12 +2224,14 @@ export const updateInternal = internalMutation({
     description: v.optional(v.union(v.string(), v.null())),
     scholarDescription: v.optional(v.union(v.string(), v.null())),
     kind: v.optional(kindLiteral),
+    // TRA-519 A4 — same semantics as `update`.
+    appActivity: v.optional(v.boolean()),
     systemPrompt: v.optional(v.union(v.string(), v.null())),
     tutorModel: v.optional(v.union(tutorModelLiteral, v.null())),
     scholarsStartFrom: v.optional(scholarsStartFromLiteral),
-    // kind="vibecode" only: the App designer scholar edit policy (TRA-301).
+    // App activities only: the App designer scholar edit policy (TRA-301).
     editAccess: v.optional(editAccessLiteral),
-    // kind="vibecode" only: the model contract (null clears) + allowSilence.
+    // App activities only: the model contract (null clears) + allowSilence.
     buildContract: v.optional(v.union(buildContractValidator, v.null())),
     allowSilence: v.optional(v.boolean()),
     processId: v.optional(v.union(v.id("processes"), v.null())),
@@ -2115,14 +2254,12 @@ export const updateInternal = internalMutation({
   handler: async (ctx, args) => {
     const { id, ...fields } = args;
     const updates: Record<string, unknown> = {};
-    const currentActivity =
-      (fields.tutorModel !== undefined ||
-        fields.buildContract !== undefined ||
-        fields.allowSilence !== undefined ||
-        fields.editAccess !== undefined) &&
-      fields.kind === undefined
-        ? await ctx.db.get(id)
-        : null;
+    const currentActivity = await ctx.db.get(id);
+    if (!currentActivity) throw new Error("Activity not found");
+    const target = resolveActivityWriteTarget(currentActivity, {
+      kind: fields.kind,
+      appActivity: fields.appActivity,
+    });
     let flairCriteria:
       | Array<{ id: string; label: string; description?: string }>
       | undefined;
@@ -2132,20 +2269,18 @@ export const updateInternal = internalMutation({
     if (fields.scholarDescription !== undefined)
       updates.scholarDescription =
         fields.scholarDescription?.trim() || undefined;
-    if (fields.kind !== undefined) updates.kind = fields.kind;
+    if (target.shapeSupplied) Object.assign(updates, storedShapeFields(target));
     if (fields.systemPrompt !== undefined)
       updates.systemPrompt = fields.systemPrompt?.trim() || undefined;
     if (fields.tutorModel !== undefined) {
-      const targetKind = fields.kind ?? currentActivity?.kind;
-      updates.tutorModel =
-        targetKind === "vibecode"
-          ? normalizeStoredTutorModel(fields.tutorModel)
-          : undefined;
+      updates.tutorModel = target.isApp
+        ? normalizeStoredTutorModel(fields.tutorModel)
+        : undefined;
     }
     if (fields.scholarsStartFrom !== undefined)
       updates.scholarsStartFrom = fields.scholarsStartFrom;
     if (fields.editAccess !== undefined) {
-      assertEditAccessKind(fields.kind ?? currentActivity?.kind);
+      assertEditAccessKind(target.isApp);
       updates.editAccess = fields.editAccess;
     }
     if (fields.processId !== undefined)
@@ -2157,10 +2292,7 @@ export const updateInternal = internalMutation({
         ? normalizeDeliverable(fields.deliverable)
         : undefined;
       if (normalized) {
-        const existing = await ctx.db.get(id);
-        if (existing) {
-          assertOneEvaluationBar(existing, { deliverable: normalized });
-        }
+        assertOneEvaluationBar(currentActivity, { deliverable: normalized });
       }
       updates.deliverable = normalized;
       flairCriteria = normalized?.criteria;
@@ -2175,39 +2307,44 @@ export const updateInternal = internalMutation({
       updates.defaultMode = fields.defaultMode;
     if (fields.recipe !== undefined)
       updates.recipe = fields.recipe ?? undefined;
-    // Recipes apply to online + offline only — clear when flipping to a kind
-    // that can't carry one.
+    // Recipes apply to (non-app) online + offline only — clear when flipping
+    // to a kind that can't carry one.
     if (
-      fields.kind !== undefined &&
-      fields.kind !== "online" &&
-      fields.kind !== "offline"
+      target.shapeSupplied &&
+      target.effectiveKind !== "online" &&
+      target.effectiveKind !== "offline"
     ) {
       updates.recipe = undefined;
     }
     Object.assign(
       updates,
       buildContractPatch(
-        fields.kind ?? currentActivity?.kind,
+        storedShapeFields(target),
         {
           buildContract: fields.buildContract,
           allowSilence: fields.allowSilence,
         },
-        currentActivity?.buildContract,
+        currentActivity.buildContract,
       ),
     );
-    if (fields.kind !== undefined && fields.kind !== "vibecode") {
-      updates.tutorModel = undefined;
+    if (target.shapeSupplied && !target.isApp) {
       // The contract steers the App designer only — drop it on a kind flip.
-      updates.buildContract = undefined;
-      updates.allowSilence = undefined;
-      updates.editAccess = undefined;
+      Object.assign(updates, APP_ONLY_CLEARED_FIELDS);
     }
+    Object.assign(updates, appDeliverablePatch(currentActivity, target, updates));
     await ctx.db.patch(id, updates);
     if (flairCriteria?.length) {
       await ensureFlairArtForActivity(ctx, id, flairCriteria);
     }
   },
 });
+
+/** B6: what a Quest's co-design hears when it tries to put a build step
+ * before any learning step. Model-facing; worded so it can act on it. */
+export const QUEST_BUILD_NEEDS_LEARNING_STEP =
+  "Add a learning step first — the build comes after they've figured it out. " +
+  "Create an online activity with a deliverable where they work out how it " +
+  "works, then add the app activity after it.";
 
 /**
  * Internal: activity-create variant invoked by the scholar IS
@@ -2236,6 +2373,8 @@ export const aiCreateForIsUnit = internalMutation({
     unitId: v.id("units"),
     title: v.string(),
     kind: kindLiteral,
+    // TRA-519 A4 (kind "vibecode" input stores the same shape).
+    appActivity: v.optional(v.boolean()),
     systemPrompt: v.string(),
     tutorModel: v.optional(tutorModelLiteral),
     // Optional tutor-supplied deliverable for online activities. When
@@ -2249,6 +2388,15 @@ export const aiCreateForIsUnit = internalMutation({
     ),
     // The planning session whose tutor is building the unit (TRA-464).
     sessionId: v.optional(v.id("sessions")),
+    // The activity's MISSION (TRA-519 B1/B4): gate + freedoms on any online
+    // activity; invariants (the mechanism as cause→effect) only on an app.
+    mission: v.optional(
+      v.object({
+        gate: v.optional(v.string()),
+        freedoms: v.optional(v.array(v.string())),
+        invariants: v.optional(v.array(v.string())),
+      }),
+    ),
   },
   handler: async (ctx, args) => {
     const unit = await ctx.db.get(args.unitId);
@@ -2261,9 +2409,52 @@ export const aiCreateForIsUnit = internalMutation({
       throw new Error("Lesson not in this unit");
     }
 
-    // Default a scorable auto-mode text deliverable onto online activities.
+    const target = resolveActivityWriteTarget(null, {
+      kind: args.kind,
+      appActivity: args.appActivity,
+    });
+    // B6 learn before you build: in a Quest, a build step comes after at
+    // least one learning step. The new activity lands at the end of this
+    // lesson, so this lesson and every earlier lesson precede it.
+    if (target.isApp) {
+      const lessons = await ctx.db
+        .query("lessons")
+        .withIndex("by_unit", (q) => q.eq("unitId", args.unitId))
+        .collect();
+      let learnedFirst = false;
+      for (const l of lessons) {
+        if (l._id !== args.lessonId && (l.order ?? 0) >= (lesson.order ?? 0)) {
+          continue;
+        }
+        const acts = await ctx.db
+          .query("activities")
+          .withIndex("by_lesson", (q) => q.eq("lessonId", l._id))
+          .collect();
+        if (acts.some((a) => isLearningStep(a))) {
+          learnedFirst = true;
+          break;
+        }
+      }
+      if (!learnedFirst) throw new Error(QUEST_BUILD_NEEDS_LEARNING_STEP);
+    }
+    // Default a scorable auto-mode text deliverable onto online activities;
+    // an app activity's deliverable is the app itself, graded like any Quest
+    // step (auto: per-scholar criteria are generated at session start).
     let deliverable: DeliverableSpec | undefined;
-    if (args.kind === "online") {
+    if (target.isApp) {
+      deliverable = normalizeDeliverable({
+        kind: "artifact",
+        prompt:
+          args.deliverable?.prompt?.trim() ||
+          `Your app, running, showing ${args.title.trim() || "what you figured out"}.`,
+        mode: "auto",
+        notes:
+          args.deliverable?.notes?.trim() ||
+          args.systemPrompt.trim() ||
+          undefined,
+        criteria: [],
+      });
+    } else if (args.kind === "online") {
       const prompt =
         args.deliverable?.prompt?.trim() ||
         "Show what you learned in this activity — write up your key " +
@@ -2280,7 +2471,7 @@ export const aiCreateForIsUnit = internalMutation({
         criteria: [],
       });
     }
-    requireDeliverableForOnline(args.kind, deliverable);
+    requireDeliverableForOnline(target.kind, deliverable);
 
     const peers = await ctx.db
       .query("activities")
@@ -2290,14 +2481,22 @@ export const aiCreateForIsUnit = internalMutation({
     const activityId = await ctx.db.insert("activities", {
       lessonId: args.lessonId,
       title: args.title.trim() || "New activity",
-      kind: args.kind,
+      ...storedShapeFields(target),
       systemPrompt: args.systemPrompt.trim() || undefined,
-      tutorModel:
-        args.kind === "vibecode"
-          ? normalizeStoredTutorModel(args.tutorModel)
-          : undefined,
+      tutorModel: target.isApp
+        ? normalizeStoredTutorModel(args.tutorModel)
+        : undefined,
       order: maxOrder + 1,
       deliverable,
+      ...(args.mission
+        ? buildContractPatch(storedShapeFields(target), {
+            buildContract: {
+              invariants: args.mission.invariants ?? [],
+              freedoms: args.mission.freedoms ?? [],
+              ...(args.mission.gate ? { gate: args.mission.gate } : {}),
+            },
+          })
+        : {}),
     });
     await markUnitBuiltInSession(ctx, {
       sessionId: args.sessionId,

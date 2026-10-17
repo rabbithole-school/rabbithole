@@ -1,6 +1,17 @@
 import { describe, expect, test } from "vitest";
 import { ConvexError } from "convex/values";
-import { serverErrorMessage } from "./serverErrorMessage";
+import { serverErrorMessage, serverRefusal } from "./serverErrorMessage";
+
+describe("serverRefusal", () => {
+  test("a ConvexError sentence is a refusal; anything else is not", () => {
+    expect(
+      serverRefusal(new ConvexError("Unlocks when you finish Name the rule")),
+    ).toBe("Unlocks when you finish Name the rule");
+    expect(serverRefusal(new Error("Failed to fetch"))).toBeNull();
+    expect(serverRefusal(new ConvexError({ code: 1 }))).toBeNull();
+    expect(serverRefusal(new ConvexError("  "))).toBeNull();
+  });
+});
 
 describe("serverErrorMessage", () => {
   test("a ConvexError's sentence is the message, framing and all ignored", () => {

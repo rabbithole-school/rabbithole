@@ -552,6 +552,39 @@ describe("api.sessions.sendMessage thread stamping", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────
+// api.sessions.startRubricCheck — thread stamping ("Check my work")
+// ─────────────────────────────────────────────────────────────────────────
+
+describe("api.sessions.startRubricCheck thread stamping", () => {
+  async function checkThread(mode: "edit" | "play" | undefined) {
+    const t = convexTest(schema, modules);
+    const teacherId = await seedUser(t, "teacher");
+    const scholarId = await seedUser(t, "scholar");
+    const { activityId } = await seedVibecodeActivity(t, teacherId, "always");
+    const sessionId = await seedSession(t, { userId: scholarId, activityId });
+    const asScholar = await withUser(t, scholarId);
+    await asScholar.mutation(api.sessions.startRubricCheck, {
+      sessionId,
+      ...(mode ? { mode } : {}),
+    });
+    const messages = await messagesFor(t, sessionId);
+    return messages.find((m) => m.role === "assistant")!.thread;
+  }
+
+  test("pressed in Play → the tutor thread", async () => {
+    expect(await checkThread("play")).toBe("tutor");
+  });
+
+  test("pressed in Edit → the designer thread", async () => {
+    expect(await checkThread("edit")).toBe("designer");
+  });
+
+  test("mode omitted (older client) → the mode the policy allows", async () => {
+    expect(await checkThread(undefined)).toBe("designer");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
 // api.sessions.getWithMessages — editAccess / effectiveEditAccess
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -931,7 +964,7 @@ describe("internal.workshopPolicy.resolveTurnModeForStream", () => {
         sessionId,
         messageId: assistantMsgId,
         callerUserId: scholarId,
-        sessionMode: "vibecode",
+        appBuild: true,
         workshopMode: result.mode,
         baselineArtifactId: artifactId,
         baselineRevision: -1,

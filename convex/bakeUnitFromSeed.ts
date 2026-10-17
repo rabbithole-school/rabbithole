@@ -19,10 +19,11 @@
 
 import { v } from "convex/values";
 import { describeLevelsForPrompt, levelsPromptLine } from "./lib/readingLevels";
+import { customQuestTopic } from "./lib/customQuestTopic";
 import type { ActionCtx } from "./_generated/server";
 import { internalAction, internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import type { Role } from "./lib/roles";
 import { MODELS } from "./lib/models";
 import { requireAnthropicApiKey } from "./lib/anthropic";
@@ -33,6 +34,8 @@ import { buildUnitDesignerSystemText } from "./unitDesignerStream";
 import { buildDesignerPhysicalEnvironmentSection } from "./prompts";
 import { curatedExplorationEntryForTopic } from "./lib/curatedExplorationCatalog";
 import { ensureSessionActivitySetup } from "./lib/sessionActivitySetup";
+import { effectiveActivityKind, isAppActivity } from "../shared/appSurface";
+import { isLearningStep, type MissionActivity } from "./lib/mission";
 
 // The scholar's chosen "way in" to the topic — picked from the live menu, whose
 // 2-4 options are proposed by the Curriculum Bot itself (see convex/bakePaths.ts
@@ -40,11 +43,44 @@ import { ensureSessionActivitySetup } from "./lib/sessionActivitySetup";
 // topic-specific angle (e.g. "Be a sound detective"). Threaded into the bake so
 // the unit is designed around THIS angle. `{ title, blurb }` is exactly what the
 // scholar saw on the card.
+//
+// `shape: "build"` marks the always-offered "Build a simulation" card
+// (shared/missionCopy.ts BUILD_SIMULATION_PATH, TRA-519 B4): the bake ends in
+// an app activity. The bake keys on `shape`, never on the title. Optional so
+// older iPad builds keep validating.
 export const chosenPathValidator = v.object({
   title: v.string(),
   blurb: v.string(),
+  shape: v.optional(v.literal("build")),
 });
-export type ChosenPath = { title: string; blurb: string };
+export type ChosenPath = { title: string; blurb: string; shape?: "build" };
+
+/** The "Build a simulation" path: the bake ends in an app activity. */
+export function isBuildPath(path: ChosenPath | null | undefined): boolean {
+  return path?.shape === "build";
+}
+
+/**
+ * B6 learn before you build: no app activity may come before the first
+ * learning step (a non-app online activity with a deliverable). Any app
+ * activity ahead of it moves to just after it, keeping relative order.
+ * Pure + stable; with no learning step at all the order is left as is.
+ */
+export function orderLearnBeforeBuild<A extends MissionActivity>(
+  ordered: readonly A[],
+): A[] {
+  const firstLearning = ordered.findIndex((a) => isLearningStep(a));
+  if (firstLearning < 0) return [...ordered];
+  const early = ordered.slice(0, firstLearning);
+  const movedApps = early.filter((a) => isAppActivity(a));
+  if (movedApps.length === 0) return [...ordered];
+  return [
+    ...early.filter((a) => !isAppActivity(a)),
+    ordered[firstLearning],
+    ...movedApps,
+    ...ordered.slice(firstLearning + 1),
+  ];
+}
 
 const BAKE_STAGES = ["commit", "capture", "reckon", "extend"] as const;
 type BakeStage = (typeof BAKE_STAGES)[number];
@@ -111,6 +147,25 @@ export function buildBakeInstruction(spec: BakeSpec): string {
     );
   }
 
+  const build = isBuildPath(spec.path);
+  const stageMarkerRule =
+    "Start each deliverable `notes` value with exactly one private stage marker: `[bake-stage:commit]`, `[bake-stage:capture]`, `[bake-stage:reckon]`, or `[bake-stage:extend]`.";
+  const createStep = build
+    ? [
+        '3. create_activity — EXACTLY 4 activities on that lesson, created in the exact learner-facing sequence they should appear. The first three are ONLINE (kind:"online") design steps where the scholar FIGURES OUT how it works: commit (a bet or prediction they own), capture (gather evidence), reckon (name the rule in their own words). Each MUST include a deliverable with mode:"auto", a concrete scholar-facing `prompt`, `notes` capturing the quality bar, and an EMPTY `criteria` array (the per-scholar rubric is generated later). ' +
+          stageMarkerRule +
+          " Use each marker exactly once, in that order. The marker is stripped after the bake.",
+        '   The 4th, `[bake-stage:extend]`, is THE BUILD: kind:"app". Its `systemPrompt` is the BUILD BRIEF: build a simulation that shows the rule the scholar named in the reckon step, in their own words — the builder can read their earlier work in this quest, so it never re-asks. Its deliverable is { kind:"artifact", mode:"auto", prompt: what their running simulation shows, notes: starting with `[bake-stage:extend]` then the quality bar, criteria: [] }. It ALWAYS carries a buildContract: `invariants` = 1-3 statements of the mechanism as testable cause→effect ("when X goes up, Y …"), `freedoms` = what the scholar owns (setting, characters, look, genre), `gate` = "The mechanism runs once with default settings."',
+      ]
+    : [
+        '3. create_activity — 3-4 ONLINE activities on that lesson, created in the exact learner-facing sequence they should appear, each a focused step toward the topic. EVERY online activity MUST include a deliverable with mode:"auto", a concrete scholar-facing `prompt`, `notes` capturing the quality bar, and an EMPTY `criteria` array (the per-scholar rubric is generated later). ' +
+          stageMarkerRule +
+          " For 3 activities use commit, capture, reckon exactly once each; for 4 use all four exactly once. The marker is stripped after the bake. Learn before you build: if you make an app activity at all, it comes after at least one online activity with a deliverable where the scholar figures it out — never first.",
+      ];
+  const promptStep = build
+    ? '5. generate_activity_prompt — write the tutor system prompt for EACH of the three design steps before you finish (NEVER for the app activity: its systemPrompt is the build brief you already wrote). In those prompts, tell the tutor to acknowledge the scholar NEUTRALLY and keep handing the thinking back — NOT to validate every turn with "that\'s exactly right" / "perfect" (constant praise short-circuits a gifted kid\'s own checking).'
+    : "5. generate_activity_prompt — write the tutor system prompt for EACH online activity before you finish. In those prompts, tell the tutor to acknowledge the scholar NEUTRALLY and keep handing the thinking back — NOT to validate every turn with \"that's exactly right\" / \"perfect\" (constant praise short-circuits a gifted kid's own checking).";
+
   return [
     "You are designing a SMALL independent-study unit for ONE gifted elementary scholar who just chose, on their own, to explore this topic. This runs HEADLESS — there is no teacher to answer questions, so build the whole thing now with your tools and never ask me anything.",
     "",
@@ -128,9 +183,11 @@ export function buildBakeInstruction(spec: BakeSpec): string {
     "Build it end-to-end, in this order, using your tools:",
     "1. update_unit — set a big idea, 2 essential questions, and 1-2 enduring understandings grounded in THIS topic.",
     "2. create_lesson — exactly ONE lesson (core strand).",
-    '3. create_activity — 3-4 ONLINE activities on that lesson, created in the exact learner-facing sequence they should appear, each a focused step toward the topic. EVERY online activity MUST include a deliverable with mode:"auto", a concrete scholar-facing `prompt`, `notes` capturing the quality bar, and an EMPTY `criteria` array (the per-scholar rubric is generated later). Start each deliverable `notes` value with exactly one private stage marker: `[bake-stage:commit]`, `[bake-stage:capture]`, `[bake-stage:reckon]`, or `[bake-stage:extend]`. For 3 activities use commit, capture, reckon exactly once each; for 4 use all four exactly once. The marker is stripped after the bake.',
-    "4. Verify that the saved activity order matches the intended discovery arc (commit before capture, capture before reckon, optional extend last). The runtime will also normalize this order from the private markers before the unit can launch.",
-    "5. generate_activity_prompt — write the tutor system prompt for EACH online activity before you finish. In those prompts, tell the tutor to acknowledge the scholar NEUTRALLY and keep handing the thinking back — NOT to validate every turn with \"that's exactly right\" / \"perfect\" (constant praise short-circuits a gifted kid's own checking).",
+    ...createStep,
+    build
+      ? "4. Verify that the saved activity order matches the intended arc (commit, capture, reckon, then the build last). The runtime will also normalize this order from the private markers before the unit can launch."
+      : "4. Verify that the saved activity order matches the intended discovery arc (commit before capture, capture before reckon, optional extend last). The runtime will also normalize this order from the private markers before the unit can launch.",
+    promptStep,
     "",
     "This is a real multi-sitting quest the scholar returns to — each activity is a meaty 15-30 minute sitting done as homework or independent work, NOT a one-sitting toy. Still exactly ONE lesson; still small enough to build now. At least ONE activity must carry an away-from-screen mission per the investigation bar's away-from-screen requirement: the activity's tutor prompt sends the scholar to do something real (measure, count, build, tally, test) with household items, and the NEXT sitting runs on what they bring back. Have an early activity open a gap the scholar owns (a bet, a prediction, a vote) and a later activity land the earned payoff — the concept's name arrives after the scholar has derived the thing, never in activity 1. Honor that they chose this — frame it as their exploration. When every online activity has a system prompt and an auto deliverable, you're done; end with a one-line summary.",
   ]
@@ -167,8 +224,9 @@ export const loadBakeContextFromSeed = internalQuery({
 
 /**
  * Read the bake spec for a Custom-Quest unit (no seed): the unit's title +
- * description stand in for the topic + rationale, and the unit's owner is the
- * scholar.
+ * description are read TOGETHER as the scholar's idea (`customQuestTopic` —
+ * a title that is only the scholar's own name yields to the description), and
+ * the unit's owner is the scholar.
  */
 export const loadBakeContextFromUnit = internalQuery({
   args: { unitId: v.id("units") },
@@ -177,13 +235,18 @@ export const loadBakeContextFromUnit = internalQuery({
     if (!unit) return null;
     const scholarId = unit.authorScholarId ?? unit.teacherId;
     const scholar = await ctx.db.get(scholarId);
+    const { topic, rationale } = customQuestTopic(
+      unit.title,
+      unit.description,
+      scholar,
+    );
     return {
       scholarId,
       scholarRole: (scholar?.role ?? null) as Role | null,
       readingLevel: describeLevelsForPrompt(scholar),
-      topic: unit.title,
+      topic,
       domain: unit.subject ?? null,
-      rationale: unit.description ?? null,
+      rationale,
       connectionTo: null as string | null,
     };
   },
@@ -223,7 +286,7 @@ export const firstOnlineActivityInUnit = internalQuery({
           .withIndex("by_lesson", (q) => q.eq("lessonId", lesson._id))
           .collect()
       ).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-      const online = acts.find((a) => a.kind === "online");
+      const online = acts.find((a) => effectiveActivityKind(a) === "online");
       if (online) return { lessonId: lesson._id, activityId: online._id };
     }
     return null;
@@ -236,7 +299,12 @@ export const firstOnlineActivityInUnit = internalQuery({
  * the private stage markers so rubric generation sees only the real quality bar.
  */
 export const normalizeBakedActivityOrder = internalMutation({
-  args: { unitId: v.id("units") },
+  args: {
+    unitId: v.id("units"),
+    // The "Build a simulation" path (TRA-519 B4): exactly 4 stages, and the
+    // extend stage is repaired into an app activity if the bot missed it.
+    build: v.optional(v.boolean()),
+  },
   handler: async (ctx, args) => {
     const lessons = await ctx.db
       .query("lessons")
@@ -253,10 +321,10 @@ export const normalizeBakedActivityOrder = internalMutation({
       .query("activities")
       .withIndex("by_lesson", (q) => q.eq("lessonId", lessons[0]._id))
       .collect();
-    if (activities.length !== 3 && activities.length !== 4) {
+    if (args.build ? activities.length !== 4 : activities.length !== 3 && activities.length !== 4) {
       return {
         normalized: false,
-        reason: `Expected 3-4 activities, found ${activities.length}`,
+        reason: `Expected ${args.build ? "4" : "3-4"} activities, found ${activities.length}`,
       };
     }
 
@@ -290,11 +358,52 @@ export const normalizeBakedActivityOrder = internalMutation({
       (a, b) =>
         stageOrder.get(a.marker!.stage)! - stageOrder.get(b.marker!.stage)!,
     );
-    for (const [order, { activity, marker }] of staged.entries()) {
+
+    // Build path: the extend stage IS the build. Repair a bot that made it a
+    // plain online activity (set the app marker, make the deliverable the
+    // app). A missing contract is logged, not fatal: the builder runs with
+    // the default app gate (lib/mission.ts DEFAULT_APP_GATE).
+    const repaired = new Map<Id<"activities">, Partial<Doc<"activities">>>();
+    if (args.build) {
+      const extend = staged.find(({ marker }) => marker!.stage === "extend")!;
+      const a = extend.activity;
+      const patch: Partial<Doc<"activities">> = {};
+      if (!isAppActivity(a)) {
+        patch.kind = "online";
+        patch.appActivity = true;
+        if (a.advanceRubric) patch.advanceRubric = undefined;
+      }
+      if (a.deliverable?.kind !== "artifact") {
+        patch.deliverable = { ...a.deliverable!, kind: "artifact" };
+      }
+      if (!a.buildContract) {
+        console.log(
+          `[bake ${args.unitId}] build stage "${a.title}" has no buildContract; the default app gate applies`,
+        );
+      }
+      if (Object.keys(patch).length > 0) {
+        console.log(
+          `[bake ${args.unitId}] repaired build stage "${a.title}": ${Object.keys(patch).join(", ")}`,
+        );
+        repaired.set(a._id, patch);
+      }
+    }
+
+    // B6 learn before you build — every Quest bake, not only the build path.
+    const shaped = staged.map((entry) => ({
+      ...entry,
+      shape: { ...entry.activity, ...(repaired.get(entry.activity._id) ?? {}) },
+    }));
+    const ordered = orderLearnBeforeBuild(
+      shaped.map((entry) => ({ ...entry.shape, entry })),
+    ).map((s) => s.entry);
+    for (const [order, { activity, marker, shape }] of ordered.entries()) {
+      const repair = repaired.get(activity._id) ?? {};
       await ctx.db.patch(activity._id, {
+        ...repair,
         order,
         deliverable: {
-          ...activity.deliverable!,
+          ...shape.deliverable!,
           notes: marker!.notes,
         },
       });
@@ -535,7 +644,7 @@ async function ensureUnitBaked(ctx: ActionCtx, spec: BakeSpec): Promise<boolean>
   if (!after) return false;
   const normalized = await ctx.runMutation(
     internal.bakeUnitFromSeed.normalizeBakedActivityOrder,
-    { unitId: spec.unitId },
+    { unitId: spec.unitId, build: isBuildPath(spec.path) },
   );
   if (!normalized.normalized) {
     console.error(

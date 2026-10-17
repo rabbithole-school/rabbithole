@@ -6,14 +6,15 @@ import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { buildObserverSystemPrompt } from "./prompts";
 import { computePromptVersion } from "./lib/promptVersion";
-import { MODELS } from "./lib/models";
+import { OBSERVER_MODEL } from "./lib/models";
 import { cleanSeedLabel } from "./lib/seedLabel";
 import { siteUrl, sessionPath, withBase } from "./lib/channels";
 import { escapeSlackText } from "./lib/slackApi";
 import {
-  OBSERVER_TOOL,
   alertEvidenceWatermark,
+  buildObserverRequest,
   buildObserverUserMessageBlocks,
+  createObserverMessage,
   groundAlertExcerpt,
   groundSessionSignalEvidence,
   observerTranscriptWindow,
@@ -183,7 +184,7 @@ export const analyzeSession = internalAction({
       if (part) scholarImages.set(m.imageId, part);
     }
 
-    // 6. Call Claude Sonnet
+    // 6. Call the observer model
     console.log(`[Observer] Calling observer model with context: ${currentObservations.length} existing observations, ${activeSeeds.length} active seeds, ${pendingSeeds.length} pending seeds, ${recentSignals.length} recent signals`);
     const { default: Anthropic } = await import("@anthropic-ai/sdk");
     const anthropic = new Anthropic();
@@ -205,44 +206,45 @@ export const analyzeSession = internalAction({
     );
     console.log(`[Observer] User message: ${userTextChars} chars text, ${scholarImages.size} scholar image(s)`);
 
-    // Model is env-overridable so Opus can be A/B tested per-deployment without
-    // a code change. Defaults to Sonnet (the cost/latency-sane baseline). Set
-    // OBSERVER_MODEL in the Convex dashboard to MODELS.OPUS's value to opt in.
-    // See evals/observer/ for the quality comparison that justifies the choice.
-    const observerModel = process.env.OBSERVER_MODEL || MODELS.SONNET;
+    // A code constant (lib/models.OBSERVER_MODEL), deliberately NOT an env
+    // override: the request shape is model-specific (see buildObserverRequest),
+    // so an env-swapped id could silently send a call shape the model rejects.
+    const observerModel = OBSERVER_MODEL;
     console.log(`[Observer] Model: ${observerModel}`);
 
     let result: ParsedObserverResponse;
     try {
-      const response = await anthropic.messages.create({
-        model: observerModel,
-        max_tokens: 4096,
-        // Prompt-cache the static prefix: the breakpoint on the system block
-        // also caches the (identical, preceding) tools array, so only the
-        // per-run transcript is re-billed. Helps whenever observer runs cluster
-        // within the cache TTL (active class time). Below the model's cache
-        // minimum it's a harmless no-op.
-        system: [
-          {
-            type: "text",
-            text: buildObserverSystemPrompt(context.institutionProfile),
-            cache_control: { type: "ephemeral" },
-          },
-        ],
-        tools: [OBSERVER_TOOL],
-        tool_choice: { type: "tool", name: "record_observations" },
-        messages: [{ role: "user", content: userBlocks }],
-      });
-
-      console.log(`[Observer] ${observerModel} response, usage: ${response.usage.input_tokens} in / ${response.usage.output_tokens} out, stop_reason: ${response.stop_reason}`);
-      await recordAnthropicUsage(ctx, {
-        source: "observer",
-        role: ROLES.SCHOLAR,
-        model: observerModel,
-        usage: response.usage,
-        sessionId: args.sessionId,
-        institutionId,
-      });
+      const response = await createObserverMessage(
+        () =>
+          anthropic.messages.create(
+            buildObserverRequest({
+              // Prompt-cache the static prefix: the breakpoint on the system
+              // block also caches the (identical, preceding) tools array, so
+              // only the per-run transcript is re-billed. Helps whenever
+              // observer runs cluster within the cache TTL (active class
+              // time). Below the model's cache minimum it's a harmless no-op.
+              system: [
+                {
+                  type: "text" as const,
+                  text: buildObserverSystemPrompt(context.institutionProfile),
+                  cache_control: { type: "ephemeral" as const },
+                },
+              ],
+              userContent: userBlocks,
+            }),
+          ),
+        async (response) => {
+          console.log(`[Observer] ${response.model} response, usage: ${response.usage.input_tokens} in / ${response.usage.output_tokens} out, stop_reason: ${response.stop_reason}`);
+          await recordAnthropicUsage(ctx, {
+            source: "observer",
+            role: ROLES.SCHOLAR,
+            model: observerModel,
+            usage: response.usage,
+            sessionId: args.sessionId,
+            institutionId,
+          });
+        },
+      );
 
       const parsed = parseObserverResponse(response.content);
       if (!parsed) {

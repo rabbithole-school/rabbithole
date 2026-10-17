@@ -19,6 +19,7 @@
 import type { Doc, Id } from "../_generated/dataModel";
 import type { QueryCtx, MutationCtx } from "../_generated/server";
 import { isTeacherRole } from "./roles";
+import { isAppActivity } from "../../shared/appSurface";
 import {
   defaultWorkshopMode,
   effectiveWorkshopMode,
@@ -130,12 +131,12 @@ export async function resolveWorkshopPolicy(
       : args.session.activityId
         ? await ctx.db.get(args.session.activityId)
         : null;
-  // The policy is a vibecode-activity field: an activity whose kind changed
-  // away from vibecode may still carry it, and it must not gate anything then.
-  const editAccess: EditAccess =
-    activity?.kind === "vibecode"
-      ? (activity.editAccess ?? EDIT_ACCESS_DEFAULT)
-      : EDIT_ACCESS_DEFAULT;
+  // The policy is an app-activity field (either shape, TRA-519): an activity
+  // that stopped being an app may still carry it, and it must not gate
+  // anything then — a non-app activity resolves to `always`.
+  const editAccess: EditAccess = isAppActivity(activity)
+    ? (activity?.editAccess ?? EDIT_ACCESS_DEFAULT)
+    : EDIT_ACCESS_DEFAULT;
   const needsCompletion =
     editAccess === "afterCompletion" &&
     activity != null &&

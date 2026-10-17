@@ -19,6 +19,7 @@ import * as Clipboard from "expo-clipboard";
 import { Markdown } from "@/components/Markdown";
 import { SpeakableBubble } from "@/components/SpeakableBubble";
 import { AppSnapshotBubble } from "@/components/AppSnapshotBubble";
+import { ImageBubble } from "@/components/PhotoAttachment";
 import { chatBubbleStyles } from "@/lib/chatBubbles";
 import { fonts, useColors } from "@/theme";
 
@@ -28,6 +29,8 @@ export function ChatBubble({
   ttsEnabled,
   stopRequestedAt,
   appSnapshotUrl,
+  hasImage = false,
+  imageUrl,
 }: {
   role: string;
   content: string;
@@ -36,21 +39,34 @@ export function ChatBubble({
   // caption beneath the finished bubble.
   stopRequestedAt?: number | null;
   appSnapshotUrl?: string | null;
+  /** The scholar attached a photo to this turn; `imageUrl` may still be
+   *  resolving, so presence and URL are separate. */
+  hasImage?: boolean;
+  imageUrl?: string | null;
 }) {
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const mine = role === "user";
 
   if (mine) {
+    // A photo-only turn draws the photo alone, never an empty text bubble.
+    const showBubble = !!content.trim() || !!appSnapshotUrl || !hasImage;
     return (
       <View style={[styles.row, styles.rowMine]}>
         <View style={styles.colMine}>
-          <View style={[styles.bubble, styles.mine]}>
-            {appSnapshotUrl ? (
-              <AppSnapshotBubble url={appSnapshotUrl} />
-            ) : null}
-            <Text style={[styles.bubbleText, styles.textMine]}>{content}</Text>
-          </View>
+          {hasImage ? <ImageBubble url={imageUrl ?? null} /> : null}
+          {showBubble ? (
+            <View style={[styles.bubble, styles.mine]}>
+              {appSnapshotUrl ? (
+                <AppSnapshotBubble url={appSnapshotUrl} />
+              ) : null}
+              {content ? (
+                <Text style={[styles.bubbleText, styles.textMine]}>
+                  {content}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
         </View>
       </View>
     );

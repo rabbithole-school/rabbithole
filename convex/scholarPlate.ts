@@ -89,6 +89,7 @@ import { dayKeyForTimezone } from "../shared/institutionDay";
 import { uniqueSubjects } from "../lib/subjects";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
+import { isAppActivity } from "../shared/appSurface";
 
 export const activeForMe = authedQuery({
   args: {
@@ -158,7 +159,7 @@ export async function unstartedAssignedRowSurface(
     activity.kind === "online" ||
     activity.kind === "problem_set" ||
     activity.kind === "simulator" ||
-    activity.kind === "vibecode"
+    isAppActivity(activity)
   ) {
     return "launchable";
   }

@@ -71,11 +71,17 @@ export type UnitResolution =
  * unitId where the tool accepts one) — the tool stops guessing and hands the
  * fuzzy matching back to the model.
  */
-export function makeUnitResolver(ctx: ActionCtx) {
+export function makeUnitResolver(
+  ctx: ActionCtx,
+  // Candidates are the units this caller's Curriculum page shows
+  // (listUnitsInternal), in the institution lens they picked, if any.
+  callerUserId: Id<"users">,
+  scope?: string,
+) {
   return async (query: string): Promise<UnitResolution> => {
     const units = await ctx.runQuery(
       internal.curriculumAssistant.listUnitsInternal,
-      {},
+      { callerUserId, scope },
     );
     // Raw-exact pre-pass (trim/lowercase only, NO punctuation folding): the
     // literal full title must always be a usable escape hatch. Without this,

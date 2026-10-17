@@ -197,7 +197,7 @@ function systemFor(c: Case, isFirstTurn: boolean): string {
       ...a: unknown[]
     ) => ReturnType<typeof buildSystemPromptParts>
   )(...args);
-  return parts.stable + parts.dynamic;
+  return parts.stable + parts.dynamic + parts.documents + parts.turnSystem;
 }
 
 type QuestionKind = "open" | "ab" | "none";

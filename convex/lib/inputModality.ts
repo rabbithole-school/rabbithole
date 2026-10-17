@@ -18,8 +18,10 @@ export type InputModality = Infer<typeof inputModalityValidator>;
  * An ABSENT modality counts as typed. The field was added 2026-08-20 (#2551)
  * and is still optional for older native clients, so a missing value cannot be
  * proven spoken; dropping every legacy row would blank the history these
- * measures are built from. The residual error (a pre-#2551 dictated turn read
- * as typed) shrinks as those rows age out of the 30/90-day windows.
+ * measures are built from. The residual error (a dictated turn with no
+ * modality read as typed) shrinks as pre-#2551 rows age out of the 30/90-day
+ * windows, but does not vanish while `sessions.sendMessage` still accepts an
+ * absent modality from older installed native clients.
  */
 export function isTypedScholarText(message: {
   inputModality?: InputModality;

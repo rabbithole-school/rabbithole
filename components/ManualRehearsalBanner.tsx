@@ -37,6 +37,8 @@ import type { Doc, Id } from "@/convex/_generated/dataModel";
 import { BotIconButton } from "./BotIconButton";
 import { ScholarPicker } from "@/components/ScholarPicker";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { isTeacherRole } from "@/convex/lib/roles";
 import { toaster } from "@/lib/toaster";
 import type { ManualRehearsalReplay } from "@/hooks/useManualRehearsalReplay";
 import { newestHtmlArtifact } from "@/lib/vibecode/helpers";
@@ -66,7 +68,15 @@ export function ManualRehearsalBanner({
   onOpenBot,
 }: ManualRehearsalBannerProps) {
   const router = useRouter();
-  const scholars = useQuery(api.users.listScholars, {});
+  const { user } = useCurrentUser();
+  // Viewing as a real scholar (or as yourself) is teacher-only. A
+  // curriculum:run holder rehearses with a synthetic scholar only, so she is
+  // never offered — or sent — the real roster.
+  const canViewAsRealScholars = !!user && isTeacherRole(user.role);
+  const scholars = useQuery(
+    api.users.listScholars,
+    canViewAsRealScholars ? {} : "skip",
+  );
   const setViewAs = useMutation(api.sessions.setTestDriveViewAs);
   const resetRehearsal = useMutation(api.sessions.resetTestDrive);
   const setVibecodeStarter = useAction(
@@ -322,6 +332,8 @@ export function ManualRehearsalBanner({
               <Popover.Content w="300px" shadow="lg" borderRadius="lg">
                 <Popover.Body p={3}>
                   <VStack gap={2} align="stretch">
+                    {canViewAsRealScholars && (
+                    <>
                     {/* Yourself */}
                     <ViewAsOption
                       label="Yourself (no dossier)"
@@ -361,9 +373,15 @@ export function ManualRehearsalBanner({
                         emptyHint="No scholars yet"
                       />
                     </Box>
+                    </>
+                    )}
 
                     {/* Synthetic */}
-                    <Box borderTopWidth="1px" borderColor="gray.100" pt={2}>
+                    <Box
+                      borderTopWidth={canViewAsRealScholars ? "1px" : undefined}
+                      borderColor="gray.100"
+                      pt={canViewAsRealScholars ? 2 : 0}
+                    >
                       <ViewAsOption
                         label={isSynthetic ? "Edit sim…" : "New sim…"}
                         active={isSynthetic}
@@ -438,7 +456,9 @@ export function ManualRehearsalBanner({
           </Portal>
         </Tooltip.Root>
 
-        {session.unitId && onOpenBot && (
+        {/* The unit's Curriculum Bot is teacher tooling; a curriculum:run
+            holder's designer has no bot either (UnitDesigner hideBot). */}
+        {session.unitId && onOpenBot && canViewAsRealScholars && (
           <BotIconButton
             onClick={onOpenBot}
             tooltipText="Ask Curriculum Bot about this activity"

@@ -30,6 +30,14 @@
  * host is keyed on the artifact id plus the Reset nonce; CodeArtifactWebView
  * itself fingerprints the content, so an edit_document str_replace (which
  * mutates the SAME artifact row) and a Restore both reload the preview.
+ *
+ * ONE APP SURFACE (TRA-519). This screen is the builder for every session that
+ * has an app. A builder-primary session (an app activity, an activity-less
+ * builder, free play) opens on it; a chat-primary session reaches it through
+ * the app card's Open (`?view=builder`) and gets a "Chat" way back. When the
+ * app is a side project (the activity's real work is a document, slides, a
+ * map) the header carries that work's status and a "Your work" sheet; when the
+ * app IS the deliverable, the Check my work footer sits under the preview.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -46,18 +54,22 @@ import {
 import { Stack, useRouter } from "expo-router";
 import { fetch as expoFetch } from "expo/fetch";
 import * as Haptics from "expo-haptics";
+import { Button, Host, Menu } from "@expo/ui/swift-ui";
+import { accessibilityLabel, tint } from "@expo/ui/swift-ui/modifiers";
 import { SymbolView } from "expo-symbols";
 import { useConvex, useMutation, useQuery } from "convex/react";
 import { useAuthToken } from "@convex-dev/auth/react";
 
 import { Drawer } from "@/components/ui/Drawer";
 import { ChatBubble } from "@/components/ChatBubble";
+import { PendingPhotoChip } from "@/components/PhotoAttachment";
+import { useImageAttachment } from "@/hooks/useImageAttachment";
 import { StreamingText } from "@/components/StreamingText";
 import {
   CodeArtifactWebView,
   type CodeArtifactWebViewHandle,
 } from "@/components/CodeArtifactWebView";
-import { api, convexSiteUrl, type Id } from "@/lib/convex";
+import { api, convexSiteUrl, type Doc, type Id } from "@/lib/convex";
 import { uploadChangedAppSnapshot } from "@/lib/appSnapshot";
 import { uploadImageDataUrl } from "@/lib/uploadImage";
 import {
@@ -77,7 +89,12 @@ import { tutorStreamErrorMessage } from "@/lib/tutorStreamError";
 import { fonts, useColors } from "@/theme";
 import {
   CODE_TOOLS,
-  newestHtmlArtifact,
+  SWITCH_APP_LABEL,
+  builderAppChoices,
+  builderHtmlArtifact,
+  htmlAppIds,
+  newlyAddedHtmlApp,
+  revisionsForApp,
 } from "../../../vendor/vibecode/helpers";
 import {
   deriveBuildPreview,
@@ -124,6 +141,13 @@ import {
   type CodeView,
 } from "@/components/DeliverablePanel";
 import { ParkingLot } from "@/components/vibecode/ParkingLot";
+import { useSavedForLaterActions } from "@/components/MissionDoneBlocks";
+import { DeliverableFooter } from "@/components/DeliverableFooter";
+import { YourWorkSheet } from "@/components/vibecode/YourWorkSheet";
+import { useBuilderDeliverable } from "@/components/vibecode/useBuilderDeliverable";
+import { APP_SURFACE_COPY } from "../../../vendor/shared/appSurface";
+import { AppPresentControls } from "@/components/vibecode/AppPresentControls";
+import { serverRefusal } from "../../../vendor/shared/serverErrorMessage";
 
 type VibecodeMessage = {
   id: string;
@@ -131,7 +155,12 @@ type VibecodeMessage = {
   content: string;
   stopRequestedAt?: number;
   appSnapshotUrl: string | null;
+  /** The scholar attached a photo ("make the art look like this"). */
+  hasImage: boolean;
+  imageUrl: string | null;
 };
+/** Present mode: the app alone on the screen, nothing to swipe back from. */
+const PRESENT_SCREEN_OPTIONS = { headerShown: false, gestureEnabled: false };
 /** How often the saved-at readout re-renders so "just now" can age into a time. */
 const SAVED_AT_TICK_MS = 30_000;
 
@@ -189,7 +218,15 @@ type HtmlArtifactVersion = {
   > | null;
 };
 
-export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
+export function VibecodeScreen({
+  sessionId,
+  appId,
+}: {
+  sessionId: Id<"sessions">;
+  /** The app to show — the one a chat app card's Open named (route param
+   *  `app`). Absent or stale → the session's newest app. */
+  appId?: string;
+}) {
   const colors = useColors();
   // The canonical chat-turn metrics (shared with the scholar tutor chat) — used
   // for the in-flight streaming bubble; settled turns render via <ChatBubble>.
@@ -202,6 +239,12 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
   // scholar's Edit unlocks, or a teacher's access is withdrawn).
   const [modeRequest, setModeRequest] = useState<WorkshopMode | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [yourWorkOpen, setYourWorkOpen] = useState(false);
+  // Present mode (showing the app to the class). The app WebView stays mounted
+  // in place; only the chrome around it goes, so the game keeps its state.
+  const [presenting, setPresenting] = useState(false);
+  // "Check my work" is in flight (the submit and the tutor's check reply).
+  const [checkBusy, setCheckBusy] = useState(false);
   // Edit's Preview | Code view of the app (TRA-520), the native twin of the
   // web CodeArtifactViewer toolbar. Play never shows code, so the live view
   // below falls back to Preview whenever the mode is not Edit.
@@ -296,6 +339,9 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
   const [kickoffRetryNonce, bumpKickoffRetry] = useState(0);
 
   const sendMessage = useMutation(api.sessions.sendMessage);
+  // A photo staged in the composer — the session chat's attach pipeline, so a
+  // builder can hold up an example ("make the art look like this").
+  const image = useImageAttachment();
   const startAppUpdateTurn = useMutation(api.sessions.startAppUpdateTurn);
   const requestStop = useMutation(api.sessions.requestStop);
   const generateUploadUrl = useMutation(api.files.generateUploadUrl);
@@ -303,6 +349,8 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
   const saveArtifact = useMutation(api.artifacts.scholarUpdate);
   const clearSessionState = useMutation(api.appStates.clearSessionState);
   const startActivityKickoff = useMutation(api.sessions.startActivityKickoff);
+  const submitDeliverable = useMutation(api.deliverables.submit);
+  const startRubricCheck = useMutation(api.sessions.startRubricCheck);
   const convex = useConvex();
   const data = useQuery(api.sessions.getWithMessages, { id: sessionId });
   const artifacts = useQuery(api.artifacts.getBySession, { sessionId });
@@ -311,7 +359,7 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
   // Version metadata (never html — that is fetched on Restore). Held here, not
   // only in the History sheet, so the transcript can render the same version
   // numbers inline as "vN · Restore" markers.
-  const revisions: HistoryRevision[] | undefined = useQuery(
+  const sessionRevisions = useQuery(
     api.codeArtifactRevisions.listForSession,
     { sessionId },
   );
@@ -343,14 +391,25 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     }
   }, [router, sessionId, startFreePlay]);
   const session = data?.session;
+  // Whether the builder is this session's primary view (an app activity,
+  // an activity-less builder, free play) or opened on demand from the chat,
+  // and whether the app is the session's work or a side project.
+  const builderPrimary = session?.builderPrimary ?? true;
+  const appRole = session?.appRole ?? "work";
+  const sessionActivityId = session?.activityId as Id<"activities"> | undefined;
   // The SERVER's edit verdict for THIS caller — rendered, never re-derived.
   // Until the session read resolves it reads "hidden": defaulting to "allowed"
   // would flash the Edit segment (and History) at a coached scholar.
   const effectiveEditAccess: EffectiveEditAccess = session
     ? ((session.effectiveEditAccess ?? "allowed") as EffectiveEditAccess)
     : "hidden";
-  const { showControl: showModeControl, editUnlocked } =
-    editControlFor(effectiveEditAccess);
+  const editControl = editControlFor(effectiveEditAccess);
+  // A side app (the activity's work is something else) has no Edit/Play: the
+  // builder stance is only for an app that IS the work (shared/appSurface.ts),
+  // so the app stays editable with History and turns stay in the one chat —
+  // the same as web.
+  const showModeControl = editControl.showControl && appRole === "work";
+  const editUnlocked = editControl.editUnlocked;
   const isBuildSession = session?.teacherBuildKickoff === true;
   const briefText = session?.appRequest ?? null;
   // An app with a character opens the scholar in Play too, even without a
@@ -371,12 +430,33 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
   const teacherEditOverride = session?.teacherEditOverride === true;
   const requestedMode = modeRequest ?? modeDefault;
   const mode: WorkshopMode =
-    requestedMode === "edit" && !editUnlocked ? "play" : requestedMode;
+    appRole === "side"
+      ? "edit"
+      : requestedMode === "edit" && !editUnlocked
+        ? "play"
+        : requestedMode;
+  // `mode` is the app SURFACE's mode: a side app is always editable. The
+  // builder STANCE (designer and tutor threads) is only for an app that is the
+  // work; a side app keeps the tutor's voice — its title, copy, character
+  // reports and unthreaded chat — exactly as web's VibecodeWorkshop does.
+  const builderStance = appRole === "work";
+  const tutorVoice = !builderStance || mode === "play";
   const codeView: CodeView = mode === "edit" ? codeViewRequest : "preview";
   const savedAt = session?.starterSavedAt ?? null;
   const autosaveFailedAt = session?.appAutosaveFailedAt ?? null;
   const isSessionOwner =
     !!session && !!me && String(session.userId) === String(me._id);
+  // The builder's done state (TRA-519 B2): once the activity is complete, the
+  // parked ideas carry the done screen's Build it now + Make it a Quest,
+  // instead of the generic Start free play. Owner only, never a rehearsal.
+  const builderDone =
+    isSessionOwner &&
+    session?.isTestDrive !== true &&
+    !!session?.activityCompletedAt;
+  const doneIdeaActions = useSavedForLaterActions({
+    sessionId,
+    canBuildNow: session?.freePlayEligible === true,
+  });
   // A scholar who only plays this app gets no "Reset app state" (it wipes
   // their saved progress in an app they cannot rebuild). Staff and a scholar
   // building their own app keep it; it stays owner-only because
@@ -390,13 +470,58 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
   });
 
   const htmlArtifact = useMemo(
-    () => newestHtmlArtifact(artifacts),
-    [artifacts],
+    () => builderHtmlArtifact(artifacts, appId),
+    [artifacts, appId],
   );
+  // History and the inline version markers list only this app's versions: a
+  // Restore writes into the app on screen.
+  const revisions: HistoryRevision[] | undefined = useMemo(
+    () => revisionsForApp(sessionRevisions, htmlArtifact?._id),
+    [sessionRevisions, htmlArtifact?._id],
+  );
+  // An app that goes away (a switch, a restore) ends the presentation.
+  const presentingApp = presenting && !!htmlArtifact;
   const htmlArtifactRef = useRef(htmlArtifact);
   useEffect(() => {
     htmlArtifactRef.current = htmlArtifact;
   }, [htmlArtifact]);
+  // Every turn this builder opens names the app on screen, so the designer
+  // or tutor acts on THAT app, never a newer one (TRA-519). Read through the
+  // ref so a send captured before a render still names the current app.
+  const openAppArg = (): { appArtifactId?: Id<"artifacts"> } => {
+    const app = htmlArtifactRef.current;
+    return app ? { appArtifactId: app._id } : {};
+  };
+  // Pinned to an older app (the `app` route param) when the AI makes a
+  // brand-new one (create_code): follow it, so the screen shows the app just
+  // built — web's VibecodeWorkshop does the same with `?app=`.
+  const knownAppIdsRef = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    if (!artifacts) return;
+    const fresh = newlyAddedHtmlApp(knownAppIdsRef.current, artifacts);
+    knownAppIdsRef.current = htmlAppIds(artifacts);
+    if (fresh && appId && String(fresh._id) !== appId) {
+      router.setParams({ app: String(fresh._id) });
+    }
+  }, [artifacts, appId, router]);
+
+  const builderDeliverable = useBuilderDeliverable({
+    sessionId,
+    activityId: sessionActivityId,
+    role: appRole,
+    artifacts,
+    appArtifactId: htmlArtifact?._id,
+    completed: !!session?.activityCompletedAt,
+  });
+  // The deliverable footer: only when the app IS the deliverable, and only for
+  // the scholar who owns the session (submit is owner-only; free play has no
+  // deliverable).
+  const showDeliverableFooter =
+    appRole === "work" &&
+    builderDeliverable.kind === "artifact" &&
+    !!htmlArtifact &&
+    isSessionOwner &&
+    !isFreePlay;
 
   const waitForRenderedArtifact = useCallback(
     async (
@@ -526,11 +651,13 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     // bubble at all.
     .filter((message) => !isQuietAppUpdatePlaceholder(message))
     // Two threads, one session (TRA-301): Edit shows only designer turns, Play
-    // only tutor turns — never both interleaved.
+    // only tutor turns — never both interleaved. A side app has one
+    // unthreaded conversation and shows all of it.
     .filter(
       (message) =>
+        !builderStance ||
         messageThread(message as { thread?: "designer" | "tutor" | null }) ===
-        threadForMode(mode),
+          threadForMode(mode),
     )
     .map((message) => ({
       id: message.id,
@@ -538,6 +665,8 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
       content: message.content,
       stopRequestedAt: (message as { stopRequestedAt?: number }).stopRequestedAt,
       appSnapshotUrl: message.appSnapshotUrl,
+      hasImage: !!message.imageId,
+      imageUrl: message.imageUrl ?? null,
     }));
 
   // The tutor's newest line while the chat drawer is closed — read from the
@@ -547,8 +676,9 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     messages: (data?.messages ?? []).filter(
       (message) =>
         message.role === "assistant" &&
-        messageThread(message as { thread?: "designer" | "tutor" | null }) ===
-          "tutor",
+        (!builderStance ||
+          messageThread(message as { thread?: "designer" | "tutor" | null }) ===
+            "tutor"),
     ),
     loaded: data !== undefined,
     chatOpen,
@@ -618,6 +748,56 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
       setCodeViewRequest(next);
     },
     [leaveCodeView],
+  );
+
+  // Present: a Code-view hand edit is flushed first (its editor unmounts
+  // while presenting), and every sheet closes so only the app is on screen.
+  const startPresenting = useCallback(() => {
+    Haptics.selectionAsync();
+    void leaveCodeView().then((ok) => {
+      if (!ok) return;
+      setChatOpen(false);
+      setHistoryOpen(false);
+      setYourWorkOpen(false);
+      setPresenting(true);
+    });
+  }, [leaveCodeView]);
+  const stopPresenting = useCallback(() => setPresenting(false), []);
+
+  // "‹ Chat": back to this session's chat view. Leaving unmounts a Code-view
+  // editor, so its pending hand edit is flushed first (and a save that cannot
+  // land keeps the scholar here, where that banner is).
+  const handleBackToChat = useCallback(async () => {
+    Haptics.selectionAsync();
+    if (!(await leaveCodeView())) return;
+    router.setParams({ view: undefined, app: undefined });
+  }, [leaveCodeView, router]);
+
+  // A builder-primary session holding more than one app (a teacher's starter
+  // plus one the designer made later) switches between them in the header;
+  // a chat-primary session reaches each app through its chat card instead.
+  // Empty for a single app: no switcher. Labels match web byte for byte.
+  const appChoices = useMemo(
+    () => (builderPrimary ? builderAppChoices(artifacts) : []),
+    [builderPrimary, artifacts],
+  );
+  const openAppId = htmlArtifact ? String(htmlArtifact._id) : null;
+  const openAppLabel =
+    appChoices.find((c) => c.id === openAppId)?.label ??
+    appChoices[appChoices.length - 1]?.label ??
+    null;
+  // A native SwiftUI menu: an action sheet presented from the navigation
+  // header never appears on iPad.
+  const handleSwitchApp = useCallback(
+    (picked: string) => {
+      if (picked === openAppId) return;
+      Haptics.selectionAsync();
+      // Switching unmounts a Code-view editor: flush its hand edit first.
+      void leaveCodeView().then((ok) => {
+        if (ok) router.setParams({ app: picked });
+      });
+    },
+    [openAppId, leaveCodeView, router],
   );
 
   const handleRestore = useCallback(
@@ -812,7 +992,11 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     },
     spoken = false,
   ): Promise<boolean> => {
-    if (!text && !appUpdate) return false;
+    // A staged photo rides the scholar's own turn, typed or spoken, and may be
+    // sent alone. An app update is the app talking, never the scholar's photo.
+    const imageId = appUpdate ? null : image.imageId;
+    if (!text && !appUpdate && !imageId) return false;
+    if (!appUpdate && image.uploading) return false;
     const inputModality = appUpdate ? "app" : spoken ? "spoken" : "typed";
     const appContext = appUpdate
       ? newestAppTutorAskContext(appUpdate.batch)
@@ -826,7 +1010,7 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     // An untouched composer still holding the send just dispatched is a
     // stale-closure resubmit, not a new turn (see sentComposerRef).
     const composerSnapshot =
-      inputModality === "typed" ? composerPayloadKey(text, null) : null;
+      inputModality === "typed" ? composerPayloadKey(text, imageId) : null;
     if (
       composerSnapshot !== null &&
       sentComposerRef.current === composerSnapshot
@@ -870,6 +1054,7 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
         const turn = await startAppUpdateTurn({
           sessionId,
           asks: appUpdate.batch.asks,
+          ...openAppArg(),
         });
         appUpdate.onPrepared(appTutorSendResultFromStatus(turn.status));
         if (turn.status !== "started") return false;
@@ -914,10 +1099,14 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
         (await sendMessage({
           sessionId,
           message: text,
+          ...(imageId ? { imageId } : {}),
           inputModality: spoken ? "spoken" : "typed",
           mode: turnMode,
+          ...openAppArg(),
         }));
       messagePersisted = true;
+      // The photo is persisted with this turn; only now is it safe to drop.
+      if (imageId) image.clear();
       // The server clamped a requested Edit to Play (the edit policy said no):
       // the turn is ALREADY in the tutor thread, so snap now rather than
       // waiting for the stream, which may never open (a 429/403 returns before
@@ -1004,6 +1193,9 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
       if (!controller.signal.aborted) {
         console.warn("[vibecode] stream failed", error);
       }
+      // The server refused the turn itself (a locked Quest build step): say
+      // why, instead of failing silently.
+      if (!messagePersisted) alertRefusal(error);
     } finally {
       // Only the turn that still owns the stream resets shared UI state — a
       // steered-away turn leaves the newer turn's state intact.
@@ -1020,6 +1212,103 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
       }
     }
     return messagePersisted;
+  };
+
+  // "Check my work" for a deliverable the builder shows (the app itself): the
+  // twin of the session screen's onRubricCheck. Submit the work, then — when it
+  // has a rubric — stream the tutor's silent check turn (startRubricCheck
+  // persists only the assistant placeholder; the stream injects the
+  // instruction, so no message the scholar didn't type reaches the transcript).
+  const runRubricCheck = async (
+    artifact: Doc<"artifacts">,
+    shouldCheck: boolean,
+  ): Promise<void> => {
+    if (!sessionActivityId || streamBusyRef.current || kickoffPendingRef.current) {
+      return;
+    }
+    try {
+      await flushPendingArtifactSaves();
+    } catch {
+      Alert.alert(
+        "Finish saving your code",
+        "Choose a code version in the Code view before checking it.",
+      );
+      return;
+    }
+    setCheckBusy(true);
+    const myTurn = ++turnSeqRef.current;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      await submitDeliverable({
+        sessionId,
+        activityId: sessionActivityId,
+        artifactId: artifact._id,
+        intent: shouldCheck ? "check" : "send",
+      });
+      if (!shouldCheck) return;
+      // The check is a turn of the mode on screen, so a check pressed in Play
+      // lands in the tutor thread (a side app has no threads).
+      const res = await startRubricCheck({
+        sessionId,
+        ...(builderStance ? { mode } : {}),
+        ...openAppArg(),
+      });
+      stopRequestedRef.current = false;
+      streamBusyRef.current = true;
+      setStreaming(true);
+      setStreamingText("");
+      setStreamingThread(threadForMode(mode));
+      liveAssistantIdRef.current = res.assistantMsgId;
+      activeStreamIdRef.current = res.streamId;
+      const resp = await expoFetch(`${convexSiteUrl}/session-stream`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({
+          sessionId: res.sessionId,
+          streamId: res.streamId,
+          assistantMsgId: res.assistantMsgId,
+          platform: "native",
+          supportsRenderCheck: true,
+          rubricCheck: { artifactTitle: artifact.title },
+        }),
+      });
+      await runProjectStreamFromResponse(resp, controller.signal, {
+        quiet: true,
+      });
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        console.warn("[rubric-check] failed", error);
+        Alert.alert(
+          shouldCheck ? "Couldn't check your work" : "Couldn't send your work",
+          "Your work is still saved. Check your connection and try again.",
+        );
+      }
+    } finally {
+      setCheckBusy(false);
+      if (turnSeqRef.current === myTurn) {
+        streamBusyRef.current = false;
+        setStreaming(false);
+        setStreamingText("");
+        liveAssistantIdRef.current = null;
+        activeStreamIdRef.current = null;
+        if (abortRef.current === controller) abortRef.current = null;
+      }
+    }
+  };
+  const handleRetryCriteria = async () => {
+    try {
+      await builderDeliverable.retryCriteria();
+    } catch (error) {
+      Alert.alert(
+        "Couldn't prepare the check",
+        error instanceof Error ? error.message : "Please try again.",
+      );
+    }
   };
 
   // App → tutor updates (asks and character/judge events) wait in one queue
@@ -1039,7 +1328,7 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
   const quietTurn =
     streaming &&
     appUpdateStreaming &&
-    (mode === "edit" || !streamingText.trim());
+    (!tutorVoice || !streamingText.trim());
   const visiblyStreaming = streaming && !quietTurn;
 
   const handleSend = () => {
@@ -1083,8 +1372,13 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     appTutorUpdates.onAskTutor(request);
     // In Edit the ask still goes to the tutor, whose reply lands in the hidden
     // Play thread — say so once, or a builder testing a hint button sees
-    // nothing happen.
-    if (mode === "edit" && isSessionOwner && !editAskNoticeShownRef.current) {
+    // nothing happen. A side app has one conversation, so no notice.
+    if (
+      builderStance &&
+      mode === "edit" &&
+      isSessionOwner &&
+      !editAskNoticeShownRef.current
+    ) {
       editAskNoticeShownRef.current = true;
       Alert.alert("Rabbithole", EDIT_MODE_ASK_NOTICE);
     }
@@ -1336,6 +1630,11 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     [buildSignals],
   );
   const buildStartedAt = streamStartedAt ?? openedAt;
+  // The designer's turns are builds. A side app's tutor turn becomes one only
+  // once it starts writing the app (web's VibecodeWorkshop, same rule).
+  const showBuildStages = builderStance
+    ? mode === "edit"
+    : buildSignals.some((signal) => signal.type === "codeToolStart");
   const buildPreview = deriveBuildPreview({
     hasArtifact: !!htmlArtifact,
     isStreaming: streaming,
@@ -1345,6 +1644,12 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
     ended: buildStage.ended,
   });
 
+  const { statusLabel, hasYourWork } = builderDeliverable;
+  const openYourWork = useCallback(() => {
+    Haptics.selectionAsync();
+    setYourWorkOpen(true);
+  }, []);
+
   // The header (a SwiftUI host inside it) is rebuilt only when something it
   // shows changes — never per streamed token: `setStreamingText` re-renders
   // this screen on every SSE chunk, and a fresh `options` object each time
@@ -1352,6 +1657,35 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
   const headerOptions = useMemo(
     () => ({
           title: headerTitle,
+          // Set explicitly: options merge, so leaving Present must undo it.
+          headerShown: true,
+          gestureEnabled: true,
+          // A chat-primary session's way back to its chat. A builder-primary
+          // session keeps the stack's own back chevron.
+          ...(builderPrimary
+            ? {}
+            : {
+                headerLeft: () => (
+                  <Pressable
+                    onPress={() => void handleBackToChat()}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel={APP_SURFACE_COPY.backToChat}
+                    style={styles.headerGhost}
+                  >
+                    <SymbolView
+                      name="chevron.left"
+                      size={16}
+                      tintColor={colors.violet}
+                    />
+                    <Text
+                      style={[styles.headerGhostText, { color: colors.violet }]}
+                    >
+                      {APP_SURFACE_COPY.backToChat}
+                    </Text>
+                  </Pressable>
+                ),
+              }),
           headerTitle: () => (
             <View style={styles.headerTitleBlock}>
               {/* The activity title with a small quiet-gray "App" eyebrow —
@@ -1430,6 +1764,59 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
                   </Text>
                 </Pressable>
               ) : null}
+              {statusLabel ? (
+                // A side app: the activity's own work, named with where it
+                // stands. Quiet by design; it opens the Your work sheet.
+                <Pressable
+                  onPress={openYourWork}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel={statusLabel}
+                  style={[styles.statusChip, { borderColor: colors.border }]}
+                >
+                  <Text style={[styles.statusChipText, { color: colors.fgMuted }]}>
+                    {statusLabel}
+                  </Text>
+                </Pressable>
+              ) : null}
+              {/* One entry point: when the status chip names the work, it IS the
+                  way in (web does the same). */}
+              {hasYourWork && !statusLabel ? (
+                <Pressable
+                  onPress={openYourWork}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel={APP_SURFACE_COPY.yourWork}
+                  style={styles.headerGhost}
+                >
+                  <SymbolView
+                    name="doc.text"
+                    size={16}
+                    tintColor={colors.violet}
+                  />
+                  <Text style={[styles.headerGhostText, { color: colors.violet }]}>
+                    {APP_SURFACE_COPY.yourWork}
+                  </Text>
+                </Pressable>
+              ) : null}
+              {htmlArtifact ? (
+                <Pressable
+                  onPress={startPresenting}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel={APP_SURFACE_COPY.presentAccessibility}
+                  style={styles.headerGhost}
+                >
+                  <SymbolView
+                    name="rectangle.on.rectangle"
+                    size={16}
+                    tintColor={colors.violet}
+                  />
+                  <Text style={[styles.headerGhostText, { color: colors.violet }]}>
+                    {APP_SURFACE_COPY.present}
+                  </Text>
+                </Pressable>
+              ) : null}
               {/* The chat sheet is a TOGGLE, not a consequence of the mode:
                   closed by default, opened by this rightmost ghost button in
                   every state. Edit | Play swaps which thread it holds. */}
@@ -1469,6 +1856,12 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
       chatOpen,
       toggleChat,
       teacherEditOverride,
+      builderPrimary,
+      handleBackToChat,
+      statusLabel,
+      hasYourWork,
+      openYourWork,
+      startPresenting,
     ],
   );
 
@@ -1497,7 +1890,9 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
           ruling 5 is called out in the PR for a ruling. The title block uses
           the SAME headerTitle render-prop idiom the session screen already
           uses for its homework eyebrow. */}
-      <Stack.Screen options={headerOptions} />
+      <Stack.Screen
+        options={presentingApp ? PRESENT_SCREEN_OPTIONS : headerOptions}
+      />
 
       {/* The cyan "Rehearse manually" starter strip is gone (TRA-301): autosave
           + History replace its Save, and "Scholars start from" belongs to the
@@ -1507,11 +1902,42 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
         {htmlArtifact ? (
           // deriveBuildPreview returns "app" exactly when an artifact exists.
           <View style={styles.previewWrap}>
-            {mode === "edit" ? (
-              <CodeViewToggle
-                view={codeView}
-                onChange={(next) => void handleCodeViewChange(next)}
-              />
+            {!presentingApp && (mode === "edit" || openAppLabel) ? (
+              // The app switcher lives here, not in the navigation header:
+              // a menu presented from the iOS 26 header toolbar never opens.
+              <View style={[styles.appTopRow, { borderBottomColor: colors.border }]}>
+                <View style={styles.appTopRowToggle}>
+                  {mode === "edit" ? (
+                    <CodeViewToggle
+                      view={codeView}
+                      onChange={(next) => void handleCodeViewChange(next)}
+                    />
+                  ) : null}
+                </View>
+                {openAppLabel ? (
+                  <View style={styles.appSwitcherWrap}>
+                    <Host matchContents>
+                      <Menu
+                        label={openAppLabel}
+                        systemImage="chevron.up.chevron.down"
+                        modifiers={[
+                          tint(colors.violet),
+                          accessibilityLabel(`${SWITCH_APP_LABEL}: ${openAppLabel}`),
+                        ]}
+                      >
+                        {appChoices.map((choice) => (
+                          <Button
+                            key={choice.id}
+                            label={choice.label}
+                            systemImage={choice.id === openAppId ? "checkmark" : undefined}
+                            onPress={() => handleSwitchApp(choice.id)}
+                          />
+                        ))}
+                      </Menu>
+                    </Host>
+                  </View>
+                ) : null}
+              </View>
             ) : null}
             <View style={styles.previewStage}>
               <CodeArtifactWebView
@@ -1523,14 +1949,15 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
                 content={htmlArtifact.content}
                 onAskTutor={handleAppTutorAsk}
                 // An Edit preview is a builder trying their own character, not
-                // play the tutor should coach: only Play reports character turns.
-                onAppAiTurn={mode === "play" ? handleAppAiTurn : undefined}
+                // play the tutor should coach: only Play (or a side app, whose
+                // chat is the tutor's) reports character turns.
+                onAppAiTurn={tutorVoice ? handleAppAiTurn : undefined}
                 // The character and judges answer only the session's owner;
                 // anyone else watching gets `unavailable` without a server call.
                 appAiEnabled={isSessionOwner}
                 style={styles.webView}
               />
-              {codeView === "code" ? (
+              {codeView === "code" && !presentingApp ? (
                 // Laid OVER the app rather than replacing it: the WebView stays
                 // mounted, so the app keeps its state and the builder's render
                 // checks keep a live host while the scholar reads the source.
@@ -1557,7 +1984,7 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
                   />
                 </ScrollView>
               ) : null}
-              {building && mode === "edit" ? (
+              {building && mode === "edit" && !presentingApp ? (
                 // Editing an already-rendered app: one vocabulary — the overlay
                 // reads the SAME derived stage label as the card/line (T1).
                 <View
@@ -1633,19 +2060,51 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
             until read. The slot is reserved for the whole of Play (empty when
             there is no line), so the app never moves when a line arrives or
             is read (a jump made taps miss, TRA-477). */}
-        {isSessionOwner && mode === "play" && htmlArtifact ? (
+        {isSessionOwner && tutorVoice && htmlArtifact && !presentingApp ? (
           <TutorLineSlot
             line={tutorLine.unread ?? null}
             onOpen={() => setChatOpen(true)}
           />
         ) : null}
+        {showDeliverableFooter && htmlArtifact && !presentingApp ? (
+          <DeliverableFooter
+            kind="text"
+            mode={builderDeliverable.mode ?? "manual"}
+            flairKey={String(htmlArtifact._id)}
+            flairEarned={builderDeliverable.appDeliverable?.flairEarned}
+            criteria={builderDeliverable.criteria}
+            deliverableId={builderDeliverable.appDeliverable?._id}
+            resolved={builderDeliverable.appDeliverable !== undefined}
+            criteriaPending={builderDeliverable.criteriaPending}
+            criteriaFailed={builderDeliverable.criteriaFailed}
+            disabled={streaming || !htmlArtifact.content.trim()}
+            busy={checkBusy}
+            onCheck={() =>
+              void runRubricCheck(
+                htmlArtifact,
+                builderDeliverable.criteria.length > 0,
+              )
+            }
+            onRetry={() => void handleRetryCriteria()}
+          />
+        ) : null}
+        {presentingApp ? <AppPresentControls onDone={stopPresenting} /> : null}
       </View>
 
+      <YourWorkSheet
+        open={yourWorkOpen && !presentingApp}
+        onClose={() => setYourWorkOpen(false)}
+        sessionId={sessionId}
+        activityId={sessionActivityId}
+        checkDisabled={streaming}
+        onAskCheck={runRubricCheck}
+      />
+
       <Drawer
-        open={chatOpen}
+        open={chatOpen && !presentingApp}
         onClose={() => setChatOpen(false)}
         side="bottom"
-        title={mode === "edit" ? "Designer" : "Tutor"}
+        title={tutorVoice ? "Tutor" : "Designer"}
       >
         <View style={styles.chatBody}>
           <ScrollView
@@ -1670,7 +2129,7 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
             ) : null}
             {messages.length === 0 && !(mode === "edit" && briefText) ? (
               <Text style={[styles.chatEmpty, { color: colors.fgMuted }]}>
-                {mode === "edit"
+                {!tutorVoice
                   ? "Describe the app you want to build — the designer writes it and you iterate."
                   : "Talk to the tutor about the app."}
               </Text>
@@ -1690,6 +2149,8 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
                       ttsEnabled={ttsEnabled}
                       stopRequestedAt={message.stopRequestedAt}
                       appSnapshotUrl={message.appSnapshotUrl}
+                      hasImage={message.hasImage}
+                      imageUrl={message.imageUrl}
                     />
                     {marker ? (
                       <View style={styles.markerRow}>
@@ -1732,7 +2193,8 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
                 );
               })
             )}
-            {visiblyStreaming && streamingThread === threadForMode(mode) ? (
+            {visiblyStreaming &&
+            (!builderStance || streamingThread === threadForMode(mode)) ? (
               <View style={styles.streamRow}>
                 <View style={bubbleStyles.tutorBare}>
                   {streamingText ? (
@@ -1742,7 +2204,7 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
                       color={colors.charcoal}
                       style={bubbleStyles.bubbleText}
                     />
-                  ) : mode === "play" ? (
+                  ) : !showBuildStages ? (
                     <Text style={[bubbleStyles.bubbleText, { color: colors.charcoalSubtle }]}>
                       {/* Play is the TUTOR thread: a question is not a build,
                           so build stages would be a seam. One plain line. */}
@@ -1770,15 +2232,29 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
                 session?.freePlayEligible ? handleStartFreePlay : undefined
               }
               startingFreePlay={startingFreePlay}
+              renderActions={
+                builderDone ? doneIdeaActions.renderActions : undefined
+              }
             />
           ) : null}
+          {!isFreePlay && builderDone ? doneIdeaActions.dialog : null}
 
-          {voice.isRecording || voice.isTranscribing ? (
+          {image.previewUri ? (
+            <View style={styles.photoRow}>
+              <PendingPhotoChip
+                uri={image.previewUri}
+                uploading={image.uploading}
+                onRemove={image.clear}
+              />
+            </View>
+          ) : null}
+          {voice.isConnecting || voice.isRecording || voice.isTranscribing ? (
             <View style={[styles.composer, { borderTopColor: colors.border }]}>
               <RecordingBar
                 level={voice.level}
                 durationMs={voice.durationMs}
                 isTranscribing={voice.isTranscribing}
+                isConnecting={voice.isConnecting}
                 isMaxed={voice.isMaxed}
                 onCancel={onMicCancel}
                 onStop={onMicStop}
@@ -1786,12 +2262,23 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
             </View>
           ) : (
             <View style={[styles.composer, { borderTopColor: colors.border }]}>
+              {/* The session chat's attach control: camera or photo library —
+                  e.g. an example picture for "make the art look like this". */}
+              <Pressable
+                onPress={() => image.chooseAndAttach()}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Add a photo"
+                style={[styles.attach, { backgroundColor: colors.charcoalSubtle }]}
+              >
+                <SymbolView name="plus" size={16} tintColor={colors.white} />
+              </Pressable>
               <AppTextInput
                 ref={composerRef}
                 value={input}
                 onChangeText={onChangeInput}
                 placeholder={
-                  mode === "edit"
+                  !tutorVoice
                     ? "Tell the designer what to change…"
                     : "Talk to the tutor…"
                 }
@@ -1805,7 +2292,7 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
                   it, and the scholar's turn carries the in-app events instead.
                   An empty box offers the mic in the same slot (the session
                   screen's pattern): tap to talk, tap the check to send. */}
-              {!visiblyStreaming && !input.trim() ? (
+              {!visiblyStreaming && !input.trim() && !image.previewUri ? (
                 <Pressable
                   onPress={() => void onMicStart()}
                   accessibilityRole="button"
@@ -1838,13 +2325,20 @@ export function VibecodeScreen({ sessionId }: { sessionId: Id<"sessions"> }) {
         // History is an Edit-only sheet under the header: it is visible only
         // while the effective mode is Edit, so a tap on Play or a server
         // policy clamp closes it with the header.
-        open={historyOpen && mode === "edit"}
+        open={historyOpen && mode === "edit" && !presentingApp}
         onClose={() => setHistoryOpen(false)}
         onRestore={(rev) => void handleRestore(rev)}
         restoring={restoring}
       />
     </>
   );
+}
+
+/** Show a deliberate server refusal of a turn (a locked Quest build step).
+ * Anything else stays a console warning, as before. */
+function alertRefusal(error: unknown): void {
+  const refusal = serverRefusal(error);
+  if (refusal) Alert.alert("Couldn't send", refusal);
 }
 
 const styles = StyleSheet.create({
@@ -1865,8 +2359,22 @@ const styles = StyleSheet.create({
   headerGhost: { flexDirection: "row", alignItems: "center", gap: 4 },
   headerGhostDisabled: { opacity: 0.4 },
   headerGhostText: { fontFamily: fonts.semibold, fontSize: 13 },
+  statusChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  statusChipText: { fontFamily: fonts.medium, fontSize: 12 },
 
   previewWrap: { flex: 1 },
+  appTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  appTopRowToggle: { flex: 1 },
+  appSwitcherWrap: { paddingHorizontal: 12 },
   previewStage: { flex: 1 },
   codeSheet: { ...StyleSheet.absoluteFill },
   codeSheetContent: { padding: 12 },
@@ -1966,5 +2474,13 @@ const styles = StyleSheet.create({
     maxHeight: 90,
   },
   send: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12 },
+  attach: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  photoRow: { paddingTop: 10 },
   sendText: { fontFamily: fonts.semibold, fontSize: 14 },
 });

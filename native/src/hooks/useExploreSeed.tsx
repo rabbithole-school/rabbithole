@@ -6,6 +6,7 @@ import * as Haptics from "expo-haptics";
 
 import { ChoosePathDialog } from "@/components/ChoosePathDialog";
 import {
+  bakePathArg,
   ENDLESS_CHAT,
   type PathChoice,
 } from "@/components/BakePathPicker";
@@ -63,7 +64,7 @@ export function useExploreSeed() {
         ...(choice === ENDLESS_CHAT
           ? { endlessChat: true }
           : choice
-            ? { bakePath: { title: choice.title, blurb: choice.blurb } }
+            ? { bakePath: bakePathArg(choice) }
             : {}),
       });
       if (!isCurrent()) return;

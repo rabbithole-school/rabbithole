@@ -20,7 +20,11 @@ const { alert, createSession, routerPush, fixture } = vi.hoisted(() => ({
   alert: vi.fn(),
   createSession: vi.fn(),
   routerPush: vi.fn(),
-  fixture: { activityKind: "online", completed: false },
+  fixture: {
+    activityKind: "online",
+    completed: false,
+    unit: null as Record<string, unknown> | null,
+  },
 }));
 
 vi.mock("react-native", async () => {
@@ -47,7 +51,10 @@ vi.mock("convex/react", () => ({
   useConvex: () => ({ query: vi.fn() }),
   useMutation: () => createSession,
   useQuery: (query: string) => {
-    if (query === "units.get") return { title: "A unit", emoji: "📚" };
+    if (query === "units.get") {
+      return fixture.unit ?? { title: "A unit", emoji: "📚" };
+    }
+    if (query === "users.currentUser") return { _id: "scholar" };
     if (query === "lessons.listByUnitPublic") {
       return [{ _id: "lesson", title: "Lesson", order: 0, durationMinutes: null }];
     }
@@ -89,8 +96,15 @@ vi.mock("@/lib/convex", () => ({
       listForScholarInUnit: "activityCompletions.listForScholarInUnit",
     },
     lessons: { listByUnitPublic: "lessons.listByUnitPublic" },
-    sessions: { create: "sessions.create", list: "sessions.list" },
+    sessions: {
+      create: "sessions.create",
+      list: "sessions.list",
+      startFreePlay: "sessions.startFreePlay",
+      questFromParkedIdea: "sessions.questFromParkedIdea",
+    },
+    quests: { appendBuildStep: "quests.appendBuildStep" },
     units: { get: "units.get" },
+    users: { currentUser: "users.currentUser" },
   },
 }));
 vi.mock("@/lib/externalAppHost", () => ({ openWebActivity: vi.fn() }));
@@ -126,6 +140,48 @@ describe("UnitProgressScreen", () => {
     vi.clearAllMocks();
     fixture.activityKind = "online";
     fixture.completed = false;
+    fixture.unit = null;
+  });
+
+  // TRA-519 B6: a Quest build step waiting on its learning step reads as
+  // locked with why, and is never the Continue target (no tap action).
+  it("shows a locked Quest build step with its unlock line and no Continue", () => {
+    fixture.activityKind = "vibecode";
+    fixture.unit = {
+      title: "My Quest",
+      emoji: "🧭",
+      authorScholarId: "scholar",
+      mission: { text: "Find out why bridges sag", setAt: 1 },
+      questLocks: { activity: { prerequisiteTitle: "Name the rule" } },
+    };
+    let renderer!: ReturnType<typeof create>;
+    act(() => {
+      renderer = create(createElement(UnitProgressScreen));
+    });
+    const text = renderedText(renderer.toJSON());
+    expect(text).toContain("Unlocks when you finish Name the rule");
+    // B5: the scholar's own Quest shows its mission line.
+    expect(text).toContain("Mission:");
+    expect(text).toContain("Find out why bridges sag");
+    expect(
+      renderer.root.findAll(
+        (node) =>
+          node.props.accessibilityLabel === "Continue to A focused activity",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("hides the mission line on a Quest the viewer did not author", () => {
+    fixture.unit = {
+      title: "Their Quest",
+      authorScholarId: "someone-else",
+      mission: { text: "Find out why bridges sag", setAt: 1 },
+    };
+    let renderer!: ReturnType<typeof create>;
+    act(() => {
+      renderer = create(createElement(UnitProgressScreen));
+    });
+    expect(renderedText(renderer.toJSON())).not.toContain("Mission:");
   });
 
   it("shows one error alert and does not navigate when Continue cannot create a session", async () => {
@@ -182,6 +238,10 @@ describe("UnitProgressScreen", () => {
     act(() => {
       renderer = create(createElement(UnitProgressScreen));
     });
+    // An app activity (either stored shape reaches the client as "vibecode")
+    // reads as "App", never the internal token (TRA-519).
+    expect(renderedText(renderer.toJSON())).toContain("App");
+    expect(renderedText(renderer.toJSON())).not.toContain("Vibecode");
     const continueButton = renderer.root.findAll(
       (node) => node.props.accessibilityLabel === "Continue to A focused activity",
     )[0];

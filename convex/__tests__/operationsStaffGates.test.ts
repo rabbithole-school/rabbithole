@@ -19,7 +19,7 @@ const modules = (
 // Why this file: "operations staff" (base `staff` role + the
 // `school:operations` capability grant — the retired `registrar` role's
 // successor) exists to have EXACTLY the scholar-admin powers
-// (create/administer accounts, manage portfolios) and nothing else — no
+// (create/administer accounts, file scanner scans) and nothing else — no
 // sensitive learning data, no curriculum, no admin. The capability split is
 // enforced by which custom-function gate each handler uses
 // (scholarAdminQuery/Mutation vs teacherQuery vs curriculumMutation vs
@@ -71,7 +71,7 @@ async function withUser(
   });
 }
 
-// ── What operations staff CAN do (account admin + portfolio) ─────────
+// ── What operations staff CAN do (account admin + scanner filing) ────
 
 describe("operations staff — allowed: account administration", () => {
   test("can create a scholar", async () => {
@@ -123,15 +123,16 @@ describe("operations staff — allowed: account administration", () => {
     expect(profile.scholar.id).toBe(kai);
   });
 
-  test("can list a scholar's portfolio", async () => {
+  // Scanner filing yes, portfolio browsing no — the full matrix lives in
+  // operationsStaffPortfolio.test.ts.
+  test("cannot browse a scholar's portfolio", async () => {
     const t = convexTest(schema, modules);
     const reg = await seedUser(t, "operations_staff", "reg");
     const kai = await seedUser(t, "scholar", "kai");
     const asReg = await withUser(t, reg);
-    const items = await asReg.query(api.portfolio.listForScholar, {
-      scholarId: kai,
-    });
-    expect(items).toEqual([]);
+    await expect(
+      asReg.query(api.portfolio.listForScholar, { scholarId: kai }),
+    ).rejects.toThrow(/teaching access/i);
   });
 
   // The roster page (ScholarHome -> useScholarRoster) loads these on mount;

@@ -14,6 +14,11 @@ import { MAGIC_REDRAW_TOOL_ACTION } from "./lib/magicAnnotations";
 import { renderCriteriaForRubricCheck } from "./lib/deliverable";
 import { writingMechanicsPolicy } from "./lib/writingMechanicsPolicy";
 import { firstIncompleteLaunchableActivityInUnit } from "./lib/scholarReads";
+import { resolveSessionMission, type SessionMission } from "./lib/mission";
+import {
+  lockedQuestBuildTitleFor,
+  openQuestBuildTitleFor,
+} from "./lib/questBuildLock";
 import {
   deriveGranuleStatuses,
   normalizeGranules,
@@ -28,8 +33,10 @@ import {
   buildDocumentNotesSection,
   buildWhisperSection,
   buildToolsSection,
+  buildSideAppSection,
   buildOpenExplorationWrapUpSection,
   buildVibecodeSection,
+  buildTutorMissionSteering,
   buildParkingLotSection,
   buildFreePlayOpenerSection,
   buildWorkbenchSection,
@@ -40,7 +47,9 @@ import {
   isSameSitting,
   TUTOR_PROMPT_SECTION_ORDER,
   TUTOR_TURN_CONTEXT_SECTIONS,
+  TUTOR_TURN_SYSTEM_SECTIONS,
   FIRST_DYNAMIC_TUTOR_SECTION,
+  FIRST_DOCUMENT_TUTOR_SECTION,
   type TutorPromptSectionKey,
 } from "./prompts";
 import type { DocumentNote, PhysicalEnvironmentContext } from "./prompts";
@@ -57,6 +66,12 @@ import {
   type InstitutionPromptProfile,
 } from "./lib/institutionPromptProfile";
 import { renderStoppedAssistantContent } from "../shared/stoppedTurn";
+import {
+  appRoleFor,
+  effectiveActivityKind,
+  isAppActivity,
+  sessionAppContextFor,
+} from "../shared/appSurface";
 import {
   CHARACTER_PERSONA_BRIEF_CHARS,
   appAiContextWindow,
@@ -84,6 +99,7 @@ import {
   shouldAnnotateGraphemes,
 } from "./lib/graphemeAnnotate";
 import { MAX_APP_ASSETS } from "../shared/appAssets";
+import { codeAppsNewestFirst, pickFocusApp } from "./lib/focusApp";
 import {
   dayStartForTimezone,
   mondayDayKeyForTimezone,
@@ -122,6 +138,7 @@ import {
   isInstructionCompletionAction,
 } from "./lib/practice/chatInstruction";
 import { isTextArtifact } from "../shared/textArtifacts";
+import { CODE_EDITOR_TOOL_NAME, codeArtifactPath } from "./lib/tutorCodeEditor";
 import { validateDeckLenient, summarizeDeckForModel } from "../shared/slidesScene";
 import { resolveReachableActivityResources } from "./lib/activityResourceReachability";
 import { scholarInstitutionId } from "./lib/scholarEnrollment";
@@ -255,12 +272,44 @@ export async function resolveActivityScopedContext(
           !!unit.authorScholarId &&
           unit.authorScholarId === args.session?.userId,
         unitId: unit._id,
+        questMission:
+          !!unit.authorScholarId &&
+          unit.authorScholarId === args.session?.userId
+            ? unit.mission?.text?.trim() || null
+            : null,
       }
     : null;
+
+  // LEARN BEFORE YOU BUILD (TRA-519 B6): while a build step of the scholar's
+  // own Quest is locked, its other sessions (learning steps, the planning
+  // chat) name it and are offered no app-creating tool. The build step itself
+  // and free play (always an app activity's) are exempt.
+  if (
+    unit &&
+    unitContext?.isOwnIsUnit &&
+    args.session &&
+    args.session.freePlay !== true &&
+    !(activity && isAppActivity(activity))
+  ) {
+    unitContext.questBuildLocked = await lockedQuestBuildTitleFor(ctx, {
+      unit,
+      scholarId: args.session.userId,
+      fromActivityId: activity?._id ?? null,
+    });
+    // Once open, the Quest's app is still built in its build step, never in
+    // a learning step or the planning chat (one home for the Quest's app).
+    if (!unitContext.questBuildLocked) {
+      unitContext.questBuildOpen = await openQuestBuildTitleFor(ctx, {
+        unit,
+        scholarId: args.session.userId,
+      });
+    }
+  }
 
   // Unit-level planning chat in the scholar's own IS unit: show the tutor
   // what's already built so it hands off instead of re-planning (TRA-464).
   if (unit && unitContext?.isOwnIsUnit && !activity && args.session) {
+    unitContext.isPlanningChat = true;
     unitContext.ownIsUnitOutline = await loadOwnIsUnitOutline(
       ctx,
       unit._id,
@@ -325,7 +374,9 @@ export async function resolveActivityScopedContext(
     ? {
         title: activity.title,
         description: activity.description ?? null,
-        kind: activity.kind,
+        // The effective kind: an app activity reads "vibecode" in either
+        // shape, so the ACTIVITY section stays byte-identical across the fold.
+        kind: effectiveActivityKind(activity),
         systemPrompt:
           args.activitySystemPrompt === undefined
             ? (activity.systemPrompt ?? null)
@@ -340,7 +391,7 @@ export async function resolveActivityScopedContext(
         // A free-play session (TRA-489) runs with NO model contract: no
         // steering, no gate, no parking. The designer tools follow suit,
         // since the stream gates them on this same field.
-        ...(activity.kind === "vibecode" &&
+        ...(isAppActivity(activity) &&
         activity.buildContract &&
         args.session?.freePlay !== true
           ? {
@@ -353,7 +404,9 @@ export async function resolveActivityScopedContext(
     : null;
 
   const resourceRows =
-    activity?.kind === "online" || activity?.kind === "vibecode"
+    activity &&
+    (effectiveActivityKind(activity) === "online" ||
+      effectiveActivityKind(activity) === "vibecode")
       ? (await resolveReachableActivityResources(ctx, activity._id)).all
       : [];
   const activityResourceContext: ActivityResourceContext[] | null =
@@ -719,7 +772,16 @@ async function loadAppAiContext(
  * Called by the HTTP action before streaming.
  */
 export const getSessionContext = internalQuery({
-  args: { sessionId: v.id("sessions") },
+  args: {
+    sessionId: v.id("sessions"),
+    // TRA-519: the turn's assistant placeholder (from the stream body). Its
+    // `focusArtifactId` — the app open in the builder, stamped and validated
+    // by the mutation that opened the turn — picks the app this turn acts on.
+    // Only a placeholder of this session counts; absent = the newest app.
+    // A plain string (straight from the stream body): a malformed one simply
+    // matches nothing here; the stream's placeholder binding rejects it later.
+    assistantMsgId: v.optional(v.string()),
+  },
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
     if (!session) return null;
@@ -740,7 +802,7 @@ export const getSessionContext = internalQuery({
       ),
     );
 
-    const chatHistory = messages
+    const historyRows = messages
       .filter(
         (m) =>
           m.role !== "system" ||
@@ -773,8 +835,9 @@ export const getSessionContext = internalQuery({
           !!m.instruction ||
           isInstructionCompletionAction(m.toolAction) ||
           (!!m.imageId && (m.role === "user" || m.role === "tool")),
-      )
-      .map((m) => ({
+      );
+    const chatHistory = historyRows
+      .map((m, index) => ({
         id: String(m._id),
         sourceRole: m.role,
         // When this turn actually happened. Nothing model-facing renders it —
@@ -829,6 +892,11 @@ export const getSessionContext = internalQuery({
         // A staff member typed this "user" turn (TRA-515): not the
         // scholar's own language for the observer's talk word floor.
         ...(m.role === "user" && m.byStaff ? { byStaff: true } : {}),
+        // TRA-530: the scholar stopped the reply to this message and nothing
+        // of it reached them, so the tutor must not now carry it out.
+        ...(isWithdrawnRequest(historyRows, index)
+          ? { replyStopped: true }
+          : {}),
       }));
     let latestInstructionCompletionIndex = -1;
     for (let index = messages.length - 1; index >= 0; index--) {
@@ -1026,6 +1094,24 @@ export const getSessionContext = internalQuery({
         lessonById,
       });
     }
+
+    // ── The session's MISSION (TRA-519 B1/B5/B6) ─────────────────────
+    // One derivation (lib/mission.ts) for the tutor's MISSION section, the
+    // builder's contract steering and the stream's park-tool offer. A step of
+    // the scholar's own Quest whose build step is still locked (B6,
+    // unitContext.questBuildLocked) carries that build step's title, so an
+    // app request there waits for it with the unlock framing.
+    const mission: SessionMission | null = resolveSessionMission(
+      session,
+      activity,
+      unit,
+      {
+        unlocksBuild:
+          unitContext?.questBuildLocked ?? unitContext?.questBuildOpen ?? null,
+        buildStepOpen:
+          !unitContext?.questBuildLocked && !!unitContext?.questBuildOpen,
+      },
+    );
 
     // Recent game evidence from this lesson. Read through contextUserId so a
     // real-scholar Test Drive sees that scholar's rounds, while a synthetic
@@ -1465,6 +1551,31 @@ export const getSessionContext = internalQuery({
         q.eq("sessionId", args.sessionId)
       )
       .collect();
+    // The app this turn acts on (TRA-519): the one open in the builder when
+    // the turn was sent, else the newest (lib/focusApp.ts).
+    const focusPlaceholder = args.assistantMsgId
+      ? messages.find(
+          (m) =>
+            String(m._id) === args.assistantMsgId && m.role === "assistant",
+        )
+      : undefined;
+    const focusApp = pickFocusApp(
+      allArtifacts,
+      session._id,
+      focusPlaceholder?.focusArtifactId,
+    );
+    // Only an app the builder named narrows the reads below; without one
+    // every read keeps its old newest-app behavior (older clients unchanged).
+    const namedFocusAppId =
+      focusApp && focusApp._id === focusPlaceholder?.focusArtifactId
+        ? focusApp._id
+        : undefined;
+    // The prompt names the open app only when there is a choice to make.
+    const openAppId =
+      namedFocusAppId &&
+      codeAppsNewestFirst(allArtifacts, session._id).length > 1
+        ? namedFocusAppId
+        : undefined;
     const artifactData = allArtifacts.length > 0
       ? allArtifacts.map((a) => ({
           id: a._id,
@@ -1473,13 +1584,23 @@ export const getSessionContext = internalQuery({
           lastEditedBy: a.lastEditedBy,
           type: a.type,
           revision: a.revision ?? 0,
+          ...(a._id === openAppId ? { openInBuilder: true as const } : {}),
         }))
       : null;
+    // TRA-519: how this session relates to its app. Builder FEATURES follow
+    // any session with an app (or a builder-primary one); the builder STANCE
+    // only a session whose app is the work (shared/appSurface.ts).
+    const appContext = sessionAppContextFor({
+      sessionMode: session.sessionMode ?? null,
+      role: appRoleFor(activity),
+      hasApp: allArtifacts.some((a) => a.type === "code"),
+    });
     const latestAppState = await readLatestSessionState(
       ctx,
       session._id,
       session.userId,
       allArtifacts,
+      namedFocusAppId,
     );
     // `artifactId` rides along so `run_app_action` can address the same app the
     // tutor is reading — one resolution, no second "which artifact?" pass.
@@ -1605,14 +1726,14 @@ export const getSessionContext = internalQuery({
     // guest / institution-less scholar, so the rendered prompt is byte-identical.
     const institutionProfile = institutionPromptProfile(institution);
 
-    // The scholar's own work from earlier sessions in this unit, for the App
-    // designer — without it a vibecode session starts cold and re-asks what
-    // the scholar already wrote. Real scholar sessions only: a rehearsal has
-    // no prior work of its own. See convex/lib/priorUnitWork.ts.
+    // The scholar's own work from earlier sessions in this unit, for any
+    // session with an app (builder features) — without it the builder starts
+    // cold and re-asks what the scholar already wrote. Real scholar sessions
+    // only: a rehearsal has no prior work of its own. See convex/lib/priorUnitWork.ts.
     const priorUnitWork =
       unit &&
       session.activityId &&
-      session.sessionMode === "vibecode" &&
+      appContext.builderFeatures &&
       !session.isTestDrive &&
       !isSyntheticView
         ? buildPriorUnitWorkSection(
@@ -1627,14 +1748,22 @@ export const getSessionContext = internalQuery({
         : null;
 
     return {
-      // The App designer's parking lot (park_idea / unpark_idea). Session-local
-      // data — no scholar-keyed read — so a scholar-stance rehearsal sees its
-      // own lot too; buildSystemPromptParts renders it only where those tools
-      // are offered.
-      parkingLot: session.sessionMode === "vibecode" ? (session.parkingLot ?? []) : [],
-      freePlay: session.sessionMode === "vibecode" && session.freePlay === true,
+      // The scholar's parked ideas (park_idea / unpark_idea). Session-local
+      // data — no scholar-keyed read — so a rehearsal sees its own lot too;
+      // buildSystemPromptParts renders it only where those tools are offered
+      // (a session with a mission, or free play's opener).
+      parkingLot: session.parkingLot ?? [],
+      // The session's MISSION (lib/mission.ts); null for exploration.
+      mission,
+      freePlay: appContext.builderStance && session.freePlay === true,
       isTestDrive: !!session.isTestDrive,
       sessionMode: session.sessionMode ?? null,
+      appContext,
+      // A side app (TRA-519): the work the tutor steers back to.
+      sideAppWork:
+        appContext.hasApp && appContext.role === "side"
+          ? { deliverableKind: activity?.deliverable?.kind ?? null }
+          : null,
       vibecodeStarterUsedAt: session.vibecodeStarterUsedAt ?? null,
       isFirstTurn,
       isFirstSession,
@@ -1697,6 +1826,10 @@ export const getSessionContext = internalQuery({
       processStateData,
       artifactData,
       appStateContext,
+      // The app the builder named for this turn (TRA-519), for the stream's
+      // version baseline/recorder and the character/judge director. Null =
+      // the newest app (no app named, or an older client).
+      focusAppId: namedFocusAppId ?? null,
       characterContext,
       appJudgeContext,
       seeds,
@@ -1786,6 +1919,28 @@ export const isStopRequested = internalQuery({
  * When such a turn is stopped, or found stranded, the row is deleted rather
  * than kept — the same end as a stay_silent turn's (finalizeStream `silent`).
  */
+/**
+ * A scholar message whose reply they stopped before the tutor said anything
+ * (TRA-530): stamped `replyStoppedAt`, and the next scholar or tutor row after
+ * it is no tutor speech — another scholar turn, an empty stopped placeholder,
+ * or nothing. Tool rows (a generated image) are skipped: they are not a reply.
+ * A crashed turn leaves the same shape unstamped, and that request is still
+ * owed, so the stamp is the only thing that tells the two apart.
+ */
+export function isWithdrawnRequest(
+  rows: readonly Pick<Doc<"messages">, "role" | "content" | "replyStoppedAt">[],
+  index: number,
+): boolean {
+  const message = rows[index];
+  if (message.role !== "user" || message.replyStoppedAt === undefined) {
+    return false;
+  }
+  const next = rows.find(
+    (row, i) => i > index && (row.role === "user" || row.role === "assistant"),
+  );
+  return !next || next.role === "user" || next.content.trim() === "";
+}
+
 export function isEmptyAppUpdatePlaceholder(
   message: Pick<Doc<"messages">, "role" | "streamTrigger" | "content">,
 ): boolean {
@@ -2116,6 +2271,19 @@ export type UnitContext = {
    *  share-back skipped) — the same pick as native's "Up next"
    *  (`firstIncompleteLaunchableActivityInUnit`). Null when none is left. */
   ownIsUnitNextActivityTitle?: string | null;
+  /** The scholar's own Quest mission line (units.mission.text, TRA-519 B5),
+   *  written with the planning tutor. Only for the scholar's own Quest. */
+  questMission?: string | null;
+  /** The activity-less planning chat of the scholar's own Quest. */
+  isPlanningChat?: boolean;
+  /** B6: the title of a still-locked build step of the scholar's own Quest,
+   *  set on its other sessions (never the build step itself). While set, the
+   *  stream offers no app-creating tool (`create_code`) and the prompt says
+   *  the app waits for that step. */
+  questBuildLocked?: string | null;
+  /** B6: the Quest's build step title when it is open (and not this
+   *  session's activity) — apps are built there, not here. */
+  questBuildOpen?: string | null;
 };
 
 export type OwnIsUnitOutlineLesson = {
@@ -2169,6 +2337,10 @@ export type ArtifactData = {
   lastEditedBy: string;
   type?: string;
   revision: number;
+  /** TRA-519: this app is the one open in the builder for this turn — set
+   *  only when the session holds more than one app and the builder named
+   *  it, so the AI edits the app on screen rather than the newest. */
+  openInBuilder?: true;
 };
 
 export type SeedData = {
@@ -2280,6 +2452,18 @@ export type LessonContext = {
   processEmoji: string | null;
 };
 
+/**
+ * The app facts the tutor prompt needs (TRA-519), derived from
+ * shared/appSurface.ts SessionAppContext by the stream (buildTutorSystemPromptParts).
+ */
+export type TutorAppSurface = {
+  builderFeatures: boolean;
+  builderPrimary: boolean;
+  /** Role "side" with an app: the activity's deliverable kind, null for a
+   *  discussion (advanceRubric). Null otherwise. */
+  sideAppWork: { deliverableKind: string | null } | null;
+};
+
 export type LessonActivityContext = {
   title: string;
   description: string | null;
@@ -2298,10 +2482,12 @@ export type LessonActivityContext = {
   // hand-off. NEVER scholar-facing — buildActivitySection never emits it; it is
   // read only for the teacher build-partner prompt on a teacher test-drive.
   appRequest?: string | null;
-  // vibecode-only: the activity's MODEL CONTRACT (activities.buildContract)
-  // and whether the designer may answer a non-answer with silence. Read by
-  // buildVibecodeSection and the stream's designer-tool gate (park_idea,
-  // stay_silent). Absent → today's designer behaviour verbatim.
+  // vibecode-only: the activity's authored MODEL CONTRACT
+  // (activities.buildContract) and whether the designer may answer a
+  // non-answer with silence. Read by buildVibecodeSection (the teacher build,
+  // and the scholar builder verbatim when the mission is authored) and the
+  // stream's stay_silent gate. The session's MISSION (getSessionContext →
+  // `mission`, TRA-519 B1) is what decides park_idea and the steering itself.
   buildContract?: NonNullable<Doc<"activities">["buildContract"]> | null;
   allowSilence?: boolean;
   problemSet?: {
@@ -2538,6 +2724,14 @@ function buildOwnIsUnitCoDesignSection(
   builtInChat: boolean,
   nextActivityTitle: string | null,
   youngReader = false,
+  // The Quest already has its mission line (units.mission, TRA-519 B5).
+  hasMission = false,
+  // B6: the planning chat of a Quest whose build step (this title) is still
+  // locked. No app-creating tool is offered here until it unlocks.
+  lockedBuild: string | null = null,
+  // The activity-less planning chat: the only place the Quest's mission is
+  // written with them (step 5b).
+  planningChat = false,
 ): string {
   // A listener or beginner (TRA-504 playtest): the planning vocabulary is
   // adult jargon to them, and a 6-year-old who said no to planning was asked
@@ -2561,7 +2755,23 @@ unit while you talk:
   - create_lesson(title, strand?)
   - create_activity(lessonId, title, kind, systemPrompt, processId?)
   - update_unit_metadata(bigIdea?, essentialQuestions?, description?)
-  - set_badge(title, icon?, description?)`;
+  - set_badge(title, icon?, description?)
+  - set_quest_mission(text, gate, scholarWords?)
+
+Learn before you build: an app or game step always comes after at least
+one step where they learn something and make something to show it (a
+piece of writing, slides, a map). Never make an app step the first
+activity.${
+    lockedBuild
+      ? `
+
+Their build step "${lockedBuild}" is still locked: it opens when they
+finish the learning step before it. An app or game they ask for here
+is not built in this chat. Say in one sentence that it gets built in
+"${lockedBuild}", which opens once they finish that learning step, then
+carry on with what is next. Never refuse the idea itself.`
+      : ""
+  }`;
 
   const activities = outline.flatMap((l) => l.activities);
   const outlineText = outline.length
@@ -2602,7 +2812,13 @@ scholar's to use however they like:
      going — don't steer them back to the activities or repeat the
      offer unless they ask what to do next.
   3. Don't re-plan the unit as if nothing exists. To change or add to
-     it, propose it out loud, wait for a yes, then use the tools above.${youngReaderNote}`;
+     it, propose it out loud, wait for a yes, then use the tools above.${
+       hasMission
+         ? ""
+         : `
+  4. Once, offer to write their Quest's mission line together (their
+     words, read back, a yes, then set_quest_mission).`
+     }${youngReaderNote}`;
   }
 
   return `${header}${outlineText}
@@ -2626,7 +2842,22 @@ How co-design should go:
      a future you (a different tutor session) actually do good
      teaching on that activity. Be specific about the learning goal,
      what to ask, what scaffolds to use. 2-4 sentences.
-  6. When the structure is in place, offer a badge: "Want a 🏆 badge
+  ${
+    hasMission
+      ? `5b. Their Quest already has its MISSION (above). Never change it
+     unless they ask to change their mission; then quote what they said
+     in scholarWords when you call set_quest_mission.
+  `
+      : planningChat
+        ? `5b. Before the hand-off, write the Quest's MISSION with them, in
+     their words: ONE line saying what they are making or finding out,
+     and the GATE, the first thing that has to exist. Read it back and
+     wait for a yes, then call set_quest_mission. It shows on their
+     Quest page. Never change it unless they ask to change their
+     mission; then quote what they said in scholarWords.
+  `
+        : ""
+  }6. When the structure is in place, offer a badge: "Want a 🏆 badge
      for when you finish this whole unit? What should we call it?"
      Use set_badge.
   7. Hand off: when they're ready to start, they
@@ -2646,6 +2877,11 @@ function buildUnitSection(
 ): string | null {
   if (!unitContext) return null;
   const lines: string[] = [`\n\nUNIT: "${unitContext.title}"`];
+  if (unitContext.isOwnIsUnit && unitContext.questMission) {
+    lines.push(
+      `Mission (the scholar wrote this with you): ${unitContext.questMission}`,
+    );
+  }
   if (unitContext.bigIdea) lines.push(`Big Idea: ${unitContext.bigIdea}`);
   if (unitContext.essentialQuestions?.length) {
     lines.push(`Essential Questions:\n${unitContext.essentialQuestions.map((q) => `  - ${q.text}`).join("\n")}`);
@@ -2670,6 +2906,11 @@ ${unitContext.videoTranscript}`);
         !!unitContext.ownIsUnitBuiltInChat,
         unitContext.ownIsUnitNextActivityTitle ?? null,
         youngReader,
+        !!unitContext.questMission,
+        unitContext.isPlanningChat
+          ? (unitContext.questBuildLocked ?? null)
+          : null,
+        !!unitContext.isPlanningChat,
       ),
     );
   }
@@ -3013,7 +3254,10 @@ function buildArtifactSection(
   artifactData: ArtifactData[] | null,
   hasUnit: boolean,
   playMode: boolean = false,
-  isVibecode: boolean = false,
+  // TRA-519: where the session's app lives. "builder": the builder is the
+  // primary view and the app fills the screen. "card": a chat session, where
+  // the app shows as a card and Open takes it full screen.
+  appSurface: "builder" | "card" = "card",
 ): string {
   const lines: string[] = [];
   // Maps are not documents — they get their own MAP section (buildMapSection).
@@ -3026,17 +3270,29 @@ function buildArtifactSection(
       // Name the surface: a writing box and a live app look and behave
       // differently on the scholar's screen, and the guidance below differs.
       const surface =
-        doc.type === "code" ? "LIVE APP — HTML code" : "WRITING BOX — plain text";
-      lines.push(`\n[Document ID: ${doc.id}] "${doc.title}" — ${surface} (revision ${doc.revision}, last edited by ${doc.lastEditedBy})
+        doc.type === "code"
+          ? doc.openInBuilder
+            ? "LIVE APP — HTML code — OPEN ON THE SCHOLAR'S SCREEN NOW"
+            : "LIVE APP — HTML code"
+          : "WRITING BOX — plain text";
+      // An app is also a file for the app editor, at a path derived from its id.
+      const path = doc.type === "code" ? `path ${codeArtifactPath(doc.id)}, ` : "";
+      lines.push(`\n[Document ID: ${doc.id}] "${doc.title}" — ${surface} (${path}revision ${doc.revision}, last edited by ${doc.lastEditedBy})
 Content:
 ${numberedContent}`);
     }
+    // TRA-519: with more than one app, the builder shows ONE of them. Any
+    // talk of "the app" means that one, and so does every edit.
+    const openApp = docs.find((doc) => doc.openInBuilder);
+    if (openApp) {
+      lines.push(`\nThis session has more than one app. The one OPEN ON THE SCHOLAR'S SCREEN is [Document ID: ${openApp.id}] "${openApp.title}". When the scholar talks about "the app", they mean that one: read, discuss and change that app (${CODE_EDITOR_TOOL_NAME} on its path), never another app in this list, unless they explicitly ask for a different one or a brand-new app.`);
+    }
     // Play (App designer §4): the app's code artifact is read-only, so the
     // scholar cannot type into it and the runtime withholds `edit_document`
-    // (convex/sessionStreamHelpers.ts). LIST the documents above so the tutor
-    // can talk about the app, but never instruct an editing tool it wasn't
-    // given (G5). The Edit-oriented "box on the screen"/edit_document
-    // guidance is emitted only outside Play.
+    // and the app editor (convex/sessionStreamHelpers.ts). LIST the documents
+    // above so the tutor can talk about the app, but never instruct an
+    // editing tool it wasn't given (G5). The Edit-oriented "box on the
+    // screen"/editing-tool guidance is emitted only outside Play.
     if (!playMode) {
       lines.push(`\nThe DOCUMENTS section above is regenerated FRESH on every turn from the live database. It reflects the scholar's latest edits, including changes they made seconds ago. **Treat this section as the absolute source of truth for what the document currently says.** If a prior message of yours claimed the document said one thing and this section now shows something different, the scholar edited it since that message — accept the new content and move on. NEVER say "your edit didn't save," "I see the same version," "the edit may not have gone through," or any variant. If they typed it and the DOCUMENTS section shows it, it saved.
 
@@ -3050,14 +3306,14 @@ The same trust holds when the box is NOT empty but you cannot find the thing you
 
 The writing box is the scholar's. You cannot write in it, and you must never offer to. When a real piece of their thinking is sitting here in the chat, tell them once that it belongs in their box — if their box has a mic, saying it there is the quickest way in, and typing works too — then move on with the conversation. Don't repeat the same request a second and third time unchanged. And don't hand them a finished sentence to copy down: proposing the exact wording for their deliverable, even in chat, is the same offloading coming through another door. If they ask you to write it for them, tell them plainly that the words have to be theirs.
 
-You have a tool called "edit_document". For a text document you may only view it, rename it, or create a new EMPTY titled document for the scholar to write in — pass its document_id and the revision shown above as base_revision, and if a rename reports a conflict, re-view the document and retry only from its returned revision. It cannot put words into a text document: str_replace and insert are for code artifacts only. The scholar writes and renames their own documents directly.
+You have a tool called "edit_document". For a text document you may only view it, rename it, or create a new EMPTY titled document for the scholar to write in — pass its document_id and the revision shown above as base_revision, and if a rename reports a conflict, re-view the document and retry only from its returned revision. It cannot put words into a text document, and no other tool can either. The scholar writes and renames their own documents directly.
 
 WHAT A WRITING BOX IS, on the web and the iPad alike: a plain-text box, usually with a mic. It has no formatting toolbar, no fonts or font sizes, no bold, no headings, and it does not run code. Anything typed in it stays literal text: an HTML tag or a markdown symbol shows on the page exactly as typed and does nothing. So never give styling, HTML, or markdown tips for a writing box — they cannot work there. If a scholar calls their writing box a code or HTML editor, asks where their code is, or wants to make something they can play or click, the writing box is not that place: code lives only in a LIVE APP (see CODE ARTIFACTS).
 
-A LIVE APP above is different: it runs as an interactive app the scholar can use, and you change it with edit_document str_replace or insert.${
-        isVibecode
+A LIVE APP above is different: it runs as an interactive app the scholar can use, and you change it with ${CODE_EDITOR_TOOL_NAME}. Each app is one file at the path shown above (/apps/<Document ID>.html; view /apps to list them): view it, or a view_range of it, then str_replace or insert. The code above is the revision you have seen. If an edit reports that the file changed (the scholar can edit the code too), view it again before retrying.${
+        appSurface === "builder"
           ? " Here it fills the screen. While editing, the scholar can switch it between Preview and a Code view of its HTML, on the web and the iPad alike."
-          : " It sits in its own tab beside their writing, and on the web and the iPad alike the scholar can switch that tab between Preview (the running app) and Code (the HTML source, which they can read and edit themselves)."
+          : " It shows as a card beside the chat, on the web and the iPad alike. The scholar taps Open on the card to take it full screen, where they can switch between Preview (the running app) and Code (the HTML source, which they can read and edit themselves)."
       }`);
     }
   } else if (hasUnit && !playMode) {
@@ -4031,27 +4287,35 @@ export function buildWebPracticeSection(
 }
 
 /**
- * Index of the prompt-cache breakpoint in {@link TUTOR_PROMPT_SECTION_ORDER}:
- * sections before it are byte-stable across a session's turns and form the
- * cached `stable` prefix; sections from it on are the per-turn `dynamic` tail.
- * Minute-varying clock and timing sections are not in the system prompt at all;
- * they render as turn context after the rolling conversation breakpoint. The
- * order — and what qualifies as stable — is documented on the constants in
- * prompts.ts (the single source of truth, also fed to the `promptVersion` hash).
- * NOTHING in the stable run may depend on `isFirstTurn` (TRA-234), the wall
- * clock, or observer output. The tools array precedes `system` in the cache
- * prefix, so it is cached along with the stable run.
+ * Indices of the two system prompt-cache boundaries in
+ * {@link TUTOR_PROMPT_SECTION_ORDER}: sections before STABLE_LEADING_SECTIONS
+ * are byte-stable across a session's turns and form the cached `stable` prefix;
+ * sections from it up to DOCUMENT_SECTIONS are the small uncached `dynamic`
+ * system remainder (turn-1-only directives); sections from DOCUMENT_SECTIONS on
+ * are the `documents` block, cached on its own. Everything that can change turn
+ * to turn renders as `turnContext`, after the rolling conversation breakpoint.
+ * The order — and what qualifies for each part — is documented on the constants
+ * in prompts.ts (the single source of truth, also fed to the `promptVersion`
+ * hash). NOTHING in the stable run may depend on `isFirstTurn` (TRA-234), the
+ * wall clock, or observer output. The tools array precedes `system` in the
+ * cache prefix, so it is cached along with the stable run.
  */
 const STABLE_LEADING_SECTIONS = TUTOR_PROMPT_SECTION_ORDER.indexOf(
   FIRST_DYNAMIC_TUTOR_SECTION,
 );
+const DOCUMENT_SECTIONS = TUTOR_PROMPT_SECTION_ORDER.indexOf(
+  FIRST_DOCUMENT_TUTOR_SECTION,
+);
 
 /**
- * Cache-split form of {@link buildSystemPrompt}: returns the byte-stable leading
- * run (`stable`), per-turn-varying system remainder (`dynamic`), and
- * minute-varying message suffix (`turnContext`). The tutor uses this to place a
- * system prompt-cache breakpoint after the large, session-stable prefix and the
- * turn context after the rolling conversation breakpoint.
+ * Cache-split form of {@link buildSystemPrompt}, ordered by volatility: the
+ * byte-stable leading run (`stable`), the turn-1-only system remainder
+ * (`dynamic`), the session's documents (`documents`, cached in their own block
+ * because they change only on an edit), the per-turn session state
+ * (`turnSystem`: the learning record, teacher guidance, live app state, …) and
+ * the minute-varying clock and pacing (`turnContext`). The tutor sends the
+ * first three as system blocks, then the history, then the last two after the
+ * rolling conversation breakpoint (sessionStreamHelpers.layoutTutorRequest).
  */
 export function buildSystemPromptParts(
   teacherWhisper: string | null,
@@ -4093,7 +4357,11 @@ export function buildSystemPromptParts(
   weeklyGoalsContext: WeeklyGoalContext[] | null = null,
   activityResourceContext: ActivityResourceContext[] | null = null,
   gameRoundContexts: GameRoundContext[] | null = null,
-  isVibecode: boolean = false,
+  // TRA-519: the session takes the builder stance (its app is the work): the
+  // APP BUILDER MODE lead-in, contract steering, the parking lot, free play.
+  // Positional and named for what it was (sessionMode "vibecode") so evals and
+  // tests stay source-compatible; builder FEATURES ride on `appSurface` below.
+  builderStance: boolean = false,
   isWorkbench: boolean = false,
   appStateContext: AppStateContext | null = null,
   institutionProfile: InstitutionPromptProfile = DEFAULT_INSTITUTION_PROMPT_PROFILE,
@@ -4127,9 +4395,9 @@ export function buildSystemPromptParts(
   // Vibecode only: the rendered SCHOLAR'S PRIOR WORK IN THIS UNIT section
   // (getSessionContext → convex/lib/priorUnitWork.ts); null omits it.
   priorUnitWork: string | null = null,
-  // Vibecode only: the session's parking lot (sessions.parkingLot). Rendered
-  // only on a scholar-stance Edit turn under a MODEL CONTRACT — the turns
-  // that are offered park_idea / unpark_idea (lib/designerTools.ts).
+  // The session's parking lot (sessions.parkingLot). Rendered only on the
+  // turns offered park_idea / unpark_idea (a session with a MISSION, not a
+  // teacher build or Play — lib/designerTools.ts missionToolOffer).
   parkingLot: ReadonlyArray<{ text: string; reason?: string }> | null = null,
   // Whether the streaming caller owns the session. stay_silent is offered only
   // to the owner (designerToolOffer), so the contract steering's silence
@@ -4152,10 +4420,43 @@ export function buildSystemPromptParts(
     beginnerTeams?: readonly string[];
     beginnerExtra?: { letters?: string; teams?: readonly string[] } | null;
   } | null = null,
-): { stable: string; dynamic: string; turnContext: string } {
+  // TRA-519: how the session relates to its app, in the form the prompt needs
+  // (getSessionContext → appContext). Null for positional/offline callers,
+  // which get the pre-fold behavior: features and the builder surface exactly
+  // where the builder stance is.
+  appSurface: TutorAppSurface | null = null,
+  // TRA-519 B1: the session's MISSION (getSessionContext → lib/mission.ts).
+  // The tutor stance renders the MISSION section; the builder stance steers by
+  // it through its contract. Null (offline callers, exploration) → neither;
+  // the builder then steers by the authored contract alone, as before.
+  mission: SessionMission | null = null,
+): {
+  stable: string;
+  dynamic: string;
+  documents: string;
+  turnSystem: string;
+  turnContext: string;
+} {
+  const builderFeatures = appSurface?.builderFeatures ?? builderStance;
+  const builderPrimary = appSurface?.builderPrimary ?? builderStance;
   const readLevel = readWrite?.read ?? readLevelOf({ readingLevel });
   const writeMode = readWrite?.write ?? "own";
   const talkLevel = talkLevelOf(readingLevel);
+  // The turns offered park_idea / unpark_idea (missionToolOffer): a mission,
+  // not a teacher build or Play. Offline callers with no mission keep the old
+  // rule (a builder-stance turn under an authored contract).
+  const missionTurn =
+    !teacherBuild &&
+    !playMode &&
+    (mission != null || (builderStance && !!lessonActivityContext?.buildContract));
+  const tutorMissionSection =
+    mission &&
+    mission.source !== "quest" &&
+    missionTurn &&
+    !builderStance &&
+    !isWorkbench
+      ? buildTutorMissionSteering(mission)
+      : null;
   // One entry per key in the system and turn-context order constants (the
   // Record type enforces exhaustiveness); the ordering lives in prompts.ts.
   const sections: Record<TutorPromptSectionKey, string | null> = {
@@ -4216,6 +4517,10 @@ export function buildSystemPromptParts(
       conversationCompletionContext,
       runtimeCapabilities.canMarkActivityComplete,
     ),
+    // The builder stance steers by the same mission in its lead-in. A Quest's
+    // planning chat (source "quest") gets no MISSION section: that chat is the
+    // scholar's to use, and the Quest's mission line rides in the UNIT section.
+    mission: tutorMissionSection,
     openExplorationWrapUp: offersWrapUp
       ? buildOpenExplorationWrapUpSection()
       : null,
@@ -4223,16 +4528,26 @@ export function buildSystemPromptParts(
     tools: playMode
       ? null
       : buildToolsSection({
-          appBuilder: isVibecode,
-          appActions: isVibecode || isWorkbench,
+          builderFeatures,
+          appActions: builderFeatures || isWorkbench,
         }),
+    sideApp:
+      !builderStance && appSurface?.sideAppWork
+        ? buildSideAppSection(appSurface.sideAppWork.deliverableKind, {
+            hasMission: tutorMissionSection != null,
+            lockedBuild: unitContext?.questBuildLocked ?? null,
+            openBuild: unitContext?.questBuildOpen ?? null,
+          })
+        : null,
     seedOrigin: buildSeedOriginSection(seedOriginContext),
     storyThread: buildStoryThreadSection(
       seedOriginContext?.storyThreadContext ?? null,
     ),
-    // ── DYNAMIC tail (from FIRST_DYNAMIC_TUTOR_SECTION on) ──
-    // Opening-turn directives (turn 1 only; null afterwards). Leads the dynamic
-    // tail so the first-ever-session FIRST MESSAGE directive keeps as much
+    // ── After the stable prefix: the turn-1-only system text, the DOCUMENTS
+    // block, and the per-turn context (see TUTOR_PROMPT_SECTION_ORDER and
+    // TUTOR_TURN_CONTEXT_SECTIONS for which key goes where) ──
+    // Opening-turn directives (turn 1 only; null afterwards). Leads what follows
+    // the stable breakpoint so the first-ever-session FIRST MESSAGE directive keeps as much
     // primacy as the cache split allows — it used to be the very first line of
     // the prompt, but anything ahead of the breakpoint must be turn-stable
     // (TRA-234).
@@ -4244,16 +4559,12 @@ export function buildSystemPromptParts(
     ),
     priorUnitWork,
     parkingLot:
-      isVibecode && freePlay && !playMode
+      builderStance && freePlay && !playMode
         ? buildFreePlayOpenerSection(parkingLot)
-        : isVibecode &&
-            !teacherBuild &&
-            !playMode &&
-            lessonActivityContext?.buildContract
+        : missionTurn
           ? buildParkingLotSection(parkingLot)
           : null,
-    // Minute-varying turn context. These render outside `system`, after the
-    // rolling conversation cache breakpoint.
+    // Minute-varying; renders in the per-turn context.
     clock: `\n\n${buildClockLine(institutionProfile)}`,
     dossier: buildDossierSection({
       content: dossierContent,
@@ -4283,11 +4594,14 @@ export function buildSystemPromptParts(
       artifactData,
       !!unitContext,
       playMode,
-      isVibecode,
+      builderPrimary ? "builder" : "card",
     ),
     map: buildMapSection(artifactData),
     slides: buildSlidesSection(artifactData),
-    appState: buildAppStateSection(appStateContext, isVibecode || isWorkbench),
+    appState: buildAppStateSection(
+      appStateContext,
+      builderFeatures || isWorkbench,
+    ),
     seeds: buildSeedsSection(seedsData),
     whisper: buildWhisperSection(teacherWhisper),
     // One-time non-human introduction, only on the opening message of the
@@ -4309,7 +4623,7 @@ export function buildSystemPromptParts(
     stable:
       (isWorkbench
         ? buildWorkbenchSection()
-        : isVibecode
+        : builderStance
           ? buildVibecodeSection({
               vibecodeStarterUsedAt,
               teacherBuild,
@@ -4317,13 +4631,18 @@ export function buildSystemPromptParts(
               playMode,
               freePlay,
               buildContract: lessonActivityContext?.buildContract ?? null,
+              mission,
               allowSilence:
                 lessonActivityContext?.allowSilence === true &&
                 callerIsSessionOwner,
             })
           : "") +
       render(TUTOR_PROMPT_SECTION_ORDER.slice(0, STABLE_LEADING_SECTIONS)),
-    dynamic: render(TUTOR_PROMPT_SECTION_ORDER.slice(STABLE_LEADING_SECTIONS)),
+    dynamic: render(
+      TUTOR_PROMPT_SECTION_ORDER.slice(STABLE_LEADING_SECTIONS, DOCUMENT_SECTIONS),
+    ),
+    documents: render(TUTOR_PROMPT_SECTION_ORDER.slice(DOCUMENT_SECTIONS)),
+    turnSystem: render(TUTOR_TURN_SYSTEM_SECTIONS).trimStart(),
     turnContext: render(TUTOR_TURN_CONTEXT_SECTIONS).trimStart(),
   };
 }
@@ -4386,7 +4705,8 @@ export function buildSystemPrompt(
   dossierInterests: Interest[] | null = null,
   offersWrapUp: boolean = false,
 ): string {
-  const { stable, dynamic, turnContext } = buildSystemPromptParts(
+  const { stable, dynamic, documents, turnSystem, turnContext } =
+    buildSystemPromptParts(
     teacherWhisper,
     readingLevel,
     scholarName,
@@ -4438,7 +4758,29 @@ export function buildSystemPrompt(
     dossierInterests,
     offersWrapUp,
   );
-  return stable + dynamic + "\n\n" + turnContext;
+  return joinTutorPromptParts({ stable, dynamic, documents, turnSystem, turnContext });
+}
+
+/**
+ * The single-string form of the cache-split parts, for offline callers and
+ * evals that send one system prompt: system parts, then the per-turn session
+ * state, then the clock and pacing.
+ */
+export function joinTutorPromptParts(parts: {
+  stable: string;
+  dynamic: string;
+  documents: string;
+  turnSystem: string;
+  turnContext: string;
+}): string {
+  return (
+    parts.stable +
+    parts.dynamic +
+    parts.documents +
+    (parts.turnSystem ? "\n\n" + parts.turnSystem : "") +
+    "\n\n" +
+    parts.turnContext
+  );
 }
 
 /**

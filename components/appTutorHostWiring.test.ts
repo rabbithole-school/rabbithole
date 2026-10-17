@@ -49,14 +49,21 @@ describe("app tutor host wiring", () => {
     expect(read("native/src/components/DeliverableCard.tsx")).toContain(
       "onAppAiTurn={onAppAiTurn}",
     );
-    // The workshops report character turns from Play only, not Edit previews,
-    // and a character turn retires the tutor's strip line (it must not come
-    // back after the update turn ends in silence).
+    // The workshops report character turns from Play only, not Edit previews
+    // (and from any side app too: it has no designer, TRA-519), and a
+    // character turn retires the tutor's strip line (it must not come back
+    // after the update turn ends in silence).
     for (const path of [HOSTS.webWorkshop, HOSTS.nativeWorkshop]) {
       const source = read(path);
       expect(source, path).toMatch(
-        /onAppAiTurn=\{\s*mode === "play" \? handleAppAiTurn : undefined\s*\}/,
+        /onAppAiTurn=\{\s*tutorVoice \? handleAppAiTurn : undefined\s*\}/,
       );
+      expect(source, path).toContain(
+        'const tutorVoice = !builderStance || mode === "play";',
+      );
+    }
+    for (const path of [HOSTS.webWorkshop, HOSTS.nativeWorkshop]) {
+      const source = read(path);
       const handler = source.slice(
         source.indexOf("const handleAppAiTurn = "),
         source.indexOf("};", source.indexOf("const handleAppAiTurn = ")),
@@ -74,7 +81,9 @@ describe("app tutor host wiring", () => {
       "appAiEnabled={!mapReadOnly}",
     );
     expect(read(HOSTS.nativeSession).split("appAiEnabled={isSessionOwner}").length - 1).toBe(2);
-    expect(read("native/src/components/DeliverablePanel.tsx").split("appAiEnabled={appAiEnabled}").length - 1).toBe(2);
+    expect(read("native/src/components/DeliverablePanel.tsx").split("appAiEnabled={appAiEnabled}").length - 1).toBe(1);
+    // The panel hands the flag to the app card, which hands it to the host.
+    expect(read("native/src/components/AppCard.tsx")).toContain("appAiEnabled={appAiEnabled}");
     expect(read("native/src/components/DeliverableCard.tsx")).toContain(
       "appAiEnabled={appAiEnabled}",
     );
@@ -84,9 +93,13 @@ describe("app tutor host wiring", () => {
     const session = read(HOSTS.webSession);
     const start = session.indexOf("const handleSend = async (");
     const appBranch = session.indexOf("if (appUpdate) {", start);
-    const clear = session.indexOf('setInput("");', start);
+    const clear = session.indexOf(
+      "composerAfterPersistedSend(composer, { directText, isAppRequest })",
+      start,
+    );
     expect(start).toBeGreaterThan(-1);
-    // The app-update branch returns before the typed path clears the composer.
+    // The composer is cleared only by a send that read it; an app update
+    // (isAppRequest) never does (TRA-527 made this explicit).
     expect(appBranch).toBeGreaterThan(start);
     expect(clear).toBeGreaterThan(appBranch);
     expect(session).toContain("if (!isAppRequest && pendingImage)");
@@ -131,9 +144,10 @@ describe("app tutor host wiring", () => {
         source.indexOf("const handleAppTutorAsk = "),
         source.indexOf("};", source.indexOf("const handleAppTutorAsk = ")),
       );
-      // The ask is still delivered, and the notice is shown in Edit only.
+      // The ask is still delivered, and the notice is shown in the builder
+      // stance's Edit only — never for a side app, whose chat is the tutor's.
       expect(handler, path).toContain("appTutorUpdates.onAskTutor(request);");
-      expect(handler, path).toContain('mode === "edit"');
+      expect(handler, path).toMatch(/builderStance &&\s+mode === "edit"/);
       expect(handler, path).toContain("EDIT_MODE_ASK_NOTICE");
     }
   });

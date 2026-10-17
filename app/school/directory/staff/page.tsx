@@ -69,6 +69,8 @@ const ADMISSIONS_TIER_HINT: Record<AdmissionsTier, string> = {
 
 type StaffCapabilityEditor = {
   canEditCurriculum: boolean;
+  /** An active `curriculum:run` grant (run the units they can edit). */
+  canRunCurriculum?: boolean;
   curriculumAccessIncludedInRole: boolean;
   canManageSchoolOperations: boolean;
   schoolOperationsIncludedInRole: boolean;
@@ -527,6 +529,13 @@ function StaffAccessEditor({
   const [canEditCurriculum, setCanEditCurriculum] = useState(
     editor.canEditCurriculum,
   );
+  // `curriculum:run` — base staff only (teachers run curriculum by role), and
+  // only alongside an explicit curriculum:edit grant.
+  const offersCurriculumRun =
+    staffer.role === "staff" && !editor.curriculumAccessIncludedInRole;
+  const [canRunCurriculum, setCanRunCurriculum] = useState(
+    editor.canRunCurriculum ?? false,
+  );
   const [canManageSchoolOperations, setCanManageSchoolOperations] = useState(
     editor.canManageSchoolOperations,
   );
@@ -586,6 +595,7 @@ function StaffAccessEditor({
     if (editor.curriculumAccessIncludedInRole) return;
     setCanEditCurriculum(value);
     if (value) return;
+    setCanRunCurriculum(false);
     setProgramGroupAccess((current) =>
       Object.fromEntries(
         Object.entries(current).map(([groupId, access]) => [
@@ -615,6 +625,9 @@ function StaffAccessEditor({
         userId: staffer.id,
         institutionId,
         canEditCurriculum,
+        ...(offersCurriculumRun
+          ? { canRunCurriculum: canEditCurriculum && canRunCurriculum }
+          : {}),
         canManageSchoolOperations,
         canManageHealthRecords,
         ...(offersMentorGrant ? { canMentorScholars } : {}),
@@ -685,6 +698,29 @@ function StaffAccessEditor({
                     : "Create and edit the activities that can be assigned to programs."}
                 </Text>
               </Box>
+              {offersCurriculumRun && (
+                <Box ml={6}>
+                  <Checkbox.Root
+                    checked={canEditCurriculum && canRunCurriculum}
+                    disabled={!canEditCurriculum}
+                    onCheckedChange={(details) =>
+                      setCanRunCurriculum(details.checked === true)
+                    }
+                  >
+                    <Checkbox.HiddenInput />
+                    <Checkbox.Control />
+                    <Checkbox.Label fontFamily="heading" fontWeight="600">
+                      Run the units they build
+                    </Checkbox.Label>
+                  </Checkbox.Root>
+                  <Text mt={1} ml={6} fontSize="sm" color="charcoal.400">
+                    Assign their units to scholars here, push and schedule
+                    them, see who finished and what they handed in, and
+                    rehearse with a practice scholar. No access to learning
+                    records or transcripts.
+                  </Text>
+                </Box>
+              )}
               <Box>
                 <Checkbox.Root
                   checked={

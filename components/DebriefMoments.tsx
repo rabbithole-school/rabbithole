@@ -47,10 +47,19 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { toaster } from "@/lib/toaster";
 import { formatRelative } from "@/lib/relativeTime";
 import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { isTeacherRole } from "@/convex/lib/roles";
 import {
   designFixPrompt,
   reviseActivityPrompt,
 } from "@/lib/curriculumBotPrompts";
+
+/** Teachers read every cohort's moments and may steer the tutor. A
+ *  curriculum:run holder reads only her own runs and may not. */
+function useReadsEveryCohort(): boolean {
+  const { user } = useCurrentUser();
+  return !!user && isTeacherRole(user.role);
+}
 
 type Source = "mastery" | "signal" | "connection";
 type Kind = "misconception" | "breakthrough" | "mastery" | "signal" | "insight";
@@ -79,7 +88,9 @@ type Moment = {
   score: number;
   scholarId: Id<"users">;
   scholarName: string;
-  sessionId: Id<"sessions">;
+  // Null for a curriculum:run holder (no transcript link).
+  sessionId: Id<"sessions"> | null;
+  assignmentId: Id<"assignments"> | null;
   label: string;
   excerpt: string;
   domain: string | null;
@@ -94,10 +105,16 @@ export function DebriefMoments({
   askAi?: (prompt: string) => void;
 }) {
   const deck = useQuery(api.keyMoments.forActivity, { activityId });
+  // A curriculum:run holder's deck is only HER runs of this activity (the
+  // server scopes it); the copy says so instead of "every cohort".
+  const readsEveryCohort = useReadsEveryCohort();
   const activity = useQuery(api.activities.get, { id: activityId });
   const runs = useQuery(api.keyMoments.runsForActivity, { activityId });
   const triage = useMutation(api.keyMoments.triage);
 
+  // null = no Debrief access (e.g. a curriculum:run holder whose grant was
+  // revoked): render nothing rather than an error.
+  if (deck === null) return null;
   if (deck === undefined) {
     return (
       <Flex justify="center" py={6}>
@@ -126,9 +143,9 @@ export function DebriefMoments({
           </Text>
         </Flex>
         <Text fontSize="xs" color="charcoal.400" mb={3} lineHeight="1.5">
-          Pulled from every cohort that&apos;s run this activity — patterns here
-          are design signals for next time. To act on one run with named
-          scholars, open it in Assignments.
+          {readsEveryCohort
+            ? "Pulled from every cohort that’s run this activity — patterns here are design signals for next time. To act on one run with named scholars, open it in Assignments."
+            : "Pulled from the runs of this activity you assigned — patterns here are design signals for next time. Open a run in Assignments to see who has finished."}
         </Text>
 
         {deck.pending.length === 0 && deck.kept.length === 0 ? (
@@ -230,6 +247,9 @@ function SavedMoment({
 }) {
   const addObservation = useMutation(api.observations.add);
   const upsertDirective = useMutation(api.teacherDirectives.upsertByTeacher);
+  // Tutor directives are teacher-only; a curriculum:run holder logs
+  // observations (against her own run) but never steers the tutor.
+  const canSteerTutor = useReadsEveryCohort();
   const [logged, setLogged] = useState(false);
   const [directiveOpen, setDirectiveOpen] = useState(false);
   const [directive, setDirective] = useState("");
@@ -241,7 +261,12 @@ function SavedMoment({
     try {
       await addObservation({
         scholarId: m.scholarId,
-        sessionId: m.sessionId,
+        sessionId: m.sessionId ?? undefined,
+        // A teacher's authority is the role; a curriculum:run holder's is
+        // the run she owns that this moment came from.
+        ...(!canSteerTutor && m.assignmentId
+          ? { assignmentId: m.assignmentId }
+          : {}),
         note: `${m.label} — ${m.excerpt}`,
         type: OBS_TYPE[m.kind] ?? "suggestion",
       });
@@ -285,14 +310,16 @@ function SavedMoment({
       >
         {logged ? <><Check /> Logged</> : "Log observation"}
       </Button>
-      <Button
-        size="2xs"
-        variant="ghost"
-        color="charcoal.500"
-        onClick={() => setDirectiveOpen((v) => !v)}
-      >
-        Steer tutor
-      </Button>
+      {canSteerTutor && (
+        <Button
+          size="2xs"
+          variant="ghost"
+          color="charcoal.500"
+          onClick={() => setDirectiveOpen((v) => !v)}
+        >
+          Steer tutor
+        </Button>
+      )}
       {askAi && (
         <Button
           size="2xs"
@@ -308,7 +335,7 @@ function SavedMoment({
       <Button size="2xs" variant="ghost" color="charcoal.300" onClick={onUnsave}>
         Remove
       </Button>
-      {directiveOpen && (
+      {canSteerTutor && directiveOpen && (
         <Box w="full" pt={1}>
           <Textarea
             size="sm"

@@ -821,7 +821,10 @@ async function synthesizePreflightResult(
  * the experiment (or a "no real data" marker). Read-only w.r.t. the transcripts.
  */
 export const runGrounding = internalAction({
-  args: { experimentId: v.id("curriculumExperiments") },
+  args: {
+    experimentId: v.id("curriculumExperiments"),
+    groundedBy: v.optional(v.id("users")),
+  },
   handler: async (ctx, args) => {
     // Whole body is guarded: groundExperiment marks `grounding.status =
     // "running"` before scheduling us, so ANY unhandled throw (incl. from
@@ -830,7 +833,7 @@ export const runGrounding = internalAction({
     try {
       const input = await ctx.runQuery(
         internal.curriculumExperiments.getGroundInput,
-        { experimentId: args.experimentId },
+        { experimentId: args.experimentId, groundedBy: args.groundedBy },
       );
       const { activityId, activity, baselineAggregate, realSessions, scholarFeedback } =
         input;

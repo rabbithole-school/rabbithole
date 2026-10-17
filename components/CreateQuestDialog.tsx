@@ -32,7 +32,7 @@ import {
 import { X } from "@phosphor-icons/react";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { BakePathPicker } from "@/components/BakePathPicker";
-import { ENDLESS_CHAT, type PathChoice } from "@/lib/bakePaths";
+import { bakePathArg, type PathChoice } from "@/lib/bakePaths";
 import { api } from "@/convex/_generated/api";
 import { toaster } from "@/lib/toaster";
 
@@ -111,10 +111,7 @@ export function CreateQuestDialog({
       // never waits for it. "Endless chat" → no chosen angle (a plain bake);
       // any other choice steers the bake. Best-effort; the ad-lib session
       // works regardless.
-      const bakePath =
-        chosen === ENDLESS_CHAT
-          ? undefined
-          : { title: chosen.title, blurb: chosen.blurb };
+      const bakePath = bakePathArg(chosen);
       try {
         await scheduleBake({
           unitId: result.unitId,

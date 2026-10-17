@@ -26,6 +26,9 @@ import {
   initialRosterSelectionState,
   rosterSelectionReducer,
 } from "@/components/startAssignmentRoster";
+import type { RosterScholar } from "@/hooks/useScholarRoster";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { isTeacherRole } from "@/convex/lib/roles";
 import { buildTeacherAssignmentPlan } from "./submitPlans";
 import { DAY, nextNineAm, toLocalInputValue } from "./scheduling";
 import type { StartAssignmentProgramTarget } from "./types";
@@ -134,9 +137,44 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
     setWorldBudget_({ perBlock: 3, perWeek: 12, seasonTicks: null });
   }, [open, initialScholarIds]);
 
-  const scholars = useQuery(
+  // A curriculum:run holder is not a teacher: she has no roster read, only
+  // the assignee picker for the picked unit's school (identity fields only).
+  const { user } = useCurrentUser();
+  const isCurriculumRunner =
+    !!user &&
+    !isTeacherRole(user.role) &&
+    user.hasCurriculumRunAccess === true;
+  const teacherScholars = useQuery(
     api.users.listScholars,
-    open && !programTarget ? {} : "skip",
+    open && !programTarget && !isCurriculumRunner ? {} : "skip",
+  );
+  const runnerScholars = useQuery(
+    api.assignments.assignableScholarsForRunner,
+    open && !programTarget && isCurriculumRunner
+      ? pickedUnitId
+        ? { unitId: pickedUnitId }
+        : {}
+      : "skip",
+  );
+  const scholars = isCurriculumRunner ? runnerScholars : teacherScholars;
+  const runnerRoster = useMemo<RosterScholar[] | undefined>(
+    () =>
+      isCurriculumRunner
+        ? runnerScholars?.map((scholar) => ({
+            id: String(scholar.id),
+            name: scholar.name,
+            username: scholar.username,
+            image: scholar.image,
+            readingLevel: null,
+            gradeLevel: null,
+            dateOfBirth: null,
+            lastMessageAt: null,
+            groupIds: [],
+            isMine: false,
+            enrollmentStanding: scholar.enrollmentStanding,
+          }))
+        : undefined,
+    [isCurriculumRunner, runnerScholars],
   );
   const teacherActivitiesInLesson = useQuery(
     api.activities.listByLesson,
@@ -349,6 +387,8 @@ export function useTeacherAssignmentMode(args: TeacherAssignmentModeArgs) {
 
   return {
     scholarSel,
+    /** Set only for a curriculum:run holder: the assignee picker's roster. */
+    runnerRoster,
     onScholarSelChange: (selection: Set<string>) =>
       dispatchRoster({ type: "selectionChanged", selection }),
     forSel,

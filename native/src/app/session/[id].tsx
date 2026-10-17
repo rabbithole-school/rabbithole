@@ -4,7 +4,6 @@ import { useAuthToken } from "@convex-dev/auth/react";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { fetch as expoFetch } from "expo/fetch";
 import {
-  ActionSheetIOS,
   ActivityIndicator,
   Alert,
   Pressable,
@@ -23,6 +22,7 @@ import * as Haptics from "expo-haptics";
 
 import { ChatSkeleton } from "@/components/ChatSkeleton";
 import { AppSnapshotBubble } from "@/components/AppSnapshotBubble";
+import { ImageBubble, PendingPhotoChip } from "@/components/PhotoAttachment";
 import type { CodeArtifactWebViewHandle } from "@/components/CodeArtifactWebView";
 import { Markdown } from "@/components/Markdown";
 import { StreamingText } from "@/components/StreamingText";
@@ -32,8 +32,20 @@ import { VibecodeScreen } from "@/components/vibecode/VibecodeScreen";
 import { RecordingBar } from "@/components/RecordingBar";
 import { GlassBar } from "@/components/Glass";
 import { WhereAmIPanel } from "@/components/WhereAmIPanel";
+import {
+  QuestBuildUnlockOffer,
+  SavedForLaterBlock,
+} from "@/components/MissionDoneBlocks";
 import { appStatusBus } from "@/lib/appStatusBus";
-import { SessionActivityNav } from "@/components/SessionActivityNav";
+import {
+  compassHeaderRight,
+  setCompassHandler,
+} from "@/components/HeaderCompassButton";
+import {
+  ActivityNavPlaceholder,
+  SessionActivityNav,
+  parseActivityNavPosition,
+} from "@/components/SessionActivityNav";
 import { SpeakableBubble } from "@/components/SpeakableBubble";
 import { DeliverableCard } from "@/components/DeliverableCard";
 import { GeoMapCard, isMapArtifact } from "@/components/GeoMapCard";
@@ -83,6 +95,7 @@ import { getNativeTTS } from "@/lib/nativeTTS";
 import { voiceMark } from "@/lib/voicePerf";
 import { api, convexSiteUrl, type Id } from "@/lib/convex";
 import { isTextArtifact } from "../../../vendor/shared/textArtifacts";
+import { serverRefusal } from "../../../vendor/shared/serverErrorMessage";
 import { uploadChangedAppSnapshot } from "@/lib/appSnapshot";
 import { uploadImageDataUrl } from "@/lib/uploadImage";
 import { shouldSkipLearnerQueries } from "@/lib/sessionLearnerQueries";
@@ -269,12 +282,25 @@ type FlairAward = {
 // exhausted / hard error → the caller shows the inline retry affordance).
 type TutorStreamResult = "completed" | "aborted" | "failed";
 
-export default function SessionScreen() {
+function SessionScreen() {
   // `title` is passed from the home card so the nav bar shows the real title
   // INSTANTLY (no "Session" placeholder) even while messages load.
   const router = useRouter();
-  const { id, title } = useLocalSearchParams<{ id: string; title?: string }>();
+  const { id, title, view, app, navPos, navTotal } = useLocalSearchParams<{
+    id: string;
+    title?: string;
+    view?: string;
+    /** The app the card's Open named (an older app opens itself). */
+    app?: string;
+    /** "Activity N of M" from the ← / → tap that opened this session. */
+    navPos?: string;
+    navTotal?: string;
+  }>();
   const sessionId = id as Id<"sessions">;
+  // `?view=builder` opens the full-screen app builder for THIS session (the
+  // app card's Open, TRA-519). A builder-primary session always shows it.
+  const builderViewRequested = view === "builder";
+  const arrivingNav = parseActivityNavPosition(navPos, navTotal);
   useEffect(() => () => clearPendingArtifactSaves(), [sessionId]);
   const { width, height } = useWindowDimensions();
   const colors = useColors();
@@ -412,6 +438,9 @@ export default function SessionScreen() {
   );
   const hasGraphemeStages = Object.keys(graphemeStages).length > 0;
   const [whereOpen, setWhereOpen] = useState(false);
+  // The header's compass item is app-wide and stable (HeaderCompassButton);
+  // this session tells it what a tap opens.
+  useEffect(() => setCompassHandler(() => setWhereOpen(true)), []);
   const authToken = useAuthToken();
   const inputRef = useRef<TextInput>(null);
   const chatScrollRef = useRef(null);
@@ -1394,10 +1423,7 @@ export default function SessionScreen() {
       // lost; tell them so they can retry.
       console.warn("[send] failed", e);
       if (!isAppRequest) {
-        Alert.alert(
-          "Couldn't send",
-          "Your message wasn't sent. Check your connection and try again.",
-        );
+        Alert.alert("Couldn't send", sendFailureMessage(e));
       }
       return false;
     } finally {
@@ -1627,7 +1653,7 @@ export default function SessionScreen() {
     // (TRA-319): running it here would stream through this shell (no
     // supportsRenderCheck, events VibecodeScreen never sees) and strand the
     // preview on its empty state. VibecodeScreen kicks off instead.
-    if (data.session?.sessionMode === "vibecode") return;
+    if (data.session?.sessionMode === "vibecode" || builderViewRequested) return;
     const hasNoMessages = (data.messages ?? []).length === 0;
     if (!hasNoMessages && !activeKickoffPlaceholder) {
       if (kickoffRetryTimerRef.current) {
@@ -1731,6 +1757,7 @@ export default function SessionScreen() {
     startActivityKickoff,
     runTutorStream,
     questBakeHolding,
+    builderViewRequested,
   ]);
 
   // Voice dictation. The mic button starts recording; the RecordingBar's ✓
@@ -1760,24 +1787,20 @@ export default function SessionScreen() {
   }, [voice]);
 
   // Attach: iOS action sheet → camera or photo library.
-  const onAttach = useCallback(() => {
-    Haptics.selectionAsync();
-    ActionSheetIOS.showActionSheetWithOptions(
-      {
-        options: ["Cancel", "Take Photo", "Choose Photo"],
-        cancelButtonIndex: 0,
-      },
-      (i) => {
-        if (i === 1) image.attach("camera");
-        else if (i === 2) image.attach("library");
-      },
-    );
-  }, [image]);
+  const onAttach = useCallback(() => image.chooseAndAttach(), [image]);
 
   if (data === undefined) {
     return (
       <>
-        <Stack.Screen options={{ title: headerTitle }} />
+        <Stack.Screen
+          options={{
+            title: headerTitle,
+            // Arriving from ← / →: the compass is already in the header (the
+            // route's options draw the same stand-in), so keep it there.
+            ...(arrivingNav ? { headerRight: compassHeaderRight } : null),
+          }}
+        />
+        {arrivingNav ? <ActivityNavPlaceholder {...arrivingNav} /> : null}
         <ChatSkeleton />
       </>
     );
@@ -1810,14 +1833,20 @@ export default function SessionScreen() {
 
   // ── Vibecode sessions: the Lovable-style live-preview builder (vibecode-spec.md).
   // Same early-return shape as workbench above; VibecodeScreen owns its own
-  // Stack.Screen (title + chat toggle).
-  if (data.session?.sessionMode === "vibecode") {
-    return <VibecodeScreen sessionId={sessionId} />;
+  // Stack.Screen (title + chat toggle). A chat-primary session reaches it too,
+  // on demand, through the app card's Open (`?view=builder`).
+  if (data.session?.sessionMode === "vibecode" || builderViewRequested) {
+    return <VibecodeScreen sessionId={sessionId} appId={app} />;
   }
 
   const activityId = sessionActivityId;
   const unitId = sessionUnitId;
   const completed = !!activityCompletedAt;
+  // TRA-519 B2: ideas the tutor parked this session, listed on the done
+  // screen (owner only, never a rehearsal).
+  const parkedIdeas = data.session?.parkingLot ?? [];
+  const showSavedForLater =
+    isSessionOwner && !data.session?.isTestDrive && parkedIdeas.length > 0;
   // S3: homework gets a visible way to say "I'm done" — the same
   // `activityCompletions` toggle the Big picture drawer (WhereAmIPanel) has
   // always offered, on online activities only, where mark-complete applies.
@@ -2045,6 +2074,14 @@ export default function SessionScreen() {
                       router.canDismiss() ? router.dismissAll() : router.replace("/")
                     }
                   />
+                  {unitId ? <QuestBuildUnlockOffer unitId={unitId} /> : null}
+                  {showSavedForLater ? (
+                    <SavedForLaterBlock
+                      sessionId={sessionId}
+                      ideas={parkedIdeas}
+                      canBuildNow={data.session?.freePlayEligible === true}
+                    />
+                  ) : null}
                 </View>
               );
             }
@@ -2275,7 +2312,7 @@ export default function SessionScreen() {
                               ? onReadYourTurn
                               : undefined
                           }
-                          readAloudDisabled={composerBusy || voice.isRecording || voice.isTranscribing}
+                          readAloudDisabled={composerBusy || voice.isConnecting || voice.isRecording || voice.isTranscribing}
                         />
                       ) : useGrapheme ? (
                         // Reading ramp: the same styles.bubbleText metrics (18/26,
@@ -2392,32 +2429,21 @@ export default function SessionScreen() {
         )}
         {image.previewUri && (
           <View style={styles.previewRow}>
-            <View style={styles.previewChip}>
-              <Image source={{ uri: image.previewUri }} style={styles.previewImg} alt="Attached photo" />
-              {image.uploading && (
-                <View style={styles.previewOverlay}>
-                  <ActivityIndicator color={colors.white} />
-                </View>
-              )}
-              <Pressable
-                onPress={image.clear}
-                hitSlop={8}
-                style={styles.previewRemove}
-                accessibilityRole="button"
-                accessibilityLabel="Remove photo"
-              >
-                <SymbolView name="xmark.circle.fill" size={22} tintColor={colors.charcoal} />
-              </Pressable>
-            </View>
+            <PendingPhotoChip
+              uri={image.previewUri}
+              uploading={image.uploading}
+              onRemove={image.clear}
+            />
           </View>
         )}
 
-        {voice.isRecording || voice.isTranscribing ? (
+        {voice.isConnecting || voice.isRecording || voice.isTranscribing ? (
           <View style={styles.composerRow}>
             <RecordingBar
               level={voice.level}
               durationMs={voice.durationMs}
               isTranscribing={voice.isTranscribing}
+              isConnecting={voice.isConnecting}
               onCancel={onMicCancel}
               onStop={onMicStop}
             />
@@ -2616,25 +2642,7 @@ export default function SessionScreen() {
                 ),
               }
             : null),
-          headerRight:
-            activityId || unitId
-              ? () => (
-                <View style={styles.headerActions}>
-                  <Pressable
-                    onPress={() => setWhereOpen(true)}
-                    hitSlop={10}
-                    accessibilityRole="button"
-                    accessibilityLabel="Where you are in this unit"
-                  >
-                    <SymbolView
-                      name="location.circle"
-                      size={27}
-                      tintColor={colors.violet}
-                    />
-                  </Pressable>
-                </View>
-              )
-              : undefined,
+          headerRight: activityId || unitId ? compassHeaderRight : undefined,
         }}
       />
       <SessionActivityNav
@@ -2643,6 +2651,7 @@ export default function SessionScreen() {
         activityId={activityId}
         assignmentId={data.session?.assignmentId}
         skipLearnerQueries={skipLearnerQueries}
+        pending={arrivingNav}
       />
       {roomCues.rest && <RestOverlay returnAt={roomCues.rest.returnAt} />}
       {roomCues.message && (
@@ -2741,6 +2750,16 @@ export default function SessionScreen() {
   );
 }
 
+
+/** Why a send failed: a deliberate refusal (a locked Quest build step) says
+ * why; anything else is most likely the network. Module-level so the send's
+ * catch holds no value block (React Compiler). */
+function sendFailureMessage(error: unknown): string {
+  return (
+    serverRefusal(error) ??
+    "Your message wasn't sent. Check your connection and try again."
+  );
+}
 
 function CompletionHandoffCard({
   visible,
@@ -2942,23 +2961,6 @@ function flairInitial(label: string): string {
   return Array.from(label.trim())[0]?.toLocaleUpperCase() ?? "?";
 }
 
-// Renders an attached photo in a chat bubble. The URL is served beside the
-// message row by getWithMessages; we show it with expo-image.
-function ImageBubble({ url }: { url: string | null }) {
-  const colors = useColors();
-  const styles = useMemo(() => makeStyles(colors), [colors]);
-  if (!url) {
-    return (
-      <View style={[styles.imageBubble, styles.imageLoading]}>
-        <ActivityIndicator color={colors.gray300} />
-      </View>
-    );
-  }
-  return (
-    <Image source={{ uri: url }} style={styles.imageBubble} contentFit="cover" alt="Attached photo" />
-  );
-}
-
 // A tutor-generated illustration (the `generate_image` tool). Unlike a
 // scholar's photo attachment this is teaching content, not a thumbnail: it
 // renders at column width and keeps the image's own aspect ratio, because a
@@ -3043,7 +3045,6 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     flexDirection: "row",
     backgroundColor: c.bgSubtle,
   },
-  headerActions: { flexDirection: "row", alignItems: "center", gap: 16 },
   // "The turn, not the bell" — calm, non-alarming violet: nothing here is
   // locked, just a soft heads-up.
   roomTurnBanner: {
@@ -3212,12 +3213,6 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     gap: 8,
     flexShrink: 0,
   },
-  imageBubble: {
-    width: 220,
-    height: 220,
-    borderRadius: 20,
-    backgroundColor: c.gray100,
-  },
   imageLoading: { alignItems: "center", justifyContent: "center" },
   imageFailed: {
     alignItems: "center",
@@ -3365,31 +3360,6 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     color: c.fg,
   },
   volumeCardHide: { padding: 4 },
-  previewChip: {
-    width: 88,
-    height: 88,
-    borderRadius: 14,
-    overflow: "hidden",
-    backgroundColor: c.gray100,
-  },
-  previewImg: { width: "100%", height: "100%" },
-  previewOverlay: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(0,0,0,0.3)",
-  },
-  previewRemove: {
-    position: "absolute",
-    top: 2,
-    right: 2,
-    backgroundColor: c.white,
-    borderRadius: 11,
-  },
   input: {
     flex: 1,
     ...CHAT_COMPOSER_INPUT,
@@ -3416,4 +3386,16 @@ function makeStyles(c: ReturnType<typeof useColors>) {
     shadowOffset: { width: 0, height: 0 },
   },
   });
+}
+
+/**
+ * The route. ← / → swap the session IN PLACE (SessionActivityNav sets this
+ * route's params) instead of replacing the screen: a screen transition makes
+ * iPadOS 26 morph every header item between the two screens, even identical
+ * ones. Keying the body by id gives each session a fresh mount while the
+ * header stays put and only its title changes.
+ */
+export default function SessionRoute() {
+  const { id } = useLocalSearchParams<{ id: string }>();
+  return <SessionScreen key={id} />;
 }

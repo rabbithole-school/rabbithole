@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
-import { Alert } from "react-native";
+import { ActionSheetIOS, Alert } from "react-native";
+import * as Haptics from "expo-haptics";
 import {
   launchCameraAsync,
   launchImageLibraryAsync,
@@ -108,5 +109,24 @@ export function useImageAttachment() {
     [uploadUri, clear],
   );
 
-  return { previewUri, imageId, uploading, attach, clear };
+  /** The composer's attach control: the iOS sheet offering camera or library.
+   *  One sheet for every chat composer, so the choices never drift apart. */
+  const chooseAndAttach = useCallback(
+    (target?: ImageUploadTarget) => {
+      Haptics.selectionAsync().catch(() => {});
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options: ["Cancel", "Take Photo", "Choose Photo"],
+          cancelButtonIndex: 0,
+        },
+        (i) => {
+          if (i === 1) void attach("camera", target);
+          else if (i === 2) void attach("library", target);
+        },
+      );
+    },
+    [attach],
+  );
+
+  return { previewUri, imageId, uploading, attach, chooseAndAttach, clear };
 }

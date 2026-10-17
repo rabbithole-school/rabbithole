@@ -22,6 +22,10 @@ import {
   fallbackPreflightResult,
   preflightCoverage,
 } from "../lib/curriculumPreflightResult";
+import {
+  grantInstitutionMembership,
+  seedTestInstitution,
+} from "./institutionTestHelpers";
 import type { ActivityKind } from "../../lib/activityKinds";
 import { describeMisconception } from "../lib/curriculumSimShared";
 
@@ -58,6 +62,17 @@ async function withUser(t: ReturnType<typeof convexTest>, userId: Id<"users">) {
     subject: `${userId}|${sessionId}`,
     issuer: "https://convex.dev",
   });
+}
+
+/** Grounding is checked at the unit's school; seed the teacher into the
+ *  primary school that unstamped fixture units belong to. */
+async function joinPrimarySchool(
+  t: ReturnType<typeof convexTest>,
+  teacher: Id<"users">,
+) {
+  const institutionId = await seedTestInstitution(t, { isPrimary: true });
+  await grantInstitutionMembership(t, teacher, institutionId, "teacher");
+  return institutionId;
 }
 
 async function seedUnitWithActivity(
@@ -461,6 +476,7 @@ describe("curriculumExperiments.groundExperiment", () => {
   test("rejects a second call while a grounding run is in flight", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
+    await joinPrimarySchool(t, teacher);
     const { experimentId } = await seedFinishedExperiment(t, teacher);
     const asTeacher = await withUser(t, teacher);
 
@@ -962,6 +978,7 @@ describe("curriculumExperiments — aide rehearse/debrief tools", () => {
   test("aideGroundLatest returns ok:false when there's no rehearsal yet", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
+    await joinPrimarySchool(t, teacher);
     const { unitId } = await seedUnitWithActivity(t, teacher);
 
     const res = await t.run((ctx) =>
@@ -978,6 +995,7 @@ describe("curriculumExperiments — aide rehearse/debrief tools", () => {
   test("aideGroundLatest grounds the most recent finished rehearsal", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
+    await joinPrimarySchool(t, teacher);
     const { unitId, activityId } = await seedUnitWithActivity(t, teacher);
 
     // Start one, then mark it finished (the sim run is a node action we
@@ -1068,6 +1086,7 @@ describe("curriculumExperiments — aide rehearse/debrief tools", () => {
   test("aideGroundLatest debriefs the latest DONE run, skipping a more-recent cancelled one", async () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
+    await joinPrimarySchool(t, teacher);
     const { unitId, activityId } = await seedUnitWithActivity(t, teacher);
 
     // A finished (done) run, then a MORE RECENT cancelled run.
@@ -1183,6 +1202,9 @@ describe("getGroundInput — scholar feedback feeds the debrief", () => {
     const t = convexTest(schema, modules);
     const teacher = await seedUser(t, "teacher");
     const scholar = await seedUser(t, "scholar");
+    // Grounding judges only scholars the grounding teacher can read.
+    const institutionId = await joinPrimarySchool(t, teacher);
+    await t.run((ctx) => ctx.db.patch(scholar, { institutionId }));
     const { lessonId, activityId } = await seedUnitWithActivity(t, teacher);
 
     const experimentId = await t.run((ctx) =>
@@ -1227,7 +1249,7 @@ describe("getGroundInput — scholar feedback feeds the debrief", () => {
 
     const input = await t.query(
       internal.curriculumExperiments.getGroundInput,
-      { experimentId },
+      { experimentId, groundedBy: teacher },
     );
 
     expect(input.scholarFeedback.count).toBe(1);

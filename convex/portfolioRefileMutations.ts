@@ -3,7 +3,11 @@ import { internalMutation, type MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { assertCanWrite, requireUser } from "./lib/auth";
-import { requireActiveScholarAccess } from "./lib/access";
+import {
+  canUserReadScholarWork,
+  requireActiveScholarAccess,
+} from "./lib/access";
+import { hasBeenFiled } from "./lib/portfolioStatus";
 import {
   documentKindUsesExtraction,
   requireKindAccess,
@@ -61,6 +65,17 @@ async function refileContext(
     throw new Error("Forbidden: scanner access required");
   }
   await requireActiveScholarAccess(ctx, user, scholarId);
+  // Refiling a scan that has ever been filed copies a scholar's work into a
+  // downloadable record (and deletes the source): teaching staff only.
+  // Operations staff refile what is still in the inbox.
+  if (
+    hasBeenFiled(item) &&
+    !(await canUserReadScholarWork(ctx, user, scholarId))
+  ) {
+    throw new Error(
+      "Forbidden: only teaching staff can refile a scan that was already filed",
+    );
+  }
   const hasHealthAccess = await hasHealthAccessAtInstitution(
     ctx, user, scholar.institutionId,
   );

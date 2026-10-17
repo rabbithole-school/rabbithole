@@ -16,6 +16,7 @@
 import { v } from "convex/values";
 import { describeLevelsForPrompt, levelsPromptLine } from "./lib/readingLevels";
 import { authedAction } from "./lib/customFunctions";
+import { customQuestTopic } from "./lib/customQuestTopic";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { MODELS } from "./lib/models";
@@ -28,14 +29,17 @@ export interface SuggestedPath {
   emoji: string;
   title: string;
   blurb: string;
+  /** "build" marks the Build a simulation card (shared/missionCopy.ts). */
+  shape?: "build";
 }
 
 // Used only when the live call errors/times out, so the menu never dead-ends.
-// Deliberately still concrete-ish, not the old abstract archetypes.
+// Deliberately still concrete-ish, not the old abstract archetypes. The build
+// path is not listed: every picker renders the fixed "Build a simulation"
+// card (shared/missionCopy.ts) after whatever list it gets (TRA-519 B4).
 const FALLBACK_PATHS: SuggestedPath[] = [
   { emoji: "🔍", title: "Get to the bottom of it", blurb: "Chase the one big 'why' behind it until it really clicks." },
   { emoji: "🔗", title: "Find the surprising links", blurb: "See what this secretly connects to in your own world." },
-  { emoji: "🛠️", title: "Make something that shows it", blurb: "Build a little explainer or diagram that proves you get it." },
 ];
 
 const REPORT_PATHS_TOOL = {
@@ -97,6 +101,7 @@ async function proposePaths(
     levelsPromptLine(cx.readingLevel) ?? "Talk level: (elementary — pick a sensible default)",
     "",
     "Propose 2-4 GENUINELY DIFFERENT, concrete ways they could dive in — each a real, worthwhile gifted activity (not the same idea reworded, and NOT abstract labels like 'go deep' / 'go wide'). Make each one a specific angle or thing-they'd-do that a curious kid would actually want to pick, and that still leads to genuinely understanding the topic. Speak TO the kid (second person), warm and concrete. Use your judgment about what makes a good gifted activity. Call report_paths.",
+    "Do not propose a build-an-app/simulation path; that option is always offered separately.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -176,15 +181,17 @@ export const suggestBakePaths = authedAction({
       };
     }
 
-    const topic = args.topic?.trim();
-    if (!topic) return { paths: FALLBACK_PATHS };
+    if (!args.topic?.trim()) return { paths: FALLBACK_PATHS };
     // Free-text Custom Quest: currentUser both gates auth (null when signed out)
-    // and gives us the scholar's reading level to calibrate to.
+    // and gives us the scholar's reading level to calibrate to. Title +
+    // description read together, exactly as the bake will read them, so the
+    // menu offers angles on the same idea the quest gets built around.
+    const { topic, rationale } = customQuestTopic(args.topic, args.rationale, user);
     return {
       paths: await proposePaths(ctx, {
         topic,
         domain: null,
-        rationale: args.rationale?.trim() || null,
+        rationale,
         readingLevel: describeLevelsForPrompt(user),
       }, institutionId),
     };

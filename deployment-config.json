@@ -585,8 +585,16 @@
       "reason": "School settings with a private print-status surface removed. No adopter action required."
     },
     {
+      "path": "app/teacher/(dashboard)/_components/CommandPalette.test.ts",
+      "reason": "Test file with the first-party admissions search cases removed. Published and runnable; not a configuration point."
+    },
+    {
       "path": "components/BehindTheCurtain.tsx",
       "reason": "Published-prompts links neutralized to the public repository. No adopter action required."
+    },
+    {
+      "path": "components/CommandPalette.tsx",
+      "reason": "Staff command palette with the first-party admissions search removed. No adopter action required."
     },
     {
       "path": "components/ParentDashboard.tsx",
@@ -595,6 +603,10 @@
     {
       "path": "components/ScholarFeed.tsx",
       "reason": "Scholar feed with private surfaces removed. No adopter action required."
+    },
+    {
+      "path": "components/StaffShell.tsx",
+      "reason": "Staff shell with the first-party admissions access check removed. No adopter action required."
     },
     {
       "path": "convex/__tests__/activityResources.test.ts",

@@ -14,8 +14,12 @@
  * Runtime import edge is one-way: this module imports the value `buildSystemPrompt`
  * (and types) from `./sessionHelpers`; `sessionHelpers` never imports this.
  */
+import type { SessionAppContext } from "../shared/appSurface";
+import { CODE_EDITOR_TOOL_NAME } from "./lib/tutorCodeEditor";
+import type { SessionMission } from "./lib/mission";
 import {
   buildSystemPromptParts,
+  joinTutorPromptParts,
   type UnitContext,
   type PersonaContext,
   type PerspectiveContext,
@@ -49,6 +53,7 @@ import {
   type TutorRuntimeCapabilities,
 } from "./sessionHelpers";
 import type { DocumentNote, PhysicalEnvironmentContext } from "./prompts";
+import { withConversationCacheBreakpoint } from "./lib/aideStream";
 import type { Interest } from "./lib/interests";
 import type { ReadLevel, WriteMode } from "./lib/readingLevels";
 import {
@@ -70,12 +75,15 @@ export const STREAM_PERSIST_INTERVAL_CHARS = 200;
  *
  * Every ~200 characters, AND the moment the placeholder first has visible
  * text. The first-text write is what makes "the stored row is empty" mean
- * "the scholar has seen nothing from it": a stop or steer deletes an empty
- * row and keeps (stamps) a non-empty one (sessions.stampLatestStreamingAssistant).
- * Without it, a reply under 200 characters — a young reader's whole turn — was
- * never stored mid-stream, so Stop deleted words already on the screen
- * (TRA-501). `lastPersistLength` resets to 0 when a tool split opens a new
- * placeholder, so each placeholder gets its own first-text write.
+ * "the scholar has seen nothing from it". A stop or steer always STAMPS the
+ * row (sessions.stampLatestStreamingAssistant; only an empty quiet app-update
+ * placeholder is deleted outright); an empty stopped row is deleted later by
+ * sessions.reapDeadStoppedPlaceholder, and only once its liveness heartbeat
+ * is stale. Without the first-text write, a reply under 200 characters — a
+ * young reader's whole turn — was never stored mid-stream, so Stop deleted
+ * words already on the screen (TRA-501). `lastPersistLength` resets to 0 when
+ * a tool split opens a new placeholder, so each placeholder gets its own
+ * first-text write.
  */
 export function shouldPersistStreamContent(
   contentLength: number,
@@ -204,6 +212,7 @@ export function parseSessionStreamBody(body: unknown): {
 export const WORKSHOP_CODE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "create_code",
   "edit_document",
+  CODE_EDITOR_TOOL_NAME,
   "define_character",
   "define_judge",
 ]);
@@ -226,7 +235,7 @@ export const RENDER_CHECK_POLL_INTERVAL_MS = 400;
 export const RENDER_CHECK_TIMEOUT_MS = 8_000;
 
 const BUILD_TOOL_TRUNCATION_MESSAGE =
-  "Your tool call was cut off by the output limit before the code arrived. Build a SMALLER first version now (a working core under roughly 300 lines), then add features with edit_document in later calls.";
+  `Your tool call was cut off by the output limit before the code arrived. Build a SMALLER first version now (a working core under roughly 300 lines), then add features with ${CODE_EDITOR_TOOL_NAME} in later calls.`;
 const BUILD_TOOL_TRUNCATION_STOP_MESSAGE =
   "Do not call create_code again this turn: reply to the teacher in one short paragraph describing what you will build and ask them to say go.";
 
@@ -277,10 +286,29 @@ function editDocumentMutationIsIncomplete(input: unknown): boolean {
   }
 }
 
+/** The app editor's writes, cut off mid-payload (create is always refused). */
+function codeEditorMutationIsIncomplete(input: unknown): boolean {
+  if (!isRecord(input)) return true;
+  switch (input.command) {
+    case "view":
+    case "create":
+      return false;
+    case "str_replace":
+      return !hasNonEmptyString(input, "old_str");
+    case "insert":
+      return (
+        !hasNonEmptyString(input, "insert_text") &&
+        !hasNonEmptyString(input, "new_str")
+      );
+    default:
+      return true;
+  }
+}
+
 function isMutatingBuildToolCall(toolName: string, input: unknown): boolean {
   if (toolName === "create_code") return true;
   return (
-    toolName === "edit_document" &&
+    (toolName === "edit_document" || toolName === CODE_EDITOR_TOOL_NAME) &&
     (!isRecord(input) || input.command !== "view")
   );
 }
@@ -307,7 +335,9 @@ export async function runBuildToolWithTruncationGuard<T>({
       ? !isRecord(input) || !hasNonEmptyString(input, "code")
       : toolName === "edit_document"
         ? editDocumentMutationIsIncomplete(input)
-        : false;
+        : toolName === CODE_EDITOR_TOOL_NAME
+          ? codeEditorMutationIsIncomplete(input)
+          : false;
   const hitOutputLimit =
     stopReason === "max_tokens" && isMutatingBuildToolCall(toolName, input);
 
@@ -340,16 +370,15 @@ export function canRequestRenderCheck(renderChecksThisTurn: number): boolean {
 
 export function renderChecksEnabled({
   supportsRenderCheck,
-  sessionMode,
+  builderFeatures,
 }: {
   supportsRenderCheck?: true;
   platform: "web" | "native";
-  sessionMode?: "conversation" | "workbench" | "vibecode" | null;
+  /** TRA-519: the session has an app (or is builder-primary). Only the builder
+   *  views advertise supportsRenderCheck, so a chat view never gets one. */
+  builderFeatures: boolean;
 }): boolean {
-  return (
-    supportsRenderCheck === true &&
-    sessionMode === "vibecode"
-  );
+  return supportsRenderCheck === true && builderFeatures;
 }
 
 /**
@@ -438,6 +467,12 @@ export type TutorPromptContext = {
   beginnerExtra?: { letters: string; teams: string[] } | null;
   scholarName: string | null;
   sessionMode?: "conversation" | "workbench" | "vibecode" | null;
+  /** TRA-519: how this session relates to its app (shared/appSurface.ts).
+   *  Absent for offline callers, which fall back to sessionMode. */
+  appContext?: SessionAppContext | null;
+  /** Role "side" with an app: the work the tutor steers back to (the
+   *  activity's deliverable kind; null for a discussion). */
+  sideAppWork?: { deliverableKind: string | null } | null;
   vibecodeStarterUsedAt?: number | null;
   /** True on a teacher test-drive session. In a vibecode session it flips the
    *  tutor into the build-partner stance (Move B). Optional so positional/
@@ -446,10 +481,14 @@ export type TutorPromptContext = {
   /** The scholar's screen shows the open-exploration "Wrap up" button (see
    *  getSessionContext). Optional so guest/offline callers default to off. */
   offersWrapUp?: boolean;
-  /** Rendered SCHOLAR'S PRIOR WORK IN THIS UNIT section (vibecode only). */
+  /** Rendered SCHOLAR'S PRIOR WORK IN THIS UNIT section (sessions with an app). */
   priorUnitWork?: string | null;
-  /** The App designer's parking lot (vibecode; sessions.parkingLot). */
+  /** The scholar's parked ideas (sessions.parkingLot), rendered where the
+   *  mission tools are offered. */
   parkingLot?: ReadonlyArray<{ text: string; reason?: string }> | null;
+  /** The session's MISSION (TRA-519 B1, lib/mission.ts). Optional; offline
+   *  callers get no MISSION section and the authored-contract builder. */
+  mission?: SessionMission | null;
   /** A free-play session (sessions.freePlay, TRA-489). Optional; offline
    *  callers default to the assignment designer. */
   freePlay?: boolean;
@@ -543,19 +582,20 @@ export function kickoffInstructionForContext(
  * when empty) are the kind of thing that's easy to get wrong inline.
  */
 export function buildTutorSystemPrompt(ctx: TutorPromptContext): string {
-  const { stable, dynamic, turnContext } = buildTutorSystemPromptParts(ctx);
-  return stable + dynamic + "\n\n" + turnContext;
+  return joinTutorPromptParts(buildTutorSystemPromptParts(ctx));
 }
 
 /**
- * Cache-split form of {@link buildTutorSystemPrompt}: returns the byte-stable
- * leading run, per-turn-varying system remainder, and minute-varying message
- * suffix separately. The tutor route places the latter after the rolling
- * conversation cache breakpoint.
+ * Cache-split form of {@link buildTutorSystemPrompt}, ordered by volatility:
+ * the byte-stable leading run, the turn-1-only system remainder, the session's
+ * documents, the per-turn session state, and the clock and pacing. {@link layoutTutorRequest} turns these
+ * into the request's system blocks and messages.
  */
 export function buildTutorSystemPromptParts(ctx: TutorPromptContext): {
   stable: string;
   dynamic: string;
+  documents: string;
+  turnSystem: string;
   turnContext: string;
 } {
   // Teacher build-partner stance (Move B) turns on ONLY for a teacher
@@ -605,7 +645,9 @@ export function buildTutorSystemPromptParts(ctx: TutorPromptContext): {
     ctx.weeklyGoals.length > 0 ? ctx.weeklyGoals : null,
     ctx.activityResourceContext ?? null,
     ctx.gameRoundContexts,
-    ctx.sessionMode === "vibecode",
+    // Builder stance: from appContext (TRA-519); offline callers without one
+    // fall back to the builder-primary session, as before the fold.
+    ctx.appContext?.builderStance ?? ctx.sessionMode === "vibecode",
     ctx.sessionMode === "workbench",
     ctx.appStateContext,
     ctx.institutionProfile ?? DEFAULT_INSTITUTION_PROMPT_PROFILE,
@@ -629,7 +671,117 @@ export function buildTutorSystemPromptParts(ctx: TutorPromptContext): {
           beginnerExtra: ctx.beginnerExtra ?? null,
         }
       : null,
+    ctx.appContext
+      ? {
+          builderFeatures: ctx.appContext.builderFeatures,
+          builderPrimary: ctx.appContext.builderPrimary,
+          sideAppWork: ctx.sideAppWork ?? null,
+        }
+      : null,
+    ctx.mission ?? null,
   );
+}
+
+/** A tutor system block. Assignable to both the beta tool runner's and the
+ *  plain stream's `system` parameter. */
+export type TutorSystemBlock = {
+  type: "text";
+  text: string;
+  cache_control?: { type: "ephemeral" };
+};
+
+/** A mid-conversation operator message. The pinned SDK's types predate it, so
+ *  the stream call site casts the laid-out messages to its param type. */
+export type TutorSystemMessage = { role: "system"; content: string };
+
+/**
+ * Lay out a tutor request by volatility, so each prompt-cache entry is written
+ * once and read until the thing it covers actually changes. Anthropic's cache
+ * prefix is tools → system → messages, and a changed byte invalidates every
+ * entry behind it, so the request runs from least to most volatile:
+ *
+ *   1. `stable` system block — breakpoint 1 (with the tools before it).
+ *   2. `dynamic` system block — turn-1-only text, no breakpoint.
+ *   3. `documents` system block — breakpoint 2. An app's line-numbered HTML is
+ *      most of a late app-session prompt; a turn that doesn't edit it reads it
+ *      from cache, and so can the history behind it.
+ *   4. the conversation — breakpoint 3, rolling, on the last user message
+ *      (withConversationCacheBreakpoint), unless the caller already placed it
+ *      (an app update puts it before its never-replayed instruction).
+ *   5. `turnContext` (clock, pacing) — text appended to the latest user
+ *      message after breakpoint 3 (appendTurnContext).
+ *   6. `turnSystem` (learning record, teacher guidance, app state, …) — a
+ *      trailing `role: "system"` message after the latest user message, so it
+ *      keeps operator authority and a scholar cannot imitate it. The tool
+ *      runner then appends assistant(tool_use) → user(tool_result) after it,
+ *      which the API accepts. When `midConversationSystem` is false (the model
+ *      lacks the feature) or the messages do not end on a user turn, it joins
+ *      the turn-context text instead.
+ *
+ * Items 5 and 6 sit after the last breakpoint: plain input, never a cache
+ * write. At most three breakpoints, inside Anthropic's limit of four. Empty
+ * blocks are omitted (no documents → no second breakpoint). With no user
+ * message to carry them, 5 and 6 end the top-level system prompt instead, after
+ * the last breakpoint. Returns new arrays; the inputs are not mutated.
+ */
+export function layoutTutorRequest<
+  M extends TurnContextMessage & { role: "user" | "assistant" },
+>(args: {
+  stable: string;
+  dynamic: string;
+  documents: string;
+  turnSystem: string;
+  turnContext: string;
+  messages: readonly M[];
+  conversationBreakpointPlaced?: boolean;
+  midConversationSystem: boolean;
+}): { system: TutorSystemBlock[]; messages: Array<M | TutorSystemMessage> } {
+  const system: TutorSystemBlock[] = [
+    { type: "text", text: args.stable, cache_control: { type: "ephemeral" } },
+  ];
+  if (args.dynamic.trim()) {
+    system.push({ type: "text", text: args.dynamic });
+  }
+  if (args.documents.trim()) {
+    system.push({
+      type: "text",
+      text: args.documents,
+      cache_control: { type: "ephemeral" },
+    });
+  }
+  const withBreakpoint = args.conversationBreakpointPlaced
+    ? [...args.messages]
+    : withConversationCacheBreakpoint(args.messages);
+  const turnSystem = args.turnSystem.trim();
+  const hasUserMessage = withBreakpoint.some((m) => m.role === "user");
+  const endsOnUser = withBreakpoint[withBreakpoint.length - 1]?.role === "user";
+  const asSystemMessage =
+    turnSystem.length > 0 && args.midConversationSystem && endsOnUser;
+  const trailingText = [args.turnContext.trim(), asSystemMessage ? "" : turnSystem]
+    .filter(Boolean)
+    .join("\n\n");
+
+  if (!hasUserMessage) {
+    if (trailingText) {
+      const last = system[system.length - 1];
+      if (!last.cache_control) {
+        system[system.length - 1] = {
+          ...last,
+          text: `${last.text}\n\n${trailingText}`,
+        };
+      } else {
+        system.push({ type: "text", text: trailingText });
+      }
+    }
+    return { system, messages: withBreakpoint };
+  }
+  const messages: Array<M | TutorSystemMessage> = trailingText
+    ? appendTurnContext(withBreakpoint, trailingText)
+    : withBreakpoint;
+  if (asSystemMessage) {
+    messages.push({ role: "system", content: turnSystem });
+  }
+  return { system, messages };
 }
 
 export const TURN_CONTEXT_PREFIX =

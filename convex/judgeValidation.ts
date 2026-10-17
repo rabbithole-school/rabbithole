@@ -12,14 +12,20 @@
  * `groundedSessionVerdicts`). The result — an agreement rate + an r-value —
  * tells the team how much to trust every scorecard the loop produces.
  *
- * Teacher-gated via requireUnitEditAccess (same gate as curriculumExperiments).
- * All reads are of the teacher's OWN comparison state. The math lives in the
+ * Teacher-gated: requireUnitEditAccess PLUS teacher standing at the unit's
+ * school (canGroundUnit, the same gate as grounding), because the verdicts carry real scholars'
+ * names, reading levels and transcript excerpts. A `curriculum:edit` staff
+ * grant or a curriculum_designer can edit the unit but is refused here. Every
+ * verdict read is narrowed to scholars the caller can read as a teacher.
+ * Comparison reads are of the teacher's OWN comparison state. The math lives in the
  * pure, unit-tested lib/judgeCorrelation.ts.
  */
 
 import { v } from "convex/values";
 import { authedQuery, authedMutation } from "./lib/customFunctions";
-import { requireUnitEditAccess } from "./lib/auth";
+import { requireGroundingAccess, requireUnitEditAccess } from "./lib/auth";
+import { canReadScholarAsTeacher } from "./lib/access";
+import type { QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   computeCorrelation,
@@ -34,6 +40,44 @@ const teacherChoiceValidator = v.union(
   v.literal("B"),
   v.literal("tie"),
 );
+
+/**
+ * The unit-edit gate plus the teacher-only grounding gate. Returns the caller.
+ */
+async function requireValidationAccess(
+  ctx: QueryCtx,
+  activityId: Id<"activities">,
+): Promise<Doc<"users">> {
+  const { user, unit } = await requireUnitEditAccess(ctx, { activityId });
+  await requireGroundingAccess(ctx, user, unit);
+  return user;
+}
+
+/**
+ * This activity's judged verdicts, narrowed to scholars the caller can read
+ * as a teacher. A verdict with no stamped scholarId falls back to its
+ * session's owner; one that resolves to no scholar is dropped.
+ */
+async function readableVerdicts(
+  ctx: QueryCtx,
+  user: Doc<"users">,
+  activityId: Id<"activities">,
+): Promise<Doc<"groundedSessionVerdicts">[]> {
+  const verdicts = await ctx.db
+    .query("groundedSessionVerdicts")
+    .withIndex("by_activity", (q) => q.eq("activityId", activityId))
+    .collect();
+  const readable: Doc<"groundedSessionVerdicts">[] = [];
+  for (const verdict of verdicts) {
+    const scholarId =
+      verdict.scholarId ?? (await ctx.db.get(verdict.sessionId))?.userId;
+    if (!scholarId) continue;
+    if (await canReadScholarAsTeacher(ctx, user, scholarId)) {
+      readable.push(verdict);
+    }
+  }
+  return readable;
+}
 
 /** Stable unordered key for a session pair (order-independent). */
 function pairKey(a: Id<"sessions">, b: Id<"sessions">): string {
@@ -92,15 +136,10 @@ function selectPairs(
 export const pairsForActivity = authedQuery({
   args: { activityId: v.id("activities"), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
-    const { user } = await requireUnitEditAccess(ctx, {
-      activityId: args.activityId,
-    });
+    const user = await requireValidationAccess(ctx, args.activityId);
     const limit = Math.max(1, Math.min(args.limit ?? MAX_PAIRS, 25));
 
-    const verdicts = await ctx.db
-      .query("groundedSessionVerdicts")
-      .withIndex("by_activity", (q) => q.eq("activityId", args.activityId))
-      .collect();
+    const verdicts = await readableVerdicts(ctx, user, args.activityId);
 
     if (verdicts.length < 2) {
       return {
@@ -212,22 +251,20 @@ export const recordChoice = authedMutation({
     teacherChoice: teacherChoiceValidator,
   },
   handler: async (ctx, args) => {
-    const { user } = await requireUnitEditAccess(ctx, {
-      activityId: args.activityId,
-    });
+    const user = await requireValidationAccess(ctx, args.activityId);
     if (String(args.sessionAId) === String(args.sessionBId)) {
       throw new Error("Cannot compare a session with itself");
     }
     // Both sessions must be judged for THIS activity — that's what makes the
-    // comparison reproducible against a persisted judge ranking.
+    // comparison reproducible against a persisted judge ranking — and both
+    // must belong to scholars this teacher can read.
+    const readable = new Set(
+      (await readableVerdicts(ctx, user, args.activityId)).map((v) =>
+        String(v.sessionId),
+      ),
+    );
     for (const sessionId of [args.sessionAId, args.sessionBId]) {
-      const judged = await ctx.db
-        .query("groundedSessionVerdicts")
-        .withIndex("by_activity_session", (q) =>
-          q.eq("activityId", args.activityId).eq("sessionId", sessionId),
-        )
-        .unique();
-      if (!judged) {
+      if (!readable.has(String(sessionId))) {
         throw new Error("Session has no judge verdict for this activity");
       }
     }
@@ -269,14 +306,9 @@ export const recordChoice = authedMutation({
 export const correlation = authedQuery({
   args: { activityId: v.id("activities") },
   handler: async (ctx, args) => {
-    const { user } = await requireUnitEditAccess(ctx, {
-      activityId: args.activityId,
-    });
+    const user = await requireValidationAccess(ctx, args.activityId);
 
-    const verdicts = await ctx.db
-      .query("groundedSessionVerdicts")
-      .withIndex("by_activity", (q) => q.eq("activityId", args.activityId))
-      .collect();
+    const verdicts = await readableVerdicts(ctx, user, args.activityId);
     const fitnessById = new Map<string, number>();
     for (const v of verdicts) fitnessById.set(String(v.sessionId), v.fitness);
 

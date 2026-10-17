@@ -3356,6 +3356,21 @@ describe("Workbench deck and Notebook", () => {
     );
   });
 
+  test("a non-teacher who owns the assignment (curriculum:run) cannot edit a scholar's bench", async () => {
+    const t = harness();
+    const fixture = await seedBench(t);
+    // The assignment's owner is base staff (a curriculum:run holder owns the
+    // runs she assigns) — owning it is not the teacher's bench authority.
+    await t.run((ctx) => ctx.db.patch(fixture.teacherId, { role: "staff" }));
+    const owner = await withUser(t, fixture.teacherId);
+    await expect(
+      owner.mutation(api.simulatorBenches.updateBenchSpec, {
+        sessionId: fixture.sessionId,
+        spec: simulatorSpecForStorage(BASE_SPEC),
+      }),
+    ).rejects.toThrow("Only the session owner or assignment teacher");
+  });
+
   test("refuses a template change after a bench has opened", async () => {
     const t = harness();
     const fixture = await seedBench(t);

@@ -139,7 +139,7 @@ function systemFor(c: Case, isFirstTurn: boolean, arm: "old" | "new"): string {
       ...a: unknown[]
     ) => ReturnType<typeof buildSystemPromptParts>
   )(...args);
-  let system = parts.stable + parts.dynamic;
+  let system = parts.stable + parts.dynamic + parts.documents + parts.turnSystem;
   if (arm === "new") return system;
   const swaps: [string, string][] = [[NEW_BASE, OLD_BASE]];
   if (system.includes(buildTalkLevelSection(c.talk))) {

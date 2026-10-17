@@ -598,7 +598,7 @@ describe("Vibecode starter promotion", () => {
         activityId,
         artifactId,
       }),
-    ).rejects.toThrow(/must be vibecode/i);
+    ).rejects.toThrow(/must be an app activity/i);
   });
 
   test("rejects choosing the saved app before a starter exists", async () => {
@@ -915,7 +915,7 @@ describe("Vibecode starter prompt", () => {
       "A teacher-authored app is already on screen.",
     );
     expect(prompt).toContain(
-      "a compact first working version — a core you can extend with edit_document, not the whole spec at once",
+      "a compact first working version — a core you can extend with str_replace_based_edit_tool, not the whole spec at once",
     );
   });
 });
@@ -1019,7 +1019,8 @@ describe("Vibecode starter internal creation", () => {
     const activity = await t.run((ctx) => ctx.db.get(result.activityId));
 
     expect(activity).toMatchObject({
-      kind: "vibecode",
+      kind: "online",
+      appActivity: true,
       starterAppId,
       scholarsStartFrom: "starter",
     });

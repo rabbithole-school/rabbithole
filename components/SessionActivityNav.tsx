@@ -39,6 +39,9 @@ import type { GameCapabilityPrompt } from "@/hooks/useGameActivity";
 import { GameCapabilityNotice } from "@/components/GameCapabilityNotice";
 import { pickNextIncompleteAfter } from "@/shared/nextIncompleteActivity";
 import { toaster } from "@/lib/toaster";
+import { serverRefusal } from "@/lib/serverErrorMessage";
+import { upNextCandidates } from "@/lib/missionApi";
+import { effectiveActivityKind } from "@/shared/appSurface";
 
 interface OfflineDialogState {
   activityId: Id<"activities">;
@@ -166,7 +169,7 @@ export function useSessionActivityNav(
       (!!activity.deliverable && activity.deliverable.mode !== "none"));
 
   const onlineUnitActivities = useMemo(
-    () => (unitActivities ?? []).filter((a) => a.kind === "online"),
+    () => (unitActivities ?? []).filter((a) => effectiveActivityKind(a) === "online"),
     [unitActivities],
   );
   const unitCompletedOnlineCount = useMemo(
@@ -175,18 +178,24 @@ export function useSessionActivityNav(
     [completedSet, onlineUnitActivities],
   );
 
+  // "Up next" walks every activity that opens a session here: online ones and
+  // app activities (a Quest's build step), like the iPad's useUnitProgress. A
+  // build step still locked by a learning step OTHER than this one is skipped;
+  // one this activity's completion unlocks stays (continueToNext completes
+  // this activity first).
   const nextOnlineActivity = useMemo(() => {
-    if (!activity || onlineUnitActivities.length === 0) return null;
-    const idx = onlineUnitActivities.findIndex((a) => a._id === activity._id);
+    if (!activity) return null;
+    const candidates = upNextCandidates(unitActivities ?? [], activity, unit);
+    const idx = candidates.findIndex((a) => a._id === activity._id);
     // Forward-only: never wrap backward to an earlier incomplete activity (see
     // shared/nextIncompleteActivity.ts). Home owns routing to earlier holes.
     const next = pickNextIncompleteAfter(
-      onlineUnitActivities,
+      candidates,
       idx,
       (a) => completedSet.has(String(a._id)),
     );
     return next ? { _id: next._id, title: next.title } : null;
-  }, [activity, completedSet, onlineUnitActivities]);
+  }, [activity, completedSet, unit, unitActivities]);
 
   const existingSessionForActivity = (activityId: Id<"activities">) =>
     activeSessions?.find(
@@ -254,7 +263,8 @@ export function useSessionActivityNav(
       console.error("Activity navigation launch failed:", error);
       toaster.error({
         title: "Couldn't start that activity",
-        description: "Please try again.",
+        // A deliberate refusal (a locked Quest build step) says why.
+        description: serverRefusal(error) ?? "Please try again.",
       });
     } finally {
       setPendingNav(false);
@@ -319,7 +329,8 @@ export function useSessionActivityNav(
       console.error("Activity navigation launch failed:", error);
       toaster.error({
         title: "Couldn't start that activity",
-        description: "Please try again.",
+        // A deliberate refusal (a locked Quest build step) says why.
+        description: serverRefusal(error) ?? "Please try again.",
       });
     } finally {
       setPendingNav(false);
@@ -333,7 +344,13 @@ export function useSessionActivityNav(
       : null,
     lessonTitle: lesson?.title ?? null,
     activity: activity
-      ? { _id: activity._id, title: activity.title, kind: activity.kind }
+      ? {
+          _id: activity._id,
+          title: activity.title,
+          // The effective kind, so every reader below keeps its meaning for
+          // app activities in either shape (TRA-519).
+          kind: effectiveActivityKind(activity),
+        }
       : null,
     isCurrentDone,
     hasRubricGate,

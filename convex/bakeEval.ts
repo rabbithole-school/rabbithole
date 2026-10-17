@@ -12,6 +12,8 @@ import type { ActivityKind } from "../lib/activityKinds";
 import { internalAction, internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
+import { isAppActivity } from "../shared/appSurface";
+import { chosenPathValidator } from "./bakeUnitFromSeed";
 
 type EvalDeliverable = {
   kind: "photo" | "artifact" | "slides" | "text" | "audio" | "map";
@@ -28,6 +30,10 @@ type EvalDesignActivity = {
   systemPrompt: string | null;
   durationMinutes: number | null;
   deliverable: EvalDeliverable;
+  /** An app activity (TRA-519): the build stage of a build-path bake. */
+  appActivity: boolean;
+  /** Carries a mission/model contract (activities.buildContract). */
+  hasContract: boolean;
 };
 
 type EvalBakedDesign = {
@@ -120,6 +126,8 @@ export const readBakedActivity = internalQuery({
           title: activity.title,
           description: activity.description ?? null,
           kind: activity.kind,
+          appActivity: isAppActivity(activity),
+          hasContract: !!activity.buildContract,
           systemPrompt: activity.systemPrompt ?? null,
           durationMinutes: activity.durationMinutes ?? null,
           deliverable: activity.deliverable
@@ -168,6 +176,9 @@ export const bakeTopicForEval = internalAction({
     rationale: v.optional(v.string()),
     connectionTo: v.optional(v.string()),
     readingLevel: v.optional(v.string()),
+    // The scholar's chosen way in, e.g. the "Build a simulation" card
+    // ({ shape: "build" }, TRA-519 B4).
+    path: v.optional(chosenPathValidator),
   },
   handler: async (
     ctx,
@@ -195,6 +206,7 @@ export const bakeTopicForEval = internalAction({
     const t0 = Date.now();
     const res = await ctx.runAction(internal.bakeUnitFromSeed.bakeUnitFromSeed, {
       seedId,
+      path: args.path,
     });
     const ms = Date.now() - t0;
 

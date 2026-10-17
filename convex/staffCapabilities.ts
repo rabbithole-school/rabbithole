@@ -191,6 +191,7 @@ export const editorForStaff = schoolAdminQuery({
     await requireStaffRecipient(ctx, args.userId, args.institutionId);
     const [
       canEditCurriculum,
+      canRunCurriculum,
       curriculumAccessIncluded,
       canManageSchoolOperations,
       schoolOperationsIncluded,
@@ -207,6 +208,12 @@ export const editorForStaff = schoolAdminQuery({
           args.userId,
           args.institutionId,
           "curriculum:edit",
+        ),
+        hasActiveInstitutionCapability(
+          ctx,
+          args.userId,
+          args.institutionId,
+          "curriculum:run",
         ),
         curriculumAccessIncludedInRole(ctx, args.userId, args.institutionId),
         hasSchoolOperationsAccessAtInstitution(
@@ -247,6 +254,9 @@ export const editorForStaff = schoolAdminQuery({
       ]);
     return {
       canEditCurriculum,
+      // Run the units she can edit (assign, push/schedule her own assignments,
+      // synthetic Preflight). Only meaningful with canEditCurriculum.
+      canRunCurriculum,
       curriculumAccessIncludedInRole: curriculumAccessIncluded,
       canManageSchoolOperations,
       schoolOperationsIncludedInRole: schoolOperationsIncluded,
@@ -276,6 +286,11 @@ export const updateForStaff = schoolAdminMutation({
     userId: v.id("users"),
     institutionId: v.id("institutions"),
     canEditCurriculum: v.boolean(),
+    // `curriculum:run` — run the units she can edit. Omitted = keep the
+    // current grant (an older client can never revoke it by accident); it is
+    // always revoked with curriculum:edit, and only base staff may hold it
+    // (teachers and school admins already run curriculum by role).
+    canRunCurriculum: v.optional(v.boolean()),
     canManageSchoolOperations: v.optional(v.boolean()),
     canManageHealthRecords: v.optional(v.boolean()),
     // Institution-wide `scholars:mentor`. Omitted = leave every existing mentor
@@ -310,6 +325,23 @@ export const updateForStaff = schoolAdminMutation({
       // staff (an outside mentor) only. Revoking stays allowed for cleanup.
       throw new Error("Only base staff can be made a mentor");
     }
+    if (args.canRunCurriculum === true) {
+      if (!args.canEditCurriculum) {
+        throw new Error("Running curriculum requires curriculum access");
+      }
+      if (!(await isBaseStaffAtInstitution(ctx, args.userId, args.institutionId))) {
+        throw new Error("Only base staff can be given curriculum running");
+      }
+    }
+    const desiredCurriculumRun =
+      args.canEditCurriculum &&
+      (args.canRunCurriculum ??
+        (await hasActiveInstitutionCapability(
+          ctx,
+          args.userId,
+          args.institutionId,
+          "curriculum:run",
+        )));
     const desiredSchoolOperations =
       args.canManageSchoolOperations ??
       (await hasSchoolOperationsAccessAtInstitution(
@@ -395,6 +427,8 @@ export const updateForStaff = schoolAdminMutation({
           return groupId !== undefined || (args.canMentorScholars ?? true);
         case "curriculum:edit":
           return args.canEditCurriculum && groupId === undefined;
+        case "curriculum:run":
+          return desiredCurriculumRun && groupId === undefined;
         case "school:operations":
           return desiredSchoolOperations && groupId === undefined;
         case "health:manage":
@@ -432,6 +466,14 @@ export const updateForStaff = schoolAdminMutation({
         granteeUserId: args.userId,
         institutionId: args.institutionId,
         capability: "curriculum:edit",
+        grantedBy: ctx.user._id,
+      });
+    }
+    if (desiredCurriculumRun) {
+      await ensureActiveStaffCapabilityGrant(ctx, {
+        granteeUserId: args.userId,
+        institutionId: args.institutionId,
+        capability: "curriculum:run",
         grantedBy: ctx.user._id,
       });
     }

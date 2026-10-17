@@ -77,6 +77,7 @@ export async function bakeTopic(topic: Topic, offline: boolean): Promise<BakeRes
     rationale: topic.rationale,
     connectionTo: topic.connectionTo,
     readingLevel: topic.readingLevel,
+    ...(topic.path ? { path: topic.path } : {}),
   });
 
   // `npx convex run <fn> <json>` prints the function's return value as JSON on
@@ -96,6 +97,22 @@ export async function bakeTopic(topic: Topic, offline: boolean): Promise<BakeRes
     );
   }
   return { ms: parsed.ms as number, activity: parsed.activity as BakedActivity };
+}
+
+/**
+ * The build-path check (TRA-519 B4): the bake's LAST activity is an app
+ * activity carrying a contract. Target: ok on >= 4 of 5 build-path bakes.
+ */
+export function buildStageCheck(design: BakedActivity["design"]): {
+  app: boolean;
+  contract: boolean;
+  ok: boolean;
+} {
+  const activities = design.lessons.flatMap((lesson) => lesson.activities);
+  const last = activities[activities.length - 1];
+  const app = last?.appActivity === true;
+  const contract = last?.hasContract === true;
+  return { app, contract, ok: app && contract };
 }
 
 /** `convex run` prints the JSON result; pull the last JSON object from stdout. */

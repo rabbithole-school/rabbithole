@@ -34,6 +34,20 @@ export function isProcessed(item: ResolvableItem): boolean {
   return scholarResolved(item) && assignmentResolved(item);
 }
 
+/**
+ * Sticky filed-ness: the item is filed now, or was filed at some point
+ * (`firstFiledAt`). A filed scan is a scholar's work, so its CONTENT (file,
+ * thumbnail, OCR text, caption) is a teaching-staff read even if it is later
+ * unfiled back into the inbox. Rows that predate the stamp count as filed only
+ * while both axes are resolved — an unfile that happened before the stamp
+ * existed cannot be reconstructed.
+ */
+export function hasBeenFiled(
+  item: ResolvableItem & { firstFiledAt?: number | null },
+): boolean {
+  return item.firstFiledAt != null || isProcessed(item);
+}
+
 /** Needs a human to fill in scholar and/or assignment. */
 export function needsReview(item: ResolvableItem): boolean {
   return !isProcessed(item);

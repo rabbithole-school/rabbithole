@@ -17,6 +17,7 @@ import {
   hasCurriculumAccessForInstitution,
 } from "./curriculumAccess";
 import { requireUnitAccessForUser } from "./unitAccess";
+import { primaryInstitutionId } from "./primaryInstitution";
 
 /**
  * Is `parentUserId` a linked guardian of `scholarId`? Pure membership
@@ -289,7 +290,7 @@ export async function requireGuardianOf(
  * the teacher dashboard, `/parent?remote=<scholarId>`).
  *
  * Teacher-role, not any staff: an operations-only staffer (`school:operations`)
- * administers accounts and portfolio but may not read the learning record —
+ * administers accounts and files scanner scans but may not read the learning record —
  * mastery, signals, seeds, session summaries, narratives — and the parent
  * portal is exactly that record in family form. `canUserAccessScholar` would
  * let them through, so this deliberately uses the teacher-membership check.
@@ -418,6 +419,75 @@ export async function requireStaffSelf(
  * Used by the Unit Designer's queries/mutations so scholars can edit
  * their own IS Units without having global curriculum access.
  */
+/**
+ * A unit's OWN school, resolved the way requireUnitAccessForUser does: a
+ * pre-tenancy unit with no stamp belongs to its scholar author's school, else
+ * the primary school. Leaving it undefined made hasCurriculumAccessForInstitution
+ * fall back to the caller's ACTIVE school, so a curriculum:edit grant at one
+ * school could edit the primary school's unstamped units (TRA-531).
+ */
+async function unitOwnInstitutionId(
+  ctx: QueryCtx | MutationCtx,
+  unit: Doc<"units">,
+): Promise<Id<"institutions"> | undefined> {
+  const author = unit.authorScholarId
+    ? await ctx.db.get(unit.authorScholarId)
+    : null;
+  return (
+    unit.institutionId ??
+    author?.institutionId ??
+    (await primaryInstitutionId(ctx)) ??
+    undefined
+  );
+}
+
+export const GROUNDING_TEACHER_ONLY =
+  "Forbidden: debriefing against real scholar sessions requires a teacher or admin role at this unit's school";
+
+/**
+ * Whether `user` may run a Debrief grounding on `unit` or read what one
+ * produced. Grounding reads real scholar transcripts and persists their names,
+ * reading levels and excerpts (`groundedSessionVerdicts`), so unit-edit access
+ * is not enough: a `curriculum:edit` staff grant or a curriculum_designer may
+ * edit the unit but carries no scholar-data access. Standing is checked at the
+ * unit's OWN school, so a teacher at one school who holds only a
+ * curriculum:edit grant at another is refused on the other school's units.
+ * A suspended school fails closed.
+ */
+export async function canGroundUnit(
+  ctx: QueryCtx | MutationCtx,
+  user: Doc<"users">,
+  unit: Doc<"units">,
+): Promise<boolean> {
+  if (!isTeacherRole(user.role)) return false;
+  const unitInstitutionId = await unitOwnInstitutionId(ctx, unit);
+  // A suspended (or deleted) school's scholars are walled off for everyone,
+  // platform admin included.
+  if (unitInstitutionId) {
+    const institution = await ctx.db.get(unitInstitutionId);
+    if (!institution || institution.disabledAt !== undefined) return false;
+  }
+  if (isPlatformAdminRole(user.role)) return true;
+  if (!unitInstitutionId) return false;
+  const memberships = await ctx.db
+    .query("memberships")
+    .withIndex("by_user", (q) => q.eq("userId", user._id))
+    .collect();
+  return memberships.some(
+    (m) => isTeacherRole(m.role) && m.institutionId === unitInstitutionId,
+  );
+}
+
+export async function requireGroundingAccess(
+  ctx: QueryCtx | MutationCtx,
+  user: Doc<"users">,
+  unit: Doc<"units">,
+): Promise<void> {
+  if (!(await canGroundUnit(ctx, user, unit))) {
+    throw new Error(GROUNDING_TEACHER_ONLY);
+  }
+}
+
 export async function requireUnitEditAccessForUser(
   ctx: QueryCtx | MutationCtx,
   user: Doc<"users">,
@@ -447,13 +517,11 @@ export async function requireUnitEditAccessForUser(
   const unit = await ctx.db.get(unitId);
   if (!unit) throw new Error("Unit not found");
 
-  const author = unit.authorScholarId
-    ? await ctx.db.get(unit.authorScholarId)
-    : null;
+  const unitInstitutionId = await unitOwnInstitutionId(ctx, unit);
   const canManageCurriculum = await hasCurriculumAccessForInstitution(
     ctx,
     user,
-    unit.institutionId ?? author?.institutionId,
+    unitInstitutionId,
   );
   const isUnitAuthor =
     !!unit.authorScholarId && unit.authorScholarId === user._id;

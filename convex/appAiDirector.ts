@@ -15,6 +15,7 @@ import { v, type Infer } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
+import { pickFocusApp } from "./lib/focusApp";
 import {
   APP_JUDGE_ID_PATTERN,
   MAX_CHARACTER_REPLY_CHARS,
@@ -151,20 +152,19 @@ export function validateJudgeSpec(input: {
   return { ok: true, value: { id, rubric, verdicts: verdicts.value } };
 }
 
-/** The app the tutor is building: the session's newest code artifact. */
+/** The app the tutor is building: the app open in the builder this turn
+ * (`focusArtifactId`, TRA-519) when it is one of this session's apps, else
+ * the session's newest code artifact (lib/focusApp.ts). */
 async function newestCodeArtifact(
   ctx: QueryCtx,
   sessionId: Id<"sessions">,
+  focusArtifactId?: Id<"artifacts">,
 ): Promise<Doc<"artifacts"> | null> {
   const artifacts = await ctx.db
     .query("artifacts")
     .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
     .collect();
-  return (
-    artifacts
-      .filter((artifact) => artifact.type === "code")
-      .sort((a, b) => b._creationTime - a._creationTime)[0] ?? null
-  );
+  return pickFocusApp(artifacts, sessionId, focusArtifactId);
 }
 
 async function ownedSession(
@@ -237,13 +237,19 @@ export const defineCharacter = internalMutation({
     sessionId: v.id("sessions"),
     callerUserId: v.id("users"),
     character: characterInput,
+    /** The app open in the builder this turn (TRA-519). */
+    focusArtifactId: v.optional(v.id("artifacts")),
   },
   returns: defineResult,
   handler: async (ctx, args) => {
     const session = await ownedSession(ctx, args.sessionId, args.callerUserId);
     const validated = validateCharacterSpec(args.character);
     if (!validated.ok) return validated;
-    const artifact = await newestCodeArtifact(ctx, session._id);
+    const artifact = await newestCodeArtifact(
+      ctx,
+      session._id,
+      args.focusArtifactId,
+    );
     if (!artifact) {
       return {
         ok: false as const,
@@ -275,13 +281,19 @@ export const defineJudge = internalMutation({
       rubric: v.string(),
       verdicts: v.array(v.string()),
     }),
+    /** The app open in the builder this turn (TRA-519). */
+    focusArtifactId: v.optional(v.id("artifacts")),
   },
   returns: defineResult,
   handler: async (ctx, args) => {
     const session = await ownedSession(ctx, args.sessionId, args.callerUserId);
     const validated = validateJudgeSpec(args.judge);
     if (!validated.ok) return validated;
-    const artifact = await newestCodeArtifact(ctx, session._id);
+    const artifact = await newestCodeArtifact(
+      ctx,
+      session._id,
+      args.focusArtifactId,
+    );
     if (!artifact) {
       return {
         ok: false as const,
@@ -317,7 +329,12 @@ export const defineJudge = internalMutation({
  * the persona stays out of the tool schema.
  */
 export const directableCharacterForSession = internalQuery({
-  args: { sessionId: v.id("sessions"), callerUserId: v.id("users") },
+  args: {
+    sessionId: v.id("sessions"),
+    callerUserId: v.id("users"),
+    /** The app open in the builder this turn (TRA-519). */
+    focusArtifactId: v.optional(v.id("artifacts")),
+  },
   returns: v.union(
     v.null(),
     v.object({
@@ -330,7 +347,11 @@ export const directableCharacterForSession = internalQuery({
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
     if (!session || session.userId !== args.callerUserId) return null;
-    const artifact = await newestCodeArtifact(ctx, session._id);
+    const artifact = await newestCodeArtifact(
+      ctx,
+      session._id,
+      args.focusArtifactId,
+    );
     const character = artifact?.appAi?.character;
     if (!artifact || !character) return null;
     return {

@@ -48,7 +48,7 @@ const { n: N, out: OUT_DIR } = parseEvalArgs({
 });
 
 const MODEL = MODELS.SONNET;
-const { maxTokens, effort } = tutorRuntime(MODEL, null);
+const { maxTokens, effort } = tutorRuntime(MODEL);
 
 function baseContext(): TutorPromptContext {
   return {

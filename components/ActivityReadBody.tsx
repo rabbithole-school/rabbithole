@@ -34,6 +34,7 @@ import { ACTIVITY_KIND, type ActivityKind } from "@/lib/activityKinds";
 import { ReadinessInline } from "@/components/curriculumDoc/ReadinessGate";
 import { SessionsInline } from "@/components/curriculumDoc/SessionsSignal";
 import { EMPTY_SESSIONS } from "@/convex/lib/activitySessions";
+import { effectiveActivityKind } from "@/shared/appSurface";
 
 function kindLabel(kind: string): string {
   return ACTIVITY_KIND[kind as ActivityKind]?.label ?? kind;
@@ -82,7 +83,8 @@ export function ActivityReadBody({
     );
   }
 
-  const isOnline = activity.kind === "online";
+  const kind = effectiveActivityKind(activity);
+  const isOnline = kind === "online";
   // The public read carries no tutor prompt (partial detail, by design).
   const systemPrompt =
     "systemPrompt" in activity ? (activity.systemPrompt ?? null) : null;
@@ -112,8 +114,8 @@ export function ActivityReadBody({
             alignItems="center"
             gap={1}
           >
-            <ActivityKindIcon kind={activity.kind} size={12} color="charcoal.500" />
-            {kindLabel(activity.kind)}
+            <ActivityKindIcon kind={kind} size={12} color="charcoal.500" />
+            {kindLabel(kind)}
           </Badge>
           {typeof activity.durationMinutes === "number" && (
             <Badge bg="gray.100" color="charcoal.500" fontFamily="heading" fontSize="2xs">
@@ -165,7 +167,7 @@ export function ActivityReadBody({
             <SectionEyebrow>Maturity</SectionEyebrow>
             <HStack gap={2.5} align="center" maxW="480px">
               <Text fontSize="sm" color="charcoal.500" fontFamily="body">
-                {kindLabel(activity.kind)} activity — quality is judged at the
+                {kindLabel(kind)} activity — quality is judged at the
                 unit&apos;s heuristic review.
               </Text>
             </HStack>

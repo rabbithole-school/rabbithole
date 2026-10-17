@@ -37,6 +37,27 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 15 * 1024 * 1024;
 const RETRY_DELAYS_MS = [5_000, 30_000, 2 * 60_000, 10 * 60_000, 30 * 60_000];
 const STUCK_AFTER_MS = 15 * 60_000;
+/** An iPad stuck in a crash loop files one automatic report per window. */
+const AUTO_REPORT_WINDOW_MS = 10 * 60_000;
+/**
+ * Fleet-wide, per trigger, per window: a regression that hits every iPad
+ * posts this many threads (each with a triage call), then raises one alert.
+ */
+const AUTO_REPORT_FLEET_CAP = 10;
+
+const triggerValidator = v.union(
+  v.literal("js_crash"),
+  v.literal("unclean_exit"),
+  v.literal("stall"),
+);
+type BugReportTrigger = NonNullable<Doc<"bugReports">["trigger"]>;
+
+const TRIGGER_HEADLINES: Record<BugReportTrigger, string> = {
+  js_crash: "💥 **Rabbithole crashed on an iPad** (automatic report)",
+  unclean_exit:
+    "🧊 **Rabbithole quit unexpectedly on an iPad** (automatic report)",
+  stall: "⏳ **Rabbithole froze on an iPad** (automatic report)",
+};
 
 type PipelineStep = "transcribe" | "post" | "files" | "bridge" | "triage";
 
@@ -68,6 +89,15 @@ interface TriageExchange {
 
 function compactOptional(value: string | undefined, max: number) {
   const compact = value?.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  return compact ? compact.slice(0, max) : undefined;
+}
+
+/** Like compactOptional, but keeps line breaks (the Slack post quotes lines). */
+function compactMultiline(value: string | undefined, max: number) {
+  const compact = value
+    ?.replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]+/g, " ")
+    .trim();
   return compact ? compact.slice(0, max) : undefined;
 }
 
@@ -152,6 +182,8 @@ export const submit = bugReportMutation({
   args: {
     surface: v.union(v.literal("native"), v.literal("web")),
     url: v.string(),
+    // Filed by the app itself (native/src/lib/appHealth.ts), not a person.
+    trigger: v.optional(triggerValidator),
     clientReportId: v.optional(v.string()),
     sessionId: v.optional(v.id("sessions")),
     viewedUserId: v.optional(v.id("users")),
@@ -191,6 +223,51 @@ export const submit = bugReportMutation({
           ok: true as const,
           reportId: existing._id,
           status: existing.status,
+        };
+      }
+    }
+
+    if (args.trigger) {
+      const trigger = args.trigger;
+      const since = Date.now() - AUTO_REPORT_WINDOW_MS;
+      const recent = await ctx.db
+        .query("bugReports")
+        .withIndex("by_actor", (q) =>
+          q.eq("actorUserId", ctx.actor._id).gt("_creationTime", since),
+        )
+        .collect();
+      const duplicate = recent.find((report) => report.trigger === trigger);
+      if (duplicate) {
+        return {
+          ok: true as const,
+          reportId: duplicate._id,
+          status: duplicate.status,
+        };
+      }
+      const fleet = await ctx.db
+        .query("bugReports")
+        .withIndex("by_trigger", (q) =>
+          q.eq("trigger", trigger).gt("_creationTime", since),
+        )
+        .order("desc")
+        .take(AUTO_REPORT_FLEET_CAP);
+      if (fleet.length >= AUTO_REPORT_FLEET_CAP) {
+        await raiseAlert(ctx, {
+          kind: "auto_bug_report_flood",
+          severity: "warning",
+          audience: "platform",
+          title: `Many iPads are reporting ${trigger} at once`,
+          body:
+            `${AUTO_REPORT_FLEET_CAP}+ automatic ${trigger} reports in ` +
+            `${AUTO_REPORT_WINDOW_MS / 60_000} minutes. Further ones are ` +
+            "dropped until it calms down; read the posted threads.",
+          source: "bugReports.submit",
+          dedupKey: `auto-bug-report-flood:${trigger}`,
+        });
+        return {
+          ok: true as const,
+          reportId: fleet[0]._id,
+          status: fleet[0].status,
         };
       }
     }
@@ -247,6 +324,7 @@ export const submit = bugReportMutation({
       viewedUserId,
       institutionId,
       surface: args.surface,
+      trigger: args.trigger,
       url: sanitizeReportUrl(args.url),
       sessionId,
       viewingMode,
@@ -255,7 +333,7 @@ export const submit = bugReportMutation({
       userAgent: compactOptional(args.userAgent, 1_000),
       appVersion: compactOptional(args.appVersion, 100),
       appBuild: compactOptional(args.appBuild, 100),
-      description: compactOptional(args.description, 8_000),
+      description: compactMultiline(args.description, 8_000),
       audioStorageId: args.audioStorageId,
       screenshotStorageId: args.screenshotStorageId,
       attempts: 0,
@@ -265,7 +343,9 @@ export const submit = bugReportMutation({
     // A scholar reporting a bug in their OWN view also gets it on their
     // Workshop board + a #workshop thread, where a staff reply reaches them.
     // Never for a report filed while viewing as a scholar — that's the viewer's.
-    const workshopCard = ctx.actor.role === ROLES.SCHOLAR && !viewedUserId;
+    // Never for an automatic report: the scholar didn't file it.
+    const workshopCard =
+      ctx.actor.role === ROLES.SCHOLAR && !viewedUserId && !args.trigger;
     if (workshopCard) {
       await fileBugReportCard(ctx, {
         scholarId: ctx.actor._id,
@@ -605,14 +685,19 @@ export const linkBugReportChannel = internalMutation({
 function reportRootMessage(context: ProcessingContext): string {
   const { report } = context;
   const lines = [
-    "🐛 **New Rabbithole bug report**",
-    `**Reported by:** ${escapeSlackText(context.actor.name)} (${escapeSlackText(context.actor.role)})`,
+    report.trigger
+      ? TRIGGER_HEADLINES[report.trigger]
+      : "🐛 **New Rabbithole bug report**",
+    `**${report.trigger ? "Signed in" : "Reported by"}:** ${escapeSlackText(context.actor.name)} (${escapeSlackText(context.actor.role)})`,
     context.viewed
       ? `**Viewing:** ${escapeSlackText(context.viewed.name)} (${escapeSlackText(context.viewed.role)})`
       : null,
     `**Surface:** ${report.surface}`,
     `**Captured:** ${new Date(report._creationTime).toISOString()}`,
     `**Where:** \`${escapeSlackText(report.url.replace(/`/g, "'"))}\``,
+    report.trigger && report.deviceModel
+      ? `**Device:** ${escapeSlackText(report.deviceModel)}, iPadOS ${escapeSlackText(report.osVersion ?? "?")}`
+      : null,
     context.session
       ? `**Session:** <${withBase(siteUrl(), sessionPath(context.session.id, context.session.ownerId))}|${escapeSlackText(context.session.title)}>`
       : null,
@@ -629,7 +714,12 @@ function reportRootMessage(context: ProcessingContext): string {
 
 function triageUserContent(context: ProcessingContext): string {
   const lines = [
-    `Bug report from ${context.actor.role} on ${context.report.surface}.`,
+    context.report.trigger
+      ? `Automatic ${context.report.trigger} report filed by the native app (signed in as a ${context.actor.role}); the description is the app's generated diagnostic text, not a person's words.`
+      : `Bug report from ${context.actor.role} on ${context.report.surface}.`,
+    context.report.appBuild
+      ? `App: ${context.report.appVersion ?? "?"} build ${context.report.appBuild}, ${context.report.deviceModel ?? "unknown device"}, iPadOS ${context.report.osVersion ?? "?"}`
+      : null,
     `URL: ${context.report.url}`,
     context.viewed ? `Viewed role: ${context.viewed.role}` : null,
     context.session ? `Session: ${context.session.title}` : null,

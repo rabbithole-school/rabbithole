@@ -67,6 +67,8 @@ const ALERT_KIND_EMOJI: Readonly<Record<string, string>> = {
   chat_overwhelm: "😫",
   // An app build drifting from its brief is a steering moment, not a failure.
   app_off_track: "🧭",
+  // The same steer for any activity that has a mission (TRA-519 B3).
+  off_mission: "🧭",
 };
 
 export function alertEmoji(
@@ -85,7 +87,7 @@ export function alertEmoji(
 // while still re-alerting if it recurs the next day. A producer can pass a
 // longer `dedupWindowMs` for a slow-moving PATTERN (vs. an emergency) so it
 // doesn't nag — e.g. parasocial over-reliance coalesces over days.
-const DEDUP_WINDOW_MS = 12 * 60 * 60 * 1000;
+export const DEDUP_WINDOW_MS = 12 * 60 * 60 * 1000;
 type AlertDbCtx = Pick<MutationCtx | QueryCtx, "db">;
 
 export interface RaiseAlertArgs {
