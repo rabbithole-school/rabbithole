@@ -1,49 +1,43 @@
 #!/usr/bin/env bash
-# Give the local tutor an Anthropic API key so it can answer. The key never
-# passes through an agent's chat.
+# Give the tutor an Anthropic API key. Rabbithole takes the key on its own
+# page, /tutor-key, which works only on this computer and only while no key is
+# set; the key never passes through an agent's chat. This opens that page
+# (sending the browser on to the scholar's view once the key is saved) and
+# returns as soon as Rabbithole reports the key, so an agent can wait on it.
 #
-#   bin/set-key.sh            asks for the key here, with the input hidden
-#   bin/set-key.sh --browser [--then <url>]
-#                             opens a one-time page on this computer to paste
-#                             it into, returns once it's saved, and sends the
-#                             browser on to <url> (default: the scholar's view)
-#   bin/set-key.sh --stdin    reads the key from standard input (the page
-#                             uses this)
+#   bin/set-key.sh   open the key page and wait (up to 30 minutes)
+#
+# To replace a key that's already set, set it from a terminal in rabbithole/:
+#   CONVEX_AGENT_MODE=anonymous npx convex env set ANTHROPIC_API_KEY
 set -euo pipefail
 . "$(dirname "$0")/../lib/common.sh"
 guard_no_cloud
 
-case "${1:-}" in
-  --browser) shift; exec node "$KIT/lib/key-page.mjs" "$@" ;;
-  --stdin) IFS= read -r key || true ;;
-  *)
-    say "Paste an Anthropic API key (it starts with sk-ant-). Get one at https://platform.claude.com/settings/keys"
-    say "Rabbithole sends tutor conversations to Anthropic with this key, and Anthropic bills you for that use."
-    printf 'Key (hidden): '
-    IFS= read -rs key
-    printf '\n'
-    ;;
-esac
-key="$(printf %s "$key" | tr -d '[:space:]')"
-[ -n "$key" ] || die "no key entered; nothing changed"
+pid_alive next && pid_alive convex || die "Rabbithole isn't running yet. Start it with bin/setup.sh, then run this again."
 
-code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://api.anthropic.com/v1/models \
-  -H "x-api-key: $key" -H "anthropic-version: 2023-06-01" || true)"
-case "$code" in
-  200) say "Anthropic accepted the key." ;;
-  401 | 403) unset key; die "Anthropic rejected that key (HTTP $code). Check it and try again; nothing changed." ;;
-  *) say "Couldn't reach Anthropic to check the key (HTTP ${code:-none}); saving it anyway." ;;
-esac
+# Not grep -q: under pipefail its early exit would fail the pipeline.
+key_set() { app_run status 2>/dev/null | grep 'Tutor key: *set' >/dev/null; }
 
-if pid_alive convex; then
-  (cd "$APP" && printf %s "$key" | npx convex env set ANTHROPIC_API_KEY >/dev/null)
-  unset key
-  say "Saved, in this computer's local Rabbithole only."
-else
-  (umask 077 && printf %s "$key" >"$PENDING_KEY")
-  unset key
-  say "Saved on this computer. Rabbithole isn't running yet; bin/setup.sh hands the key over once it is."
+if key_set; then
+  say "The tutor already has a key."
+  exit 0
 fi
-say "While a key is set, Rabbithole's scheduled jobs can call the model too, so stop it (bin/stop.sh) when you're done."
-say "To remove the key:"
-say "  (cd rabbithole && CONVEX_AGENT_MODE=anonymous npx convex env remove ANTHROPIC_API_KEY)"
+
+next="/dev-login?u=leilani_park&to=%2Fscholar"
+url="http://localhost:$WEB_PORT/tutor-key?next=$(printf %s "$next" | sed 's/?/%3F/; s/=/%3D/g; s/&/%26/g')"
+say "Opening Rabbithole's key page: $url"
+say "Paste the key there. It's checked with Anthropic and saved in this computer's Rabbithole only."
+case "$(uname -s)" in
+  Darwin) open "$url" 2>/dev/null || true ;;
+  Linux) xdg-open "$url" >/dev/null 2>&1 || true ;;
+esac
+
+for _ in $(seq 1 900); do # 30 minutes, every 2 seconds
+  if key_set; then
+    say "The tutor has its key. The page is taking the person to the scholar's view."
+    say "While a key is set, Rabbithole's scheduled jobs can call the model too, so stop it (bin/stop.sh) when you're done."
+    exit 0
+  fi
+  sleep 2
+done
+die "no key arrived in 30 minutes; nothing changed. Run bin/set-key.sh again when ready."

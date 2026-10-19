@@ -61,7 +61,7 @@ Mac). `bin/uninstall.sh --all` removes the backend download and
 `pnpm store prune` trims the package store. Say so up front if the person
 cares where things go.
 
-## 3. While it installs: who, what, and a key
+## 3. While it installs: who, what, and the key
 
 Ask, showing all four choices:
 
@@ -81,32 +81,20 @@ costs a dollar or two; a kid who uses it all school day costs a few dollars a
 day. They can set a spending limit in the console first. Scheduled jobs use
 the key too, so stop Rabbithole when done.
 
-The key goes in through a page, not through you. Run
-`bin/set-key.sh --browser`: it opens a one-time page on this computer where
-the person pastes the key (it also walks them through getting one), checks
-it with Anthropic, and saves it, whether or not setup has finished. Then the
-page takes their browser straight to the scholar's view as soon as
-Rabbithole is ready, and the script returns. So tell them, in one message:
-a page opened in their browser, the key goes there and never into this
-chat, and it will take them to the tutor. Then wait for the script to
-return instead of asking them to tell you; if your commands time out sooner,
-run it in the background and check its output every few seconds. If the
-page didn't open, the link is in the script's output. (Without `--browser`,
-the script asks for the key in a terminal instead.)
+The key goes into Rabbithole, never through you. Ask now whether they have
+one; you'll open the page for it once setup prints READY (step 4).
 
-If they don't have a key yet, help them get one; it takes a few minutes.
-Anthropic only makes keys in its web console: sign in or sign up at
-https://platform.claude.com, add a few dollars of credit under Billing (and
-a spending limit, if they like), then create a key at
+If they don't have a key yet, help them get one while setup runs; it takes a
+few minutes. Anthropic only makes keys in its web console: sign in or sign
+up at https://platform.claude.com, add a few dollars of credit under Billing
+(and a spending limit, if they like), then create a key at
 https://platform.claude.com/settings/keys. The console shows the key only
-once, so have them paste it into the key page right away.
+once, so have them keep it handy for the next step.
 
 The tutor is the point of trying Rabbithole, so don't offer a tour without a
 key in its place. If they decide not to get one, say plainly that the tutor
-is what's worth seeing and that they can come back to it any time with
-`bin/set-key.sh --browser`. Without a key, the tutor's chat says it needs
-one and links to a page in Rabbithole where they can add it; that page
-only works while no key is set.
+is what's worth seeing; the tutor's chat itself will offer to take a key
+whenever they're ready.
 
 Let their answer to the Caterpillar shape what you point out from here: a
 parent wants to know what a child will see, a teacher what they can steer, a
@@ -114,9 +102,21 @@ leader where data goes and what it costs, a tinkerer how it's built.
 
 ## 4. The tutor
 
-When setup prints READY, the person has answered step 3, and the key is set,
-they'll already be on the scholar's view if the key page took them there.
-If not, open it (`open <url>` on a Mac, `xdg-open` on Linux):
+When setup prints READY, run `bin/set-key.sh`. It opens Rabbithole's own
+key page (`/tutor-key`, which works only on this computer and only while no
+key is set), where the person pastes the key. Rabbithole checks it with
+Anthropic, saves it, and takes their browser straight to the scholar's view;
+the script returns as soon as the key is in. So tell them, in one message: a
+page opened in their browser, the key goes there and never into this chat,
+and it will take them to the tutor. Then wait for the script instead of
+asking them to tell you; if your commands time out sooner, run it in the
+background and check its output every few seconds. If the page didn't open,
+the address is in the script's output. To replace a key that's already set,
+run `CONVEX_AGENT_MODE=anonymous npx convex env set ANTHROPIC_API_KEY` in
+`rabbithole/` from the person's own terminal.
+
+If the browser isn't on the scholar's view, open it (`open <url>` on a Mac,
+`xdg-open` on Linux):
 
     http://localhost:3000/dev-login?u=leilani_park&to=/scholar
 

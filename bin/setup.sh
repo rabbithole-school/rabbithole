@@ -30,13 +30,12 @@ ready() {
   Logs:                   rabbithole/local/.run/convex.log and next.log
 EOF
   # Not grep -q: under pipefail its early exit would fail the pipeline.
-  if [ ! -f "$PENDING_KEY" ] && app_run status 2>/dev/null | grep 'Tutor key: *not set' >/dev/null; then
-    say "  Let the tutor answer:   bin/set-key.sh --browser   (a page for pasting an Anthropic key)"
+  if app_run status 2>/dev/null | grep 'Tutor key: *not set' >/dev/null; then
+    say "  Let the tutor answer:   bin/set-key.sh   (opens Rabbithole's page for an Anthropic key)"
   fi
 }
 
 if pid_alive next && pid_alive convex; then
-  hand_over_key || die "couldn't hand the key over; run bin/set-key.sh again"
   say "Rabbithole is already running."
   ready
   exit 0
@@ -64,6 +63,5 @@ app_run setup "$@" | awk '/\] READY$/ { done = 1 } !done { print; fflush() }' ||
   die "setup stopped early. Its logs are in rabbithole/local/.run/; read the one named above, fix the cause, and run bin/setup.sh again."
 
 [ "${1:-}" = "--no-serve" ] && { say ""; say "Set up. Start it with: bin/setup.sh"; exit 0; }
-hand_over_key || die "couldn't hand the key over; run bin/set-key.sh again"
 printf '\n[drink-me] READY\n'
 ready
