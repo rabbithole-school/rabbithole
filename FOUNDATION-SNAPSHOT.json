@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "5552f5492ee5224e71ccb77fde79a389134283d5",
+  "sourceCommit": "ed8b705f7898db9dcac931b1cecdbbfdf9106fc5",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -11119,7 +11119,7 @@
     },
     {
       "path": "convex/prompts.ts",
-      "sha256": "32c3849385ec3cf9212051a2faa47bfaae46561d881218ff0b624899fc1d4a96",
+      "sha256": "f812781e004515b6bdad3648f384be52b0cfb0dae2cbdb707f4734d0c475236a",
       "mode": "100644"
     },
     {
@@ -13303,6 +13303,76 @@
       "mode": "100644"
     },
     {
+      "path": "evals/stance-fit/README.md",
+      "sha256": "a74e75f76896c0e7b6d234946cbc272d844540bab35a2fd15f11d12782811855",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/classify.ts",
+      "sha256": "820e9de31f91c47b0ede2b504922332716e60f5e2c3e834d89e6a81c8bb307d9",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/decision-points.ts",
+      "sha256": "718aecf82afb1e227d71d2eb76e67d4b6204d18c3c89c8126a79cc2388dfeec2",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/fetch.mjs",
+      "sha256": "469299a1de67147b7f234693146563b6b8f8701c409bc71b88846b694dea1dd6",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/fixtures/smoke-session.json",
+      "sha256": "1c8566335c19ffbe671fa06b67ad2c75153ae834254d06c0230d2c7ab83bb238",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/replay/compare.ts",
+      "sha256": "4fdaa854c5f807fad59dd8e3f40ebac5ac31fdf4ed2db6112089dcbe8d58ff61",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/replay/fixtures/synthetic/data/synthetic-replay-fractions.json",
+      "sha256": "7538113534b77f597ea856affec9f0e9601754c44e95a892a6b43e647ec0f337",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/replay/fixtures/synthetic/data/synthetic-replay-volcano.json",
+      "sha256": "cd6e34e65dcbb93f3d36d738f47928a2c3f47b626803cfa6943c92c4831fce9c",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/replay/fixtures/synthetic/decision-points.json",
+      "sha256": "6ef64e9fefdecb3f80be7e21f0bd71d718d8d5e57835e9eec0d45623e4c14f1d",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/replay/judge.ts",
+      "sha256": "58d64a57d8e03353f9c40858c8240135b2bffae9bf43071275f095e4d952f8e8",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/replay/lib.test.ts",
+      "sha256": "eb7010ec7fbef8f0b433d3f0123e529e7ba5792851a92c76490e3f2243f9b126",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/replay/lib.ts",
+      "sha256": "e3bce263bccdd6b5460e3269c6a2a265fef537ceec361d7a5bf19d9310e1b1ac",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/replay/run.ts",
+      "sha256": "b58fe35472d18c39beb6429fcf82c8955d47d58c4e019b141ddc5f3890f0bd87",
+      "mode": "100644"
+    },
+    {
+      "path": "evals/stance-fit/report.ts",
+      "sha256": "a8ea8dab421d282f93168d282ae51b073589b11f1e46bfec0fb4b97f4988a4f5",
+      "mode": "100644"
+    },
+    {
       "path": "evals/teach-back/.gitignore",
       "sha256": "ccfd32f90a6f609ef1fb2fdcd1feabb82d2c799bd5fcdc343f0ae67f41842485",
       "mode": "100644"
@@ -13379,7 +13449,7 @@
     },
     {
       "path": "evals/tutor-quality/FINDINGS.md",
-      "sha256": "e54774d0456cc5946aad2a3cfe245e7081ce4e6e1a5203a6082c76b65447b5f5",
+      "sha256": "148a08f8126418215ad6430d0749ea4899d751baf4429659d28dcea58d7f16d4",
       "mode": "100644"
     },
     {
@@ -14259,7 +14329,7 @@
     },
     {
       "path": "lib/__tests__/kidSafePrinciples.test.ts",
-      "sha256": "b70a05cf5205a4607efb618dd18cd8a0f37d0b63b2fee0b1e5d05fa2e4e553c1",
+      "sha256": "72cdcd62677355d9951277134ca12af93b6dd31b5e622a3f6406190a43a19043",
       "mode": "100644"
     },
     {
@@ -14819,7 +14889,7 @@
     },
     {
       "path": "lib/kidSafePrinciples.ts",
-      "sha256": "0a2c755c98b22c9e9117a4bbf7edb92eadf9cfc19f6f927abd1e68531aca1931",
+      "sha256": "1fef270b84d9eb1835c1956e6def85c124c4d654955ccd196be213d51e31784f",
       "mode": "100644"
     },
     {
@@ -18819,7 +18889,7 @@
     },
     {
       "path": "native/src/lib/kidSafePrinciples.ts",
-      "sha256": "4688113a7cefcd613d37a83de48a2917b6dc029faf4ed0440a1b03101513bb1a",
+      "sha256": "32fa331bf1dc22fa73feb2b7803b8c353402861aae2f8141dc720fa68582ac97",
       "mode": "100644"
     },
     {
@@ -21569,7 +21639,7 @@
     },
     {
       "path": "shared/tutorQualityRubric.ts",
-      "sha256": "df7d3343dd37815e38134621f6e5e07db0123494dc799c8f7df6fc4b50069361",
+      "sha256": "ca9ae1942b0fb17135d29103af79dbf3542d2b887de4edbb0050b29bf6428df2",
       "mode": "100644"
     },
     {
@@ -21993,5 +22063,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "c7c0d693d686eb409c91f14bbc73a97539a42a08b9f2631e169b3adf6a6d11fc"
+  "treeHash": "d49f5abab0470cfb242f0fe482b57a0a4f96a0d5df89d0c0fa8e55cddbeab241"
 }

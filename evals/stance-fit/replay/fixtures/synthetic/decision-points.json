@@ -1,0 +1,42 @@
+[
+  {
+    "sessionId": "synthetic-replay-fractions",
+    "scholarIndex": 8,
+    "tutorIndex": 9,
+    "state": "stuck_repeating",
+    "originalMove": "direct_explanation",
+    "originalFit": "matched"
+  },
+  {
+    "sessionId": "synthetic-replay-fractions",
+    "scholarIndex": 10,
+    "tutorIndex": 11,
+    "state": "demonstrated",
+    "originalMove": "probe_question",
+    "originalFit": "missed_closure"
+  },
+  {
+    "sessionId": "synthetic-replay-volcano",
+    "scholarIndex": 4,
+    "tutorIndex": 5,
+    "state": "has_footing",
+    "originalMove": "probe_question",
+    "originalFit": "matched"
+  },
+  {
+    "sessionId": "synthetic-replay-fractions",
+    "scholarIndex": 6,
+    "tutorIndex": 7,
+    "state": "stuck_repeating",
+    "originalMove": "narrowing_hint",
+    "originalFit": "funnel"
+  },
+  {
+    "sessionId": "synthetic-replay-volcano",
+    "scholarIndex": 6,
+    "tutorIndex": 7,
+    "state": "has_footing",
+    "originalMove": "probe_question",
+    "originalFit": "matched"
+  }
+]

@@ -1,0 +1,71 @@
+{
+  "sessionId": "synthetic-stance-smoke",
+  "title": "Why the Moon changes shape",
+  "unitTitle": "Sky Patterns",
+  "activityTitle": "Moon Phases",
+  "readingLevel": "Grade 4",
+  "createdAt": 1789761600000,
+  "scholarId": "fictional-scholar-001",
+  "messages": [
+    {
+      "role": "user",
+      "content": "<start>",
+      "createdAt": 1789761600000
+    },
+    {
+      "role": "assistant",
+      "content": "What have you noticed about how the Moon looks on different nights?",
+      "createdAt": 1789761601000
+    },
+    {
+      "role": "user",
+      "content": "I never learned moon phases. Why does it change shape?",
+      "createdAt": 1789761602000
+    },
+    {
+      "role": "assistant",
+      "content": "What do you think could make the bright part change?",
+      "createdAt": 1789761603000
+    },
+    {
+      "role": "user",
+      "content": "I have no idea.",
+      "createdAt": 1789761604000
+    },
+    {
+      "role": "assistant",
+      "content": "Could Earth's shadow be covering different parts?",
+      "createdAt": 1789761605000
+    },
+    {
+      "role": "user",
+      "content": "Maybe Earth's shadow?",
+      "createdAt": 1789761606000
+    },
+    {
+      "role": "assistant",
+      "content": "If that were true, would the shadow change as the Moon travels around Earth?",
+      "createdAt": 1789761607000
+    },
+    {
+      "role": "user",
+      "content": "I still don't know. Just explain it.",
+      "createdAt": 1789761608000
+    },
+    {
+      "role": "assistant",
+      "content": "The Sun always lights half of the Moon. As the Moon moves around Earth, we see different amounts of that lit half; those views are the phases.",
+      "createdAt": 1789761609000
+    },
+    {
+      "role": "user",
+      "content": "Oh, so the Moon stays round and we just see different amounts of its sunny half.",
+      "createdAt": 1789761610000
+    },
+    {
+      "role": "assistant",
+      "content": "Exactly: the Moon stays round, and its changing position changes how much of the lit half we see. You explained the key idea, so this part is done.",
+      "createdAt": 1789761611000
+    }
+  ]
+}

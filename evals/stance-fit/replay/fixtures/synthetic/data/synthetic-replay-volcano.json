@@ -1,0 +1,51 @@
+{
+  "sessionId": "synthetic-replay-volcano",
+  "title": "Why volcanoes erupt",
+  "unitTitle": null,
+  "activityTitle": null,
+  "readingLevel": "Grade 5",
+  "createdAt": 1789761600000,
+  "scholarId": "fictional-synthetic-replay-volcano",
+  "messages": [
+    {
+      "role": "user",
+      "content": "<start>",
+      "createdAt": 1789761600000
+    },
+    {
+      "role": "assistant",
+      "content": "Welcome back! What are you curious about today?",
+      "createdAt": 1789761601000
+    },
+    {
+      "role": "user",
+      "content": "why do volcanoes erupt",
+      "createdAt": 1789761602000
+    },
+    {
+      "role": "assistant",
+      "content": "Great question. What do you already know about what is inside the Earth?",
+      "createdAt": 1789761603000
+    },
+    {
+      "role": "user",
+      "content": "there's hot melted rock called magma, and it's less dense than the rock around it",
+      "createdAt": 1789761604000
+    },
+    {
+      "role": "assistant",
+      "content": "So if magma is less dense, what do you think it tends to do?",
+      "createdAt": 1789761605000
+    },
+    {
+      "role": "user",
+      "content": "it rises up! like a bubble in water, and gas in it pushes too",
+      "createdAt": 1789761606000
+    },
+    {
+      "role": "assistant",
+      "content": "Yes. Why might the gas matter when it gets near the surface?",
+      "createdAt": 1789761607000
+    }
+  ]
+}

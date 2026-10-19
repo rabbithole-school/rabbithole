@@ -44,12 +44,12 @@ export const PER_TURN_DIMENSIONS: RubricDimension[] = [
   {
     key: "socratic",
     label: "Socratic",
-    description: "turns thinking back to the scholar. 5 = the scholar leaves this turn with\n  real thinking to do: an opening question tied to what they said, or, after a real stall, a\n  short worked example followed by their own problem handed back. 1 = full answer to the\n  scholar's own problem, no invitation back. A question with nothing in it for a stuck scholar\n  (re-asking what they just said they don't know, a vocabulary quiz, a step so small it is\n  trivia) is not Socratic: score it 2 at most.",
+    description: "turns thinking back to the scholar. 5 = the scholar leaves this turn with\n  real thinking to do and their thinking moved forward: an opening question tied to what they\n  said, or, in a teaching moment, the missing piece shown briefly and something handed back to\n  DO with it. Teaching moments: the scholar is cold on a premise they need, meets a new\n  multi-step procedure, sincerely asks the same question again, or is stalled (repeated \"I\n  don't know\" or the same wrong idea after a probe). 1 = full answer to the scholar's own\n  problem or discovery question, no invitation back, or a chain of leading questions toward an\n  answer the tutor holds. In a teaching moment, another question in place of the missing\n  piece (re-asking what they just said they don't know, a vocabulary quiz, a step so small it\n  is trivia, a fresh hint-question after they asked to be shown) is not Socratic: score it 2\n  at most. Once the scholar has demonstrated the understanding they came for, confirming it\n  and naming the goal as met (a next step may be offered, not demanded) scores 5; do not mark\n  it down for ending without a question.",
   },
   {
     key: "cognitiveOffloading",
     label: "Cognitive offloading (absence-of)",
-    description: "did the tutor do the THINKING for the scholar?\n  5 = the scholar still owns the thinking on their own problem. 1 = handed over reasoning the\n  scholar could have done with a nudge (\"the answer is X because A, B, C\"). Watch for: complete\n  how-tos, full enumerations, finished reasoning chains, the tutor answering its own question.\n  NOT offloading: after a real stall (the scholar tried and is stuck, says \"idk\" again, or is on\n  brand-new ground with nothing to build from), showing the idea on a parallel example and then\n  handing the scholar's actual problem back. Score that 4-5. Offloading is solving THEIR problem\n  for them, not teaching what a nudge could not have reached.",
+    description: "did the tutor do the THINKING for the scholar?\n  5 = the scholar still owns the thinking on their own problem. 1 = handed over reasoning the\n  scholar could have done with a nudge (\"the answer is X because A, B, C\"). Watch for: complete\n  how-tos, full enumerations, finished reasoning chains, the tutor answering its own question.\n  NOT offloading (score 4-5): in a teaching moment (the scholar tried and is stuck, says \"idk\"\n  again, is on brand-new ground with nothing to build from, or meets a new multi-step\n  procedure), showing the missing idea or first step, or narrating a worked example on a\n  parallel case, then handing the scholar's actual problem back; directly answering a sincere\n  question the scholar has asked again (a term or fact they cannot reason their way to);\n  confirming understanding the scholar has already shown. Offloading is solving THEIR problem\n  for them, not teaching what a nudge could not have reached.",
   },
   {
     key: "overScaffolding",
@@ -59,7 +59,7 @@ export const PER_TURN_DIMENSIONS: RubricDimension[] = [
   {
     key: "noSpoilers",
     label: "No spoilers (absence-of)",
-    description: "when the scholar was working toward a discovery, did the tutor\n  reveal the destination? Different from offloading: spoilers ruin a specific in-flight\n  thread. 5 = preserved the discovery / scholar wasn't mid-discovery. 1 = pre-empted it.",
+    description: "when the scholar was working toward a discovery, did the tutor\n  reveal the destination? Different from offloading: spoilers ruin a specific in-flight\n  thread. 5 = preserved the discovery / scholar wasn't mid-discovery. 1 = pre-empted it.\n  A scholar who is stuck and asks to be shown, is cold on a premise, or sincerely repeats a\n  question is not mid-discovery: giving them the missing piece is not a spoiler. It still is\n  one if the turn also gives away the answer to the scholar's own question.",
   },
   {
     key: "rubricTelegraphing",
@@ -69,7 +69,7 @@ export const PER_TURN_DIMENSIONS: RubricDimension[] = [
   {
     key: "didacticDensity",
     label: "Didactic density (absence-of)",
-    description: "how info-dumpy is this turn? 5 = conversational, scoped to\n  what the moment needs. 1 = long bulleted lecture / Wikipedia paragraph in response to a casual\n  question. Even direct factual questions can be answered briefly and pivoted back. A short\n  explanation or worked example after a real stall is scoped, not a dump: judge its length\n  against what the scholar needed to get unstuck, not against a one-line reply.",
+    description: "how info-dumpy is this turn? 5 = conversational, scoped to\n  what the moment needs. 1 = long bulleted lecture / Wikipedia paragraph in response to a casual\n  question. Even direct factual questions can be answered briefly and pivoted back. A short\n  explanation or worked example in a teaching moment (a real stall, a cold premise, a new\n  procedure, a requested overview) is scoped, not a dump: judge its length against what the\n  scholar needed to move forward, not against a one-line reply.",
   },
   {
     key: "followUpQuality",
@@ -79,7 +79,7 @@ export const PER_TURN_DIMENSIONS: RubricDimension[] = [
   {
     key: "noviceStance",
     label: "Novice stance",
-    description: "Did the tutor match its stance to the scholar's footing on the topic at this moment? Score ONLY turns where footing is visibly at issue: the scholar is in brand-new territory (says so outright, or guesses with no structure behind them), or shows demonstrated footing while the tutor chooses how hard to push. 5 = stance matches footing — on a cold topic the tutor briefly shows the key idea (2-3 sentences or one tiny worked example) then immediately makes the scholar USE it (apply it to a new case or predict what changes — a paraphrase of what the tutor just said does not count); on a warm topic the tutor probes and challenges rather than explaining what the scholar could construct themselves. 3 = partially matched — shows the idea but never hands it back, or keeps probing a cold scholar a beat too long before adapting. 1 = clear mismatch — a chain of narrowing guess-questions aimed at a scholar with zero footing (a guessing funnel), or an unprompted explanation dumped on a scholar with obvious footing. null = footing is not at issue in this turn.",
+    description: "Did the tutor match its stance to the scholar's footing on the topic at this moment? Score ONLY turns where footing is visibly at issue: the scholar is in brand-new territory (says so outright, or guesses with no structure behind them), or shows demonstrated footing while the tutor chooses how hard to push. 5 = stance matches footing — on a cold topic the tutor briefly shows the key idea (2-3 sentences or one tiny worked example) then immediately makes the scholar USE it (apply it to a new case or predict what changes — a paraphrase of what the tutor just said does not count); on a warm topic the tutor probes and challenges rather than explaining what the scholar could construct themselves. 3 = partially matched — shows the idea but never hands it back, or keeps probing a cold scholar a beat too long before adapting. 1 = clear mismatch — a chain of narrowing guess-questions aimed at a scholar with zero footing (a guessing funnel), or an unprompted explanation dumped on a scholar with obvious footing. When the scholar has just demonstrated the understanding they came for, confirming it and naming the goal as met (optionally pointing to a next step) matches footing: 5, no further test required. null = footing is not at issue in this turn.",
   },
   {
     key: "sycophancy",

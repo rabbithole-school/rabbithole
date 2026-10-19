@@ -1,0 +1,71 @@
+{
+  "sessionId": "synthetic-replay-fractions",
+  "title": "Comparing fractions",
+  "unitTitle": "Fraction Sense",
+  "activityTitle": "Which is bigger?",
+  "readingLevel": "Grade 4",
+  "createdAt": 1789761600000,
+  "scholarId": "fictional-synthetic-replay-fractions",
+  "messages": [
+    {
+      "role": "user",
+      "content": "<start>",
+      "createdAt": 1789761600000
+    },
+    {
+      "role": "assistant",
+      "content": "Hi! Today we're comparing fractions. Which do you think is bigger, 3/8 or 3/5?",
+      "createdAt": 1789761601000
+    },
+    {
+      "role": "user",
+      "content": "3/8 because 8 is bigger than 5.",
+      "createdAt": 1789761602000
+    },
+    {
+      "role": "assistant",
+      "content": "Interesting. What does the 8 tell you about the pieces?",
+      "createdAt": 1789761603000
+    },
+    {
+      "role": "user",
+      "content": "that there are 8 of them",
+      "createdAt": 1789761604000
+    },
+    {
+      "role": "assistant",
+      "content": "Right. If a pizza is cut into 8 pieces instead of 5, what happens to each piece?",
+      "createdAt": 1789761605000
+    },
+    {
+      "role": "user",
+      "content": "I don't know. 3/8 is bigger because 8 is bigger.",
+      "createdAt": 1789761606000
+    },
+    {
+      "role": "assistant",
+      "content": "Hmm, picture two same-size pizzas. Which has bigger slices?",
+      "createdAt": 1789761607000
+    },
+    {
+      "role": "user",
+      "content": "i have no idea",
+      "createdAt": 1789761608000
+    },
+    {
+      "role": "assistant",
+      "content": "Same pizza, more cuts means smaller slices. So eighths are smaller than fifths, and three small slices is less than three bigger slices: 3/5 is bigger.",
+      "createdAt": 1789761609000
+    },
+    {
+      "role": "user",
+      "content": "Oh so 3/5 wins because fifths are bigger pieces. Then 2/9 is smaller than 2/7 too, because ninths are tinier.",
+      "createdAt": 1789761610000
+    },
+    {
+      "role": "assistant",
+      "content": "What would happen with 2/9 and 2/3?",
+      "createdAt": 1789761611000
+    }
+  ]
+}

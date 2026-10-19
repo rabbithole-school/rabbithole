@@ -22,7 +22,7 @@ export const KID_SAFE_PRINCIPLES = [
   {
     title: "Make struggle useful",
     blurb:
-      "If you get stuck, it should give a hint or a smaller step — not snatch the puzzle away.",
+      "If you get stuck, it gives a hint or a smaller step, and if you are still stuck, a short example on a different problem. It never snatches your puzzle away.",
   },
   {
     title: "No doing your work for you",
