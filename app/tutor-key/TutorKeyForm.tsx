@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Box, Button, Flex, Input, Text, VStack } from "@chakra-ui/react";
 
 type Status =
@@ -9,9 +9,21 @@ type Status =
   | { kind: "saved" }
   | { kind: "error"; message: string };
 
-export function TutorKeyForm() {
+// Long enough to read the confirmation, short enough not to wait on.
+const RETURN_DELAY_MS = 900;
+
+/** `returnTo` is already validated (lib/tutorKeyReturn.ts). */
+export function TutorKeyForm({ returnTo }: { returnTo: string }) {
   const [key, setKey] = useState("");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
+
+  // A full navigation, not a router push, so the chat remounts and its
+  // opening turn runs again with the key now set.
+  useEffect(() => {
+    if (status.kind !== "saved") return;
+    const timer = setTimeout(() => window.location.assign(returnTo), RETURN_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [status.kind, returnTo]);
 
   const save = async () => {
     setStatus({ kind: "saving" });
@@ -50,7 +62,7 @@ export function TutorKeyForm() {
         {status.kind === "saved" ? (
           <Box bg="white" borderWidth="1px" borderColor="gray.200" borderRadius="lg" p={4}>
             <Text fontFamily="body" fontSize="sm" color="charcoal.600">
-              Saved. Go back to the chat and tap Try again.
+              Saved. Taking you back…
             </Text>
           </Box>
         ) : (

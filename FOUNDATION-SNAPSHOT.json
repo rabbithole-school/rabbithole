@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "43806af7f39facc90231dc0e03b2db2b6a40b0c1",
+  "sourceCommit": "708da3abc90fc980a173e917f8b9c0d084d041e9",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -424,7 +424,7 @@
     },
     {
       "path": "app/scholar/[sessionId]/page.tsx",
-      "sha256": "a571d9309ee325e8b63531aa62e62dba74e8866fdea9c2c67aa0af76be984cb8",
+      "sha256": "365389af9402067bda796fc5a5931c9ba1ccc4f823a7a50e86977d6b7843ac03",
       "mode": "100644"
     },
     {
@@ -984,12 +984,12 @@
     },
     {
       "path": "app/tutor-key/TutorKeyForm.tsx",
-      "sha256": "c2adfa6adc1bf6c27694fc8d2e12ae777bfb8fc5dfeebe13933de543dd82e17b",
+      "sha256": "52b7c98e583f642a36c12422e66b8df678d5d6d0397da3e4c7bac869fa019074",
       "mode": "100644"
     },
     {
       "path": "app/tutor-key/page.tsx",
-      "sha256": "66ab5637c2196e9d678ec2fe50b459441de855bd9e80a2e08d076283e2c8a09c",
+      "sha256": "8a4484f338fb9c329c671eaf3b4ac938fd05476b9b266abfce612d130a0ad859",
       "mode": "100644"
     },
     {
@@ -2099,7 +2099,7 @@
     },
     {
       "path": "components/SessionInterface.tsx",
-      "sha256": "0e84d3f0d23a84436fe952e73d0f0bbf5c4fbada5e934acb371fa878e3e50cc8",
+      "sha256": "0bda3dc2a980724c612ba89005ff457fc109e468665b4e61bb66c4714d746c83",
       "mode": "100644"
     },
     {
@@ -2114,7 +2114,7 @@
     },
     {
       "path": "components/SessionTranscript.tsx",
-      "sha256": "69c1c2c3ee143dd48ef1b46559f7887517cabaed16a1ef4b98a73e7cf5d6b09f",
+      "sha256": "d88b953a1af58a4e1b054505b33974eeac82ef2ffd161a9356b600ef18bb55ec",
       "mode": "100644"
     },
     {
@@ -15608,6 +15608,16 @@
       "mode": "100644"
     },
     {
+      "path": "lib/tutorKeyReturn.test.ts",
+      "sha256": "e6861d7539d53b9673ad09270a8b1618630b0a1ed41d4ebf32bcee5601939d57",
+      "mode": "100644"
+    },
+    {
+      "path": "lib/tutorKeyReturn.ts",
+      "sha256": "5a7e7820e0b60c843b585616bdd86bbebfdc9a99449c02e8d9d6590ff279b3e5",
+      "mode": "100644"
+    },
+    {
       "path": "lib/uploadMessageAttachment.ts",
       "sha256": "456be6699b3203bcbadce81055e3aa2aeec09ce5d08349367386e52885b51ea5",
       "mode": "100644"
@@ -22148,5 +22158,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "dda52e293522600ce8fc7519828d2c9a99712f7b471bcf6c81498eba5c610dc7"
+  "treeHash": "7ede33175f04057b502946581533f4503573653dab66f8db35f57f239eb2e8cc"
 }

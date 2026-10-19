@@ -37,6 +37,7 @@ import {
 } from "@/lib/sentenceStream";
 import { busyRetryCopy } from "@/shared/llmLimiter";
 import { isTutorNeedsKeyError, TUTOR_NEEDS_KEY_MESSAGE } from "@/shared/tutorKey";
+import { tutorKeyHref } from "@/lib/tutorKeyReturn";
 import {
   beginnerAlphabet,
   checkDecodable,
@@ -1643,6 +1644,27 @@ export function SessionInterface({
   // keeps the existing hidden <start> path.
   useEffect(() => {
     if (!sessionData || isStreaming || kickoffPendingRef.current) return;
+    // An opener refused for want of a key leaves only its hidden <start>: the
+    // stream discards the empty placeholder (TRA-536), so nothing marks the
+    // turn dead and the chat would sit blank. On a fresh mount (back from
+    // /tutor-key, or a reload) ask for that reply again, once per mount. A
+    // key still missing fails the same way and shows the notice; welcomeSentRef
+    // stays set, so it never loops.
+    const onlyMessage =
+      sessionData.messages.length === 1 ? sessionData.messages[0] : null;
+    if (
+      onlyMessage?.role === "user" &&
+      onlyMessage.content === "<start>" &&
+      !sessionData.session.activityId &&
+      !sessionData.session.isArchived &&
+      currentUser &&
+      String(currentUser._id) === String(sessionData.session.userId)
+    ) {
+      if (welcomeSentRef.current === sessionId) return;
+      welcomeSentRef.current = sessionId;
+      void handleRetryTurn();
+      return;
+    }
     const hasNoMessages = sessionData.messages.length === 0;
     if (!hasNoMessages && !activeKickoffPlaceholder) {
       if (kickoffRetryTimerRef.current) {
@@ -2108,7 +2130,15 @@ export function SessionInterface({
             : stream.busyRetryAfterSec !== undefined
               ? busyRetryCopy(stream.busyRetryAfterSec)
               : null,
-          failedTurnAddKeyHref: stream.needsKey?.addKeyPath ?? null,
+          // Same tab, back to this chat after the save: the fresh mount runs
+          // the opening turn again with the key set.
+          failedTurnAddKeyHref:
+            stream.needsKey?.addKeyPath && typeof window !== "undefined"
+              ? tutorKeyHref(
+                  stream.needsKey.addKeyPath,
+                  window.location.pathname + window.location.search,
+                )
+              : null,
           input,
           setInput,
           handleKeyDown,
