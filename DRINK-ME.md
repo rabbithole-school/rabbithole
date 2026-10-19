@@ -54,6 +54,13 @@ background if your commands time out sooner. Progress goes to
 seconds. If it stops early, it names the log to read; fix the cause and run
 `bin/setup.sh` again, and it picks up where it stopped.
 
+Everything lands in the kit's folder except two shared caches that other
+projects on the computer use too: pnpm's package store, and the Convex
+backend download (in `~/.cache/convex`, or `~/Library/Caches/convex` on a
+Mac). `bin/uninstall.sh --all` removes the backend download and
+`pnpm store prune` trims the package store. Say so up front if the person
+cares where things go.
+
 ## 3. While it installs: who, what, and a key
 
 Ask, showing all four choices:
