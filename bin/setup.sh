@@ -29,7 +29,8 @@ ready() {
   Stop:                   bin/stop.sh      Start again: bin/setup.sh
   Logs:                   rabbithole/local/.run/convex.log and next.log
 EOF
-  if [ ! -f "$PENDING_KEY" ] && app_run status 2>/dev/null | grep -q 'Tutor key: *not set'; then
+  # Not grep -q: under pipefail its early exit would fail the pipeline.
+  if [ ! -f "$PENDING_KEY" ] && app_run status 2>/dev/null | grep 'Tutor key: *not set' >/dev/null; then
     say "  Let the tutor answer:   bin/set-key.sh --browser   (a page for pasting an Anthropic key)"
   fi
 }
