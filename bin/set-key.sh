@@ -3,8 +3,10 @@
 # passes through an agent's chat.
 #
 #   bin/set-key.sh            asks for the key here, with the input hidden
-#   bin/set-key.sh --browser  opens a one-time page on this computer to paste
-#                             it into, and returns once it's saved
+#   bin/set-key.sh --browser [--then <url>]
+#                             opens a one-time page on this computer to paste
+#                             it into, returns once it's saved, and sends the
+#                             browser on to <url> (default: the scholar's view)
 #   bin/set-key.sh --stdin    reads the key from standard input (the page
 #                             uses this)
 set -euo pipefail
@@ -12,7 +14,7 @@ set -euo pipefail
 guard_no_cloud
 
 case "${1:-}" in
-  --browser) exec node "$KIT/lib/key-page.mjs" ;;
+  --browser) shift; exec node "$KIT/lib/key-page.mjs" "$@" ;;
   --stdin) IFS= read -r key || true ;;
   *)
     say "Paste an Anthropic API key (it starts with sk-ant-). Get one at https://platform.claude.com/settings/keys"

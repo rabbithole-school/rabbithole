@@ -75,14 +75,17 @@ day. They can set a spending limit in the console first. Scheduled jobs use
 the key too, so stop Rabbithole when done.
 
 The key goes in through a page, not through you. Run
-`bin/set-key.sh --browser` in the background: it opens a one-time page on
-this computer where the person pastes the key, checks it with Anthropic,
-saves it, and returns once it's saved. The page also walks them through
-getting a key if they don't have one. Tell them a page opened in their
-browser and the key goes there, straight into Rabbithole, never into this
-chat. If the page can't open, the link is in the script's output. It works
-whether or not setup has finished. (`bin/set-key.sh` without `--browser`
-asks for the key in a terminal instead, for people who prefer that.)
+`bin/set-key.sh --browser`: it opens a one-time page on this computer where
+the person pastes the key (it also walks them through getting one), checks
+it with Anthropic, and saves it, whether or not setup has finished. Then the
+page takes their browser straight to the scholar's view as soon as
+Rabbithole is ready, and the script returns. So tell them, in one message:
+a page opened in their browser, the key goes there and never into this
+chat, and it will take them to the tutor. Then wait for the script to
+return instead of asking them to tell you; if your commands time out sooner,
+run it in the background and check its output every few seconds. If the
+page didn't open, the link is in the script's output. (Without `--browser`,
+the script asks for the key in a terminal instead.)
 
 If they don't have a key yet, help them get one; it takes a few minutes.
 Anthropic only makes keys in its web console: sign in or sign up at
@@ -105,8 +108,8 @@ leader where data goes and what it costs, a tinkerer how it's built.
 ## 4. The tutor
 
 When setup prints READY, the person has answered step 3, and the key is set,
-open the scholar's view
-(`open <url>` on a Mac, `xdg-open` on Linux):
+they'll already be on the scholar's view if the key page took them there.
+If not, open it (`open <url>` on a Mac, `xdg-open` on Linux):
 
     http://localhost:3000/dev-login?u=leilani_park&to=/scholar
 
