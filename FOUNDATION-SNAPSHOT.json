@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "ae58da16fff4d5f3c2e3502cbb8e8bbb9ef4a120",
+  "sourceCommit": "36869465401dd52d6e371f55feca63a3bc010bfc",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -16579,7 +16579,7 @@
     },
     {
       "path": "native/src/app/index.tsx",
-      "sha256": "5b9ef5d7cf6d19e38916237423487fc9df4abb5efc6e9e024110d2ff583d2326",
+      "sha256": "f5c09c065970d3160716eae497de47c58751aeb86d4d37bde07d3966de8aa14b",
       "mode": "100644"
     },
     {
@@ -18068,6 +18068,11 @@
       "mode": "100644"
     },
     {
+      "path": "native/src/hooks/__tests__/usePrewarmSessions.test.ts",
+      "sha256": "64f3e66cebe9928d25b7c960d03f6a9c05a123570c964e40556b9be998671840",
+      "mode": "100644"
+    },
+    {
       "path": "native/src/hooks/__tests__/useSmoothedQuery.test.ts",
       "sha256": "7b48cb9710a30fa2a596f06943588c5c516b9620726f434ab4dab994c544a39c",
       "mode": "100644"
@@ -18210,6 +18215,11 @@
     {
       "path": "native/src/hooks/usePresentationSystemUI.ts",
       "sha256": "9fd91ef45bdaf175833d5b7f3be40e686f28e0ba4b706a0d47b46d9b1c08be19",
+      "mode": "100644"
+    },
+    {
+      "path": "native/src/hooks/usePrewarmSessions.ts",
+      "sha256": "31416e9528ff96aa1d70b232d1e71d3a62ac7fcdc4edf4759ff57b67b8f1f954",
       "mode": "100644"
     },
     {
@@ -22083,5 +22093,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "07d0ee9330e53d91ee6dda5b2b7297541ad05b604529af93dcbc8a31bfb01ee3"
+  "treeHash": "8a00a12aa91281b950eaf98e1f0cd548401ebed40f38627c4783d4c2d657495c"
 }

@@ -52,6 +52,7 @@ import { QuestionQueueList } from "@/components/QuestionQueue";
 import { PeerTrails } from "@/components/PeerTrails";
 import { UnitBand } from "@/components/UnitBand";
 import { ScholarHomeTabs } from "@/components/ScholarHomeTabs";
+import { usePrewarmSessions } from "@/hooks/usePrewarmSessions";
 import { PlannedTodayCard } from "@/components/PlannedTodayCard";
 import { ComingUpCard } from "@/components/ComingUpCard";
 import { ScholarPrepSections } from "@/components/ScholarPrepSections";
@@ -329,23 +330,6 @@ function sectionMeta(c: ReturnType<typeof useColors>): Record<
   };
 }
 const ORDER: PlateRow["origin"][] = ["classFocus", "homework", "is"];
-
-// Prewarm each row's chat query while home is mounted, so tapping in paints
-// instantly (native equivalent of the web RoutePrefetcher — same Convex
-// shared-subscription trick).
-function usePrewarmSessions(ids: string[]) {
-  const convex = useConvex();
-  const key = ids.join(",");
-  useEffect(() => {
-    const idList = key ? key.split(",") : [];
-    const unsubs = idList.map((id) =>
-      convex
-        .watchQuery(api.sessions.getWithMessages, { id: id as Id<"sessions"> })
-        .onUpdate(() => {}),
-    );
-    return () => unsubs.forEach((u) => u());
-  }, [convex, key]);
-}
 
 // Home routes on WHO is signed in before mounting anything. ScholarHome's
 // queries are learner-only (`asLearner: true`, `requireActiveLearnerInstitution`)
