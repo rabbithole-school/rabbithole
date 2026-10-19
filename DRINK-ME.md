@@ -104,9 +104,9 @@ once, so have them paste it into the key page right away.
 The tutor is the point of trying Rabbithole, so don't offer a tour without a
 key in its place. If they decide not to get one, say plainly that the tutor
 is what's worth seeing and that they can come back to it any time with
-`bin/set-key.sh --browser`. Without a key, the tutor's chat shows a red
-“Connection lost” and leaves the question unanswered: that's the missing
-key, not a broken install.
+`bin/set-key.sh --browser`. Without a key, the tutor's chat says it needs
+one and links to a page in Rabbithole where they can add it; that page
+only works while no key is set.
 
 Let their answer to the Caterpillar shape what you point out from here: a
 parent wants to know what a child will see, a teacher what they can steer, a
