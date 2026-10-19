@@ -108,6 +108,11 @@ The tutor speaks first, with a question. Have them wait for it before typing
 curious kid would. The tutor answers back with another question, not the
 answer. That's the moment; let it land before moving on.
 
+Typing is the way in. The microphone button needs an OpenAI key, which this
+kit doesn't set up, so the chat page shows a small red “1 Issue” badge in a
+corner: that's the page's developer mode noting the missing voice key, and
+it's safe to ignore.
+
 ## 5. Who steers it
 
 Then show the adults' side. No passwords.
