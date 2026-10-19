@@ -27,7 +27,8 @@ Watching that happen once, on a topic a real kid cares about, is what makes
 the rest make sense. Everything below is the shortest path to it: start the
 install, gather what you need while it runs, and open straight into the
 tutor. The teacher's and parent's views come after, as the answer to “who
-steers this?”
+steers this?” So open one page at a time, and make the first one the
+tutor's chat, once the person has answered step 3's questions.
 
 ## 1. The kit
 
@@ -92,7 +93,8 @@ leader where data goes and what it costs, a tinkerer how it's built.
 
 ## 4. The tutor
 
-When setup prints READY and the key is set, open the scholar's view
+When setup prints READY, the person has answered step 3, and the key is set,
+open the scholar's view
 (`open <url>` on a Mac, `xdg-open` on Linux):
 
     http://localhost:3000/dev-login?u=leilani_park&to=/scholar
