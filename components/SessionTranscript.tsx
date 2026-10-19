@@ -287,8 +287,8 @@ export function TutorTurnFailedNotice({
   onRetry: () => void;
   /** Why, when it's worth saying (a busy server's honest wait, a missing key). */
   note?: string | null;
-  /** The local runner's page for adding the tutor's Anthropic key. Opens in a
-   *  new tab so this chat, and its "Try again", stay where they are. */
+  /** The local runner's page for adding the tutor's Anthropic key, built by
+   *  tutorKeyHref so a save brings the scholar straight back to this chat. */
   addKeyHref?: string | null;
 }) {
   return (
@@ -304,7 +304,7 @@ export function TutorTurnFailedNotice({
           color="violet.500"
           fontFamily="heading"
         >
-          <a href={addKeyHref} target="_blank" rel="noopener">
+          <a href={addKeyHref}>
             Add the key
           </a>
         </Button>

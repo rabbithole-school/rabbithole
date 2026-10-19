@@ -128,18 +128,24 @@ function ScholarSessionInner() {
   const urlActivity = searchParams.get("activity");
   const hasDimensionParams = !!urlUnit || !!urlActivity;
 
-  // Fetch projects reactively via Convex
+  // Every authed read waits for the signed-in user (as /scholar does). On a
+  // cold load these subscriptions can reach the backend before the auth token
+  // does; a "Not authenticated" from one trips the ErrorBoundary's sign-in
+  // bounce, so a full reload of a chat (or the return from /tutor-key) would
+  // land on /sign-in instead of the chat.
   const sessionsResult = useQuery(
     api.sessions.list,
-    isRemoteMode
-      ? { userId: remoteUserId as Id<"users"> }
-      : { asLearner: !isTestMode },
+    !user
+      ? "skip"
+      : isRemoteMode
+        ? { userId: remoteUserId as Id<"users"> }
+        : { asLearner: !isTestMode },
   );
   // Manual rehearsals are deliberately absent from `sessions.list`, so resolve the
   // active row directly before choosing chat vs. Workbench vs. Vibecode.
   const currentSession = useQuery(
     api.sessions.get,
-    !isNewSession && !isMeAlias && sessionId
+    user && !isNewSession && !isMeAlias && sessionId
       ? { id: sessionId as Id<"sessions"> }
       : "skip",
   );
@@ -151,9 +157,10 @@ function ScholarSessionInner() {
 
   // Fetch unit list for resolving URL param slug to ID
   const units =
-    useQuery(api.units.list, {
-      asLearner: !isTestMode && !isRemoteMode,
-    }) ?? [];
+    useQuery(
+      api.units.list,
+      user ? { asLearner: !isTestMode && !isRemoteMode } : "skip",
+    ) ?? [];
 
   // Fetch scholar info for remote mode banner
   const remoteUser = useQuery(
@@ -170,7 +177,7 @@ function ScholarSessionInner() {
   // before the bench aggregate is first ensured (WorkbenchSurface ensures it).
   const benchProbe = useQuery(
     api.simulatorBenches.getBench,
-    !isNewSession && !isMeAlias && sessionId
+    user && !isNewSession && !isMeAlias && sessionId
       ? { sessionId: sessionId as Id<"sessions"> }
       : "skip",
   );
