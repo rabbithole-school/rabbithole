@@ -80,8 +80,17 @@ import { KID_SAFE_PRINCIPLES } from "../kidSafePrinciples";
 // tutor credits the scholar only with words/ideas that appear in the scholar's
 // own messages, never with an example the tutor introduced. Re-reviewed against
 // the gloss: it supports "No doing your work for you". No gloss change needed.
+// Re-baselined 2026-10-19 (PR #4233 + #4273): the stall rule now teaches after
+// one scaffold (a short explanation or a parallel worked example, then the
+// scholar's own problem handed back), closure stops re-testing shown
+// understanding, and two bullets name funneling disguises (known-answer
+// either/or, choosing the next step of the scholar's own work) and start warm
+// scholars from their own idea. Re-reviewed against the gloss: "Make struggle
+// useful" promised only "a hint or a smaller step", so its blurb now names the
+// parallel example; the rest strengthen "Ask before answering", "No doing
+// your work for you" and "Notice what you figured out".
 const EXPECTED_TUTOR_GUIDELINES_HASH =
-  "af10ab90b141294b7c2cff959d0b30cd2a70f07c1658e53cf0b12d1573b21f23";
+  "dba2d8007efa45dce59713c15b119f521903ad9ae77ab6984f8f92e614b1c02c";
 
 const FORBIDDEN_TOKENS = [
   /\bwhisper\b/i,

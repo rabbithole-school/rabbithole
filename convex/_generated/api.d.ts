@@ -724,6 +724,7 @@ import type * as teacherToday from "../teacherToday.js";
 import type * as testDriveFlags from "../testDriveFlags.js";
 import type * as tournaments from "../tournaments.js";
 import type * as trophyCase from "../trophyCase.js";
+import type * as tutorKey from "../tutorKey.js";
 import type * as tutorTranscripts from "../tutorTranscripts.js";
 import type * as understandings from "../understandings.js";
 import type * as understandingsData from "../understandingsData.js";
@@ -1467,6 +1468,7 @@ declare const fullApi: ApiFromModules<{
   testDriveFlags: typeof testDriveFlags;
   tournaments: typeof tournaments;
   trophyCase: typeof trophyCase;
+  tutorKey: typeof tutorKey;
   tutorTranscripts: typeof tutorTranscripts;
   understandings: typeof understandings;
   understandingsData: typeof understandingsData;

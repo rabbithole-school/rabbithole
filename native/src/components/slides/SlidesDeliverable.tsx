@@ -17,12 +17,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActionSheetIOS,
   ActivityIndicator,
-  Modal,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import Animated from "react-native-reanimated";
 import { useAction, useMutation, useQuery } from "convex/react";
 

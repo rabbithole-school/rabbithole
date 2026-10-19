@@ -60,6 +60,7 @@ const STAFF_TOOL_LABELS: Record<string, string> = {
   move_lesson: "Moving lesson",
   // Managed-iPad operations (lib/deviceOpsTools.ts)
   restart_managed_device: "Restarting an iPad",
+  set_freeze_mode: "Updating Freeze Mode",
   // Assignment / scheduling tools
   list_assignments: "Loading assignments",
   get_assignment: "Reading assignment",

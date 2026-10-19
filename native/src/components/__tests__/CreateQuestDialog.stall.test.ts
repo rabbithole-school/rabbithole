@@ -18,6 +18,11 @@ const mocks = vi.hoisted(() => ({
   pickerProps: [] as { onSpecificBuild?: () => void }[],
 }));
 
+// Freeze Mode's modal wrapper adds an overlay this test doesn't exercise;
+// hand back the mocked React Native Modal.
+vi.mock("@/components/FreezableModal", async () => ({
+  Modal: (await import("react-native")).Modal,
+}));
 vi.mock("react-native", async () => {
   const react = await vi.importActual<typeof import("react")>("react");
   const passthrough = ({ children }: { children?: ReactNode }) => children ?? null;

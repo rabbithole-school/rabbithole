@@ -48,6 +48,8 @@ pnpm local:stop
 ```
 
 It prints `/dev-login` links for a teacher, a scholar, and a parent. It refuses
-to run against a cloud Convex deployment.
+to run against a cloud Convex deployment. The web app listens only on this
+computer, but the local Convex backend listens on every network interface (the
+Convex CLI has no option to restrict it), so run it on a network you trust.
 
 The native Expo application lives in `native/`.

@@ -4,12 +4,12 @@ import { useQuery } from "convex/react";
 import { router } from "expo-router";
 import {
   Alert,
-  Modal,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SymbolView, type SymbolViewProps } from "expo-symbols";
 import * as Haptics from "expo-haptics";

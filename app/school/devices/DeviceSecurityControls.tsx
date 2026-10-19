@@ -6,8 +6,8 @@
  * section primitive that gives the drawer one typographic system.
  *
  * `DrawerSection` is deliberately local to this feature: heading, divider and
- * spacing live in one place so Status / Scholar / Rabbithole Lock / Lost Mode /
- * Device details / Actions cannot drift apart again.
+ * spacing live in one place so Status / Scholar / Rabbithole Lock / Freeze Mode /
+ * Lost Mode / Device details / Actions cannot drift apart again.
  */
 
 import {
@@ -23,7 +23,13 @@ import {
   Text,
   VStack,
 } from "@chakra-ui/react";
-import { Camera, LockKey, LockKeyOpen, Siren } from "@phosphor-icons/react";
+import {
+  Camera,
+  LockKey,
+  LockKeyOpen,
+  Siren,
+  Snowflake,
+} from "@phosphor-icons/react";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { ConvexError } from "convex/values";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -99,6 +105,8 @@ export type LockControlDevice = {
   appliedMatchesDesired: boolean;
   inSingleAppMode?: boolean | null;
   institutionTimeZone?: string;
+  /** Freeze Mode holds the lock armed, so disarm is unavailable while set. */
+  frozenUntil?: number | null;
 };
 
 type LostModeState = FunctionReturnType<typeof api.simplemdm.lostModeStatus>;
@@ -314,7 +322,11 @@ export function RabbitholeLockControl({
         </Badge>
       }
       action={
-        desiredArmed ? (
+        desiredArmed && device.frozenUntil ? (
+          <Text fontSize="sm" color="charcoal.500">
+            Unfreeze to disarm
+          </Text>
+        ) : desiredArmed ? (
           <HStack align="end" gap={2} wrap="wrap">
             <Box minW="180px">
               <Text
@@ -378,9 +390,11 @@ export function RabbitholeLockControl({
                   : "Disarmed until midnight."}
         </Text>
         {desiredArmed ? (
-          <Text fontSize="xs" color="charcoal.400">
-            {selectedOption.description}
-          </Text>
+          !device.frozenUntil && (
+            <Text fontSize="xs" color="charcoal.400">
+              {selectedOption.description}
+            </Text>
+          )
         ) : (
           device.disarmExpiresAt && (
             <Text fontSize="xs" color="charcoal.400">
@@ -403,6 +417,142 @@ export function RabbitholeLockControl({
               : "Waiting for the iPad to leave Rabbithole Lock."}
         </Text>
       </VStack>
+    </ControlSection>
+  );
+}
+
+// Fixed presets for a freeze, inside the server's 5–480 minute bounds.
+const FREEZE_PRESET_MINUTES = [15, 30, 60] as const;
+
+export type FreezeControlDevice = {
+  pairedDeviceId: Id<"pairedDevices">;
+  frozenUntil: number | null;
+  institutionTimeZone?: string;
+};
+
+/**
+ * Freeze Mode — pin the iPad inside Rabbithole behind a "frozen until <time>,
+ * ask a teacher to unfreeze" screen. The server arms Rabbithole Lock and thaws
+ * on schedule (`deviceLock.setFreezeMode` / `thawFreeze`).
+ */
+export function FreezeModeControl({
+  device,
+  variant = "card",
+}: {
+  device: FreezeControlDevice;
+  variant?: "card" | "drawer";
+}) {
+  const setFreezeMode = useMutation(api.deviceLock.setFreezeMode);
+  const [minutes, setMinutes] =
+    useState<(typeof FREEZE_PRESET_MINUTES)[number]>(15);
+  const [saving, setSaving] = useState(false);
+  const frozen = device.frozenUntil !== null;
+
+  async function update(nextFrozen: boolean) {
+    setSaving(true);
+    try {
+      const result = await setFreezeMode({
+        pairedDeviceId: device.pairedDeviceId,
+        frozen: nextFrozen,
+        minutes: nextFrozen ? minutes : undefined,
+      });
+      toaster.success({
+        title: nextFrozen ? "iPad frozen" : "iPad unfrozen",
+        description: nextFrozen
+          ? result.frozenUntil
+            ? `It stays frozen until ${formatTimestamp(result.frozenUntil, device.institutionTimeZone)}.`
+            : undefined
+          : "Rabbithole Lock stays armed.",
+      });
+    } catch (error) {
+      toaster.error({
+        title: nextFrozen ? "Couldn't freeze this iPad" : "Couldn't unfreeze this iPad",
+        description: error instanceof Error ? error.message : "Please try again.",
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <ControlSection
+      variant={variant}
+      title="Freeze Mode"
+      icon={<Snowflake size={18} weight="duotone" />}
+      badge={
+        frozen ? (
+          <Badge variant="subtle" colorPalette="blue">
+            Frozen
+          </Badge>
+        ) : null
+      }
+      action={
+        frozen ? (
+          <Button
+            size="sm"
+            variant="outline"
+            loading={saving}
+            onClick={() => void update(false)}
+          >
+            Unfreeze
+          </Button>
+        ) : (
+          <HStack align="end" gap={2} wrap="wrap">
+            <Box minW="160px">
+              <Text
+                fontSize="xs"
+                fontWeight="600"
+                color="charcoal.500"
+                mb={1}
+                id={`freeze-for-${device.pairedDeviceId}`}
+              >
+                Freeze for
+              </Text>
+              <FieldSelect
+                value={String(minutes)}
+                onChange={(value) =>
+                  setMinutes(
+                    Number(value) as (typeof FREEZE_PRESET_MINUTES)[number],
+                  )
+                }
+                fieldProps={{
+                  "aria-labelledby": `freeze-for-${device.pairedDeviceId}`,
+                }}
+              >
+                {FREEZE_PRESET_MINUTES.map((value) => (
+                  <option key={value} value={value}>
+                    {value} minutes
+                  </option>
+                ))}
+              </FieldSelect>
+            </Box>
+            <Button
+              size="sm"
+              variant="outline"
+              loading={saving}
+              onClick={() => void update(true)}
+            >
+              <Snowflake size={16} />
+              Freeze
+            </Button>
+          </HStack>
+        )
+      }
+    >
+      <Text fontSize="sm" color="charcoal.600">
+        {frozen && device.frozenUntil ? (
+          <>
+            Frozen until{" "}
+            <Text as="span" fontWeight="600">
+              {formatTimestamp(device.frozenUntil, device.institutionTimeZone)}
+            </Text>
+            . Once this iPad is online, Rabbithole shows the Freeze Mode screen
+            and Rabbithole Lock keeps the scholar in the app.
+          </>
+        ) : (
+          "Keeps the scholar in Rabbithole behind a screen that says the iPad is frozen until a set time and to ask a teacher to unfreeze it."
+        )}
+      </Text>
     </ControlSection>
   );
 }

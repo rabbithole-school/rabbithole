@@ -1,6 +1,7 @@
 /**
  * Rabbithole Lock — remote control for the native iPad app's Autonomous Single
- * App Mode posture.
+ * App Mode posture — and Freeze Mode, which holds that lock armed behind a
+ * "frozen until <time>" overlay (bottom of this file).
  *
  * The server owns desired state; the iPad owns OS truth. Staff can request an
  * arm/disarm here, while the native app subscribes by its high-entropy local
@@ -78,6 +79,29 @@ function requireTimedDisarmMinutes(minutes: number | undefined): number {
   return minutes;
 }
 
+// Freeze Mode's window, in minutes. Same bounds as a timed disarm, for the same
+// reasons: long enough to matter, short of a school day so a forgotten freeze
+// can't quietly become an all-day lockout.
+const FREEZE_MIN_MINUTES = 5;
+const FREEZE_MAX_MINUTES = 480;
+
+function requireFreezeMinutes(minutes: number | undefined): number {
+  if (
+    minutes === undefined ||
+    !Number.isInteger(minutes) ||
+    minutes < FREEZE_MIN_MINUTES ||
+    minutes > FREEZE_MAX_MINUTES
+  ) {
+    throw new Error(
+      `Freeze Mode needs minutes between ${FREEZE_MIN_MINUTES} and ${FREEZE_MAX_MINUTES}.`,
+    );
+  }
+  return minutes;
+}
+
+const FROZEN_DISARM_REFUSAL =
+  "That iPad is in Freeze Mode. Unfreeze it before disarming Rabbithole Lock.";
+
 type LockCommand = {
   state: RabbitholeLockState;
   disarmMode?: RabbitholeLockDisarmMode;
@@ -92,7 +116,8 @@ type LockTransitionSource =
   | "mcp"
   | "midnight"
   | "timed"
-  | "device";
+  | "device"
+  | "freeze";
 
 /** The agent transports that share listForAgent/setFromAgent ("app" = the
  *  in-app staff aide). Required, not defaulted: the value lands verbatim in
@@ -195,6 +220,12 @@ export async function applyCommandToRows(
   // immediate re-arm rather than failing loudly.
   const timedMinutes =
     mode === "timed" ? requireTimedDisarmMinutes(command.disarmMinutes) : null;
+  // Freeze Mode holds the lock armed. Callers pre-check so they can answer
+  // politely; this backstop keeps a future caller from silently letting a
+  // frozen iPad leave Rabbithole.
+  if (command.state === "disarmed" && rows.some((row) => row.freezeUntil !== undefined)) {
+    throw new Error(FROZEN_DISARM_REFUSAL);
+  }
   const changedIds: Id<"pairedDevices">[] = [];
 
   for (const row of rows) {
@@ -369,6 +400,7 @@ async function deviceSettingsPayload(
     desiredState: state,
     disarmMode: row.rabbitholeLockDisarmMode ?? null,
     disarmExpiresAt: row.rabbitholeLockDisarmExpiresAt ?? null,
+    frozenUntil: row.freezeUntil ?? null,
     desiredUpdatedAt: updatedAt,
     desiredUpdatedByName: updatedBy?.name ?? null,
     appliedMatchesDesired,
@@ -410,6 +442,9 @@ export const stateForDevice = query({
       desiredState: desiredState(row),
       disarmMode: row.rabbitholeLockDisarmMode ?? null,
       disarmExpiresAt: row.rabbitholeLockDisarmExpiresAt ?? null,
+      // The boundary, not a verdict: the iPad compares it to its own clock
+      // (T11), so an offline device still thaws on time.
+      frozenUntil: row.freezeUntil ?? null,
       desiredUpdatedAt: desiredUpdatedAt(row),
       settingsPath: settingsPath(row._id),
     };
@@ -457,6 +492,9 @@ export const setRabbitholeLock = authedMutation({
     const mode =
       args.state === "disarmed" ? args.disarmMode ?? "until_midnight" : undefined;
     if (mode === "timed") requireTimedDisarmMinutes(args.disarmMinutes);
+    if (args.state === "disarmed" && row.freezeUntil !== undefined) {
+      throw new Error(FROZEN_DISARM_REFUSAL);
+    }
     const result = await applyCommandToRows(
       ctx,
       [row],
@@ -679,6 +717,7 @@ export const listForAgent = internalQuery({
         desiredState: device.desiredState,
         disarmMode: device.disarmMode,
         disarmExpiresAt: device.disarmExpiresAt,
+        frozenUntil: device.frozenUntil,
         appliedMatchesDesired: device.appliedMatchesDesired,
         inSingleAppMode: device.inSingleAppMode,
         settingsUrl: withBase(siteUrl(), device.settingsPath),
@@ -691,12 +730,62 @@ export const listForAgent = internalQuery({
 });
 
 /**
- * The write half. Every id must resolve inside the caller's school-operations
- * institutions or the WHOLE batch is refused before a single row changes — a
- * fuzzy scholar-name match upstream can therefore never write to a device the
- * agent merely guessed at. Prompt confirmation is a UX obligation on the tool
- * layer, never the authorization boundary; that lives here.
+ * The guard every agent WRITE shares: refuse a view-as session, then require
+ * every id to resolve inside the caller's live school-operations institutions
+ * — or refuse the WHOLE batch before a single row changes. A fuzzy
+ * scholar-name match upstream can therefore never write to a device the agent
+ * merely guessed at. Prompt confirmation is a UX obligation on the tool layer,
+ * never the authorization boundary; that lives here.
  */
+async function resolveAgentWriteRows(
+  ctx: MutationCtx,
+  callerUserId: Id<"users">,
+  pairedDeviceIds: Id<"pairedDevices">[],
+): Promise<
+  | { ok: false; message: string }
+  | { ok: true; caller: Doc<"users">; rows: Doc<"pairedDevices">[] }
+> {
+  // A view-as session is read-only, and the in-app aide ("app") runs as the
+  // REAL owner of that browser session — so refuse here, as the console's
+  // own write wrapper does. A no-op for Slack (no session) and MCP (an
+  // OAuth session carries no overlay).
+  try {
+    await assertNotImpersonating(ctx);
+  } catch (error) {
+    return { ok: false, message: (error as Error).message };
+  }
+  const caller = await ctx.db.get(callerUserId);
+  if (!caller) {
+    return { ok: false, message: "Forbidden: school staff role required" };
+  }
+  const ids = [...new Set(pairedDeviceIds)];
+  if (ids.length === 0) {
+    return { ok: false, message: "Choose at least one iPad." };
+  }
+  if (ids.length > 50) {
+    return { ok: false, message: "Choose no more than 50 iPads at once." };
+  }
+
+  const institutionIds = await liveSchoolOperationsInstitutionIds(ctx, caller);
+  if (!institutionIds) {
+    return { ok: false, message: "Forbidden: school operations access required" };
+  }
+  const rows: Doc<"pairedDevices">[] = [];
+  for (const id of ids) {
+    const row = await ctx.db.get(id);
+    // No "all" escape hatch: every row faces the same live-institution set.
+    if (!row || !institutionIds.has(row.institutionId)) {
+      return {
+        ok: false,
+        message: "One or more iPads are unavailable in your school context.",
+      };
+    }
+    rows.push(row);
+  }
+  return { ok: true, caller, rows };
+}
+
+/** The Rabbithole Lock write half for agents. */
 export const setFromAgent = internalMutation({
   args: {
     callerUserId: v.id("users"),
@@ -709,52 +798,28 @@ export const setFromAgent = internalMutation({
     disarmMinutes: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    // A view-as session is read-only, and the in-app aide ("app") runs as the
-    // REAL owner of that browser session — so refuse here, as the console's
-    // own write wrapper does. A no-op for Slack (no session) and MCP (an
-    // OAuth session carries no overlay).
-    try {
-      await assertNotImpersonating(ctx);
-    } catch (error) {
-      return { ok: false as const, message: (error as Error).message };
-    }
-    const caller = await ctx.db.get(args.callerUserId);
-    if (!caller) {
-      return { ok: false as const, message: "Forbidden: school staff role required" };
-    }
-    const ids = [...new Set(args.pairedDeviceIds)];
-    if (ids.length === 0) {
-      return { ok: false as const, message: "Choose at least one iPad." };
-    }
-    if (ids.length > 50) {
-      return { ok: false as const, message: "Choose no more than 50 iPads at once." };
-    }
-
-    const institutionIds = await liveSchoolOperationsInstitutionIds(ctx, caller);
-    if (!institutionIds) {
-      return {
-        ok: false as const,
-        message: "Forbidden: school operations access required",
-      };
-    }
-    const rows: Doc<"pairedDevices">[] = [];
-    for (const id of ids) {
-      const row = await ctx.db.get(id);
-      // No "all" escape hatch: every row faces the same live-institution set.
-      if (!row || !institutionIds.has(row.institutionId)) {
-        return {
-          ok: false as const,
-          message: "One or more iPads are unavailable in your school context.",
-        };
-      }
-      rows.push(row);
-    }
+    const resolved = await resolveAgentWriteRows(
+      ctx,
+      args.callerUserId,
+      args.pairedDeviceIds,
+    );
+    if (!resolved.ok) return { ok: false as const, message: resolved.message };
+    const { caller, rows } = resolved;
 
     const mode =
       args.state === "disarmed"
         ? args.disarmMode ?? "until_midnight"
         : undefined;
     if (mode === "timed") requireTimedDisarmMinutes(args.disarmMinutes);
+    if (args.state === "disarmed") {
+      const frozen = rows.filter((row) => row.freezeUntil !== undefined);
+      if (frozen.length > 0) {
+        return {
+          ok: false as const,
+          message: `${frozen.length} of those iPads ${frozen.length === 1 ? "is" : "are"} in Freeze Mode. Unfreeze ${frozen.length === 1 ? "it" : "them"} before disarming Rabbithole Lock.`,
+        };
+      }
+    }
     const result = await applyCommandToRows(
       ctx,
       rows,
@@ -770,6 +835,172 @@ export const setFromAgent = internalMutation({
         result.changedIds.length === 0
           ? `Those ${rows.length} iPad${rows.length === 1 ? " is" : "s are"} already ${description}.`
           : `${result.changedIds.length} iPad${result.changedIds.length === 1 ? "" : "s"} ${description}.`,
+    };
+  },
+});
+
+// ─── Freeze Mode ────────────────────────────────────────────────────────────
+//
+// A staff "pause" for one iPad: Rabbithole Lock is armed (so the scholar can't
+// leave the app) and the native app covers itself with a "frozen until
+// <time>, ask a teacher to unfreeze" overlay. It thaws on its own at the
+// chosen time, or when staff unfreeze it here, on the devices page, or
+// through an agent tool. Thawing leaves the lock armed — the fleet default.
+
+type FreezeCommand = { kind: "freeze"; minutes: number } | { kind: "unfreeze" };
+
+function formatFreezeMinutes(minutes: number): string {
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+
+// Exported for tests, like applyCommandToRows above.
+export async function applyFreezeToRows(
+  ctx: MutationCtx,
+  rows: Doc<"pairedDevices">[],
+  actorUserId: Id<"users">,
+  command: FreezeCommand,
+  source: LockTransitionSource,
+): Promise<{ changedIds: Id<"pairedDevices">[] }> {
+  const now = Date.now();
+  const minutes =
+    command.kind === "freeze" ? requireFreezeMinutes(command.minutes) : null;
+  const changedIds: Id<"pairedDevices">[] = [];
+
+  for (const row of rows) {
+    if (minutes === null) {
+      if (row.freezeUntil === undefined) continue;
+      await ctx.db.patch(row._id, {
+        freezeUntil: undefined,
+        freezeUpdatedBy: actorUserId,
+      });
+    } else {
+      // A re-freeze REPLACES the end time (shorter or longer). It only has to
+      // differ from the old one, so the old thaw job (which compares this
+      // exact value) can't clear the new freeze.
+      const requested = now + minutes * 60_000;
+      const freezeUntil =
+        requested === row.freezeUntil ? requested + 1 : requested;
+      await ctx.db.patch(row._id, { freezeUntil, freezeUpdatedBy: actorUserId });
+      await ctx.scheduler.runAt(freezeUntil, internal.deviceLock.thawFreeze, {
+        pairedDeviceId: row._id,
+        expectedFreezeUntil: freezeUntil,
+      });
+      // Pin the iPad inside Rabbithole for the freeze. A no-op when already
+      // armed; otherwise it replaces any disarm (and its scheduled re-arm).
+      const current = await ctx.db.get(row._id);
+      if (current) {
+        await applyCommandToRows(ctx, [current], actorUserId, { state: "armed" }, "freeze");
+      }
+    }
+    changedIds.push(row._id);
+    await writeAuditLog(ctx, {
+      institutionId: row.institutionId,
+      actorUserId,
+      action: minutes === null ? "device.freeze.end" : "device.freeze.start",
+      targetUserId: row.scholarId,
+      at: now,
+      detail: `${minutes === null ? "unfrozen" : `frozen for ${formatFreezeMinutes(minutes)}`} via ${source}; device ${row.deviceId}`,
+    });
+  }
+  return { changedIds };
+}
+
+export const setFreezeMode = authedMutation({
+  args: {
+    pairedDeviceId: v.id("pairedDevices"),
+    frozen: v.boolean(),
+    /** Required (5..480) when freezing. */
+    minutes: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const row = await ctx.db.get(args.pairedDeviceId);
+    if (!row) throw new Error("That device is no longer paired.");
+    if (
+      !(await hasSchoolOperationsAccessAtInstitution(
+        ctx,
+        ctx.user,
+        row.institutionId,
+      ))
+    ) {
+      throw new Error("Forbidden: device is not in your current school context");
+    }
+    const command: FreezeCommand = args.frozen
+      ? { kind: "freeze", minutes: requireFreezeMinutes(args.minutes) }
+      : { kind: "unfreeze" };
+    const result = await applyFreezeToRows(ctx, [row], ctx.user._id, command, "web");
+    const updated = await ctx.db.get(row._id);
+    return {
+      changed: result.changedIds.length === 1,
+      frozenUntil: updated?.freezeUntil ?? null,
+    };
+  },
+});
+
+/**
+ * Scheduled at each freeze's end. Revision-checked on the exact instant, so a
+ * re-freeze or an unfreeze made after this job was scheduled is never undone.
+ */
+export const thawFreeze = internalMutation({
+  args: {
+    pairedDeviceId: v.id("pairedDevices"),
+    expectedFreezeUntil: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const row = await ctx.db.get(args.pairedDeviceId);
+    if (!row || row.freezeUntil !== args.expectedFreezeUntil) {
+      return { thawed: false };
+    }
+    await ctx.db.patch(row._id, { freezeUntil: undefined });
+    await writeAuditLog(ctx, {
+      institutionId: row.institutionId,
+      actorUserId: row.freezeUpdatedBy ?? row.pairedBy,
+      action: "device.freeze.end",
+      targetUserId: row.scholarId,
+      at: Date.now(),
+      detail: `freeze ended on schedule; device ${row.deviceId}`,
+    });
+    return { thawed: true };
+  },
+});
+
+/** Freeze Mode's agent write half; same guard as setFromAgent. */
+export const freezeFromAgent = internalMutation({
+  args: {
+    callerUserId: v.id("users"),
+    source: agentSourceValidator,
+    pairedDeviceIds: v.array(v.id("pairedDevices")),
+    frozen: v.boolean(),
+    /** Required (5..480) when freezing. */
+    minutes: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const resolved = await resolveAgentWriteRows(
+      ctx,
+      args.callerUserId,
+      args.pairedDeviceIds,
+    );
+    if (!resolved.ok) return { ok: false as const, message: resolved.message };
+    const { caller, rows } = resolved;
+    let command: FreezeCommand;
+    try {
+      command = args.frozen
+        ? { kind: "freeze", minutes: requireFreezeMinutes(args.minutes) }
+        : { kind: "unfreeze" };
+    } catch (error) {
+      return { ok: false as const, message: (error as Error).message };
+    }
+    const result = await applyFreezeToRows(ctx, rows, caller._id, command, args.source);
+    const count = result.changedIds.length;
+    const noun = (n: number) => `${n} iPad${n === 1 ? "" : "s"}`;
+    return {
+      ok: true as const,
+      changedCount: count,
+      message:
+        command.kind === "freeze"
+          ? `${noun(count)} frozen for ${formatFreezeMinutes(command.minutes)}. Each stays in Rabbithole behind the Freeze Mode screen until then, or until staff unfreeze it.`
+          : count === 0
+            ? `${rows.length === 1 ? "That iPad wasn't" : "None of those iPads were"} frozen.`
+            : `${noun(count)} unfrozen.`,
     };
   },
 });

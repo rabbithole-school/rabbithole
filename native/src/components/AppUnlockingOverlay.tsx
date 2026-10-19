@@ -31,12 +31,12 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Animated,
   Easing,
-  Modal,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 
 import {
   UNLOCK_PROGRESS_ESTIMATE_MS,

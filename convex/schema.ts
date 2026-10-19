@@ -1567,6 +1567,14 @@ export default defineSchema({
     ),
     rabbitholeLockAppliedAt: v.optional(v.number()),
     rabbitholeLockInSingleAppMode: v.optional(v.boolean()),
+    // Freeze Mode: staff pin this iPad inside Rabbithole AND cover the app
+    // with a "frozen until <time>, ask a teacher to unfreeze" overlay. Present
+    // = frozen until that instant; a revision-checked scheduled job clears it
+    // at expiry (deviceLock.thawFreeze), and the device also compares it to
+    // its own clock so an offline iPad still thaws on time. Freezing arms
+    // Rabbithole Lock, and a disarm is refused while frozen.
+    freezeUntil: v.optional(v.number()),
+    freezeUpdatedBy: v.optional(v.id("users")),
     // A temporary, staff-authorized Robotics capture surface for this already
     // assigned managed iPad. All fields are optional so existing bindings stay
     // valid; the server treats an expired command as inactive even before its

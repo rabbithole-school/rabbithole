@@ -182,6 +182,35 @@ const config = [
   //   3. lib/games and convex/games stay framework-free. lib/games/* is vendored
   //      into the native bundle verbatim; one React import there breaks the iPad
   //      build at a distance from the edit that caused it.
+  // Freeze Mode: iOS draws a `<Modal>` in its own window above the app, so
+  // only the wrapper (which renders the freeze overlay inside the modal) may
+  // use React Native's. The gate is how a teacher unfreezes, and Wi-Fi help is
+  // offline recovery, so both stay reachable. native/src/games/** sets its own
+  // no-restricted-imports below (a later block replaces this rule there).
+  {
+    files: ["native/src/**/*.tsx"],
+    ignores: [
+      "native/src/components/FreezableModal.tsx",
+      "native/src/components/AsamParentGate.tsx",
+      "native/src/components/wifi/KioskWifiHelpOverlay.tsx",
+      "native/src/app/dev-slides.tsx",
+    ],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "react-native",
+              importNames: ["Modal"],
+              message:
+                'Import Modal from "@/components/FreezableModal" so a frozen iPad stays covered while a modal is open.',
+            },
+          ],
+        },
+      ],
+    },
+  },
   {
     files: ["lib/games/**/*.ts", "convex/games.ts"],
     rules: {

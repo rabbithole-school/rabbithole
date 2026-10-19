@@ -28,12 +28,12 @@ import {
   ActivityIndicator,
   Alert,
   AppState,
-  Modal,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { SymbolView } from "expo-symbols";
 import { useConvex } from "convex/react";

@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import {
   Alert,
   KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -12,6 +11,7 @@ import {
   type StyleProp,
   type ViewStyle,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import { Image } from "expo-image";
 import { SymbolView } from "expo-symbols";
 import { useVideoPlayer, VideoView } from "expo-video";

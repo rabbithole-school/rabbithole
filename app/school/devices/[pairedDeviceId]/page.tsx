@@ -23,6 +23,7 @@ import { Surface } from "@/components/ui/Surface";
 import { useAuthorizationGuard } from "@/hooks/useAuthorizationGuard";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import {
+  FreezeModeControl,
   LostModeControl,
   RabbitholeLockControl,
   RoboticsCaptureStationModeControl,
@@ -116,6 +117,14 @@ export default function DeviceSettingsPage() {
               disarmExpiresAt: detail.disarmExpiresAt,
               appliedMatchesDesired: detail.appliedMatchesDesired,
               inSingleAppMode: detail.inSingleAppMode,
+              institutionTimeZone: detail.institutionTimeZone,
+              frozenUntil: detail.frozenUntil,
+            }}
+          />
+          <FreezeModeControl
+            device={{
+              pairedDeviceId: detail._id,
+              frozenUntil: detail.frozenUntil,
               institutionTimeZone: detail.institutionTimeZone,
             }}
           />

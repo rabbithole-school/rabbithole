@@ -5,7 +5,7 @@
  * Single App Mode based on connectivity + the remote desired state) and renders
  * the hidden
  * `AsamParentGate` wrapping the app subtree so the 4-finger hold gesture is
- * detectable anywhere on screen.
+ * detectable anywhere on screen — including over the Freeze Mode overlay.
  *
  * Mounted only when the MDM-delivered `asamEnabled` configuration is `"1"` (see
  * app/_layout.tsx). The Stable binary therefore remains safe on personal installs.
@@ -30,6 +30,7 @@ import { useMemo, useState } from "react";
 import { useAsamController } from "@/hooks/useAsamController";
 import { useAsamDisplayPolicy } from "@/hooks/useAsamDisplayPolicy";
 import { AsamParentGate } from "@/components/AsamParentGate";
+import { FreezeModeOverlay } from "@/components/FreezeModeOverlay";
 import { AsamControllerContext } from "@/contexts/AsamControllerContext";
 
 function AsamKeepAwake() {
@@ -48,8 +49,9 @@ export function AsamHybridHost({ children }: { children: React.ReactNode }) {
       restoreAfterSystemUI: asam.restoreAfterSystemUI,
       openTeacherUnlock: () => setGateVisible(true),
       isTeacherUnlockAvailable: true,
+      frozenUntil: asam.lockState?.frozenUntil ?? null,
     }),
-    [asam.releaseForSystemUI, asam.restoreAfterSystemUI],
+    [asam.releaseForSystemUI, asam.restoreAfterSystemUI, asam.lockState?.frozenUntil],
   );
 
   return (
@@ -68,6 +70,9 @@ export function AsamHybridHost({ children }: { children: React.ReactNode }) {
         onVisibleChange={setGateVisible}
       >
         {children}
+        {/* Inside the gate so the four-finger hold still reaches Device
+            settings (and its QR code) while the iPad is frozen. */}
+        <FreezeModeOverlay frozenUntil={asam.lockState?.frozenUntil} />
       </AsamParentGate>
     </AsamControllerContext.Provider>
   );

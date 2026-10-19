@@ -29,13 +29,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAction, useMutation } from "convex/react";
 

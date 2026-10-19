@@ -1981,6 +1981,27 @@ export const discardEmptyAppUpdatePlaceholder = internalMutation({
 });
 
 /**
+ * Drop a turn's assistant placeholder that nothing will ever fill, leaving no
+ * trace (no preview, no recency) — but only while it is still empty, so a row
+ * that somehow already carries content is never destroyed. Used by the
+ * stream's no-Anthropic-key refusal (TRA-536).
+ */
+export const discardEmptyTurnPlaceholder = internalMutation({
+  args: { messageId: v.id("messages"), sessionId: v.id("sessions") },
+  handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.messageId);
+    if (
+      message &&
+      message.sessionId === args.sessionId &&
+      message.role === "assistant" &&
+      message.content.trim() === ""
+    ) {
+      await ctx.db.delete(args.messageId);
+    }
+  },
+});
+
+/**
  * Stamp the liveness heartbeat without touching content. Called from the HTTP
  * stream handler at message_start (and on each turn boundary) so a stream that
  * does a long tool call or model thinking-pause BEFORE any text still proves

@@ -20,6 +20,12 @@ type PresentationAsamController = Pick<
    * the gate isn't mounted.
    */
   isTeacherUnlockAvailable: boolean;
+  /**
+   * Freeze Mode's end (epoch ms) or null. Read by `FreezableModal` so the
+   * freeze overlay also covers content shown in a `<Modal>`, which iOS
+   * presents in its own window above the in-tree overlay.
+   */
+  frozenUntil: number | null;
 };
 
 const NOOP_CONTROLLER: PresentationAsamController = {
@@ -27,6 +33,7 @@ const NOOP_CONTROLLER: PresentationAsamController = {
   restoreAfterSystemUI: () => {},
   openTeacherUnlock: () => {},
   isTeacherUnlockAvailable: false,
+  frozenUntil: null,
 };
 
 export const AsamControllerContext =

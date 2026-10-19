@@ -7,6 +7,11 @@ const { passthrough, pendingMutation } = vi.hoisted(() => ({
   pendingMutation: vi.fn(() => new Promise<never>(() => {})),
 }));
 
+// Freeze Mode's modal wrapper adds an overlay this test doesn't exercise;
+// hand back the mocked React Native Modal.
+vi.mock("@/components/FreezableModal", async () => ({
+  Modal: (await import("react-native")).Modal,
+}));
 vi.mock("react-native", () => ({
   ActivityIndicator: passthrough,
   Alert: { alert: vi.fn() },

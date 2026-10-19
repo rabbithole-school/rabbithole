@@ -1,6 +1,5 @@
 import { type ReactNode, useCallback, useRef, useState } from "react";
 import {
-  Modal,
   Pressable,
   StyleSheet,
   Text,
@@ -10,6 +9,7 @@ import {
   type StyleProp,
   type ViewStyle,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import { SymbolView, type SymbolViewProps } from "expo-symbols";
 import * as Haptics from "expo-haptics";
 import Animated, {

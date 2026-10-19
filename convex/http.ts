@@ -42,7 +42,9 @@ import {
   supportsMidConversationSystem,
   tutorRuntime,
 } from "./lib/tutorModel";
-import { requireAnthropicApiKey } from "./lib/anthropic";
+import { hasAnthropicApiKey, requireAnthropicApiKey } from "./lib/anthropic";
+import { isLocalRunnerDeployment } from "./lib/deploymentSafety";
+import { TUTOR_KEY_PATH, TUTOR_NEEDS_KEY_MESSAGE } from "../shared/tutorKey";
 import { isPrintRelayClaimConflict } from "./lib/printRelayHttp";
 import {
   buildGameHandoffPrompt,
@@ -514,6 +516,30 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
         { status: 400, headers: SSE_ERROR_HEADERS },
       );
     }
+
+    // ── No Anthropic key on this deployment (TRA-536) ──────────────────
+    // Say so plainly instead of failing mid-stream. Checked after auth so it
+    // can't be probed anonymously. Only the local runner names the page where
+    // the key can be added; elsewhere the chat just shows the message.
+    if (!hasAnthropicApiKey()) {
+      // Drop the still-empty placeholder without a trace (no preview, no
+      // recency): nothing will ever fill it, and a live-looking placeholder
+      // would keep every client showing "thinking" until the orphan reap.
+      // Checked once the placeholder is proven this stream's (above) and
+      // before the turn writes anything (snapshot attach, thread stamp).
+      await ctx.runMutation(internal.sessionHelpers.discardEmptyTurnPlaceholder, {
+        messageId: assistantMsgId as Id<"messages">,
+        sessionId: sessionId as Id<"sessions">,
+      });
+      return new Response(
+        sseEvent({
+          error: TUTOR_NEEDS_KEY_MESSAGE,
+          ...(isLocalRunnerDeployment() ? { addKeyPath: TUTOR_KEY_PATH } : {}),
+        }),
+        { status: 503, headers: SSE_ERROR_HEADERS },
+      );
+    }
+
     let appSnapshotImagePart: ImageContentPart | null = null;
     if (appSnapshotStorageId) {
       try {

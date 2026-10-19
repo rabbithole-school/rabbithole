@@ -1,3 +1,7 @@
+export function hasAnthropicApiKey(): boolean {
+  return Boolean(process.env.ANTHROPIC_API_KEY?.trim());
+}
+
 export function requireAnthropicApiKey(): string {
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) {

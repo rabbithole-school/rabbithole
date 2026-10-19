@@ -37,6 +37,7 @@ const DEVICE_TOOLS = [
   "list_managed_devices",
   "list_rabbithole_lock_devices",
   "set_rabbithole_lock",
+  "set_freeze_mode",
   "restart_managed_device",
 ];
 const ROLES: Role[] = [

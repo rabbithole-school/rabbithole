@@ -21,7 +21,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -30,6 +29,7 @@ import {
   useWindowDimensions,
   type ViewStyle,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import Animated, {
   Easing,
   FadeIn,

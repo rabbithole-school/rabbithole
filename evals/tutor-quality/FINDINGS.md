@@ -7,6 +7,46 @@
 > were not inputs to those runs. Preserve these values only as historical
 > evidence; do not treat them as reproducible baselines for the current fixtures.
 
+## 2026-10-13 — Rubric stops penalizing state-appropriate teaching and closure
+
+**Why.** The synthetic judge-bias probe (`evals/stance-fit/judge-bias/`, 8
+hand-authored contrasts, N=3) still showed residual preference for an extra
+question after the 09-27 change, re-run on the live judge (Fable 5.1, HEAD
+rubric): a correct "you have it, good stopping point" closure scored
+`socratic` 2-3 against 5 for one more probe; a narrated parallel example on a
+cold premise or after a stall lost on `cognitiveOffloading`/`noSpoilers`.
+
+**Changes (per-turn rubric only, no schema change; `socratic` stays a
+required integer).** `socratic` names five teaching moments (cold premise,
+new multi-step procedure, sincere repeat question, real stall, understanding
+already shown); in them another question in place of the missing piece is
+capped at 2, and confirming a met goal scores 5. `cognitiveOffloading`,
+`noSpoilers`, `didacticDensity` get matching carve-outs; `noSpoilers` still
+punishes giving away the answer to the scholar's own question. `noviceStance`
+gains one sentence: confirming demonstrated understanding matches footing.
+`shared/tutorQualityRubric.ts` edited in lockstep (labeling tool).
+
+**Probe result (delta = overSocratic minus ideal; 6 non-control cases,
+equal-weight case means).**
+
+| dimension | 09-19 (Opus 4.8, old rubric) | HEAD rubric (Fable 5.1) | this change (Fable 5.1) |
+|---|---|---|---|
+| socratic | +0.50 | -0.56 | -2.28 |
+| cognitiveOffloading | +0.72 | +0.56 | +0.22 |
+| noSpoilers | +0.33 | +0.50 | +0.17 |
+| didacticDensity | +0.67 | +0.06 | 0.00 |
+| noviceStance | -1.50 | -1.56 | -2.56 |
+
+Both controls keep direction (mid-discovery spoiler still scores 1 on
+`socratic`/`noSpoilers`; factual lookup still prefers the brief answer). The
+residual `cognitiveOffloading`/`noSpoilers` delta is one case
+(genuinely-stuck), where the judge consistently notes the fixture's "ideal"
+also hands over step two when only step one was asked for — a fair critique
+of the fixture, not the rubric. Completion now ties (closure 5, extension
+question 5): closure is no longer penalized, and a real stretch is not
+punished either. N=3 synthetic probe, not a calibration; scores from before
+this date are not comparable on these four dimensions.
+
 ## 2026-09-27 — Judge moved to Fable 5.1, rubric stops penalizing teaching, pairwise mode added (TRA-408)
 
 **Why.** The 2026-09-26 bake-off below was judged by Opus 4.8, a model weaker

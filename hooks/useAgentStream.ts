@@ -4,6 +4,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { useAuthToken } from "@convex-dev/auth/react";
 import type { ToolActivity } from "@/lib/toolActivityGroups";
 import { LLM_BUSY_MESSAGE } from "@/shared/llmLimiter";
+import { isTutorNeedsKeyError, TUTOR_KEY_PATH } from "@/shared/tutorKey";
 import { parseRetryAfterSeconds, planStreamRetry } from "@/shared/streamRetry";
 
 // Re-exported so the existing `@/hooks/useAgentStream` imports keep working;
@@ -49,6 +50,9 @@ export interface StreamEvent {
    * request. The client acts on the Play case (snapping to Play); an "edit"
    * value is currently ignored. */
   workshopMode?: "edit" | "play";
+  /** With the no-key refusal (shared/tutorKey.ts): the page where this
+   * deployment takes the key. Sent only by the local runner. */
+  addKeyPath?: string;
 }
 
 /**
@@ -133,6 +137,10 @@ export interface UseAgentStreamReturn {
    *  asked for (`Retry-After`, seconds; null if it sent none). Undefined when
    *  the last turn did not fail on a busy refusal. Feeds `busyRetryCopy`. */
   busyRetryAfterSec: number | null | undefined;
+  /** When the last turn failed because the deployment has no Anthropic key:
+   *  where the key can be added (null when this deployment can't take one
+   *  from the app). Undefined otherwise. */
+  needsKey: { addKeyPath: string | null } | undefined;
 }
 
 export function useAgentStream(options?: UseAgentStreamOptions): UseAgentStreamReturn {
@@ -144,6 +152,9 @@ export function useAgentStream(options?: UseAgentStreamOptions): UseAgentStreamR
   const [isThinking, setIsThinking] = useState(false);
   const [busyRetryAfterSec, setBusyRetryAfterSec] = useState<
     number | null | undefined
+  >(undefined);
+  const [needsKey, setNeedsKey] = useState<
+    { addKeyPath: string | null } | undefined
   >(undefined);
   const abortRef = useRef<AbortController | null>(null);
   // Set true by stop() so the in-flight run's finally keeps the partial content
@@ -285,6 +296,15 @@ export function useAgentStream(options?: UseAgentStreamOptions): UseAgentStreamR
             // Forward to component-specific handler first
             onEventRef.current?.(data);
 
+            // --- No Anthropic key on this deployment (a terminal refusal) ---
+            if (isTutorNeedsKeyError(data.error)) {
+              setNeedsKey({
+                // Only ever our own page, never a server-chosen link.
+                addKeyPath:
+                  data.addKeyPath === TUTOR_KEY_PATH ? TUTOR_KEY_PATH : null,
+              });
+            }
+
             // --- Tool progress events ---
             // Accumulate an ordered log for the turn (vs. the old single
             // transient indicator): toolStart appends a running row;
@@ -381,6 +401,7 @@ export function useAgentStream(options?: UseAgentStreamOptions): UseAgentStreamR
       let failed = false;
       let userStopped = false;
       setBusyRetryAfterSec(undefined);
+      setNeedsKey(undefined);
 
       try {
         for (;;) {
@@ -495,5 +516,6 @@ export function useAgentStream(options?: UseAgentStreamOptions): UseAgentStreamR
     send,
     stop,
     busyRetryAfterSec,
+    needsKey,
   };
 }

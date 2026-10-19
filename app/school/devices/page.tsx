@@ -60,6 +60,7 @@ import {
   Power,
   Prohibit,
   SignOut,
+  Snowflake,
   Trash,
   WarningCircle,
   X,
@@ -112,6 +113,7 @@ import {
 } from "./simpleMdmActionPolicy";
 import {
   DrawerSection,
+  FreezeModeControl,
   LostModeControl,
   simpleMdmErrorMessage,
   RabbitholeLockControl,
@@ -1243,6 +1245,16 @@ function LockStatusBadge({
   }
   const armed = pairedDevice.rabbitholeLockDesiredState === "armed";
   const applied = pairedDevice.rabbitholeLockAppliedMatchesDesired;
+  if (pairedDevice.freezeUntil !== null) {
+    // Freezing arms the lock; until the iPad applies it, the freeze isn't
+    // fully in effect, so say so rather than claim "Frozen".
+    return (
+      <Badge size="sm" variant="subtle" colorPalette="blue">
+        {applied ? <Snowflake size={13} /> : <Spinner size="xs" borderWidth="1.5px" />}
+        {applied ? "Frozen" : "Freezing"}
+      </Badge>
+    );
+  }
   const label = applied
     ? armed
       ? "Armed"
@@ -3006,6 +3018,15 @@ function DeviceDetailsDrawer({
                         desiredState: pairedDevice.rabbitholeLockDesiredState,
                         disarmMode: pairedDevice.rabbitholeLockDisarmMode,
                         appliedMatchesDesired: pairedDevice.rabbitholeLockAppliedMatchesDesired,
+                        frozenUntil: pairedDevice.freezeUntil,
+                      }}
+                    />
+                    <FreezeModeControl
+                      key={`freeze:${pairedDevice._id}`}
+                      variant="drawer"
+                      device={{
+                        pairedDeviceId: pairedDevice._id,
+                        frozenUntil: pairedDevice.freezeUntil,
                       }}
                     />
                     {pairedDevice.scholarId && (

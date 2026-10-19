@@ -1039,3 +1039,269 @@ describe("Rabbithole Lock Slack boundary", () => {
     }
   });
 });
+
+describe("Freeze Mode", () => {
+  async function seedOne(t: TestHarness, slug = "moli") {
+    const institutionId = await seedInstitution(t, slug);
+    const teacherId = await seedUser(t, "teacher", institutionId, `${slug} teacher`);
+    const scholarId = await seedUser(t, "scholar", institutionId, `${slug} Kai`);
+    const pairedDeviceId = await seedDevice(
+      t,
+      institutionId,
+      scholarId,
+      teacherId,
+      `ipad-${slug}`,
+    );
+    return { institutionId, teacherId, scholarId, pairedDeviceId };
+  }
+
+  test("freezing arms the lock, stamps the end, schedules a thaw, and reaches the device read", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-17T20:00:00.000Z"));
+    const t = convexTest(schema, modules);
+    const { teacherId, pairedDeviceId } = await seedOne(t);
+    // Start disarmed, so the freeze has to arm it.
+    await t.run((ctx) =>
+      ctx.db.patch(pairedDeviceId, {
+        rabbitholeLockDesiredState: "disarmed",
+        rabbitholeLockDisarmMode: "until_further_notice",
+      }),
+    );
+
+    const result = await (await withUser(t, teacherId)).mutation(
+      api.deviceLock.setFreezeMode,
+      { pairedDeviceId, frozen: true, minutes: 30 },
+    );
+    const end = Date.parse("2026-10-17T20:30:00.000Z");
+    expect(result).toEqual({ changed: true, frozenUntil: end });
+
+    const row = await t.run((ctx) => ctx.db.get(pairedDeviceId));
+    expect(row).toMatchObject({
+      freezeUntil: end,
+      rabbitholeLockDesiredState: "armed",
+    });
+    expect(row!.rabbitholeLockDisarmMode).toBeUndefined();
+    const jobs = await t.run((ctx) =>
+      ctx.db.system.query("_scheduled_functions").collect(),
+    );
+    expect(jobs.map((job) => job.name)).toEqual(["deviceLock:thawFreeze"]);
+    expect(jobs[0].args[0]).toMatchObject({
+      pairedDeviceId,
+      expectedFreezeUntil: end,
+    });
+
+    expect(
+      await t.query(api.deviceLock.stateForDevice, { deviceId: "ipad-moli" }),
+    ).toMatchObject({ desiredState: "armed", frozenUntil: end });
+
+    const audits = await t.run((ctx) =>
+      ctx.db
+        .query("auditLog")
+        .filter((q) => q.eq(q.field("action"), "device.freeze.start"))
+        .collect(),
+    );
+    expect(audits).toHaveLength(1);
+  });
+
+  test("the thaw job clears only the freeze it was scheduled for", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, pairedDeviceId } = await seedOne(t);
+    const asTeacher = await withUser(t, teacherId);
+    await asTeacher.mutation(api.deviceLock.setFreezeMode, {
+      pairedDeviceId,
+      frozen: true,
+      minutes: 15,
+    });
+    const first = (await t.run((ctx) => ctx.db.get(pairedDeviceId)))!.freezeUntil!;
+    // Re-freezing replaces the end time; the first job is now stale.
+    await asTeacher.mutation(api.deviceLock.setFreezeMode, {
+      pairedDeviceId,
+      frozen: true,
+      minutes: 60,
+    });
+    const second = (await t.run((ctx) => ctx.db.get(pairedDeviceId)))!.freezeUntil!;
+    expect(second).toBeGreaterThan(first);
+
+    expect(
+      await t.mutation(internal.deviceLock.thawFreeze, {
+        pairedDeviceId,
+        expectedFreezeUntil: first,
+      }),
+    ).toEqual({ thawed: false });
+    expect((await t.run((ctx) => ctx.db.get(pairedDeviceId)))!.freezeUntil).toBe(second);
+
+    expect(
+      await t.mutation(internal.deviceLock.thawFreeze, {
+        pairedDeviceId,
+        expectedFreezeUntil: second,
+      }),
+    ).toEqual({ thawed: true });
+    const row = await t.run((ctx) => ctx.db.get(pairedDeviceId));
+    expect(row!.freezeUntil).toBeUndefined();
+    // Thawing leaves the lock armed (absent = armed).
+    expect(row!.rabbitholeLockDesiredState ?? "armed").toBe("armed");
+  });
+
+  test("a re-freeze can shorten a freeze, not only lengthen it", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, pairedDeviceId } = await seedOne(t);
+    const asTeacher = await withUser(t, teacherId);
+    await asTeacher.mutation(api.deviceLock.setFreezeMode, {
+      pairedDeviceId,
+      frozen: true,
+      minutes: 480,
+    });
+    const long = (await t.run((ctx) => ctx.db.get(pairedDeviceId)))!.freezeUntil!;
+    await asTeacher.mutation(api.deviceLock.setFreezeMode, {
+      pairedDeviceId,
+      frozen: true,
+      minutes: 5,
+    });
+    const short = (await t.run((ctx) => ctx.db.get(pairedDeviceId)))!.freezeUntil!;
+    expect(long - short).toBeGreaterThan(470 * 60_000);
+    // The long freeze's thaw job is stale and must not clear the short one.
+    expect(
+      await t.mutation(internal.deviceLock.thawFreeze, {
+        pairedDeviceId,
+        expectedFreezeUntil: long,
+      }),
+    ).toEqual({ thawed: false });
+  });
+
+  test("unfreeze clears the freeze, and a stale thaw afterwards is a no-op", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, pairedDeviceId } = await seedOne(t);
+    const asTeacher = await withUser(t, teacherId);
+    await asTeacher.mutation(api.deviceLock.setFreezeMode, {
+      pairedDeviceId,
+      frozen: true,
+      minutes: 15,
+    });
+    const end = (await t.run((ctx) => ctx.db.get(pairedDeviceId)))!.freezeUntil!;
+    expect(
+      await asTeacher.mutation(api.deviceLock.setFreezeMode, {
+        pairedDeviceId,
+        frozen: false,
+      }),
+    ).toEqual({ changed: true, frozenUntil: null });
+    expect(
+      await t.mutation(internal.deviceLock.thawFreeze, {
+        pairedDeviceId,
+        expectedFreezeUntil: end,
+      }),
+    ).toEqual({ thawed: false });
+    // Unfreezing an unfrozen iPad changes nothing.
+    expect(
+      await asTeacher.mutation(api.deviceLock.setFreezeMode, {
+        pairedDeviceId,
+        frozen: false,
+      }),
+    ).toEqual({ changed: false, frozenUntil: null });
+  });
+
+  test("a frozen iPad cannot be disarmed — on the web or through an agent", async () => {
+    const t = convexTest(schema, modules);
+    const { teacherId, pairedDeviceId } = await seedOne(t);
+    const asTeacher = await withUser(t, teacherId);
+    await asTeacher.mutation(api.deviceLock.setFreezeMode, {
+      pairedDeviceId,
+      frozen: true,
+      minutes: 15,
+    });
+    await expect(
+      asTeacher.mutation(api.deviceLock.setRabbitholeLock, {
+        pairedDeviceId,
+        state: "disarmed",
+        disarmMode: "until_midnight",
+      }),
+    ).rejects.toThrow(/Freeze Mode/);
+    const viaAgent = await t.mutation(internal.deviceLock.setFromAgent, {
+      callerUserId: teacherId,
+      source: "slack" as const,
+      pairedDeviceIds: [pairedDeviceId],
+      state: "disarmed",
+    });
+    expect(viaAgent.ok).toBe(false);
+    expect(viaAgent.message).toMatch(/Freeze Mode/);
+    expect(
+      await t.query(api.deviceLock.stateForDevice, { deviceId: "ipad-moli" }),
+    ).toMatchObject({ desiredState: "armed" });
+  });
+
+  test("rejects out-of-range minutes and devices outside the caller's school", async () => {
+    const t = convexTest(schema, modules);
+    const a = await seedOne(t, "school-a");
+    const b = await seedOne(t, "school-b");
+    const asTeacherA = await withUser(t, a.teacherId);
+    for (const minutes of [undefined, 4, 481, 12.5]) {
+      await expect(
+        asTeacherA.mutation(api.deviceLock.setFreezeMode, {
+          pairedDeviceId: a.pairedDeviceId,
+          frozen: true,
+          minutes,
+        }),
+      ).rejects.toThrow(/between 5 and 480/);
+    }
+    await expect(
+      asTeacherA.mutation(api.deviceLock.setFreezeMode, {
+        pairedDeviceId: b.pairedDeviceId,
+        frozen: true,
+        minutes: 15,
+      }),
+    ).rejects.toThrow(/Forbidden/);
+    const mixed = await t.mutation(internal.deviceLock.freezeFromAgent, {
+      callerUserId: a.teacherId,
+      source: "mcp" as const,
+      pairedDeviceIds: [a.pairedDeviceId, b.pairedDeviceId],
+      frozen: true,
+      minutes: 15,
+    });
+    expect(mixed.ok).toBe(false);
+    const rows = await t.run((ctx) => ctx.db.query("pairedDevices").collect());
+    expect(rows.every((row) => row.freezeUntil === undefined)).toBe(true);
+  });
+
+  test("the agent path freezes a batch, lists frozenUntil, and unfreezes", async () => {
+    const t = convexTest(schema, modules);
+    const institutionId = await seedInstitution(t, "moli");
+    const teacherId = await seedUser(t, "teacher", institutionId);
+    const kai = await seedUser(t, "scholar", institutionId, "Kai");
+    const lani = await seedUser(t, "scholar", institutionId, "Lani");
+    const first = await seedDevice(t, institutionId, kai, teacherId, "ipad-kai");
+    const second = await seedDevice(t, institutionId, lani, teacherId, "ipad-lani");
+
+    const frozen = await t.mutation(internal.deviceLock.freezeFromAgent, {
+      callerUserId: teacherId,
+      source: "slack" as const,
+      pairedDeviceIds: [first, second],
+      frozen: true,
+      minutes: 20,
+    });
+    expect(frozen).toMatchObject({ ok: true, changedCount: 2 });
+    expect(frozen.message).toMatch(/2 iPads frozen for 20 minutes/);
+
+    const badMinutes = await t.mutation(internal.deviceLock.freezeFromAgent, {
+      callerUserId: teacherId,
+      source: "slack" as const,
+      pairedDeviceIds: [first],
+      frozen: true,
+    });
+    expect(badMinutes.ok).toBe(false);
+
+    const listed = await t.query(internal.deviceLock.listForAgent, {
+      callerUserId: teacherId,
+    });
+    expect(listed.ok).toBe(true);
+    if (listed.ok) {
+      expect(listed.devices.every((device) => typeof device.frozenUntil === "number")).toBe(true);
+    }
+
+    const thawed = await t.mutation(internal.deviceLock.freezeFromAgent, {
+      callerUserId: teacherId,
+      source: "slack" as const,
+      pairedDeviceIds: [first],
+      frozen: false,
+    });
+    expect(thawed).toMatchObject({ ok: true, changedCount: 1, message: "1 iPad unfrozen." });
+  });
+});
