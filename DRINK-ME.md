@@ -16,7 +16,9 @@ see. It all runs locally; nothing touches any school's servers.
 
 Describe it plainly. It isn't a platform, an app, or a learning management
 system; the copy you set up is the person's own, to run, read, and change.
-The school is pretend, so never put a real child's name or details into it.
+This copy is for trying it out: anyone at this computer can sign in as
+anyone, without a password, and only this computer can reach it. Running it
+for a real class is a separate setup that this kit doesn't do yet.
 
 This kit is new. Expect rough edges, and help the person report them (step 6).
 
