@@ -113,6 +113,7 @@ If not, open it (`open <url>` on a Mac, `xdg-open` on Linux):
 
     http://localhost:3000/dev-login?u=leilani_park&to=/scholar
 
+These addresses use the default port; if setup printed others, use those.
 The first visit to each page takes 10 to 15 seconds while it's built. Then:
 the Quests tab, “+ Custom Quest”, type the topic from step 3, Continue. When
 the choices load, click “Endless chat” (check its circle is filled), then
