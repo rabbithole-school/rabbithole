@@ -24,9 +24,7 @@ ready() {
   Pick a pretend person:  http://localhost:$WEB_PORT/dev-login
   A teacher's view:       http://localhost:$WEB_PORT/dev-login?u=kawena&to=/teacher
   A scholar's view:       http://localhost:$WEB_PORT/dev-login?u=leilani_park&to=/scholar
-  A parent's view:        http://localhost:$WEB_PORT/dev-login?u=parent_park&to=/parent
-
-  Let the tutor answer:   bin/set-key.sh   (run it yourself; it asks for an Anthropic key)
+  A parent's view:        http://localhost:$WEB_PORT/dev-login?u=parent_park&to=/parent  Let the tutor answer:   bin/set-key.sh --browser   (a page for pasting an Anthropic key)
   Stop:                   bin/stop.sh      Start again: bin/setup.sh
   Logs:                   rabbithole/local/.run/convex.log and next.log
 EOF

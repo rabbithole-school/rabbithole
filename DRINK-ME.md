@@ -68,33 +68,33 @@ Ask, showing all four choices:
 And: “What's something a kid you know is curious about right now?” A topic is
 all you need. It's what the tutor will talk about in step 4.
 
-Then the key. The tutor needs an Anthropic API key from
-console.anthropic.com, and the person pays Anthropic for what it uses, on
+Then the key. The tutor needs an Anthropic API key, and the person pays Anthropic for what it uses, on
 their own key. Each tutor reply costs about 10 to 40 cents, so trying it
 costs a dollar or two; a kid who uses it all school day costs a few dollars a
 day. They can set a spending limit in the console first. Scheduled jobs use
 the key too, so stop Rabbithole when done.
 
-The key goes in through `bin/set-key.sh`, which the person runs in their own
-terminal so the key never passes through you. Give them the command with the
-kit's full path (`cd /full/path/to/rabbithole-drink-me && bin/set-key.sh`),
-or on a Mac open a terminal there for them with
-`open -a Terminal /full/path/to/rabbithole-drink-me`. Nothing shows while
-they paste the key; that's on purpose. The script checks the key before
-saving it, and works whether or not setup has finished.
+The key goes in through a page, not through you. Run
+`bin/set-key.sh --browser` in the background: it opens a one-time page on
+this computer where the person pastes the key, checks it with Anthropic,
+saves it, and returns once it's saved. The page also walks them through
+getting a key if they don't have one. Tell them a page opened in their
+browser and the key goes there, straight into Rabbithole, never into this
+chat. If the page can't open, the link is in the script's output. It works
+whether or not setup has finished. (`bin/set-key.sh` without `--browser`
+asks for the key in a terminal instead, for people who prefer that.)
 
-If they don't have a key yet, offer to help them get one; it takes a few
-minutes, in the browser. Anthropic only makes keys in its web console, so
-open the pages for them and walk them through: sign in or sign up at
-https://platform.claude.com, add credits under Billing (a few dollars is
-plenty) and set a spending limit there, then create a key at
-https://platform.claude.com/settings/keys and copy it. The console shows the
-key only once, so have them run `bin/set-key.sh` right after.
+If they don't have a key yet, help them get one; it takes a few minutes.
+Anthropic only makes keys in its web console: sign in or sign up at
+https://platform.claude.com, add a few dollars of credit under Billing (and
+a spending limit, if they like), then create a key at
+https://platform.claude.com/settings/keys. The console shows the key only
+once, so have them paste it into the key page right away.
 
 The tutor is the point of trying Rabbithole, so don't offer a tour without a
 key in its place. If they decide not to get one, say plainly that the tutor
 is what's worth seeing and that they can come back to it any time with
-`bin/set-key.sh`. Without a key, the tutor's chat shows a red
+`bin/set-key.sh --browser`. Without a key, the tutor's chat shows a red
 “Connection lost” and leaves the question unanswered: that's the missing
 key, not a broken install.
 

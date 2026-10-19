@@ -53,7 +53,6 @@ pid_alive() { [ -f "$RUN/$1.pid" ] && kill -0 "$(cat "$RUN/$1.pid")" 2>/dev/null
 # Run one of the snapshot's own pnpm local:* scripts, e.g.  app_run stop
 app_run() { local s="$1"; shift; (cd "$APP" && pnpm --silent "local:$s" "$@"); }
 
-# Stop only what this kit started; the snapshot's local:stop does exactly that.
 # A key set before the local database is up waits here (owner-only) until
 # setup hands it over.
 PENDING_KEY="$KIT/.pending-key"
@@ -64,4 +63,5 @@ hand_over_key() {
   say "Handed your Anthropic key to Rabbithole."
 }
 
+# Stop only what this kit started; the snapshot's local:stop does exactly that.
 stop_all() { [ ! -f "$APP/local/stop.sh" ] || app_run stop >/dev/null; }
