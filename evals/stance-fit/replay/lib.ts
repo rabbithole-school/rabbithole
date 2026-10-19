@@ -392,7 +392,10 @@ export function renderCompare(input: CompareInput): string {
     const h = pairedHeadline(metric, a, b, dps);
     const delta = h.rateA == null || h.rateB == null ? null : h.rateB - h.rateA;
     const d = delta == null ? "—" : `${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(0)} pts`;
-    lines.push(`| ${h.name} | ${h.want} | ${h.nDp} | ${pct(h.rateOriginal)} | ${pct(h.rateA)} | ${pct(h.rateB)} | ${d} | ${h.bBetter} | ${h.bWorse} | ${h.ties} |`);
+    // Headline names contain literal "|" (move alternatives); escape so they
+    // don't split the Markdown table into extra columns.
+    const name = h.name.replace(/\|/g, "\\|");
+    lines.push(`| ${name} | ${h.want} | ${h.nDp} | ${pct(h.rateOriginal)} | ${pct(h.rateA)} | ${pct(h.rateB)} | ${d} | ${h.bBetter} | ${h.bWorse} | ${h.ties} |`);
   }
   lines.push("");
 

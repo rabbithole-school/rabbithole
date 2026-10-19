@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "ed8b705f7898db9dcac931b1cecdbbfdf9106fc5",
+  "sourceCommit": "04a10252f363f12d8e3ae42afc9cb81d29e7d509",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -13354,12 +13354,12 @@
     },
     {
       "path": "evals/stance-fit/replay/lib.test.ts",
-      "sha256": "eb7010ec7fbef8f0b433d3f0123e529e7ba5792851a92c76490e3f2243f9b126",
+      "sha256": "ce66935424cb073a39d8ffd2b52fe4272cc2028515b646593f60c8007afb8c89",
       "mode": "100644"
     },
     {
       "path": "evals/stance-fit/replay/lib.ts",
-      "sha256": "e3bce263bccdd6b5460e3269c6a2a265fef537ceec361d7a5bf19d9310e1b1ac",
+      "sha256": "2c64ed739dbc1826e40cc728f3d12abbcfcecfd0c8f60fbc6e602b37fbe0f5ff",
       "mode": "100644"
     },
     {
@@ -22063,5 +22063,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "d49f5abab0470cfb242f0fe482b57a0a4f96a0d5df89d0c0fa8e55cddbeab241"
+  "treeHash": "5b1d107aa1364595205a29dcc721cc5234978eaa6a9c4ac568646958699746aa"
 }

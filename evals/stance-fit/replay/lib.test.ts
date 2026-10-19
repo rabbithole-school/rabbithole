@@ -175,6 +175,9 @@ describe("aggregation", () => {
     expect(md).toContain("Paired decision points: **3**");
     expect(md).toContain("### stuck_repeating (2 dp; A n=4, B n=4)");
     expect(md).not.toContain("Warning");
+    // Headline names with literal "|" are escaped so the table keeps its columns.
+    expect(md).toContain("direct_explanation\\|worked_example_parallel\\|answer_given");
+    expect(md).toContain("probe_question\\|narrowing_hint (control)");
     const drifted = { ...B.verdicts, judgePromptSha256: "q".repeat(64) };
     expect(renderCompare({ labelA: "A", labelB: "B", dps, gensA: A.gens, gensB: B.gens, verdictsA: A.verdicts, verdictsB: drifted })).toContain("judge drift");
   });
