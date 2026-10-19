@@ -17,8 +17,9 @@ export interface SuggestedPath {
   emoji: string;
   title: string;
   blurb: string;
-  /** "build" marks the fixed "Build a simulation" card; the bake keys on it. */
-  shape?: "build";
+  /** "build" marks the fixed "Build a simulation" card; "buildFirst" the
+   * menu-less "Build it" launch. The bake keys on it. */
+  shape?: "build" | "buildFirst";
 }
 
 export const ENDLESS_CHAT = "endless-chat" as const;
@@ -32,7 +33,7 @@ export const BUILD_PATH: SuggestedPath = { ...BUILD_SIMULATION_PATH };
  * `bakePathArg` in lib/bakePaths.ts. */
 export function bakePathArg(
   choice: PathChoice,
-): { title: string; blurb: string; shape?: "build" } | undefined {
+): { title: string; blurb: string; shape?: "build" | "buildFirst" } | undefined {
   if (choice === ENDLESS_CHAT) return undefined;
   return {
     title: choice.title,
@@ -75,7 +76,13 @@ const LOADING_MESSAGES = [
   "🪄 Almost ready…",
 ];
 
-const SUGGESTION_CACHE = new Map<string, SuggestedPath[]>();
+interface Suggestions {
+  paths: SuggestedPath[];
+  /** The scholar's words already name a specific thing to make. */
+  specificBuild: boolean;
+}
+
+const SUGGESTION_CACHE = new Map<string, Suggestions>();
 
 type Selection =
   | number
@@ -171,9 +178,13 @@ function LoadingCard() {
 export function BakePathPicker({
   source,
   onSelect,
+  onSpecificBuild,
 }: {
   source: BakePathSource;
   onSelect: (choice: PathChoice | null) => void;
+  /** Called instead of revealing the menu when the scholar's words already
+   * describe a specific build; the caller launches it. */
+  onSpecificBuild?: () => void;
 }) {
   const suggest = useAction(api.bakePaths.suggestBakePaths);
   const sourceKind = source.kind;
@@ -182,10 +193,23 @@ export function BakePathPicker({
   const sourceRationale = source.kind === "topic" ? source.rationale : undefined;
   const key = cacheKey(source);
   const cached = SUGGESTION_CACHE.get(key) ?? null;
-  const [paths, setPaths] = useState<SuggestedPath[] | null>(cached);
-  const [selected, setSelected] = useState<Selection>(cached ? 0 : null);
+  // A specific-build hit is handed off, never revealed: start on the loading view.
+  const handsOff = (hit: Suggestions | null) =>
+    !!hit?.specificBuild && !!onSpecificBuild;
+  const [paths, setPaths] = useState<SuggestedPath[] | null>(
+    cached && !handsOff(cached) ? cached.paths : null,
+  );
+  const [selected, setSelected] = useState<Selection>(
+    cached && !handsOff(cached) ? 0 : null,
+  );
   const [msgIdx, setMsgIdx] = useState(0);
   const notifySelection = useEffectEvent(onSelect);
+  // Returns true when the result was handed to the caller as a specific build.
+  const handOffSpecificBuild = useEffectEvent((result: Suggestions) => {
+    if (!result.specificBuild || !onSpecificBuild) return false;
+    onSpecificBuild();
+    return true;
+  });
   const touchedRef = useRef(false);
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
@@ -195,10 +219,16 @@ export function BakePathPicker({
     touchedRef.current = false;
     const hit = SUGGESTION_CACHE.get(key);
     if (hit) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- A cache hit must synchronously restore its paths before resetting and reporting the selected path.
-      setPaths(hit);
+      if (handOffSpecificBuild(hit)) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- A handed-off hit keeps the loading view.
+        setPaths(null);
+        setSelected(null);
+        notifySelection(null);
+        return;
+      }
+      setPaths(hit.paths);
       setSelected(0);
-      notifySelection(hit[0] ?? null);
+      notifySelection(hit.paths[0] ?? null);
       return;
     }
 
@@ -220,7 +250,12 @@ export function BakePathPicker({
       .then((result) => {
         if (cancelled) return;
         const nextPaths = result.paths?.length ? result.paths : FALLBACK_PATHS;
-        SUGGESTION_CACHE.set(key, nextPaths);
+        const next: Suggestions = {
+          paths: nextPaths,
+          specificBuild: result.specificBuild === true,
+        };
+        SUGGESTION_CACHE.set(key, next);
+        if (handOffSpecificBuild(next)) return;
         setPaths(nextPaths);
         if (!touchedRef.current) {
           setSelected(0);
@@ -228,6 +263,7 @@ export function BakePathPicker({
         }
       })
       .catch(() => {
+        // A timeout or error is never a specific build: show the fallbacks.
         if (cancelled) return;
         setPaths(FALLBACK_PATHS);
         if (!touchedRef.current) {
@@ -266,15 +302,9 @@ export function BakePathPicker({
         </Text>
       </View>
 
-      <OptionCard
-        emoji="💬"
-        title="Endless chat"
-        blurb="No plan — just start talking and follow your curiosity wherever it goes."
-        tileBg={colors.gray100}
-        selected={selected === ENDLESS_CHAT}
-        onPress={() => pick(ENDLESS_CHAT, ENDLESS_CHAT)}
-      />
-
+      {/* While the bot is thinking, only the loading line + placeholders show;
+          the fixed cards arrive with the suggestions, so a scholar whose words
+          already name a build never sees a menu flash before the hand-off. */}
       {loading ? (
         <>
           <LoadingCard />
@@ -282,30 +312,38 @@ export function BakePathPicker({
           <LoadingCard />
         </>
       ) : (
-        paths.map((path, i) => (
+        <>
           <OptionCard
-            key={`${path.title}-${i}`}
-            emoji={path.emoji}
-            title={path.title}
-            blurb={path.blurb}
-            tileBg={withAlpha(accentForIndex(i), 0.12)}
-            selected={selected === i}
-            badge={i === 0 ? <SuggestedBadge /> : undefined}
-            onPress={() => pick(i, path)}
+            emoji="💬"
+            title="Endless chat"
+            blurb="No plan — just start talking and follow your curiosity wherever it goes."
+            tileBg={colors.gray100}
+            selected={selected === ENDLESS_CHAT}
+            onPress={() => pick(ENDLESS_CHAT, ENDLESS_CHAT)}
           />
-        ))
+          {paths.map((path, i) => (
+            <OptionCard
+              key={`${path.title}-${i}`}
+              emoji={path.emoji}
+              title={path.title}
+              blurb={path.blurb}
+              tileBg={withAlpha(accentForIndex(i), 0.12)}
+              selected={selected === i}
+              badge={i === 0 ? <SuggestedBadge /> : undefined}
+              onPress={() => pick(i, path)}
+            />
+          ))}
+          {/* Build a simulation — fixed after the live suggestions. */}
+          <OptionCard
+            emoji={BUILD_PATH.emoji}
+            title={BUILD_PATH.title}
+            blurb={BUILD_PATH.blurb}
+            tileBg={colors.violetSubtle}
+            selected={selected === BUILD_SIMULATION_PATH.shape}
+            onPress={() => pick(BUILD_SIMULATION_PATH.shape, BUILD_PATH)}
+          />
+        </>
       )}
-
-      {/* Build a simulation — fixed after the live suggestions, always
-          offered (like Endless chat, it doesn't wait on the bot). */}
-      <OptionCard
-        emoji={BUILD_PATH.emoji}
-        title={BUILD_PATH.title}
-        blurb={BUILD_PATH.blurb}
-        tileBg={colors.violetSubtle}
-        selected={selected === BUILD_SIMULATION_PATH.shape}
-        onPress={() => pick(BUILD_SIMULATION_PATH.shape, BUILD_PATH)}
-      />
     </View>
   );
 }

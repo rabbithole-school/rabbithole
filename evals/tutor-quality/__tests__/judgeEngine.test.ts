@@ -115,7 +115,7 @@ describe("judgeEngineName / judgeProvenance", () => {
   test("copilot provenance is the normalised copilot-cli id", () => {
     process.env[ENV_KEY] = "copilot";
     expect(judgeEngineName()).toBe("copilot");
-    expect(judgeProvenance()).toBe("copilot-cli:claude-fable-5-1");
+    expect(judgeProvenance()).toBe("copilot-cli:claude-opus-5-5");
   });
 
   test("rejects an unknown engine", () => {
@@ -140,10 +140,19 @@ describe("buildCopilotPrompt", () => {
 });
 
 describe("assertJudgeNotWeaker", () => {
-  test("the default judge can grade every tutor model we run", () => {
+  test("the default judge can grade the fleet tutor models", () => {
     delete process.env[ENV_KEY];
     delete process.env.JUDGE_MODEL;
-    expect(() => assertJudgeNotWeaker([MODELS.SONNET, MODELS.OPUS_5_5, MODELS.FABLE])).not.toThrow();
+    expect(() => assertJudgeNotWeaker([MODELS.SONNET, MODELS.OPUS_5_5])).not.toThrow();
+  });
+
+  test("a Fable tutor (the per-person 'fable' preference) needs a Fable judge", () => {
+    delete process.env[ENV_KEY];
+    delete process.env.JUDGE_MODEL;
+    expect(() => assertJudgeNotWeaker([MODELS.FABLE])).toThrow(/weaker than tutor model/);
+    process.env.JUDGE_MODEL = "claude-fable-5.1";
+    expect(() => assertJudgeNotWeaker([MODELS.FABLE])).not.toThrow();
+    delete process.env.JUDGE_MODEL;
   });
 
   test("refuses a judge weaker than either compared model", () => {

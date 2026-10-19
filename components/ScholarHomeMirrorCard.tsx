@@ -43,12 +43,16 @@ import { SuggestedQuestCard } from "@/components/SuggestedQuests";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { toaster } from "@/lib/toaster";
 import { formatTimeAgo } from "@/lib/relativeTime";
+import { serverErrorMessage } from "@/lib/serverErrorMessage";
+import { TEACHER_ARCHIVE_COPY } from "@/shared/teacherArchive";
 
 type Home = FunctionReturnType<typeof api.scholarPlate.homeForScholar>;
 type HomeRow = Home["rows"][number];
 type HomeOnboarding = NonNullable<Home["onboarding"]>;
 type SuggestedQuest = Home["suggested"][number];
 
+// A row whose session holds an app gets the teacher archive (a lock only a
+// teacher lifts) instead of the scholar-restorable session archive.
 type SectionOrigin = "onboarding" | "classFocus" | "homework" | "is";
 
 const SECTION_META: Record<
@@ -77,6 +81,7 @@ export function ScholarHomeMirrorCard({
   const home = useQuery(api.scholarPlate.homeForScholar, { scholarId });
 
   const archiveSession = useMutation(api.sessions.archive);
+  const archiveApp = useMutation(api.sessions.archiveApp);
   const retractQuest = useMutation(api.quests.retract);
   const setScholars = useMutation(api.assignments.setScholars);
   const clearActivity = useMutation(api.assignments.clearActivity);
@@ -153,8 +158,13 @@ export function ScholarHomeMirrorCard({
     setBusy(true);
     try {
       if (pending.type === "archive" && pending.row.sessionId) {
-        await archiveSession({ id: pending.row.sessionId });
-        toaster.success({ title: "Session archived" });
+        if (pending.row.hasApp === true) {
+          await archiveApp({ id: pending.row.sessionId });
+          toaster.success({ title: TEACHER_ARCHIVE_COPY.archivedToast });
+        } else {
+          await archiveSession({ id: pending.row.sessionId });
+          toaster.success({ title: "Session archived" });
+        }
       } else if (pending.type === "retract" && pending.row.unitId) {
         const res = await retractQuest({ unitId: pending.row.unitId });
         toaster.success({
@@ -198,7 +208,7 @@ export function ScholarHomeMirrorCard({
     } catch (e) {
       toaster.error({
         title: "Couldn't complete that",
-        description: e instanceof Error ? e.message : undefined,
+        description: serverErrorMessage(e) || undefined,
       });
     } finally {
       setBusy(false);
@@ -513,7 +523,9 @@ function PlateRowView({
                       fontSize="sm"
                       onSelect={() => onAction({ type: "archive", row })}
                     >
-                      Archive session
+                      {row.hasApp === true
+                        ? TEACHER_ARCHIVE_COPY.archiveAction
+                        : "Archive session"}
                     </Menu.Item>
                   )}
                   {canRetract && (
@@ -648,9 +660,16 @@ function buildConfirmCopy(
       : pending.row.title;
   switch (pending.type) {
     case "archive":
+      if (pending.row.hasApp === true) {
+        return {
+          title: TEACHER_ARCHIVE_COPY.confirmTitle(name),
+          body: TEACHER_ARCHIVE_COPY.confirmBody,
+          cta: TEACHER_ARCHIVE_COPY.archiveAction,
+        };
+      }
       return {
         title: "Archive this session?",
-        body: `"${name}" will be moved to the scholar's archived sessions. They can restore it from Finished. This takes it off their Home.`,
+        body: `"${name}" will be moved to the scholar's archived sessions. They can unarchive it from Archived on their Home.`,
         cta: "Archive session",
       };
     case "retract":

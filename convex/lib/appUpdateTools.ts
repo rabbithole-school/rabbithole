@@ -224,6 +224,10 @@ export function appUpdateInstruction(args: {
   hasAsks: boolean;
   hasCharacter: boolean;
   canStaySilent: boolean;
+  /** The session is in the scholar's own Quest (SessionMission.ownQuest).
+   *  Its app is theirs: a run is never a cue to quiz them about the Quest
+   *  plan's idea (prod 2026-10-16; prompts.ts buildOwnQuestBuildSteering). */
+  ownQuest?: boolean;
 }): string {
   const moves = args.hasCharacter
     ? `coach the scholar in your own voice, direct the character or speak ` +
@@ -239,13 +243,27 @@ export function appUpdateInstruction(args: {
         ? ` Speak, direct, or overrule the character only for one of the ` +
           `reasons in CHARACTER ON STAGE, and never right after the character ` +
           `has done its part and before the scholar has had a try.`
-        : ` Speak only if they are stuck after several tries, upset, asked ` +
-          `you something, or have just finished.`);
+        : args.ownQuest
+          ? ` Speak only if they are stuck after several tries, upset, or ` +
+            `asked you something.`
+          : ` Speak only if they are stuck after several tries, upset, asked ` +
+            `you something, or have just finished.`);
+  // In their own Quest the app is the scholar's: whatever they do in it is
+  // play, never a run of an experiment the plan wants analysed.
+  const ownQuest = args.ownQuest
+    ? ` This app is the scholar's own Quest, theirs to play and build. A run ` +
+      `is play, not an experiment: never quiz them about it, never ask them ` +
+      `to change a setting or run it again to test an idea, and never bring ` +
+      `back a question they skipped. Finishing a run, a round, or the ` +
+      `activity is not on its own a reason to speak, whatever CHARACTER ON ` +
+      `STAGE says. If you speak, it is about what they are trying to do.`
+    : "";
   return (
     `[SYSTEM — this is NOT a message the scholar typed. Things happened ` +
     `inside the app since your last reply; they are the IN-APP lines and APP ` +
     `REQUESTs after it, above. You are the director here: ${moves}.` +
     restraint +
+    ownQuest +
     (args.canStaySilent
       ? ` To say nothing, call ${STAY_SILENT_TOOL_NAME} before writing any text.`
       : "") +

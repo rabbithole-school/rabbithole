@@ -22,6 +22,16 @@ export const BUILD_SIMULATION_PATH = {
   shape: "build",
 } as const;
 
+/** Never a card: the path a Custom Quest launches with when the scholar's own
+ * words already describe the thing to make (the menu is skipped). The quest is
+ * that one build, with no learning step in front of it. */
+export const BUILD_IT_PATH = {
+  emoji: "🛠️",
+  title: "Build it",
+  blurb: "Build the thing you described, and figure out how it works as you go.",
+  shape: "buildFirst",
+} as const;
+
 /** B6: a Quest build step's row while its learning step is unfinished. */
 export function questBuildLockLabel(prerequisiteTitle: string): string {
   return `Unlocks when you finish ${prerequisiteTitle}`;

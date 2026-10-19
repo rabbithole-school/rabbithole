@@ -3,6 +3,7 @@ import {
   buildNowDigest,
   deriveHomeTabs,
   filterHomeworkForNow,
+  filterArchivedRowsForTab,
   filterRowsForTab,
   focusSectionLabel,
   groupHomeRowsByUnit,
@@ -168,9 +169,51 @@ describe("filterRowsForTab", () => {
     ]);
   });
 
-  test("prep and apps tabs never surface plate rows", () => {
+  test("prep never surfaces plate rows; apps surfaces only app rows", () => {
     expect(filterRowsForTab(rows, "prep")).toEqual([]);
     expect(filterRowsForTab(rows, "apps")).toEqual([]);
+    const withApps = [
+      ...rows,
+      { id: "built", ...assigned("classFocus", "Science"), isApp: true },
+      { id: "questApp", origin: "is" as const, subject: null, isApp: true },
+    ];
+    expect(filterRowsForTab(withApps, "apps").map((row) => row.id)).toEqual([
+      "built",
+      "questApp",
+    ]);
+    // An app row still belongs to its ordinary tabs too.
+    expect(filterRowsForTab(withApps, "subject:science").map((r) => r.id)).toContain(
+      "built",
+    );
+    expect(filterRowsForTab(withApps, "quests").map((r) => r.id)).toContain(
+      "questApp",
+    );
+  });
+});
+
+describe("filterArchivedRowsForTab", () => {
+  const rows = [
+    { id: "focus", ...assigned("classFocus", "Math Workshop") },
+    { id: "hw", ...assigned("homework", "Science") },
+    { id: "quest", origin: "is" as const, subject: null },
+    { id: "app", origin: "is" as const, subject: null, isApp: true },
+  ];
+  const ids = (tab: string) =>
+    filterArchivedRowsForTab(rows, tab).map((row) => row.id);
+
+  test("Now lists the same archived rows as All", () => {
+    expect(ids("now")).toEqual(ids("all"));
+    expect(ids("all")).toEqual(["focus", "hw"]);
+  });
+
+  test("Scholar's Prep lists archived homework", () => {
+    expect(ids("prep")).toEqual(["hw"]);
+  });
+
+  test("subject, Quests and Apps place rows the way the active filter does", () => {
+    expect(ids("subject:math")).toEqual(["focus"]);
+    expect(ids("quests")).toEqual(["quest", "app"]);
+    expect(ids("apps")).toEqual(["app"]);
   });
 });
 

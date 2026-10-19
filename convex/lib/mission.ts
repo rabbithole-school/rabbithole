@@ -39,6 +39,8 @@ export type MissionSession = {
 
 export type MissionUnit = {
   authorScholarId?: unknown;
+  /** "inspired" = designed by someone else for the scholar (a teacher offer). */
+  authorRole?: string | null;
   mission?: { text: string; gate?: string } | null;
 };
 
@@ -225,4 +227,39 @@ export function lockedQuestBuildTitle<A extends MissionActivity & { _id: string 
     earlier ??= title;
   }
   return earlier;
+}
+
+// ── BUILD FIRST: the scholar build kickoff ──────────────────────────────
+
+/**
+ * Whether a session opens by BUILDING the scholar's app: the scholar described
+ * a specific thing to make, so their Quest starts at its build step (the
+ * build-first bake) and the builder makes the first version from their words
+ * instead of asking them to retype the idea. ONE rule, read by
+ * `sessions.getWithMessages` (the clients' kickoff) and the stream's kickoff
+ * instruction (`getSessionContext`), so the two cannot disagree. It lives here
+ * beside the B6 helpers because it is B6's complement: a Quest that is ONLY
+ * its build, so there is no learning step to lock it behind. A build step
+ * after other steps (B6, or a B4 build-last bake) keeps the ordinary opening.
+ *
+ * True iff: not a test drive; the unit is the session owner's own Quest and
+ * not one a teacher designed for them (`authorRole: "inspired"`); and the
+ * activity is an app activity that is the Quest's ONLY activity (`ordered` is
+ * the unit's activities in scholar-visible order) — the shape the build-first
+ * bake produces.
+ */
+export function isScholarBuildKickoff<A extends MissionActivity & { _id: string }>(args: {
+  isTestDrive: boolean;
+  /** The session's owner. The Quest must be theirs. */
+  ownerId: unknown;
+  unit: MissionUnit | null | undefined;
+  activity: A | null | undefined;
+  ordered: readonly A[];
+}): boolean {
+  const { unit, activity, ordered } = args;
+  if (args.isTestDrive || !isQuestUnit(unit)) return false;
+  if (unit?.authorScholarId !== args.ownerId) return false;
+  if (unit?.authorRole === "inspired") return false;
+  if (!activity || !isAppActivity(activity)) return false;
+  return ordered.length === 1 && ordered[0]._id === activity._id;
 }

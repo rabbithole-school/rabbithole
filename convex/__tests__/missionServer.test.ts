@@ -636,3 +636,115 @@ describe("sessions.questFromParkedIdea", () => {
     ).rejects.toThrow(/rehearsal/);
   });
 });
+
+describe("BUILD FIRST: getWithMessages' scholarBuildKickoff", () => {
+  /** A build-first Quest beside the world's: its only step is the app. */
+  async function buildFirstQuest(t: T, w: World) {
+    return await t.run(async (ctx) => {
+      const unitId = await ctx.db.insert("units", {
+        teacherId: w.scholarId,
+        institutionId: w.institutionId,
+        title: "Heron angles",
+        isActive: true,
+        authorScholarId: w.scholarId,
+      });
+      const lessonId = await ctx.db.insert("lessons", {
+        unitId,
+        title: "Build it",
+        order: 0,
+      });
+      const activityId = await ctx.db.insert("activities", {
+        lessonId,
+        title: "Build a heron angle game",
+        order: 0,
+        kind: "online",
+        appActivity: true,
+        deliverable: APP_DELIVERABLE,
+      });
+      return { unitId, lessonId, activityId };
+    });
+  }
+
+  async function appSession(
+    t: T,
+    w: World,
+    at: { unitId: Id<"units">; lessonId: Id<"lessons">; activityId: Id<"activities"> },
+    overrides: Partial<Doc<"sessions">> = {},
+  ) {
+    return await t.run((ctx) =>
+      ctx.db.insert("sessions", {
+        userId: w.scholarId,
+        institutionId: w.institutionId,
+        unitId: at.unitId,
+        lessonId: at.lessonId,
+        activityId: at.activityId,
+        sessionMode: "vibecode",
+        title: "Build",
+        isArchived: false,
+        ...overrides,
+      }),
+    );
+  }
+
+  test("true for the owner of a build-first Quest step, and its kickoff starts", async () => {
+    const t = convexTest(schema, modules);
+    const w = await questWorld(t);
+    const first = await buildFirstQuest(t, w);
+    const sessionId = await appSession(t, w, first);
+    const as = await asUser(t, w.scholarId);
+    const data = await as.query(api.sessions.getWithMessages, { id: sessionId });
+    expect(data.session.scholarBuildKickoff).toBe(true);
+    // Never the teacher-only build hand-off.
+    expect(
+      Object.prototype.hasOwnProperty.call(data.session, "teacherBuildKickoff"),
+    ).toBe(false);
+    const kickoff = await as.mutation(api.sessions.startActivityKickoff, {
+      sessionId,
+    });
+    expect(kickoff?.status).toBe("started");
+
+    // A teacher reading the same session never triggers it.
+    const asTeacher = await asUser(t, w.teacherId);
+    const teacherView = await asTeacher.query(api.sessions.getWithMessages, {
+      id: sessionId,
+    });
+    expect(teacherView.session.scholarBuildKickoff).toBe(false);
+  });
+
+  test("false for a B6 build step that follows a learning step", async () => {
+    const t = convexTest(schema, modules);
+    const w = await questWorld(t);
+    const sessionId = await appSession(t, w, {
+      unitId: w.unitId,
+      lessonId: w.lessonId,
+      activityId: w.buildId,
+    });
+    const as = await asUser(t, w.scholarId);
+    const data = await as.query(api.sessions.getWithMessages, { id: sessionId });
+    expect(data.session.scholarBuildKickoff).toBe(false);
+  });
+
+  test("false for an app activity in a teacher's unit", async () => {
+    const t = convexTest(schema, modules);
+    const w = await questWorld(t, { teacherUnit: true });
+    await t.run((ctx) => ctx.db.delete(w.learnId));
+    const sessionId = await appSession(t, w, {
+      unitId: w.unitId,
+      lessonId: w.lessonId,
+      activityId: w.buildId,
+    });
+    const as = await asUser(t, w.scholarId);
+    const data = await as.query(api.sessions.getWithMessages, { id: sessionId });
+    expect(data.session.scholarBuildKickoff).toBe(false);
+  });
+
+  test("false for a test drive", async () => {
+    const t = convexTest(schema, modules);
+    const w = await questWorld(t);
+    const first = await buildFirstQuest(t, w);
+    const sessionId = await appSession(t, w, first, { isTestDrive: true });
+    const as = await asUser(t, w.scholarId);
+    const data = await as.query(api.sessions.getWithMessages, { id: sessionId });
+    expect(data.session.scholarBuildKickoff).toBe(false);
+  });
+});

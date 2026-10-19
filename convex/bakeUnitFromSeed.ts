@@ -48,16 +48,30 @@ import { isLearningStep, type MissionActivity } from "./lib/mission";
 // (shared/missionCopy.ts BUILD_SIMULATION_PATH, TRA-519 B4): the bake ends in
 // an app activity. The bake keys on `shape`, never on the title. Optional so
 // older iPad builds keep validating.
+//
+// `shape: "buildFirst"` is never a card: the Custom Quest dialog sends it,
+// without showing the menu, when the scholar's own words already describe a
+// specific thing to make (`suggestBakePaths` → `specificBuild`). The quest is
+// then that one build, with no learning step in front of it.
 export const chosenPathValidator = v.object({
   title: v.string(),
   blurb: v.string(),
-  shape: v.optional(v.literal("build")),
+  shape: v.optional(v.union(v.literal("build"), v.literal("buildFirst"))),
 });
-export type ChosenPath = { title: string; blurb: string; shape?: "build" };
+export type ChosenPath = {
+  title: string;
+  blurb: string;
+  shape?: "build" | "buildFirst";
+};
 
 /** The "Build a simulation" path: the bake ends in an app activity. */
 export function isBuildPath(path: ChosenPath | null | undefined): boolean {
   return path?.shape === "build";
+}
+
+/** The scholar described the thing to make: the quest is that one build. */
+export function isBuildFirstPath(path: ChosenPath | null | undefined): boolean {
+  return path?.shape === "buildFirst";
 }
 
 /**
@@ -83,14 +97,16 @@ export function orderLearnBeforeBuild<A extends MissionActivity>(
 }
 
 const BAKE_STAGES = ["commit", "capture", "reckon", "extend"] as const;
-type BakeStage = (typeof BAKE_STAGES)[number];
+// The build-first quest's single activity carries its own marker, so a bot
+// that falls back to the discovery arc fails normalization instead of passing.
+type BakeStage = (typeof BAKE_STAGES)[number] | "build";
 
 export function parseBakeStageMarker(
   notes: string | undefined,
 ): { stage: BakeStage; notes: string } | null {
   if (!notes) return null;
   const match = notes.match(
-    /^\s*\[bake-stage:(commit|capture|reckon|extend)\]\s*/i,
+    /^\s*\[bake-stage:(commit|capture|reckon|extend|build)\]\s*/i,
   );
   if (!match) return null;
   const cleanedNotes = notes.slice(match[0].length).trim();
@@ -128,6 +144,7 @@ export interface BakeSpec {
  * constraints (small, finish prompts, never ask questions).
  */
 export function buildBakeInstruction(spec: BakeSpec): string {
+  if (isBuildFirstPath(spec.path)) return buildBuildFirstInstruction(spec);
   const steering: string[] = [];
   if (spec.connectionTo) steering.push(`What sparked it: ${spec.connectionTo}`);
   if (spec.rationale) steering.push(`Why it pulls them: ${spec.rationale}`);
@@ -190,6 +207,43 @@ export function buildBakeInstruction(spec: BakeSpec): string {
     promptStep,
     "",
     "This is a real multi-sitting quest the scholar returns to — each activity is a meaty 15-30 minute sitting done as homework or independent work, NOT a one-sitting toy. Still exactly ONE lesson; still small enough to build now. At least ONE activity must carry an away-from-screen mission per the investigation bar's away-from-screen requirement: the activity's tutor prompt sends the scholar to do something real (measure, count, build, tally, test) with household items, and the NEXT sitting runs on what they bring back. Have an early activity open a gap the scholar owns (a bet, a prediction, a vote) and a later activity land the earned payoff — the concept's name arrives after the scholar has derived the thing, never in activity 1. Honor that they chose this — frame it as their exploration. When every online activity has a system prompt and an auto deliverable, you're done; end with a one-line summary.",
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
+}
+
+/**
+ * The build-first quest: the scholar already said what they want to make, so
+ * the quest is that one app activity. The learning lives inside the build —
+ * the concept their idea runs on becomes the build contract's invariants, and
+ * the builder hands those decisions back to the scholar.
+ */
+function buildBuildFirstInstruction(spec: BakeSpec): string {
+  // A Custom Quest's description is the scholar's own words about what to
+  // make (`customQuestTopic` hands it over as `rationale`), so it is quoted
+  // with the title, never filed as private steering.
+  const words = [spec.topic, spec.rationale]
+    .filter((w): w is string => !!w?.trim())
+    .map((w) => `"${w.trim()}"`)
+    .join(" — ");
+  return [
+    "You are setting up a quest for ONE gifted elementary scholar who already knows exactly what they want to make. This runs HEADLESS — there is no teacher to answer questions, so build the whole thing now with your tools and never ask me anything.",
+    "",
+    `What the scholar wants to make, in their words: ${words}${spec.domain ? ` (${spec.domain})` : ""}`,
+    spec.connectionTo
+      ? `What sparked it: ${spec.connectionTo}\n(Private steering — calibrate to it, don't read it back to the scholar.)`
+      : "",
+    levelsPromptLine(spec.readingLevel) ?? "Talk level: (not set — pick a sensible elementary default)",
+    "",
+    "THIS QUEST IS BUILDING THEIR THING. Keep their idea, their name for it, and their framing — don't redesign it, shrink it into a worksheet, or swap in a different project. Do NOT put a learning step in front of it: the learning happens INSIDE the build. Find the concept their idea runs on (the math or science behind its core mechanic) — that is what the quest teaches, by having the scholar make the decisions that carry it as they build.",
+    "",
+    "Build it end-to-end, in this order, using your tools:",
+    "1. update_unit — a big idea, 2 essential questions, and 1-2 enduring understandings grounded in the concept their build runs on.",
+    "2. create_lesson — exactly ONE lesson (core strand).",
+    '3. create_activity — EXACTLY ONE activity on that lesson: kind:"app", the build. Its `systemPrompt` is the BUILD BRIEF: build what the scholar described, starting from their words; whenever the build reaches a choice that carries the concept (a rule, a number, a relationship), the scholar decides it and the builder hands that thinking back instead of deciding for them. Its deliverable is { kind:"artifact", mode:"auto", prompt: what their finished app does, notes: starting with `[bake-stage:build]` then the quality bar, criteria: [] }. It ALWAYS carries a buildContract: `invariants` = 1-3 statements of the concept their app must get right, as testable cause→effect ("when X goes up, Y …"), `freedoms` = everything else the scholar owns (characters, look, story, rules of play), `gate` = "The core mechanic runs once."',
+    "4. Do NOT call generate_activity_prompt — the build brief is the activity's prompt.",
+    "",
+    "The build can span several sittings; the scholar returns to keep extending it. When the activity exists with its build brief, deliverable, and buildContract, you're done; end with a one-line summary.",
   ]
     .filter((l) => l !== "")
     .join("\n");
@@ -266,7 +320,9 @@ export const unitInstitutionScope = internalQuery({
   },
 });
 
-/** Find the first ONLINE activity in a (freshly baked) unit, in lesson→activity order. */
+/** Find the first ONLINE activity in a (freshly baked) unit, in lesson→activity
+ * order. An app activity counts (it is online with app settings): a build-first
+ * quest has nothing else. */
 export const firstOnlineActivityInUnit = internalQuery({
   args: { unitId: v.id("units") },
   handler: async (
@@ -286,7 +342,9 @@ export const firstOnlineActivityInUnit = internalQuery({
           .withIndex("by_lesson", (q) => q.eq("lessonId", lesson._id))
           .collect()
       ).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-      const online = acts.find((a) => effectiveActivityKind(a) === "online");
+      const online = acts.find(
+        (a) => effectiveActivityKind(a) === "online" || isAppActivity(a),
+      );
       if (online) return { lessonId: lesson._id, activityId: online._id };
     }
     return null;
@@ -304,6 +362,9 @@ export const normalizeBakedActivityOrder = internalMutation({
     // The "Build a simulation" path (TRA-519 B4): exactly 4 stages, and the
     // extend stage is repaired into an app activity if the bot missed it.
     build: v.optional(v.boolean()),
+    // The build-first quest: exactly one activity, the build, repaired the
+    // same way. No learning step, so B6 has nothing to reorder or lock.
+    buildFirst: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const lessons = await ctx.db
@@ -321,6 +382,31 @@ export const normalizeBakedActivityOrder = internalMutation({
       .query("activities")
       .withIndex("by_lesson", (q) => q.eq("lessonId", lessons[0]._id))
       .collect();
+    if (args.buildFirst) {
+      // The scholar skipped the menu for this, so a near-miss is repaired
+      // rather than dropped: one activity that is marked build OR already an
+      // app is the build. Anything else (the discovery arc, several steps)
+      // fails.
+      const a = activities.length === 1 ? activities[0] : null;
+      const marker = a ? parseBakeStageMarker(a.deliverable?.notes) : null;
+      if (
+        !a?.deliverable ||
+        !(marker?.stage === "build" || (!marker && isAppActivity(a)))
+      ) {
+        return {
+          normalized: false,
+          reason: `Expected one build activity, found ${activities.length}`,
+        };
+      }
+      const patch = buildStageRepair(args.unitId, a);
+      const deliverable = patch.deliverable ?? a.deliverable;
+      await ctx.db.patch(a._id, {
+        ...patch,
+        order: 0,
+        deliverable: { ...deliverable, notes: marker?.notes ?? deliverable.notes },
+      });
+      return { normalized: true, reason: null };
+    }
     if (args.build ? activities.length !== 4 : activities.length !== 3 && activities.length !== 4) {
       return {
         normalized: false,
@@ -339,7 +425,7 @@ export const normalizeBakedActivityOrder = internalMutation({
       };
     }
 
-    const expectedStages = BAKE_STAGES.slice(0, activities.length);
+    const expectedStages: BakeStage[] = BAKE_STAGES.slice(0, activities.length);
     const actualStages = staged.map(({ marker }) => marker!.stage);
     if (
       new Set(actualStages).size !== actualStages.length ||
@@ -351,7 +437,7 @@ export const normalizeBakedActivityOrder = internalMutation({
       };
     }
 
-    const stageOrder = new Map(
+    const stageOrder = new Map<BakeStage, number>(
       BAKE_STAGES.map((stage, index) => [stage, index]),
     );
     staged.sort(
@@ -359,34 +445,12 @@ export const normalizeBakedActivityOrder = internalMutation({
         stageOrder.get(a.marker!.stage)! - stageOrder.get(b.marker!.stage)!,
     );
 
-    // Build path: the extend stage IS the build. Repair a bot that made it a
-    // plain online activity (set the app marker, make the deliverable the
-    // app). A missing contract is logged, not fatal: the builder runs with
-    // the default app gate (lib/mission.ts DEFAULT_APP_GATE).
+    // Build path: the extend stage IS the build (`buildStageRepair`).
     const repaired = new Map<Id<"activities">, Partial<Doc<"activities">>>();
     if (args.build) {
       const extend = staged.find(({ marker }) => marker!.stage === "extend")!;
-      const a = extend.activity;
-      const patch: Partial<Doc<"activities">> = {};
-      if (!isAppActivity(a)) {
-        patch.kind = "online";
-        patch.appActivity = true;
-        if (a.advanceRubric) patch.advanceRubric = undefined;
-      }
-      if (a.deliverable?.kind !== "artifact") {
-        patch.deliverable = { ...a.deliverable!, kind: "artifact" };
-      }
-      if (!a.buildContract) {
-        console.log(
-          `[bake ${args.unitId}] build stage "${a.title}" has no buildContract; the default app gate applies`,
-        );
-      }
-      if (Object.keys(patch).length > 0) {
-        console.log(
-          `[bake ${args.unitId}] repaired build stage "${a.title}": ${Object.keys(patch).join(", ")}`,
-        );
-        repaired.set(a._id, patch);
-      }
+      const patch = buildStageRepair(args.unitId, extend.activity);
+      if (Object.keys(patch).length > 0) repaired.set(extend.activity._id, patch);
     }
 
     // B6 learn before you build — every Quest bake, not only the build path.
@@ -411,6 +475,38 @@ export const normalizeBakedActivityOrder = internalMutation({
     return { normalized: true, reason: null };
   },
 });
+
+/**
+ * The patch that makes a baked build stage an app activity whose deliverable
+ * is the app, for a bot that missed either. A missing contract is logged, not
+ * fatal: the builder runs with the default app gate (lib/mission.ts
+ * DEFAULT_APP_GATE).
+ */
+function buildStageRepair(
+  unitId: Id<"units">,
+  a: Doc<"activities">,
+): Partial<Doc<"activities">> {
+  const patch: Partial<Doc<"activities">> = {};
+  if (!isAppActivity(a)) {
+    patch.kind = "online";
+    patch.appActivity = true;
+    if (a.advanceRubric) patch.advanceRubric = undefined;
+  }
+  if (a.deliverable?.kind !== "artifact") {
+    patch.deliverable = { ...a.deliverable!, kind: "artifact" };
+  }
+  if (!a.buildContract) {
+    console.log(
+      `[bake ${unitId}] build stage "${a.title}" has no buildContract; the default app gate applies`,
+    );
+  }
+  if (Object.keys(patch).length > 0) {
+    console.log(
+      `[bake ${unitId}] repaired build stage "${a.title}": ${Object.keys(patch).join(", ")}`,
+    );
+  }
+  return patch;
+}
 
 /** Stamp a seed with the unit the bake produced (flips the star to "structured"). */
 export const stampSeedUnit = internalMutation({
@@ -644,7 +740,11 @@ async function ensureUnitBaked(ctx: ActionCtx, spec: BakeSpec): Promise<boolean>
   if (!after) return false;
   const normalized = await ctx.runMutation(
     internal.bakeUnitFromSeed.normalizeBakedActivityOrder,
-    { unitId: spec.unitId, build: isBuildPath(spec.path) },
+    {
+      unitId: spec.unitId,
+      build: isBuildPath(spec.path),
+      buildFirst: isBuildFirstPath(spec.path),
+    },
   );
   if (!normalized.normalized) {
     console.error(

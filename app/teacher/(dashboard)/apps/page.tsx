@@ -13,13 +13,19 @@
  * row opens the Enable dialog (§6.1); "New app" adds a catalog row from a name
  * + URL.
  *
+ * Apps scholars built sit in the same list (review/teacher-apps-scholar-rows-
+ * options.html, Option 2): "All" means all, so they appear beside catalog apps
+ * with a Scholar tag, and By scholars shows only them. Teachers see them;
+ * operations staff hold no scholar records and don't.
+ *
  * The launcher union is resolved at read time (convex/scholarApps.ts), so a
  * grant here is followed as membership churns — never fanned out per scholar.
  */
 
-import type { ManagedNativeAppKey } from "@/convex/lib/managedNativeApps";
 import { useState } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useRouter, useSearchParams } from "next/navigation";
+import NextLink from "next/link";
+import { useMutation, usePaginatedQuery, useQuery } from "convex/react";
 import {
   Box,
   Button,
@@ -27,32 +33,25 @@ import {
   Heading,
   HStack,
   Input,
+  SimpleGrid,
   Spinner,
   Stack,
   Text,
   VStack,
-  chakra,
 } from "@chakra-ui/react";
-import { Plus, X, AppWindow, CaretRight, Trash, Timer } from "@phosphor-icons/react";
+import { Plus, AppWindow, Timer } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import type { ScholarBuiltApp } from "@/convex/scholarBuiltApps";
 import { Surface } from "@/components/ui/Surface";
 import {
   AppAccessDrawer,
-  appLaunchSummary,
-  domainOf,
   type AppAccessTarget,
 } from "@/components/AppAccessDrawer";
 import { ScholarPicker } from "@/components/ScholarPicker";
-import {
-  ScholarFacepile,
-  type FacepileScholar,
-} from "@/components/ScholarFacepile";
 import { FieldSelect } from "@/components/ui/FieldSelect";
 import { MakeFocusDialog } from "@/components/MakeFocusDialog";
 import { LiveFocusBar } from "@/components/LiveFocusBar";
-import { AppTileIcon } from "@/components/ui/AppTileIcon";
-import { AppPreviewButton } from "@/components/AppPreviewButton";
 import {
   AppTileEditorDialog,
   AppTileFields,
@@ -65,31 +64,32 @@ import { isTeacherRole } from "@/convex/lib/roles";
 import { serverErrorMessage } from "@/lib/serverErrorMessage";
 import { ContextTabs } from "@/components/ui/ContextTabs";
 import type { ExternalAppKind } from "@/shared/appKind";
-
-type AppRow = {
-  _id: Id<"externalApps">;
-  name: string;
-  webUrl: string;
-  nativeUrlScheme: string | null;
-  iconUrl: string | null;
-  iconEmoji: string | null;
-  color: string | null;
-  credentialSource: "scholarApp" | "libraryCard" | null;
-  defaultForNewScholars: boolean;
-  managedNativeAppKey: ManagedNativeAppKey | null;
-  appKind: ExternalAppKind;
-  audiences: {
-    grantId: Id<"appAudiences">;
-    audienceKind: "group" | "institution";
-    audienceId: string;
-    enabled: boolean;
-    label: string;
-    emoji: string | null;
-    memberCount: number;
-  }[];
-  directScholarCount: number;
-  directFacepile: FacepileScholar[];
-};
+import { ScholarScopePicker } from "@/components/ScholarScopePicker";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { useArchiveAppConfirm } from "@/components/TeacherArchivedApp";
+import { useAppsScope } from "@/components/teacherApps/useAppsScope";
+import { TimedAccessChip } from "@/components/teacherApps/TimedAccessChip";
+import { AppGalleryCard } from "@/components/teacherApps/AppGalleryCard";
+import {
+  ArchivedCatalogRow,
+  CatalogRow,
+  ReachLine,
+  ScholarAppRow,
+  scholarAppHref,
+  scholarAppSource,
+  editedLabel,
+  type AppRow,
+} from "@/components/teacherApps/AppListRows";
+import { Avatar } from "@/components/Avatar";
+import {
+  appListItems,
+  sortCatalog,
+  type AppSort,
+  type ListItem as AppListItem,
+} from "@/components/teacherApps/appListOrder";
+import { useNow } from "@/hooks/useNow";
+import { useSmoothedQuery } from "@/hooks/useSmoothedQuery";
+import { TEACHER_ARCHIVE_COPY } from "@/shared/teacherArchive";
 
 type RoomRow = {
   _id: Id<"rooms">;
@@ -104,40 +104,86 @@ type RoomRow = {
   updatedAt: number;
 };
 
-function launchSummary(row: AppRow): string {
-  return appLaunchSummary({
-    _id: row._id,
-    name: row.name,
-    webUrl: row.webUrl,
-    credentialSource: row.credentialSource,
-    managedNativeAppKey: row.managedNativeAppKey,
-  });
-}
+type KindFilter = "all" | ExternalAppKind | "scholar" | "archived";
 
-const KIND_FILTERS: { value: "all" | ExternalAppKind; label: string }[] = [
+const KIND_FILTERS: { value: KindFilter; label: string }[] = [
   { value: "all", label: "All" },
   { value: "web", label: "Web" },
   { value: "custom", label: "Custom" },
   { value: "native", label: "Native iPad" },
+  { value: "scholar", label: "By scholars" },
+  { value: "archived", label: "Archived" },
 ];
 
 // One sentence-case line per empty filtered view (no CTA).
-const KIND_EMPTY_LINE: Record<ExternalAppKind, string> = {
+const KIND_EMPTY_LINE: Record<Exclude<KindFilter, "all">, string> = {
   web: "No web apps yet.",
   custom: "No custom apps yet.",
   native: "No native iPad apps yet.",
+  scholar: "No scholar-built apps yet.",
+  archived: "No archived apps.",
 };
 
+type ContractFilter = "all" | "with" | "without";
+
+const SORT_OPTIONS: { value: AppSort; label: string }[] = [
+  { value: "name", label: "Name" },
+  { value: "newest", label: "Newest" },
+  { value: "oldest", label: "Oldest" },
+  { value: "edited", label: "Last edited" },
+];
+
+const CONTRACT_OPTIONS: { value: ContractFilter; label: string }[] = [
+  { value: "all", label: "Any learning contract" },
+  { value: "with", label: "With learning contract" },
+  { value: "without", label: "Without learning contract" },
+];
+
+function matchesContract(has: boolean, filter: ContractFilter): boolean {
+  return filter === "all" || has === (filter === "with");
+}
+
+function isKindFilter(value: string | null): value is KindFilter {
+  return KIND_FILTERS.some((f) => f.value === value);
+}
+
+// Scholar-built rows arrive a page at a time (scholarBuiltApps.listForScholars
+// is paginated and index-bounded); catalog rows always come whole.
+const SCHOLAR_PAGE = 30;
+
+type ListItem = AppListItem<AppRow, ScholarBuiltApp>;
+
 export default function TeacherAppsPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const { user } = useCurrentUser();
-  const apps = useQuery(api.appAudiences.listAppsWithAudiences, {}) as
-    | AppRow[]
-    | undefined;
+  const isTeacher = isTeacherRole(user?.role);
+  // The scholar scope (review/teacher-apps-v2-sketch.html §4), kept in the URL.
+  const scope = useAppsScope();
+  // Minute-rounded clock for the timed-access windows (T11): the query re-runs
+  // once a minute, and useSmoothedQuery keeps the list on screen meanwhile.
+  const now = Math.floor(useNow(60_000) / 60_000) * 60_000;
+  const apps = useSmoothedQuery(
+    api.appAudiences.listAppsWithAudiences,
+    scope.isLoading
+      ? "skip"
+      : {
+          includeArchived: true,
+          now,
+          ...(scope.isWholePool
+            ? {}
+            : { scholarIds: scope.scholarIds as Id<"users">[] }),
+        },
+  ) as AppRow[] | undefined;
   const unassignAudience = useMutation(api.appAudiences.unassignAudience);
   const createCatalogApp = useMutation(api.externalApps.createCatalogApp);
   const setCatalogAppArchived = useMutation(
     api.externalApps.setCatalogAppArchived,
   );
+  const restoreScholarApp = useMutation(api.sessions.restoreApp);
+  // One archive dialog for the page: a row unmounts the moment its archive
+  // lands, so a dialog inside the row would take the body lock down with it.
+  const archiveScholarApp = useArchiveAppConfirm();
 
   const [enableApp, setEnableApp] = useState<AppAccessTarget | null>(null);
   const [busy, setBusy] = useState(false);
@@ -151,10 +197,46 @@ export default function TeacherAppsPage() {
   const [composeLink, setComposeLink] = useState(false);
   const [newTile, setNewTile] = useState<AppTileDraft>({ emoji: "", color: "" });
   const [tileApp, setTileApp] = useState<AppRow | null>(null);
-  // Narrow the standing-apps list by what each app IS. Ephemeral local state —
-  // the Apps tab keeps no URL params, and the kind filter is a transient
-  // narrowing, not a deep-linkable view like the Scholars/Assignments boards.
-  const [kindFilter, setKindFilter] = useState<"all" | ExternalAppKind>("all");
+  // Which apps to list. Local state, seeded from `?tab=` so the retired
+  // /teacher/apps/scholar-built route can land on By scholars.
+  const [chosenFilter, setKindFilter] = useState<KindFilter>(() => {
+    const tab = searchParams.get("tab");
+    return isKindFilter(tab) ? tab : "all";
+  });
+  // Order and the learning-contract narrowing. Catalog rows come whole and are
+  // sorted and filtered here; scholar rows are paged by the server, so both
+  // travel as arguments and a page still fills with matching apps.
+  const [sort, setSort] = useState<AppSort>("name");
+  const [contractFilter, setContractFilter] = useState<ContractFilter>("all");
+  // By scholars is a teacher view: anyone else landing on ?tab=scholar sees All.
+  const kindFilter: KindFilter =
+    chosenFilter === "scholar" && !isTeacher ? "all" : chosenFilter;
+
+  const wantsScholarApps =
+    isTeacher &&
+    (kindFilter === "all" || kindFilter === "scholar" || kindFilter === "archived");
+  const scholarApps = usePaginatedQuery(
+    api.scholarBuiltApps.listForScholars,
+    wantsScholarApps && !scope.isLoading
+      ? {
+          scholarIds: scope.scholarIds as Id<"users">[],
+          archived: kindFilter === "archived",
+          // Oldest walks the same index ascending. There is no index on edit
+          // time, so Name and Last edited keep the newest-first walk.
+          ...(sort === "oldest" ? { order: "asc" as const } : {}),
+          ...(contractFilter === "all"
+            ? {}
+            : { learningContract: contractFilter }),
+        }
+      : "skip",
+    { initialNumItems: SCHOLAR_PAGE },
+  );
+  const scholarLoaded = wantsScholarApps ? scholarApps.results : [];
+  const scholarPending =
+    wantsScholarApps && scholarApps.status === "LoadingFirstPage";
+  const scholarMore =
+    wantsScholarApps &&
+    (scholarApps.status === "CanLoadMore" || scholarApps.status === "LoadingMore");
 
   const guarded = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -169,8 +251,23 @@ export default function TeacherAppsPage() {
     }
   };
 
-  const handleUnassign = (row: AppRow, aud: AppRow["audiences"][number]) =>
-    guarded(async () => {
+  const handleUnassign = (row: AppRow, aud: AppRow["audiences"][number]) => {
+    // Narrowed to a few scholars, a group chip still removes the whole
+    // group's grant: say who loses the tile before doing it.
+    if (scope.scopeLabel) {
+      const who =
+        aud.audienceKind === "institution"
+          ? "every scholar at the school"
+          : `everyone in ${aud.label}`;
+      if (
+        !window.confirm(
+          `Remove ${row.name} from ${aud.audienceKind === "institution" ? "the school" : aud.label}? This removes it for ${who}, not just ${scope.scopeLabel}.`,
+        )
+      ) {
+        return;
+      }
+    }
+    return guarded(async () => {
       await unassignAudience({
         appId: row._id,
         audienceKind: aud.audienceKind,
@@ -181,6 +278,7 @@ export default function TeacherAppsPage() {
         description: "The tile is gone for everyone that grant covered.",
       });
     });
+  };
 
   const handleCreate = () =>
     guarded(async () => {
@@ -202,25 +300,301 @@ export default function TeacherAppsPage() {
       setShowNew(false);
     });
 
-  const handleDelete = (row: AppRow) => {
+  // Archive, not delete: the app moves to the Archived filter, where Restore
+  // brings it back with its grants intact.
+  const handleArchive = (row: AppRow) => {
     const inUse = row.audiences.length > 0 || row.directScholarCount > 0;
     const warning = inUse
-      ? `Delete ${row.name}? It's enabled for scholars — the tile will disappear from their home launchers.`
-      : `Delete ${row.name}? It will be removed from the catalog.`;
+      ? `Archive ${row.name}? It's enabled for scholars, and the tile will disappear from their home launchers until you restore it.`
+      : `Archive ${row.name}? You can restore it from Archived.`;
     if (!window.confirm(warning)) return;
     return guarded(async () => {
       await setCatalogAppArchived({ appId: row._id, archived: true });
       toaster.success({
-        title: `${row.name} deleted`,
-        description: "Removed from the catalog.",
+        title: `${row.name} archived`,
+        description: "Restore it from Archived.",
       });
     });
   };
 
+  const handleRestore = (row: AppRow) =>
+    guarded(async () => {
+      await setCatalogAppArchived({ appId: row._id, archived: false });
+      toaster.success({ title: `${row.name} restored` });
+    });
+
+  const handleRestoreScholarApp = (app: ScholarBuiltApp) =>
+    guarded(async () => {
+      await restoreScholarApp({ id: app.sessionId });
+      toaster.success({ title: TEACHER_ARCHIVE_COPY.restoredToast });
+    });
+
+  const targetFor = (row: AppRow): AppAccessTarget => ({
+    _id: row._id,
+    name: row.name,
+    webUrl: row.webUrl,
+    nativeUrlScheme: row.nativeUrlScheme,
+    credentialSource: row.credentialSource,
+    managedNativeAppKey: row.managedNativeAppKey,
+  });
+
+  const renderRow = (item: ListItem) => {
+    if (item.kind === "scholar") {
+      const app = item.app;
+      return (
+        <ScholarAppRow
+          key={app.sessionId}
+          app={app}
+          busy={busy}
+          onNavigate={(href) => router.push(href)}
+          onArchive={() => archiveScholarApp.open(app.title, app.sessionId)}
+          onRestore={() => void handleRestoreScholarApp(app)}
+        />
+      );
+    }
+    const row = item.row;
+    return row.archived ? (
+      <ArchivedCatalogRow
+        key={row._id}
+        row={row}
+        busy={busy}
+        onRestore={() => void handleRestore(row)}
+      />
+    ) : (
+      <CatalogRow
+        key={row._id}
+        row={row}
+        now={now}
+        busy={busy}
+        onOpen={() => setEnableApp(targetFor(row))}
+        onTile={() => setTileApp(row)}
+        onFocus={() => setFocusApp({ appId: row._id, name: row.name })}
+        onArchive={() => void handleArchive(row)}
+        onUnassign={(aud) => void handleUnassign(row, aud)}
+      />
+    );
+  };
+
+  const showMore = scholarMore ? (
+    <Flex justify="center" mt={3}>
+      <Button
+        size="sm"
+        variant="outline"
+        colorPalette="violet"
+        fontFamily="heading"
+        loading={scholarApps.status === "LoadingMore"}
+        onClick={() => scholarApps.loadMore(SCHOLAR_PAGE)}
+      >
+        Show more scholar apps
+      </Button>
+    </Flex>
+  ) : null;
+
+  const emptyLine =
+    contractFilter !== "all"
+      ? contractFilter === "with"
+        ? "No apps here have a learning contract."
+        : "Every app here has a learning contract."
+      : kindFilter === "all"
+      ? scope.scopeLabel
+        ? `No apps reach ${scope.scopeLabel} yet.`
+        : "No apps yet. Add one with “New app.”"
+      : kindFilter === "scholar" && scope.scopeLabel
+        ? `No apps from ${scope.scopeLabel} yet.`
+        : KIND_EMPTY_LINE[kindFilter];
+
+  const body = (() => {
+    if (apps === undefined || (kindFilter === "scholar" && scholarPending)) {
+      return (
+        <HStack justify="center" py={12}>
+          <Spinner color="violet.500" />
+        </HStack>
+      );
+    }
+    if (kindFilter === "custom") {
+      const custom = sortCatalog(
+        apps.filter(
+          (row) =>
+            !row.archived &&
+            row.appKind === "custom" &&
+            matchesContract(row.hasLearningContract, contractFilter),
+        ),
+        sort,
+      );
+      if (custom.length === 0) {
+        return (
+          <Surface p={8}>
+            <EmptyState title={emptyLine} />
+          </Surface>
+        );
+      }
+      return (
+        <SimpleGrid templateColumns="repeat(auto-fill, minmax(220px, 1fr))" gap={3.5}>
+          {custom.map((row) => (
+            <AppGalleryCard
+              key={row._id}
+              name={row.name}
+              screenshotUrl={row.screenshotUrl}
+              iconUrl={row.iconUrl}
+              iconEmoji={row.iconEmoji}
+              color={row.color}
+              overlay={
+                row.timed ? (
+                  <TimedAccessChip
+                    window={row.timed}
+                    now={now}
+                    withAudience={false}
+                    onClick={() => setEnableApp(targetFor(row))}
+                  />
+                ) : undefined
+              }
+              actions={
+                <>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    colorPalette="violet"
+                    fontFamily="heading"
+                    onClick={() => setEnableApp(targetFor(row))}
+                  >
+                    Edit
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    colorPalette="gray"
+                    fontFamily="heading"
+                    disabled={busy}
+                    onClick={() => void handleArchive(row)}
+                  >
+                    Archive
+                  </Button>
+                </>
+              }
+            >
+              <ReachLine row={row} />
+              <GalleryFacts
+                edited={editedLabel(row.lastEditedAt)}
+                learningContract={row.hasLearningContract}
+              />
+            </AppGalleryCard>
+          ))}
+        </SimpleGrid>
+      );
+    }
+    if (kindFilter === "scholar") {
+      if (scholarLoaded.length === 0 && !scholarMore) {
+        return (
+          <Surface p={8}>
+            <EmptyState
+              title={emptyLine}
+              hint="Apps scholars build in Quests, app activities and free builds show up here."
+            />
+          </Surface>
+        );
+      }
+      return (
+        <>
+          <SimpleGrid templateColumns="repeat(auto-fill, minmax(220px, 1fr))" gap={3.5}>
+            {scholarLoaded.map((app) => (
+              <AppGalleryCard
+                key={app.sessionId}
+                name={app.title}
+                actions={
+                  <>
+                    <Button asChild size="xs" colorPalette="violet" fontFamily="heading">
+                      <NextLink href={scholarAppHref(app)}>Open</NextLink>
+                    </Button>
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      colorPalette="gray"
+                      fontFamily="heading"
+                      onClick={() => archiveScholarApp.open(app.title, app.sessionId)}
+                    >
+                      {TEACHER_ARCHIVE_COPY.archiveAction}
+                    </Button>
+                  </>
+                }
+              >
+                {!scope.focusScholar && (
+                  <HStack gap={1.5}>
+                    <Avatar
+                      name={app.builder.name}
+                      src={app.builder.image ?? undefined}
+                      size="2xs"
+                    />
+                    <Text fontSize="xs" color="charcoal.500" fontFamily="heading" fontWeight="600">
+                      {app.builder.name}
+                    </Text>
+                  </HStack>
+                )}
+                <Text fontSize="xs" color="charcoal.400" fontFamily="body" lineClamp={2}>
+                  {scholarAppSource(app)}
+                </Text>
+                <GalleryFacts
+                  edited={editedLabel(app.lastEditedAt)}
+                  learningContract={app.hasLearningContract}
+                />
+              </AppGalleryCard>
+            ))}
+          </SimpleGrid>
+          {showMore}
+        </>
+      );
+    }
+    const catalog = apps.filter(
+      (row) =>
+        (kindFilter === "archived"
+          ? row.archived
+          : !row.archived && (kindFilter === "all" || row.appKind === kindFilter)) &&
+        matchesContract(row.hasLearningContract, contractFilter),
+    );
+    // Catalog in the chosen sort, then scholar-built apps in server order
+    // (appListOrder.ts), so "Show more" only appends at the bottom.
+    const items: ListItem[] = appListItems(
+      catalog,
+      kindFilter === "all" || kindFilter === "archived" ? scholarLoaded : [],
+      sort,
+    );
+    if (items.length === 0 && !scholarMore && !scholarPending) {
+      return (
+        <Surface p={8}>
+          <EmptyState title={emptyLine} />
+        </Surface>
+      );
+    }
+    return (
+      <>
+        <Surface p={0} overflow="hidden">
+          <VStack gap={0} align="stretch">
+            {items.map(renderRow)}
+            {scholarPending && (
+              <HStack
+                gap={2}
+                px={4}
+                py={3}
+                color="charcoal.400"
+                borderTopWidth={items.length > 0 ? "1px" : 0}
+                borderColor="gray.100"
+              >
+                <Spinner size="xs" color="violet.500" />
+                <Text fontSize="sm" fontFamily="body">
+                  Loading apps scholars built&hellip;
+                </Text>
+              </HStack>
+            )}
+          </VStack>
+        </Surface>
+        {showMore}
+      </>
+    );
+  })();
+
   return (
     <Box flex={1} h="full" overflowY="auto" bg="gray.50">
       <Box maxW="4xl" mx="auto" px={{ base: 4, md: 8 }} py={8}>
-        <Flex justify="space-between" align="flex-start" mb={6} gap={4}>
+        <Flex justify="space-between" align="flex-start" mb={6} gap={4} wrap="wrap">
           <Stack gap={1}>
             <HStack gap={2}>
               <Box color="violet.500">
@@ -236,7 +610,9 @@ export default function TeacherAppsPage() {
               </Heading>
             </HStack>
             <Text fontSize="sm" color="charcoal.400" fontFamily="body">
-              Standing apps on scholars&rsquo; home launchers
+              {isTeacher
+                ? "Apps on scholars’ launchers and apps they built"
+                : "Standing apps on scholars’ home launchers"}
             </Text>
           </Stack>
           <HStack gap={2} flexShrink={0}>
@@ -333,312 +709,65 @@ export default function TeacherAppsPage() {
           </Surface>
         )}
 
-        {apps === undefined ? (
-          <HStack justify="center" py={12}>
-            <Spinner color="violet.500" />
-          </HStack>
-        ) : apps.length === 0 ? (
-          <Surface p={8}>
-            <Text
-              fontSize="sm"
-              color="charcoal.400"
-              fontFamily="body"
-              textAlign="center"
-            >
-              No apps yet. Add one with “New app.”
+        <Flex gap={3} align="center" wrap="wrap" mb={3}>
+          <ScholarScopePicker
+            groups={scope.groups}
+            scopeKey={scope.scopeKey}
+            hasMine={scope.hasMine}
+            onSelectScope={scope.selectScope}
+            visibleScholarIds={scope.visibleScholarIds}
+            scopedScholarIds={scope.scopedScholarIds}
+            focusScholar={scope.focusScholar}
+            onFocusScholar={scope.focus}
+          />
+          {scope.truncatedTo !== null && (
+            <Text fontSize="sm" color="charcoal.400" fontFamily="body">
+              Showing the first {scope.truncatedTo} scholars
             </Text>
-          </Surface>
-        ) : (
-          (() => {
-            const filtered =
-              kindFilter === "all"
-                ? apps
-                : apps.filter((row) => row.appKind === kindFilter);
-            return (
-              <>
-                <Box mb={3}>
-                  <ContextTabs<"all" | ExternalAppKind>
-                    ariaLabel="Filter apps by kind"
-                    value={kindFilter}
-                    onChange={setKindFilter}
-                    items={KIND_FILTERS}
-                  />
-                </Box>
-                {filtered.length === 0 ? (
-                  <Surface p={8}>
-                    <Text
-                      fontSize="sm"
-                      color="charcoal.400"
-                      fontFamily="body"
-                      textAlign="center"
-                    >
-                      {kindFilter === "all"
-                        ? "No apps yet. Add one with “New app.”"
-                        : KIND_EMPTY_LINE[kindFilter]}
-                    </Text>
-                  </Surface>
-                ) : (
-                  <Surface p={0} overflow="hidden">
-                    <VStack gap={0} align="stretch">
-                      {filtered.map((row) => {
-                const target: AppAccessTarget = {
-                  _id: row._id,
-                  name: row.name,
-                  webUrl: row.webUrl,
-                  nativeUrlScheme: row.nativeUrlScheme,
-                  credentialSource: row.credentialSource,
-                  managedNativeAppKey: row.managedNativeAppKey,
-                };
-                const hasAssignments =
-                  row.audiences.length > 0 || row.directScholarCount > 0;
-                return (
-                  <Box
-                    key={row._id}
-                    px={4}
-                    py={3.5}
-                    borderBottomWidth="1px"
-                    borderColor="gray.100"
-                    _last={{ borderBottomWidth: 0 }}
-                    cursor="pointer"
-                    transition="background 0.12s"
-                    _hover={{ bg: "violet.50" }}
-                    // A POINTER shortcut, deliberately not a control: the row
-                    // contains real buttons (change the tile, delete, open
-                    // access), and a control nested inside a control makes
-                    // every child activation ambiguous for the keyboard — Space
-                    // scrolls or is swallowed, Enter fires both. Each action is
-                    // its own <button> instead; the caret at the end of the row
-                    // is the focusable twin of this click.
-                    onClick={() => setEnableApp(target)}
-                  >
-                    <Flex gap={3} align="center" wrap="wrap">
-                      <chakra.button
-                        type="button"
-                        aria-label={`Change the ${row.name} tile`}
-                        title="Change the tile"
-                        flexShrink={0}
-                        borderRadius="12px"
-                        cursor="pointer"
-                        _focusVisible={{
-                          outline: "2px solid",
-                          outlineColor: "violet.400",
-                          outlineOffset: "2px",
-                        }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setTileApp(row);
-                        }}
-                      >
-                        <AppTileIcon
-                          name={row.name}
-                          iconUrl={row.iconUrl}
-                          iconEmoji={row.iconEmoji}
-                          color={row.color}
-                          boxSize="42px"
-                          radius="12px"
-                          markFontSize="18px"
-                          imagePadding="6px"
-                          // The button it sits in is labeled "Change the <app>
-                          // tile", and the row names the app beside it.
-                          decorative
-                        />
-                      </chakra.button>
+          )}
+        </Flex>
+        <Flex mb={3} gap={2} align="center" wrap="wrap">
+          {/* Six tabs outgrow a phone: the strip scrolls sideways there
+              instead of clipping Archived. */}
+          <Box maxW="full" overflowX="auto">
+            <ContextTabs<KindFilter>
+              ariaLabel="Filter apps by kind"
+              value={kindFilter}
+              onChange={setKindFilter}
+              items={isTeacher ? KIND_FILTERS : KIND_FILTERS.filter((f) => f.value !== "scholar")}
+            />
+          </Box>
+          <HStack gap={2} ml={{ md: "auto" }}>
+            <FieldSelect
+              value={contractFilter}
+              onChange={(v) => setContractFilter(v as ContractFilter)}
+              w="auto"
+              fieldProps={{ "aria-label": "Learning contract", fontSize: "sm" }}
+            >
+              {CONTRACT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </FieldSelect>
+            <FieldSelect
+              value={sort}
+              onChange={(v) => setSort(v as AppSort)}
+              w="auto"
+              fieldProps={{ "aria-label": "Sort", fontSize: "sm" }}
+            >
+              {SORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </FieldSelect>
+          </HStack>
+        </Flex>
 
-                      {/* Name + how it opens */}
-                      <Box flex="1 1 180px" minW="170px">
-                        <HStack gap={2}>
-                          <Text
-                            fontSize="sm"
-                            fontFamily="heading"
-                            fontWeight="700"
-                            color="charcoal.500"
-                          >
-                            {row.name}
-                          </Text>
-                          {row.defaultForNewScholars && (
-                            <Box
-                              as="span"
-                              fontSize="2xs"
-                              fontWeight="700"
-                              color="green.700"
-                              bg="green.50"
-                              borderRadius="4px"
-                              px={1.5}
-                              py={0.5}
-                            >
-                              Default
-                            </Box>
-                          )}
-                        </HStack>
-                        <Text
-                          fontSize="2xs"
-                          color="charcoal.400"
-                          fontFamily="body"
-                          title={
-                            row.managedNativeAppKey
-                              ? `The iPad unlocks the installed app temporarily, one app at a time, only while a scholar has access here. In a browser the tile opens ${domainOf(row.webUrl)} instead.`
-                              : undefined
-                          }
-                        >
-                          {launchSummary(row)}
-                        </Text>
-                      </Box>
+        {body}
 
-                      {/* Who it's enabled for */}
-                      <Box flex="1 1 200px" minW="180px">
-                        {hasAssignments ? (
-                          <HStack gap={2} flexWrap="wrap" align="center">
-                            {row.audiences.map((aud) => (
-                              <AudienceChip
-                                key={aud.grantId}
-                                aud={aud}
-                                busy={busy}
-                                onRemove={() => void handleUnassign(row, aud)}
-                              />
-                            ))}
-                            {row.directScholarCount > 0 && (
-                              <HStack gap={1.5} align="center">
-                                <ScholarFacepile
-                                  scholars={row.directFacepile}
-                                  total={row.directScholarCount}
-                                  size="xs"
-                                  max={3}
-                                  showOverflow={false}
-                                />
-                                <Text
-                                  fontSize="2xs"
-                                  color="charcoal.400"
-                                  fontFamily="heading"
-                                  fontWeight="600"
-                                >
-                                  Enabled for {row.directScholarCount} scholar
-                                  {row.directScholarCount === 1 ? "" : "s"}
-                                </Text>
-                              </HStack>
-                            )}
-                          </HStack>
-                        ) : (
-                          // Mirrors the facepile above it: same 24px circle and
-                          // same label type, so an empty app reads as a row in
-                          // the same column rather than absent sub-text.
-                          <HStack gap={1.5} align="center">
-                            <Flex
-                              w="24px"
-                              h="24px"
-                              borderRadius="full"
-                              bg="gray.100"
-                              color="charcoal.400"
-                              align="center"
-                              justify="center"
-                              flexShrink={0}
-                            >
-                              <Plus size={14} strokeWidth={2.5} />
-                            </Flex>
-                            <Text
-                              fontSize="2xs"
-                              color="charcoal.400"
-                              fontFamily="heading"
-                              fontWeight="600"
-                            >
-                              Enable for&hellip;
-                            </Text>
-                          </HStack>
-                        )}
-                      </Box>
-
-                      {/* Make focus + delete + the row's own access control.
-                          "Make focus" is the headline ad-hoc-push action —
-                          kept as its own labeled button, not folded into an
-                          overflow menu, so it's visible at a glance. */}
-                      <HStack gap={1} flexShrink={0}>
-                        <AppPreviewButton
-                          app={{
-                            name: row.name,
-                            webUrl: row.webUrl,
-                            nativeUrlScheme: row.nativeUrlScheme,
-                          }}
-                        />
-                        <Button
-                          size="xs"
-                          variant="outline"
-                          colorPalette="violet"
-                          fontFamily="heading"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setFocusApp({ appId: row._id, name: row.name });
-                          }}
-                        >
-                          <Timer style={{ marginRight: 4 }} size={14} />
-                          Make focus
-                        </Button>
-                        <chakra.button
-                          display="flex"
-                          alignItems="center"
-                          justifyContent="center"
-                          borderRadius="md"
-                          w="28px"
-                          h="28px"
-                          color="charcoal.300"
-                          opacity={busy ? 0.4 : 1}
-                          cursor={busy ? "not-allowed" : "pointer"}
-                          _hover={{
-                            color: busy ? "charcoal.300" : "red.500",
-                            bg: busy ? undefined : "red.50",
-                          }}
-                          _focusVisible={{
-                            outline: "2px solid",
-                            outlineColor: "violet.400",
-                            outlineOffset: "2px",
-                          }}
-                          type="button"
-                          disabled={busy}
-                          aria-label={`Delete ${row.name}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (!busy) void handleDelete(row);
-                          }}
-                        >
-                          <Trash size={16} weight="bold" />
-                        </chakra.button>
-                        {/* The keyboard-reachable form of "click the row" */}
-                        <chakra.button
-                          display="flex"
-                          alignItems="center"
-                          justifyContent="center"
-                          borderRadius="md"
-                          w="28px"
-                          h="28px"
-                          color="charcoal.300"
-                          cursor="pointer"
-                          _hover={{ color: "violet.500", bg: "violet.50" }}
-                          _focusVisible={{
-                            outline: "2px solid",
-                            outlineColor: "violet.400",
-                            outlineOffset: "2px",
-                          }}
-                          type="button"
-                          aria-label={`Enable ${row.name} for scholars, groups, or school-wide`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setEnableApp(target);
-                          }}
-                        >
-                          <CaretRight size={18} weight="bold" />
-                        </chakra.button>
-                      </HStack>
-                    </Flex>
-                  </Box>
-                );
-              })}
-                    </VStack>
-                  </Surface>
-                )}
-              </>
-            );
-          })()
-        )}
-
-        {isTeacherRole(user?.role) && <SharedRoomsPanel />}
+        {isTeacher && <SharedRoomsPanel />}
       </Box>
 
       <AppAccessDrawer
@@ -665,7 +794,28 @@ export default function TeacherAppsPage() {
       />
 
       <AppTileEditorDialog app={tileApp} onClose={() => setTileApp(null)} />
+      {archiveScholarApp.dialog}
     </Box>
+  );
+}
+
+/** A gallery card's edit time and learning-contract fact, on one quiet line;
+ *  nothing when it has neither. */
+function GalleryFacts({
+  edited,
+  learningContract,
+}: {
+  edited: string | null;
+  learningContract: boolean;
+}) {
+  const parts = [edited, learningContract ? "Learning contract" : null].filter(
+    Boolean,
+  );
+  if (parts.length === 0) return null;
+  return (
+    <Text fontSize="xs" color="charcoal.400" fontFamily="body" lineClamp={1}>
+      {parts.join(" · ")}
+    </Text>
   );
 }
 
@@ -1089,62 +1239,5 @@ function SharedRoomsPanel() {
         </Flex>
       )}
     </Box>
-  );
-}
-
-/** A removable audience chip: a group (emoji + name) or a School-wide grant.
- *  A paused grant (enabled:false) reads muted. Click the × to un-assign. */
-function AudienceChip({
-  aud,
-  busy,
-  onRemove,
-}: {
-  aud: AppRow["audiences"][number];
-  busy: boolean;
-  onRemove: () => void;
-}) {
-  const school = aud.audienceKind === "institution";
-  const paused = !aud.enabled;
-  const label = school ? "School-wide" : aud.label;
-  return (
-    <HStack
-      gap={1}
-      fontSize="3xs"
-      fontWeight="700"
-      fontFamily="body"
-      color={paused ? "charcoal.400" : school ? "violet.700" : "green.700"}
-      bg={paused ? "gray.100" : school ? "violet.50" : "green.50"}
-      borderRadius="full"
-      pl={2}
-      pr={1}
-      py={0.5}
-    >
-      <Text>
-        {!school && aud.emoji ? `${aud.emoji} ` : ""}
-        {label}
-        {paused ? " · paused" : ""}
-      </Text>
-      <chakra.button
-        display="flex"
-        alignItems="center"
-        justifyContent="center"
-        borderRadius="full"
-        w="14px"
-        h="14px"
-        color="currentColor"
-        opacity={busy ? 0.4 : 0.7}
-        cursor={busy ? "not-allowed" : "pointer"}
-        _hover={{ opacity: busy ? 0.4 : 1, bg: busy ? undefined : "blackAlpha.100" }}
-        type="button"
-        disabled={busy}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (!busy) onRemove();
-        }}
-        aria-label={`Un-assign ${label}`}
-      >
-        <X size={9} weight="bold" />
-      </chakra.button>
-    </HStack>
   );
 }

@@ -642,6 +642,7 @@ describe("durable bug-report pipeline", () => {
   });
 
   test("storage-backed Whisper reads the blob and preserves the m4a filename mapping", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "sk-test");
     const t = convexTest(schema, modules);
     const audio = await t.run((ctx) =>
       ctx.storage.store(new Blob(["aac fixture"], { type: "audio/mp4" })),

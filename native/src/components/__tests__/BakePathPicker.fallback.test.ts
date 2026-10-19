@@ -60,6 +60,10 @@ describe("BakePathPicker when path suggestions never arrive", () => {
     });
     expect(renderer.root.findAllByType("spinner")).toHaveLength(1);
     expect(onSelect).toHaveBeenLastCalledWith(null);
+    // While loading, only the loading line + placeholders: the fixed cards
+    // arrive together with the suggestions.
+    expect(textOf(renderer.root)).not.toContain("Endless chat");
+    expect(textOf(renderer.root)).not.toContain("Build a simulation");
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15_000);
@@ -67,6 +71,8 @@ describe("BakePathPicker when path suggestions never arrive", () => {
 
     expect(renderer.root.findAllByType("spinner")).toHaveLength(0);
     expect(textOf(renderer.root)).toContain("Get to the bottom of it");
+    expect(textOf(renderer.root)).toContain("Endless chat");
+    expect(textOf(renderer.root)).toContain("Build a simulation");
     expect(onSelect).toHaveBeenLastCalledWith(
       expect.objectContaining({ title: "Get to the bottom of it" }),
     );

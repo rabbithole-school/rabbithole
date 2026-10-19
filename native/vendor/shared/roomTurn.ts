@@ -21,6 +21,51 @@
  *     teacher's dashboard.
  */
 
+import { dayKeyForTimezone } from "./institutionDay";
+
+// ─── Which clock does `endsAt` mean? ───────────────────────────────────
+
+/**
+ * A class focus's `endsAt` carries two meanings. A block push (the assign
+ * dialog's duration, a timetable placement) ends on the institution day it
+ * went live: that is the ROOM's clock, and everything below is built for it.
+ * A teacher-given lifetime ("through Friday", the staff aide's `endsAtMs`)
+ * ends on a LATER day: it only says how long the focus stays on screen, and
+ * says nothing about when the room turns. Reading a lifetime as a block end
+ * told a scholar on a Saturday that "your class is with X, until the block
+ * wraps (~11:59 PM)" — the time of day of a deadline thirteen days out.
+ *
+ * Keyed on `setAt` rather than the viewer's clock, so the classification is
+ * stable for the whole life of the focus (including its final day).
+ */
+export function isLifetimeFocus(
+  setAt: number | null | undefined,
+  endsAt: number | null | undefined,
+  timeZone: string,
+): boolean {
+  // A missing or zero setAt (the server's last-resort coercion) is no evidence.
+  if (!setAt || endsAt == null) return false;
+  try {
+    return dayKeyForTimezone(endsAt, timeZone) !== dayKeyForTimezone(setAt, timeZone);
+  } catch {
+    return false;
+  }
+}
+
+/** The room-clock reading of a live focus: `endsAt` only when it is a block
+ *  end, plus the lifetime end (or null) for the lifetime copy. Every surface
+ *  that builds a focus lock goes through this, so none can forget the split. */
+export function roomClockForFocus(focus: {
+  setAt?: number | null;
+  endsAt?: number | null;
+  timeZone: string;
+}): { endsAt: number | null; lifetimeEndsAt: number | null } {
+  const endsAt = focus.endsAt ?? null;
+  return isLifetimeFocus(focus.setAt, endsAt, focus.timeZone)
+    ? { endsAt: null, lifetimeEndsAt: endsAt }
+    : { endsAt, lifetimeEndsAt: null };
+}
+
 // ─── Phase derivation (scholar-facing) ─────────────────────────────────
 
 export type RoomTurnPhase = "withClass" | "windingDown" | "turned";
@@ -67,7 +112,33 @@ export function formatRoomTurnTime(
   }
 }
 
+/** "Friday, Oct 30"-style institution-local date for a lifetime's last day. */
+function formatLifetimeDate(
+  endsAt: number,
+  timeZone: string,
+): string | null {
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      weekday: "long",
+      month: "short",
+      day: "numeric",
+    }).format(new Date(endsAt));
+  } catch {
+    return null;
+  }
+}
+
 // ─── Copy builders — the ONLY place these strings are written ──────────
+
+/**
+ * The plate line for a focus with a lifetime rather than a block end. It
+ * names the span the teacher gave and claims nothing about the room right
+ * now, so it stays true on a weekend and on the last day alike.
+ */
+function classFocusLifetimeLine(dateLabel: string | null): string {
+  return dateLabel ? `Class work through ${dateLabel}` : "Class work";
+}
 
 /**
  * The plate's class-focus card, for the row that IS the live matching focus
@@ -86,6 +157,33 @@ export function classFocusPlateLine(
   return timeLabel
     ? `With the class until the block wraps (~${timeLabel})`
     : "With the class right now";
+}
+
+/**
+ * The one line a plate card or the in-session strip shows for the live
+ * focus: the lifetime line when the focus has a lifetime, otherwise the
+ * room-clock line. `focus` is a `roomClockForFocus` result plus its zone.
+ */
+export function liveFocusLine(
+  phase: RoomTurnPhase,
+  focus: {
+    endsAt?: number | null;
+    lifetimeEndsAt?: number | null;
+    timeZone?: string;
+  },
+): string {
+  const { timeZone } = focus;
+  if (focus.lifetimeEndsAt != null) {
+    return classFocusLifetimeLine(
+      timeZone ? formatLifetimeDate(focus.lifetimeEndsAt, timeZone) : null,
+    );
+  }
+  return classFocusPlateLine(
+    phase,
+    focus.endsAt != null && timeZone
+      ? formatRoomTurnTime(focus.endsAt, timeZone)
+      : null,
+  );
 }
 
 /**

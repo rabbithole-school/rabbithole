@@ -6,8 +6,10 @@
  * Asks the Curriculum Bot (`api.bakePaths.suggestBakePaths`) for 2-4 concrete,
  * kid-facing ways into THIS topic, and lets the scholar pick one. A fixed
  * "Endless chat" option sits at the top — the old ad-lib free exploration with
- * no curated path — and is always available, even while the bot is still
- * thinking (it doesn't need the call). Owns its own selection and reports the
+ * no curated path — and a fixed "Build a simulation" card at the bottom. Both
+ * appear with the bot's suggestions, not before: shown during the wait they
+ * read as the whole menu, and they are the wrong menu when the scholar already
+ * described what to build (`onSpecificBuild`). Owns its own selection and reports the
  * chosen choice up via `onSelect` (called with `null` while nothing is selected
  * yet). Shared by every quest-start flow so they never drift apart: the inline
  * star-drawer + standalone dialog (a topic SEED) and the Custom Quest dialog (a
@@ -16,9 +18,14 @@
  * The live call is ~10s, so the loading state is deliberately alive (rotating
  * reassurance + shimmer) and results are memoised per-source so reopening is
  * instant.
+ *
+ * `onSpecificBuild`: when the suggester reports that the scholar's own words
+ * already describe a specific thing to make, the picker never reveals its
+ * options and hands off to the caller instead (the Custom Quest dialog starts
+ * a build-first quest). Without the prop the menu shows as usual.
  */
 
-import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useState, type ReactNode } from "react";
 import { useAction } from "convex/react";
 import { Box, Flex, Stack, Text } from "@chakra-ui/react";
 import { Check } from "@phosphor-icons/react";
@@ -37,7 +44,8 @@ import { withTimeout } from "@/shared/withTimeout";
 
 // Reopening a star (or retyping the same Custom-Quest topic) within a session
 // shouldn't re-pay the ~10s call. Keyed by a stable string per source.
-const SUGGESTION_CACHE = new Map<string, SuggestedPath[]>();
+type Suggestions = { paths: SuggestedPath[]; specificBuild: boolean };
+const SUGGESTION_CACHE = new Map<string, Suggestions>();
 
 function cacheKey(source: BakePathSource): string {
   return source.kind === "seed"
@@ -190,6 +198,8 @@ type Selection = number | typeof ENDLESS_CHAT | "build" | null;
 type PickerProps = {
   source: BakePathSource;
   onSelect: (choice: PathChoice | null) => void;
+  /** The scholar already described a specific build: skip the menu. */
+  onSpecificBuild?: () => void;
 };
 
 /**
@@ -207,19 +217,24 @@ export function BakePathPicker(props: PickerProps) {
   return <PathPicker key={cacheKey(props.source)} {...props} />;
 }
 
-function PathPicker({ source, onSelect }: PickerProps) {
+function PathPicker({ source, onSelect, onSpecificBuild }: PickerProps) {
   const suggest = useAction(api.bakePaths.suggestBakePaths);
   const key = cacheKey(source);
   const cached = SUGGESTION_CACHE.get(key) ?? null;
-  const [paths, setPaths] = useState<SuggestedPath[] | null>(cached);
-  const [selected, setSelected] = useState<Selection>(cached ? 0 : null);
+  // A specific build never shows the menu: it stays in the loading view while
+  // the caller takes over.
+  const handsOff = (s: Suggestions | null) => !!s?.specificBuild && !!onSpecificBuild;
+  const [paths, setPaths] = useState<SuggestedPath[] | null>(
+    cached && !handsOff(cached) ? cached.paths : null,
+  );
+  const [selected, setSelected] = useState<Selection>(
+    cached && !handsOff(cached) ? 0 : null,
+  );
   const [msgIdx, setMsgIdx] = useState(0);
   // Keep `onSelect` fresh without making a new parent closure refire the ~10s
   // request.
   const notifySelection = useEffectEvent(onSelect);
-  // Once the scholar picks anything (including endless chat), don't let the
-  // arriving suggestions stomp their choice with the default.
-  const touchedRef = useRef(false);
+  const notifySpecificBuild = useEffectEvent(() => onSpecificBuild?.());
 
   // Mounts once per source (the caller keys on `cacheKey`), so the state this
   // effect used to reset is already correct from the initializers above — it is
@@ -228,7 +243,8 @@ function PathPicker({ source, onSelect }: PickerProps) {
   useEffect(() => {
     let cancelled = false;
     if (cached) {
-      notifySelection(cached[0] ?? null);
+      if (handsOff(cached)) notifySpecificBuild();
+      else notifySelection(cached.paths[0] ?? null);
       return;
     }
     notifySelection(null);
@@ -242,20 +258,22 @@ function PathPicker({ source, onSelect }: PickerProps) {
       .then((r) => {
         if (cancelled) return;
         const ps = r.paths?.length ? r.paths : FALLBACK_PATHS;
-        SUGGESTION_CACHE.set(key, ps);
-        setPaths(ps);
-        if (!touchedRef.current) {
-          setSelected(0);
-          notifySelection(ps[0] ?? null);
+        const result = { paths: ps, specificBuild: r.specificBuild === true };
+        SUGGESTION_CACHE.set(key, result);
+        if (handsOff(result)) {
+          notifySpecificBuild();
+          return;
         }
+        // Nothing is pickable until now, so the default can't stomp a choice.
+        setPaths(ps);
+        setSelected(0);
+        notifySelection(ps[0] ?? null);
       })
       .catch(() => {
         if (cancelled) return;
         setPaths(FALLBACK_PATHS);
-        if (!touchedRef.current) {
-          setSelected(0);
-          notifySelection(FALLBACK_PATHS[0]);
-        }
+        setSelected(0);
+        notifySelection(FALLBACK_PATHS[0]);
       });
     return () => {
       cancelled = true;
@@ -277,7 +295,6 @@ function PathPicker({ source, onSelect }: PickerProps) {
   }, [loading]);
 
   const pick = (choice: Selection, value: PathChoice) => {
-    touchedRef.current = true;
     setSelected(choice);
     onSelect(value);
   };
@@ -288,26 +305,25 @@ function PathPicker({ source, onSelect }: PickerProps) {
         {loading ? LOADING_MESSAGES[msgIdx] : "How do you want to explore it?"}
       </Text>
 
-      <Stack gap={2.5} role="radiogroup" aria-label="Choose your path">
-        {/* Endless chat — the old ad-lib free exploration. Always available
-            (it doesn't wait on the bot), no badge. */}
-        <OptionCard
-          emoji="💬"
-          title="Endless chat"
-          blurb="No plan — just start talking and follow your curiosity wherever it goes."
-          tileBg="gray.100"
-          selected={selected === ENDLESS_CHAT}
-          onClick={() => pick(ENDLESS_CHAT, ENDLESS_CHAT)}
-        />
+      {loading ? (
+        <Stack gap={2.5} aria-busy="true">
+          <ShimmerCard />
+          <ShimmerCard />
+          <ShimmerCard />
+        </Stack>
+      ) : (
+        <Stack gap={2.5} role="radiogroup" aria-label="Choose your path">
+          {/* Endless chat — the old ad-lib free exploration, no badge. */}
+          <OptionCard
+            emoji="💬"
+            title="Endless chat"
+            blurb="No plan — just start talking and follow your curiosity wherever it goes."
+            tileBg="gray.100"
+            selected={selected === ENDLESS_CHAT}
+            onClick={() => pick(ENDLESS_CHAT, ENDLESS_CHAT)}
+          />
 
-        {loading ? (
-          <>
-            <ShimmerCard />
-            <ShimmerCard />
-            <ShimmerCard />
-          </>
-        ) : (
-          paths!.map((p, i) => (
+          {paths!.map((p, i) => (
             <OptionCard
               key={`${p.title}-${i}`}
               emoji={p.emoji}
@@ -318,21 +334,20 @@ function PathPicker({ source, onSelect }: PickerProps) {
               badge={i === 0 ? <SuggestedBadge /> : undefined}
               onClick={() => pick(i, p)}
             />
-          ))
-        )}
+          ))}
 
-        {/* Build a simulation — fixed after the live suggestions and always
-            offered (like Endless chat, it doesn't wait on the bot). Its
-            `shape: "build"` rides the chosen path into the bake. */}
-        <OptionCard
-          emoji={BUILD_PATH.emoji}
-          title={BUILD_PATH.title}
-          blurb={BUILD_PATH.blurb}
-          tileBg="violet.50"
-          selected={selected === "build"}
-          onClick={() => pick("build", BUILD_PATH)}
-        />
-      </Stack>
+          {/* Build a simulation — fixed after the live suggestions. Its
+              `shape: "build"` rides the chosen path into the bake. */}
+          <OptionCard
+            emoji={BUILD_PATH.emoji}
+            title={BUILD_PATH.title}
+            blurb={BUILD_PATH.blurb}
+            tileBg="violet.50"
+            selected={selected === "build"}
+            onClick={() => pick("build", BUILD_PATH)}
+          />
+        </Stack>
+      )}
     </Stack>
   );
 }

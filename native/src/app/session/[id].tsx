@@ -96,6 +96,8 @@ import { voiceMark } from "@/lib/voicePerf";
 import { api, convexSiteUrl, type Id } from "@/lib/convex";
 import { isTextArtifact } from "../../../vendor/shared/textArtifacts";
 import { serverRefusal } from "../../../vendor/shared/serverErrorMessage";
+import { isTeacherArchived } from "../../../vendor/shared/teacherArchive";
+import { TeacherArchivedSession } from "@/components/TeacherArchivedSession";
 import { uploadChangedAppSnapshot } from "@/lib/appSnapshot";
 import { uploadImageDataUrl } from "@/lib/uploadImage";
 import { shouldSkipLearnerQueries } from "@/lib/sessionLearnerQueries";
@@ -131,9 +133,10 @@ import type { GraphemeSpan } from "../../../vendor/shared/graphemeSegments";
 import { pickLockingFocus } from "../../../vendor/shared/focusLock";
 import { useQuestBakeHold } from "../../../vendor/shared/questBakeHold";
 import {
-  classFocusPlateLine,
   focusMismatchBannerText,
   formatRoomTurnTime,
+  liveFocusLine,
+  roomClockForFocus,
   TURNED_BANNER_TEXT,
   WINDING_DOWN_BANNER_TEXT,
 } from "../../../vendor/shared/roomTurn";
@@ -150,6 +153,19 @@ import {
   homeworkEyebrow,
 } from "../../../vendor/shared/homeworkFraming";
 import { useNow } from "@/hooks/useNow";
+// Screen options merge and outlive the component that set them, and this one
+// route renders several screens in place: the app builder (`?view=builder`),
+// the next session after ← / →, the loading skeleton between them. Each
+// <Stack.Screen> here spreads this first, so a header left behind (the
+// builder's "‹ Back to chat" and "App" title, Present's hidden header, the
+// last session's homework eyebrow) never outlives its screen.
+const SESSION_HEADER_BASE = {
+  headerLeft: undefined,
+  headerTitle: undefined,
+  headerShown: true,
+  gestureEnabled: true,
+};
+
 const COLUMN_MAX_WIDTH = 720;
 // The composer field: its text input's vertical padding, and the bordered
 // wrap's padding and border around it. The buttons beside the field are sized
@@ -162,9 +178,6 @@ const COMPOSER_WRAP_BORDER = 1;
 function composerFieldHeight(lineHeight: number): number {
   return lineHeight + 2 * (COMPOSER_INPUT_PAD_V + COMPOSER_WRAP_PAD_V + COMPOSER_WRAP_BORDER);
 }
-// How long a pending turn must run before the Stop control arms with no text
-// yet on screen (the escape hatch for a busy-backend wait). See stopArmed.
-const STOP_ARM_DELAY_MS = 2000;
 
 /** Wait `ms`, resolving true on timeout or false the moment `signal` aborts. */
 function sleepAbortable(ms: number, signal: AbortSignal): Promise<boolean> {
@@ -272,16 +285,6 @@ type Bubble = {
   stopRequestedAt?: number | null;
 };
 
-type FlairAward = {
-  criterionId: string;
-  label: string;
-};
-
-// A tutor stream ends one of three ways: it finished, the user aborted it (Stop
-// or steer or unmount — never a failure), or it genuinely failed (busy budget
-// exhausted / hard error → the caller shows the inline retry affordance).
-type TutorStreamResult = "completed" | "aborted" | "failed";
-
 function SessionScreen() {
   // `title` is passed from the home card so the nav bar shows the real title
   // INSTANTLY (no "Session" placeholder) even while messages load.
@@ -372,7 +375,7 @@ function SessionScreen() {
   // `voice` (the dictation hook) is declared further down because it depends
   // on onSend; the voice loop reaches it through this ref.
   const dictationRef = useRef<{
-    startRecording: (o?: { latched?: boolean }) => Promise<void>;
+    startRecording: (o?: { latched?: boolean; auto?: boolean }) => Promise<void>;
     cancelRecording: () => void;
   } | null>(null);
   // Beginner readers (TRA-504) get the same read-to-me default, minus the
@@ -420,7 +423,7 @@ function SessionScreen() {
     autoListen: sessionReadLevel === "listener",
     yourTurnAlphabet: isBeginnerSession ? decodableAlphabet : null,
     startListening: () => {
-      void dictationRef.current?.startRecording({ latched: true });
+      void dictationRef.current?.startRecording({ latched: true, auto: true });
     },
     cancelListening: () => dictationRef.current?.cancelRecording(),
     sessionKey: sessionId,
@@ -684,7 +687,9 @@ function SessionScreen() {
         // "The turn, not the bell" — when (+ in what timezone) this class
         // focus wraps, so the banners render a soft local time instead of a
         // bare "paused until then".
-        endsAt: firstFocus.endsAt ?? null,
+        // Block end vs. a teacher-given lifetime — only a block end is
+        // the room's clock (shared/roomTurn.ts).
+        ...roomClockForFocus(firstFocus),
         timeZone: firstFocus.timeZone,
       }
     : null;
@@ -732,9 +737,12 @@ function SessionScreen() {
   // winding-down cue (item 2) and the at-the-turn choice (item 3); like the
   // mismatch banner it never disables the composer or the session.
   const isFocusMatch = !isHomeworkSession && focusLock?.unitId != null && !isFocusMismatch;
+  // A lifetime ("through Friday") is not the room's clock: no "your class is
+  // elsewhere" banner and no turn memory for it — only the plate line below.
+  const focusHasRoomClock = focusLock?.lifetimeEndsAt == null;
   const roomPhase = useRoomTurnPhase(focusLock?.endsAt ?? null);
   const { showTurnBanner } = useRoomTurnAwareness(
-    isFocusMatch,
+    isFocusMatch && focusHasRoomClock,
     roomPhase,
     focusLock?.label ?? null,
     focusLock?.endsAt ?? null,
@@ -1649,6 +1657,10 @@ function SessionScreen() {
   // keeps the existing hidden <start> path.
   useEffect(() => {
     if (data === undefined) return;
+    // A teacher put this session away: the server serves it with no messages,
+    // which would otherwise read as "never opened" and fire an opener the
+    // server refuses. Nothing auto-sends into a teacher-archived session.
+    if (isTeacherArchived(data.session)) return;
     // Vibecode sessions own their teacher-build kickoff inside VibecodeScreen
     // (TRA-319): running it here would stream through this shell (no
     // supportsRenderCheck, events VibecodeScreen never sees) and strand the
@@ -1794,6 +1806,7 @@ function SessionScreen() {
       <>
         <Stack.Screen
           options={{
+            ...SESSION_HEADER_BASE,
             title: headerTitle,
             // Arriving from ← / →: the compass is already in the header (the
             // route's options draw the same stand-in), so keep it there.
@@ -1806,11 +1819,19 @@ function SessionScreen() {
     );
   }
 
+  // ── Put away by a teacher (review/teacher-archive-scholar-apps.html): one
+  // calm state in place of every renderer below — no chat, builder, app
+  // WebView, Present controls or chip strip. Checked first so a teacher
+  // archiving mid-session swaps an open builder out on the next reactive read.
+  if (isTeacherArchived(data.session)) {
+    return <TeacherArchivedSession title={headerTitle} />;
+  }
+
   // ── Offline / scanned-work sessions: no tutor chat, just the scans ──
   if (data.session?.isOffline) {
     return (
       <>
-        <Stack.Screen options={{ title: headerTitle }} />
+        <Stack.Screen options={{ ...SESSION_HEADER_BASE, title: headerTitle }} />
         <OfflineSessionView sessionId={sessionId} />
       </>
     );
@@ -1825,7 +1846,7 @@ function SessionScreen() {
   if (data.session?.sessionMode === "workbench") {
     return (
       <>
-        <Stack.Screen options={{ title: headerTitle }} />
+        <Stack.Screen options={{ ...SESSION_HEADER_BASE, title: headerTitle }} />
         <WorkbenchScreen sessionId={sessionId} />
       </>
     );
@@ -2622,6 +2643,7 @@ function SessionScreen() {
     <>
       <Stack.Screen
         options={{
+          ...SESSION_HEADER_BASE,
           title: headerTitle,
           // HOMEWORK SAYS IT IS HOMEWORK. Web parity (SessionInterface's
           // compass eyebrow): at 7pm at the kitchen table the load-bearing
@@ -2662,7 +2684,7 @@ function SessionScreen() {
       )}
       {/* "Your class is elsewhere" — informational only; the session below
           stays fully usable (web parity: SessionInterface). */}
-      {isFocusMismatch ? (
+      {isFocusMismatch && focusHasRoomClock ? (
         <View style={styles.roomTurnBannerAmbient}>
           <SymbolView name="clock" size={14} tintColor={colors.violet} />
           <Text style={styles.roomTurnBannerAmbientText}>
@@ -2679,7 +2701,7 @@ function SessionScreen() {
         <View style={styles.roomTurnBannerAmbient}>
           <SymbolView name="clock" size={14} tintColor={colors.violet} />
           <Text style={styles.roomTurnBannerAmbientText}>
-            {classFocusPlateLine(roomPhase, focusTimeLabel)}
+            {liveFocusLine(roomPhase, focusLock ?? {})}
           </Text>
         </View>
       ) : null}
@@ -2750,6 +2772,19 @@ function SessionScreen() {
   );
 }
 
+// How long a pending turn must run before the Stop control arms with no text
+// yet on screen (the escape hatch for a busy-backend wait). See stopArmed.
+const STOP_ARM_DELAY_MS = 2000;
+
+type FlairAward = {
+  criterionId: string;
+  label: string;
+};
+
+// A tutor stream ends one of three ways: it finished, the user aborted it (Stop
+// or steer or unmount — never a failure), or it genuinely failed (busy budget
+// exhausted / hard error → the caller shows the inline retry affordance).
+type TutorStreamResult = "completed" | "aborted" | "failed";
 
 /** Why a send failed: a deliberate refusal (a locked Quest build step) says
  * why; anything else is most likely the network. Module-level so the send's

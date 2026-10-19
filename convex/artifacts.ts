@@ -9,9 +9,15 @@ import {
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { insertCodeRevision } from "./codeArtifactRevisions";
+import { pickFocusApp } from "./lib/focusApp";
 import { isTeacherRole, ROLES } from "./lib/roles";
 import { resolveWorkshopPolicy } from "./lib/workshopPolicy";
 import { requireTeacherOrSelf } from "./lib/auth";
+import {
+  assertNotTeacherArchived,
+  assertSessionNotTeacherArchived,
+  mayReadTeacherArchived,
+} from "./lib/teacherArchive";
 import {
   requireActiveScholarAccess,
   resolveActiveMembership,
@@ -126,6 +132,9 @@ export const getBySession = authedQuery({
     if (isTeacher && session.userId !== ctx.user._id) {
       await requireActiveScholarAccess(ctx, ctx.user, session.userId);
     }
+    // Put away by a teacher: a scholar screen subscribes here, so return
+    // nothing rather than throw (a throwing useQuery would crash its tree).
+    if (!mayReadTeacherArchived(ctx.user, session)) return [];
 
     const rows = await ctx.db
       .query("artifacts")
@@ -166,6 +175,8 @@ export const scholarUpdate = authedMutation({
     if (isTeacher && session.userId !== ctx.user._id) {
       await requireActiveScholarAccess(ctx, ctx.user, session.userId);
     }
+    // An app put away by a teacher is read-only for everyone until restored.
+    assertNotTeacherArchived(session);
     if (!isTextArtifact(artifact)) {
       throw new Error("Structured artifacts must be edited with their own tool.");
     }
@@ -298,6 +309,7 @@ export const scholarCreate = authedMutation({
     if (isTeacher && session.userId !== ctx.user._id) {
       await requireActiveScholarAccess(ctx, ctx.user, session.userId);
     }
+    assertNotTeacherArchived(session);
 
     return await ctx.db.insert("artifacts", {
       sessionId: args.sessionId,
@@ -324,6 +336,7 @@ export const deleteArtifact = authedMutation({
     if (isTeacher && session.userId !== ctx.user._id) {
       await requireActiveScholarAccess(ctx, ctx.user, session.userId);
     }
+    assertNotTeacherArchived(session);
     // App designer (TRA-301): deleting a vibecode code app is a destructive
     // code write — a scholar pinned to Play could otherwise delete the
     // teacher-authored app and never rebuild it (Play has no code tools). Gate
@@ -371,6 +384,8 @@ export const getByScholar = authedQuery({
     }[] = [];
 
     for (const session of sessions) {
+      // A scholar reading their own work never gets a put-away app's code.
+      if (!mayReadTeacherArchived(ctx.user, session)) continue;
       const artifacts = await ctx.db
         .query("artifacts")
         .withIndex("by_session", (q) => q.eq("sessionId", session._id))
@@ -425,6 +440,8 @@ export const aiCreate = internalMutation({
     language: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // The tutor never writes into an app a teacher put away.
+    await assertSessionNotTeacherArchived(ctx, args.sessionId);
     const id = await ctx.db.insert("artifacts", {
       sessionId: args.sessionId,
       title: args.title,
@@ -435,6 +452,69 @@ export const aiCreate = internalMutation({
       ...(args.language ? { language: args.language } : {}),
     });
     return id;
+  },
+});
+
+/**
+ * The app `create_code` rebuilds when the session already has one: the app
+ * the builder has open (pickFocusApp), else the newest. Null when the session
+ * has no app yet, so `create_code` makes the first one.
+ */
+export const aiFocusApp = internalQuery({
+  args: {
+    sessionId: v.id("sessions"),
+    focusArtifactId: v.optional(v.id("artifacts")),
+  },
+  handler: async (ctx, args) => {
+    const artifacts = await ctx.db
+      .query("artifacts")
+      .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+      .collect();
+    const app = pickFocusApp(artifacts, args.sessionId, args.focusArtifactId);
+    return app ? { _id: app._id, title: app.title, revision: app.revision ?? 0 } : null;
+  },
+});
+
+/**
+ * AI rewrites a whole app in place (`create_code` on a session that already
+ * has an app). The rewrite is a new revision of the SAME artifact, so the
+ * turn recorder versions it and it shows in the builder's History, instead of
+ * a second app with the same title beside the first. Bound to the revision
+ * the model last saw, like str_replace: a scholar's Code-view edit since then
+ * is a conflict, never silently overwritten. The title is kept (a scholar may
+ * have renamed the app); renaming is edit_document's job.
+ */
+export const aiReplaceApp = internalMutation({
+  args: {
+    sessionId: v.id("sessions"),
+    artifactId: v.id("artifacts"),
+    content: v.string(),
+    baseRevision: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const artifact = await ctx.db.get(args.artifactId);
+    assertArtifactBelongsToSession(artifact, args.sessionId);
+    if (!artifact || artifact.type !== "code") {
+      return { kind: "refused" as const, error: "Error: that document is not an app." };
+    }
+    const result = editResult(artifact, args.baseRevision);
+    if (result.kind !== "ready") return result;
+    const revision = result.currentRevision + 1;
+    // The title stays: the scholar may have named their app.
+    await ctx.db.patch(artifact._id, {
+      content: args.content,
+      lastEditedBy: "ai",
+      revision,
+    });
+    return {
+      kind: "success" as const,
+      artifact: artifactState({
+        ...artifact,
+        content: args.content,
+        lastEditedBy: "ai",
+        revision,
+      }),
+    };
   },
 });
 
@@ -451,6 +531,8 @@ export const aiStrReplace = internalMutation({
     baseRevision: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // The tutor never writes into an app a teacher put away.
+    await assertSessionNotTeacherArchived(ctx, args.sessionId);
     let artifact;
     if (args.artifactId) {
       artifact = await ctx.db.get(args.artifactId);
@@ -519,6 +601,8 @@ export const aiInsert = internalMutation({
     baseRevision: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // The tutor never writes into an app a teacher put away.
+    await assertSessionNotTeacherArchived(ctx, args.sessionId);
     let artifact;
     if (args.artifactId) {
       artifact = await ctx.db.get(args.artifactId);
@@ -569,6 +653,8 @@ export const aiRename = internalMutation({
     baseRevision: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // The tutor never writes into an app a teacher put away.
+    await assertSessionNotTeacherArchived(ctx, args.sessionId);
     let artifact;
     if (args.artifactId) {
       artifact = await ctx.db.get(args.artifactId);
@@ -684,6 +770,8 @@ export const aiCreateMapArtifact = internalMutation({
     specJson: v.string(),
   },
   handler: async (ctx, args) => {
+    // The tutor never writes into an app a teacher put away.
+    await assertSessionNotTeacherArchived(ctx, args.sessionId);
     let raw: unknown;
     try {
       raw = JSON.parse(args.specJson);
@@ -770,6 +858,8 @@ export const aiApplyMapOps = internalMutation({
     baseRevision: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // The tutor never writes into an app a teacher put away.
+    await assertSessionNotTeacherArchived(ctx, args.sessionId);
     const existing = await findMapArtifact(ctx, args.sessionId);
     if (!existing) {
       return {
@@ -844,6 +934,8 @@ export const getById = authedQuery({
     if (isTeacher && session.userId !== ctx.user._id) {
       await requireActiveScholarAccess(ctx, ctx.user, session.userId);
     }
+    // Put away by a teacher: null (not a throw) for a subscribed scholar view.
+    if (!mayReadTeacherArchived(ctx.user, session)) return null;
     // No-spoiler redaction: a scholar (owner) must never receive a graded
     // task's answer-bearing fields. Teachers/staff keep the raw spec.
     if (!isTeacher) return redactMapRowForScholar(artifact);
@@ -940,6 +1032,7 @@ export const scholarSetMapPins = authedMutation({
     if (artifact.type !== "map") throw new Error("Not a map artifact");
     const session = await ctx.db.get(artifact.sessionId);
     if (!session) throw new Error("Session not found");
+    assertNotTeacherArchived(session);
     if (session.userId !== ctx.user._id) throw new Error("Forbidden");
 
     const check = validateScholarPins(args.pins);
@@ -992,6 +1085,8 @@ export const aiCreateManipulativeArtifact = internalMutation({
     specJson: v.string(),
   },
   handler: async (ctx, args) => {
+    // The tutor never writes into an app a teacher put away.
+    await assertSessionNotTeacherArchived(ctx, args.sessionId);
     let raw: unknown;
     try {
       raw = JSON.parse(args.specJson);
@@ -1095,6 +1190,8 @@ export const aiCreateSlidesDeck = internalMutation({
     deckJson: v.string(),
   },
   handler: async (ctx, args) => {
+    // The tutor never writes into an app a teacher put away.
+    await assertSessionNotTeacherArchived(ctx, args.sessionId);
     let raw: unknown;
     try {
       raw = JSON.parse(args.deckJson);
@@ -1151,6 +1248,8 @@ export const aiApplySlideOps = internalMutation({
     baseRevision: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // The tutor never writes into an app a teacher put away.
+    await assertSessionNotTeacherArchived(ctx, args.sessionId);
     const existing = await findSlidesArtifact(ctx, args.sessionId);
     if (!existing) {
       return { error: 'No deck exists yet. Create one first.' as const };
@@ -1214,6 +1313,7 @@ export const scholarApplySlideOps = authedMutation({
 
     const session = await ctx.db.get(artifact.sessionId);
     if (!session) throw new Error("Session not found");
+    assertNotTeacherArchived(session);
     // Owner-only: this is the kid's own work, and a teacher edit would be
     // indistinguishable from the kid's in the learning record.
     if (session.userId !== ctx.user._id) {
@@ -1296,6 +1396,7 @@ export const scholarEnsureSlidesDeck = authedMutation({
   handler: async (ctx, args) => {
     const session = await ctx.db.get(args.sessionId);
     if (!session) throw new Error("Session not found");
+    assertNotTeacherArchived(session);
     if (session.userId !== ctx.user._id) {
       throw new Error("Only the scholar who owns this session can start a deck");
     }

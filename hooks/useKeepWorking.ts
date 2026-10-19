@@ -7,6 +7,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useRemote } from "@/hooks/useRemote";
 import { toaster } from "@/lib/toaster";
+import { serverRefusal } from "@/lib/serverErrorMessage";
 
 /**
  * "Keep working on this" — re-open a scholar's FINISHED session and drop them
@@ -35,7 +36,9 @@ export function useKeepWorking() {
         console.error("Failed to re-open session:", error);
         toaster.error({
           title: "Couldn't re-open that work",
-          description: "Please try again.",
+          // A deliberate refusal (e.g. a teacher put the app away) says why;
+          // anything else is a transient failure worth retrying.
+          description: serverRefusal(error) ?? "Please try again.",
         });
         setPendingId(null);
       }

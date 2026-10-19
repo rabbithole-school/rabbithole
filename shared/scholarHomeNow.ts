@@ -6,6 +6,9 @@ import {
 export type ScholarHomeRow = {
   origin: "classFocus" | "homework" | "is";
   subject: string | null;
+  // The session holds an app the scholar built (a `type: "code"` artifact —
+  // the same test the teacher archive uses). Such a row also shows on Apps.
+  isApp?: boolean;
 };
 
 export type ScholarHomeTab = {
@@ -128,8 +131,9 @@ export function deriveHomeTabs({
   if (!tabs.some((tab) => tab.key === MATH_TAB.key)) tabs.push(MATH_TAB);
   if (hasOther && presentTabs.length >= 2) tabs.push({ key: "other", label: "Other" });
   tabs.push(PREP_TAB);
-  // Apps tab (the external-app launcher) sits just left of Quests, and only
-  // when the scholar has ≥1 app. The launcher renders ONLY on this tab.
+  // Apps tab sits just left of Quests, and only when the scholar has ≥1 app:
+  // a launcher tile, or an app they built (active or archived). The launcher
+  // renders ONLY on this tab.
   if (hasApps) tabs.push({ key: "apps", label: "Apps" });
   tabs.push({ key: "quests", label: "Quests" });
 
@@ -144,7 +148,8 @@ export function filterRowsForTab<T extends ScholarHomeRow>(
   if (tabKey === "quests") {
     return rows.filter((row) => row.origin === "is");
   }
-  if (tabKey === "prep" || tabKey === "apps") return [];
+  if (tabKey === "apps") return rows.filter((row) => row.isApp === true);
+  if (tabKey === "prep") return [];
   if (tabKey === "all" || tabKey === "now") return assignedRows;
   if (tabKey === "other") {
     return assignedRows.filter(
@@ -159,6 +164,21 @@ export function filterRowsForTab<T extends ScholarHomeRow>(
   return assignedRows.filter(
     (row) => row.subject !== null && subjectTabKey(row.subject) === selectedKey,
   );
+}
+
+/**
+ * The Archived filter's twin of `filterRowsForTab`: which archived rows
+ * (sessions.finishedForScholar) a Home tab lists. Every tab places a row the
+ * way it places an active one, with two differences. Now has no meaning for
+ * archived work, so it lists the same rows as All. Scholar's Prep renders its
+ * own sections when active, and lists archived homework here.
+ */
+export function filterArchivedRowsForTab<T extends ScholarHomeRow>(
+  rows: T[],
+  tabKey: string,
+): T[] {
+  if (tabKey === "prep") return rows.filter((row) => row.origin === "homework");
+  return filterRowsForTab(rows, tabKey === "now" ? "all" : tabKey);
 }
 
 export function shouldShowHomeworkInNow({

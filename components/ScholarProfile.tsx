@@ -22,6 +22,7 @@ import { toaster } from "@/lib/toaster";
 import type { Id } from "@/convex/_generated/dataModel";
 import { EXTENDED_EDUCATION_LABEL } from "@/shared/scholarGroupRouting";
 import { serverErrorMessage } from "@/lib/serverErrorMessage";
+import { TEACHER_ARCHIVE_COPY } from "@/shared/teacherArchive";
 import {
   Box,
   Flex,
@@ -494,6 +495,24 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
       ? { scholarId: scholarId as Id<"users"> }
       : "skip",
   );
+  // Restore lives on the App state row (the canonical home for a teacher-
+  // archived app — review/teacher-archive-scholar-apps.html §4).
+  const restoreApp = useMutation(api.sessions.restoreApp);
+  const [restoringSessionId, setRestoringSessionId] = useState<string | null>(null);
+  const handleRestoreApp = async (sessionId: Id<"sessions">) => {
+    setRestoringSessionId(String(sessionId));
+    try {
+      await restoreApp({ id: sessionId });
+      toaster.success({ title: TEACHER_ARCHIVE_COPY.restoredToast });
+    } catch (e) {
+      toaster.error({
+        title: "Couldn't restore the app",
+        description: serverErrorMessage(e) || undefined,
+      });
+    } finally {
+      setRestoringSessionId(null);
+    }
+  };
   const shouldLoadReadingLevelInsights =
     !isOperationsMode && activeTab === "map" && progressSection === "reading";
   // Ages the estimate line ("N days ago"); a minute tick is plenty.
@@ -1497,7 +1516,7 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                     <CardHeading
                       icon={<BracketsCurly />}
                       title="App state"
-                      hint="Final saved values and recent console output from Vibecode sessions."
+                      hint="Final saved values and recent console output from scholars' apps."
                     />
                     <VStack gap={2} align="stretch">
                       {scholarAppStates.map((state) => {
@@ -1507,6 +1526,8 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                         } catch {
                           prettyDoc = "";
                         }
+                        const teacherArchivedAt = state.teacherArchivedAt;
+                        const isAppArchived = teacherArchivedAt != null;
                         return (
                           <Box
                             as="details"
@@ -1533,6 +1554,18 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                               >
                                 {state.sessionTitle}
                               </Text>
+                              {isAppArchived && (
+                                <Badge
+                                  ml={2}
+                                  colorPalette="gray"
+                                  variant="subtle"
+                                  fontSize="2xs"
+                                  fontFamily="heading"
+                                  textTransform="none"
+                                >
+                                  {TEACHER_ARCHIVE_COPY.archivedLabel}
+                                </Badge>
+                              )}
                               <Text
                                 as="span"
                                 ml={2}
@@ -1552,6 +1585,19 @@ export function ScholarProfile({ scholarId, institutionScope, activeTab: control
                               borderTopWidth="1px"
                               borderColor="gray.100"
                             >
+                              {isAppArchived && (
+                                <Flex pt={3} justify="flex-start">
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    fontFamily="heading"
+                                    loading={restoringSessionId === String(state.sessionId)}
+                                    onClick={() => void handleRestoreApp(state.sessionId)}
+                                  >
+                                    {TEACHER_ARCHIVE_COPY.restoreAction}
+                                  </Button>
+                                </Flex>
+                              )}
                               <Box pt={3}>
                                 <Text
                                   fontFamily="heading"

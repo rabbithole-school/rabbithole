@@ -18,8 +18,8 @@
  * - COMMANDS. `view` (optional `view_range` [start, end], 1-indexed, end -1 =
  *   last line), `str_replace` (old_str must occur exactly once), `insert`
  *   (after `insert_line`, 0 = top). `create` is refused: a new app is
- *   `create_code` (which carries the Quest build lock), and overwriting a
- *   whole app is not an edit.
+ *   `create_code` (which carries the Quest build lock); a whole-app rewrite
+ *   is also `create_code`, which versions the session's app in place.
  * - CONFLICTS. The tool has no revision parameter, so the executor holds it:
  *   each write is bound to the revision of the app the model last SAW — the
  *   DOCUMENTS section at turn start, a `view`, or its own previous edit
@@ -322,7 +322,7 @@ export function readRequiredMessage(path: string): string {
 }
 
 export function createRefusalMessage(path: string): string {
-  return `CREATE_UNAVAILABLE: ${path} was not written. Start a new app with create_code; change an existing app with str_replace or insert on its path.`;
+  return `CREATE_UNAVAILABLE: ${path} was not written. Change an existing app with str_replace or insert on its path, or rewrite it whole with create_code (its next version). Only a genuinely different second app takes create_code with new_app: true.`;
 }
 
 function requireString(value: unknown, field: string): string {

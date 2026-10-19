@@ -12,6 +12,7 @@
 // previous verdict (unlimited retries).
 
 import { v } from "convex/values";
+import { assertNotTeacherArchived } from "./lib/teacherArchive";
 import {
   authedMutation,
   authedQuery,
@@ -145,6 +146,8 @@ export const submit = authedMutation({
     const session = await ctx.db.get(args.sessionId);
     if (!session) throw new Error("Session not found");
     if (session.userId !== ctx.user._id) throw new Error("Forbidden");
+    // An app a teacher put away takes no submissions until it is restored.
+    assertNotTeacherArchived(session);
     const scholarId = session.userId;
     // Free play (TRA-489) is the scholar's own version: no deliverable.
     if (session.freePlay === true) {

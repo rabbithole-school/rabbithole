@@ -13,6 +13,7 @@ import {
   rubricCheckInstruction,
   kickoffInstruction,
   kickoffInstructionForContext,
+  scholarBuildKickoffInstruction,
   teacherBuildKickoffInstruction,
   canRequestRenderCheck,
   renderChecksEnabled,
@@ -255,7 +256,8 @@ describe("runBuildToolWithTruncationGuard", () => {
       blocked: true,
       truncationsThisTurn: 1,
     });
-    expect(first.result).toContain("Build a SMALLER first version now");
+    expect(first.result).toContain("build a SMALLER first version now");
+    expect(first.result).toContain("do NOT shrink it");
     expect(mutation).not.toHaveBeenCalled();
 
     const second = await runBuildToolWithTruncationGuard({
@@ -318,6 +320,15 @@ describe("rubricCheckInstruction", () => {
     expect(out).toContain("their current work");
     expect(out).toContain("update_rubric_score");
   });
+
+  test("in the scholar's own Quest it still scores, with its own reply move", () => {
+    const quest = rubricCheckInstruction("Game", { ownQuest: true });
+    expect(quest).toContain("update_rubric_score");
+    expect(quest).not.toBe(rubricCheckInstruction("Game"));
+    expect(rubricCheckInstruction("Game", { ownQuest: false })).toBe(
+      rubricCheckInstruction("Game"),
+    );
+  });
 });
 
 describe("kickoffInstruction", () => {
@@ -361,6 +372,23 @@ describe("teacherBuildKickoffInstruction", () => {
           appRequest: "Teacher-only request",
         },
       }),
+    ).toBe(kickoffInstruction());
+  });
+});
+
+describe("scholarBuildKickoffInstruction selection", () => {
+  test("a build-first Quest step opens with the scholar build instruction", () => {
+    const scholarCtx = {
+      isTestDrive: false,
+      scholarBuildKickoff: true,
+      lessonActivityContext: { starterAppId: null, appRequest: null },
+    };
+    expect(kickoffInstructionForContext(scholarCtx)).toBe(
+      scholarBuildKickoffInstruction(),
+    );
+    expect(scholarBuildKickoffInstruction()).not.toBe(kickoffInstruction());
+    expect(
+      kickoffInstructionForContext({ ...scholarCtx, scholarBuildKickoff: false }),
     ).toBe(kickoffInstruction());
   });
 });

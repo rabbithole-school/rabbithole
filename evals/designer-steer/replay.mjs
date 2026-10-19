@@ -324,9 +324,9 @@ async function assignAndOpen(env, setup, scholarName, activityId = setup.activit
 }
 
 /** POST /session-stream as VibecodeWorkshop does (Edit = the designer thread) and read the SSE to the end. */
-async function streamTurn(env, scholarName, prepared, { mode = "edit" } = {}) {
+async function streamTurn(env, scholarName, prepared, { mode = "edit", extraBody = {} } = {}) {
   const started = Date.now();
-  const body = { sessionId: prepared.sessionId, streamId: prepared.streamId, assistantMsgId: prepared.assistantMsgId, platform: "web", ...(mode ? { mode } : {}) };
+  const body = { sessionId: prepared.sessionId, streamId: prepared.streamId, assistantMsgId: prepared.assistantMsgId, platform: "web", ...(mode ? { mode } : {}), ...extraBody };
   const segments = [""];
   const tools = [];
   let done = null;

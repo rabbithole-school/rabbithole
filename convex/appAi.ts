@@ -6,6 +6,7 @@
  * by the tutor's tools elsewhere; this file only reads them.
  */
 import { v, type Infer } from "convex/values";
+import { mayReadTeacherArchived } from "./lib/teacherArchive";
 import { internalMutation, type MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { authedQuery } from "./lib/customFunctions";
@@ -404,6 +405,8 @@ export const listForSession = authedQuery({
     } else if (session.userId !== ctx.user._id) {
       throw new Error("Forbidden");
     }
+    // Put away by a teacher: the owner's subscribed view gets nothing.
+    if (!mayReadTeacherArchived(ctx.user, session)) return [];
 
     const rows = (
       await ctx.db

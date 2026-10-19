@@ -12,6 +12,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import { canAccessSession, READ_ONLY_ACCOUNT_ERROR, VIEWING_AS_READ_ONLY_ERROR } from "./lib/auth";
 import { llmBudgetExceeded, llmBudgetMessage } from "./llmBudget";
 import { acquireLlmLease } from "./lib/llmLease";
+import { TEACHER_ARCHIVE_COPY } from "../shared/teacherArchive";
 import { levelsPromptLine } from "./lib/readingLevels";
 import { APP_UPDATE_LLM_SURFACE, LLM_BUSY_MESSAGE } from "./lib/llmLimiter";
 import {
@@ -455,6 +456,18 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
         );
       }
     }
+    // ── Teacher archive ───────────────────────────────────────────────
+    // An app a teacher put away takes no tutor turns, for anyone, until it
+    // is restored. sendMessage and every placeholder path already refuse;
+    // this catches a stream POSTed after the archive landed (a stale tab, or
+    // a placeholder minted just before it). Refused before any lease is
+    // taken, so there is nothing to release.
+    if (session.teacherArchivedAt != null) {
+      return new Response(
+        sseEvent({ error: TEACHER_ARCHIVE_COPY.refusal }),
+        { status: 403, headers: SSE_ERROR_HEADERS },
+      );
+    }
     // ── App designer: the EFFECTIVE mode (TRA-301) ────────────────────
     // The body's `mode` is a request. The server derives the mode this turn
     // actually runs in from the activity's scholar edit policy, the caller's
@@ -881,7 +894,13 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
           if (rubricCheck) {
             apiMessages.push({
               role: "user",
-              content: rubricCheckInstruction(rubricCheck.artifactTitle),
+              content: rubricCheckInstruction(rubricCheck.artifactTitle, {
+                // The app builder's check only: a Quest's learning steps
+                // (a prediction, an essay) keep the usual tutoring check.
+                ownQuest:
+                  session.mission?.ownQuest === true &&
+                  session.appContext.builderStance,
+              }),
             });
           }
 
@@ -910,6 +929,7 @@ const sessionStreamHandler = httpAction(async (ctx, request) => {
                 hasAsks: turnPolicy.appUpdateAskCount > 0,
                 hasCharacter: !!session.characterContext,
                 canStaySilent: offerStaySilent,
+                ownQuest: session.mission?.ownQuest === true,
               }),
             });
           }

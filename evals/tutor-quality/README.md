@@ -94,12 +94,12 @@ The rubric is fixed; the *engine* that runs it is swappable via `JUDGE_ENGINE`
 (one rubric, two engines — [`lib/judgeEngine.ts`](lib/judgeEngine.ts)):
 
 - **`anthropic`** (default, the fallback + calibration reference) — the Anthropic
-  SDK, pinned to [`TUTOR_JUDGE_MODEL`](../../convex/lib/models.ts) (Fable 5.1).
-  Fable rejects a forced `tool_choice`, so the call uses `auto` plus an
+  SDK, pinned to [`TUTOR_JUDGE_MODEL`](../../convex/lib/models.ts) (Opus 5.5).
+  It rejects a forced `tool_choice`, so the call uses `auto` plus an
   instruction and re-asks when the tool call is missing. `JUDGE_MODEL`
   overrides it (e.g. `claude-opus-4-8` to re-score with the old judge).
   Needs `ANTHROPIC_API_KEY`.
-- **`copilot`** — Claude Fable 5.1 via the headless GitHub Copilot CLI
+- **`copilot`** — Claude Opus 5.5 via the headless GitHub Copilot CLI
   (`copilot -p … --model claude-fable-5.1`; override with `JUDGE_MODEL` for a back-test), which routes judging through a
   Copilot seat rather than the Anthropic API. Auth is `COPILOT_GITHUB_TOKEN` (a
   fine-grained PAT with the "Copilot Requests" permission — see

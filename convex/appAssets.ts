@@ -11,6 +11,7 @@ import type { Id } from "./_generated/dataModel";
 import { isTeacherRole } from "./lib/roles";
 import { requireActiveScholarAccess } from "./lib/access";
 import { MAX_APP_ASSETS } from "../shared/appAssets";
+import { assertMayReadTeacherArchived } from "./lib/teacherArchive";
 
 type AuthorizedAsset = {
   id: Id<"_storage">;
@@ -43,6 +44,8 @@ export const authorizeArtifactAssets = internalQuery({
       if (!isTeacherRole(caller.role)) throw new Error("Forbidden");
       await requireActiveScholarAccess(ctx, caller, session.userId);
     }
+    // A put-away app's pictures stay with it (teachers still resolve them).
+    assertMayReadTeacherArchived(caller, session);
 
     const inherited = artifact.appAssetIds ?? [];
     const sessionAssets = session.appAssetIds ?? [];

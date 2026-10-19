@@ -141,6 +141,9 @@ import {
 } from "@/components/AppAiTurnRow";
 import type { AppAiTurnView } from "@/convex/appAi";
 import { isTeacherRole } from "@/convex/lib/roles";
+import { serverRefusal } from "@/lib/serverErrorMessage";
+import { TeacherArchivedAppNotice } from "@/components/TeacherArchivedApp";
+import { isTeacherArchived } from "@/shared/teacherArchive";
 
 const NO_APP_AI_TURNS: AppAiTurnView[] = [];
 const NO_APP_CHARACTER_NAMES: AppCharacterNames = {};
@@ -156,9 +159,10 @@ import { newestHtmlArtifact } from "@/lib/vibecode/helpers";
 import { composerAfterPersistedSend } from "@/lib/composerAfterSend";
 import type { GraphemeSpan, GraphemeStages } from "@/shared/graphemeSegments";
 import {
-  classFocusPlateLine,
   focusMismatchBannerText,
   formatRoomTurnTime,
+  liveFocusLine,
+  roomClockForFocus,
   TURNED_BANNER_TEXT,
   WINDING_DOWN_BANNER_TEXT,
 } from "@/shared/roomTurn";
@@ -375,7 +379,9 @@ export function SessionInterface({
         // "The turn, not the bell" — when (+ in what timezone) this class
         // focus wraps, so the banners can render a soft local time instead
         // of a bare "paused until then".
-        endsAt: firstFocus.endsAt ?? null,
+        // Block end vs. a teacher-given lifetime — only a block end is
+        // the room's clock (shared/roomTurn.ts).
+        ...roomClockForFocus(firstFocus),
         timeZone: firstFocus.timeZone,
       }
     : null;
@@ -1005,7 +1011,7 @@ export function SessionInterface({
     // Eyes-free "your turn" cue — kids docked in the Folio can't feel the
     // haptic, so the mic opening gets an audible blip too.
     getTTSEngine()?.playListeningCue();
-    void startRecording({ latched: true });
+    void startRecording({ latched: true, auto: true });
   }, [sttEnabled, startRecording]);
   const maybeAutoListenRef = useRef(maybeAutoListen);
   // eslint-disable-next-line react-hooks/refs, react-hooks/immutability -- latest callback for engine onIdle + stream done
@@ -1154,9 +1160,12 @@ export function SessionInterface({
   // (item 3), never a lock.
   const isFocusMatch =
     !isTestMode && !isHomeworkSession && focusLock?.unitId != null && !isFocusMismatch;
+  // A lifetime ("through Friday") is not the room's clock: no "your class is
+  // elsewhere" banner and no turn memory for it — only the plate line below.
+  const focusHasRoomClock = focusLock?.lifetimeEndsAt == null;
   const roomPhase = useRoomTurnPhase(focusLock?.endsAt ?? null);
   const { showTurnBanner } = useRoomTurnAwareness(
-    isFocusMatch,
+    isFocusMatch && focusHasRoomClock,
     roomPhase,
     focusLock?.label ?? null,
     focusLock?.endsAt ?? null,
@@ -1357,6 +1366,12 @@ export function SessionInterface({
         return result;
       } catch (error) {
         console.error("Error sending message:", error);
+        // A deliberate refusal (e.g. a teacher put this app away while the
+        // tab was open) says why instead of failing silently.
+        const refusal = serverRefusal(error);
+        if (refusal && userMessage !== "<start>") {
+          toaster.error({ title: "Couldn't send", description: refusal });
+        }
         return null;
       }
     });
@@ -1612,6 +1627,9 @@ export function SessionInterface({
     if (welcomeSentRef.current === sessionId) return;
 
     const session = sessionData.session;
+    // A teacher-archived app never opens a turn (the server refuses anyway);
+    // the scholar sees the archived pane, a teacher reads the transcript.
+    if (isTeacherArchived(session)) return;
     if (session.activityId) {
       if (
         session.isArchived ||
@@ -1899,12 +1917,20 @@ export function SessionInterface({
         }
       />
       <ProjectActivityNavModal data={activityNav} />
+      {isRemoteMode &&
+        isTeacherRole(currentUser?.role) &&
+        sessionData?.session &&
+        isTeacherArchived(sessionData.session) && (
+          <TeacherArchivedAppNotice
+            sessionId={sessionData.session._id as Id<"sessions">}
+          />
+        )}
 
       {/* "Your class is elsewhere" notice — informational only. The hard focus
           gate is gone (shared/focusLock.ts), so this session stays fully
           usable; the banner just says where the room is, with a shortcut home
           for a scholar who wants to join it. */}
-      {isFocusMismatch && (() => {
+      {isFocusMismatch && focusHasRoomClock && (() => {
         const focusUnit = units.find((u) => String(u._id) === focusLock?.unitId);
         const focusName =
           focusLock?.label ??
@@ -1969,7 +1995,7 @@ export function SessionInterface({
         >
           <Clock size={14} color="var(--chakra-colors-violet-400)" />
           <Text fontSize="xs" fontFamily="heading" color="violet.600" flex={1}>
-            {classFocusPlateLine(roomPhase, focusTimeLabel)}
+            {liveFocusLine(roomPhase, focusLock ?? {})}
           </Text>
         </Flex>
       )}

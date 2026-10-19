@@ -4,6 +4,7 @@ import { describe, expect, test } from "vitest";
 import {
   DEFAULT_APP_GATE,
   defaultGateFor,
+  isScholarBuildKickoff,
   questBuildLock,
   questBuildPrerequisite,
   lockedQuestBuildTitle,
@@ -168,5 +169,47 @@ describe("learn before you build (B6)", () => {
 
   test("lock label", () => {
     expect(questBuildLockLabel("Write your rule")).toBe("Unlocks when you finish Write your rule");
+  });
+});
+
+describe("isScholarBuildKickoff (build first)", () => {
+  const ownQuest = { authorScholarId: "scholar1" };
+  const base = { isTestDrive: false, ownerId: "scholar1", unit: ownQuest };
+
+  test("a Quest that is only its app step builds on open", () => {
+    expect(isScholarBuildKickoff({ ...base, activity: build, ordered: [build] })).toBe(true);
+    // Any other step in front (even one B6 would not lock on) is not build-first.
+    expect(
+      isScholarBuildKickoff({ ...base, activity: build, ordered: [walk, discussion, build] }),
+    ).toBe(false);
+  });
+
+  test("a Quest a teacher designed for the scholar keeps the ordinary opening", () => {
+    expect(
+      isScholarBuildKickoff({
+        ...base,
+        unit: { ...ownQuest, authorRole: "inspired" },
+        activity: build,
+        ordered: [build],
+      }),
+    ).toBe(false);
+  });
+
+  test("a B6 build step after a learning step keeps the ordinary opening", () => {
+    expect(isScholarBuildKickoff({ ...base, activity: build, ordered: [essay, build] })).toBe(false);
+  });
+
+  test("never a test drive, a teacher's unit, another scholar's Quest, or a non-app step", () => {
+    expect(
+      isScholarBuildKickoff({ ...base, isTestDrive: true, activity: build, ordered: [build] }),
+    ).toBe(false);
+    expect(
+      isScholarBuildKickoff({ ...base, unit: teacherUnit, activity: build, ordered: [build] }),
+    ).toBe(false);
+    expect(
+      isScholarBuildKickoff({ ...base, ownerId: "scholar2", activity: build, ordered: [build] }),
+    ).toBe(false);
+    expect(isScholarBuildKickoff({ ...base, activity: essay, ordered: [essay] })).toBe(false);
+    expect(isScholarBuildKickoff({ ...base, activity: build, ordered: [] })).toBe(false);
   });
 });

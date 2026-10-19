@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAction, useMutation } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { haptic } from "@/lib/native";
@@ -34,6 +34,11 @@ export {
   type ParsedRealtimeEvent,
   type TranscriptAssembly,
 } from "@/lib/realtimeTranscriptionProtocol";
+
+// Shown when a scholar taps the mic on a deployment with no OpenAI key (the
+// public local runner). Voice is on-demand there: nothing is pre-warmed.
+export const VOICE_UNAVAILABLE_MESSAGE =
+  "Voice needs an OpenAI key, which isn't set up here. Type instead.";
 
 const OPENAI_REALTIME_URL = "https://api.openai.com/v1/realtime/calls";
 const STARTUP_TIMEOUT_MS = 3_500;
@@ -123,6 +128,11 @@ export function useStreamingDictation(
   // the mic. In fallback mode we surface `legacy.isMicBusy` via the spread.
   const streamingMicBusy = useIsMicBusy(micToken);
 
+  // undefined while loading: pre-warm waits for `true`, a tap proceeds as
+  // before, so a deployment WITH the key behaves exactly as it always did.
+  const voiceAvailable = useQuery(
+    api.realtimeTranscription.voiceInputAvailable,
+  );
   const mintTranscriptionSecret = useAction(
     api.realtimeTranscription.mintTranscriptionSecret,
   );
@@ -302,10 +312,11 @@ export function useStreamingDictation(
   // them), and nothing retries: a tripped budget breaker costs one call per
   // mount / tab-visible / take, never a loop.
   const prefetchSecret = useCallback(() => {
+    if (voiceAvailable !== true) return;
     if (streamingDisabledRef.current) return;
     if (!shouldPrefetchSecret(secretRef.current, Date.now())) return;
     mintSecret().catch(() => {});
-  }, [mintSecret]);
+  }, [mintSecret, voiceAvailable]);
 
   const getSecret = useCallback(async (): Promise<MintedSecret> => {
     const cached = secretRef.current;
@@ -341,8 +352,15 @@ export function useStreamingDictation(
     [transcribe, sessionId],
   );
 
+  // `auto` marks a listen nobody tapped for (voice-mode auto-listen); `latched`
+  // only means "silence ends the take", which a tap can also ask for.
   const startRecording = useCallback(
-    async (opts?: { latched?: boolean }) => {
+    async (opts?: { latched?: boolean; auto?: boolean }) => {
+      if (voiceAvailable === false) {
+        // A hands-free listen stays silent; a tap explains.
+        if (!opts?.auto) setError(VOICE_UNAVAILABLE_MESSAGE);
+        return;
+      }
       if (streamingDisabledRef.current) {
         emitDiagnostic("streaming-disabled");
         await legacy.startRecording(opts);
@@ -680,6 +698,7 @@ export function useStreamingDictation(
       startLevelMonitor,
       stopInputCapture,
       transcribeBackup,
+      voiceAvailable,
     ],
   );
 

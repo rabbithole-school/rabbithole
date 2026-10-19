@@ -16,6 +16,7 @@ type T = ReturnType<typeof convexTest>;
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 async function seedUser(t: T, role: Role, username: string) {
@@ -96,6 +97,7 @@ describe("transcribeAttachment", () => {
   });
 
   test("returns transcript and reported duration for video", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "sk-test");
     const t = convexTest(schema, modules);
     const teacherId = await seedUser(t, "teacher", "teacher-video");
     const asTeacher = await withUser(t, teacherId);
@@ -131,5 +133,24 @@ describe("transcribeAttachment", () => {
       audioSeconds: 2.25,
     });
     expect(usage[0]?.sessionId).toBeUndefined();
+  });
+});
+
+describe("transcribe without OPENAI_API_KEY", () => {
+  test("refuses clearly before calling Whisper", async () => {
+    // vitest.setup.ts strips the key; keep it absent explicitly.
+    vi.stubEnv("OPENAI_API_KEY", "");
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const t = convexTest(schema, modules);
+    const scholarId = await seedUser(t, "scholar", "scholar-nokey");
+    const asScholar = await withUser(t, scholarId);
+
+    await expect(
+      asScholar.action(api.audioActions.transcribe, {
+        audioBase64: Buffer.from("audio").toString("base64"),
+      }),
+    ).rejects.toThrow("OPENAI_API_KEY is not configured");
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

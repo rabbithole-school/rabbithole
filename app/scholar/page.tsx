@@ -25,6 +25,7 @@ import {
   Flex,
   HStack,
   Text,
+  chakra,
 } from "@chakra-ui/react";
 import { AppLogo } from "@/components/AppLogo";
 import { MapHomeCard } from "@/components/MapHomeCard";
@@ -89,6 +90,9 @@ import { ScholarHomeSectionHeader } from "@/components/ui/ScholarHomeSectionHead
 import { EmptyState } from "@/components/ui/EmptyState";
 import { useKeepWorking } from "@/hooks/useKeepWorking";
 import { ArrowClockwise } from "@phosphor-icons/react";
+import { TEACHER_ARCHIVE_COPY, isTeacherArchived } from "@/shared/teacherArchive";
+import { HOME_ARCHIVE_COPY } from "@/shared/homeArchive";
+import { HomeArchiveButton } from "@/components/HomeArchiveButton";
 import { useInstitutionDay, } from "@/hooks/useInstitutionDay";
 import { DEFAULT_TIMEZONE, dueStatus } from "@/shared/institutionDay";
 import { DueChip } from "@/components/ui/DueChip";
@@ -100,6 +104,7 @@ import { shouldShowProfileSetup } from "@/lib/profileSetup";
 import {
   buildNowDigest,
   deriveHomeTabs,
+  filterArchivedRowsForTab,
   filterHomeworkForNow,
   filterRowsForTab,
   focusSectionLabel,
@@ -122,8 +127,8 @@ import {
   UnitGroupRow,
 } from "@/components/ui/UnitGroupCard";
 import {
-  classFocusPlateLine,
-  formatRoomTurnTime,
+  liveFocusLine,
+  roomClockForFocus,
 } from "@/shared/roomTurn";
 import { useRoomTurnPhase } from "@/hooks/useRoomTurnPhase";
 
@@ -234,7 +239,9 @@ function ScholarHome() {
         // "The turn, not the bell" — when (+ in what timezone) this class
         // focus wraps, so the plate's class-focus card can render a soft
         // local time instead of a bare "paused until then".
-        endsAt: firstFocus.endsAt ?? null,
+        // Block end vs. a teacher-given lifetime — only a block end is
+        // the room's clock (shared/roomTurn.ts).
+        ...roomClockForFocus(firstFocus),
         timeZone: firstFocus.timeZone,
       }
     : null;
@@ -613,14 +620,21 @@ function ScholarHome() {
     currentBlock?.kind === "prep" ||
     (prepBlock ? isWithinPrepWindow(prepBlock, nowMs) : false);
 
-  // Derive the tab set from the plate's subject tabs + the current rows.
+  // Derive the tab set from the plate's subject tabs + the active AND
+  // archived rows together, so switching a row to Archived never makes its
+  // tab vanish (review/home-finished-filter.html: a subject with only archived
+  // work keeps its tab). Apps exists for a launcher tile or any app the
+  // scholar built, active or archived.
   // Remote/teacher view gets no tabs (the server-side plate data drives them).
   const tabs: ScholarHomeTab[] =
     !isRemoteMode && plateResult
       ? deriveHomeTabs({
           subjectTabs: plateResult.subjectTabs,
-          rows: plateResult.rows,
-          hasApps: (launcherApps?.length ?? 0) > 0,
+          rows: [...plateResult.rows, ...(archivedSessions ?? [])],
+          hasApps:
+            (launcherApps?.length ?? 0) > 0 ||
+            plateResult.rows.some((row) => row.isApp) ||
+            (archivedSessions ?? []).some((row) => row.isApp),
         }).tabs
       : [];
 
@@ -684,7 +698,7 @@ function ScholarHome() {
     [startUnit, router, stamp, isRemoteMode, remoteUserId],
   );
   const [isCreating, setIsCreating] = useState(false);
-  const [finishedOpen, setFinishedOpen] = useState(false);
+  const [archivedOpen, setArchivedOpen] = useState(false);
 
   const impersonation = useQuery(api.impersonation.myImpersonation, {});
   const isImpersonating =
@@ -846,8 +860,8 @@ function ScholarHome() {
             onOpenUnitProgress={(unitId, assignmentId) =>
               setProgressTarget({ unitId, assignmentId })
             }
-            finishedOpen={finishedOpen}
-            setFinishedOpen={setFinishedOpen}
+            archivedOpen={archivedOpen}
+            setArchivedOpen={setArchivedOpen}
             isRemoteMode={isRemoteMode}
             isStaffPreview={isTestMode}
             remoteUserId={remoteUserId}
@@ -1098,8 +1112,8 @@ function ScholarSections({
   setDialogOpen,
   onOpenUnit,
   onOpenUnitProgress,
-  finishedOpen,
-  setFinishedOpen,
+  archivedOpen,
+  setArchivedOpen,
   isRemoteMode,
   isStaffPreview,
   remoteUserId,
@@ -1188,8 +1202,8 @@ function ScholarSections({
     unitId: Id<"units">,
     assignmentId?: Id<"assignments">,
   ) => void;
-  finishedOpen: boolean;
-  setFinishedOpen: (open: boolean) => void;
+  archivedOpen: boolean;
+  setArchivedOpen: (open: boolean) => void;
   isRemoteMode: boolean;
   /** A teacher looking at Home without a learner context (remote view or
    *  self-preview). Live pushes are addressed to scholars, so the strip
@@ -1213,10 +1227,29 @@ function ScholarSections({
 }) {
   const { stamp } = useRemote();
 
-  // "Review" (M3 fix: was "Keep working on this", which read as if the
-  // Finished row wasn't actually done) — re-open a finished session without
-  // regressing completion (see hooks/useKeepWorking + convex sessions.reopen).
+  // Tapping an Archived row re-opens it without regressing completion (see
+  // hooks/useKeepWorking + convex sessions.reopen).
   const { keepWorking, pendingId: reopeningId } = useKeepWorking();
+  const router = useRouter();
+  // Which teacher-archived card has its explain line open (tap toggles it
+  // inline, matching the iPad).
+  const [explainedId, setExplainedId] = useState<string | null>(null);
+  // A teacher-archived app stays in Archived, labelled, with no way back in
+  // for the scholar (review/teacher-archive-scholar-apps.html §5). A teacher
+  // in remote mode still opens it read-only (no reopen) to restore it.
+  const openArchived = (session: { _id: Id<"sessions">; teacherArchivedAt?: number }) => {
+    if (isTeacherArchived(session)) {
+      if (isRemoteMode) {
+        router.push(stamp(`/scholar/${session._id}`));
+      } else {
+        setExplainedId((cur) =>
+          cur === String(session._id) ? null : String(session._id),
+        );
+      }
+      return;
+    }
+    void keepWorking(session._id);
+  };
 
   // All/remote needs a fallback only when a live focus has no canonical plate
   // row (for example an offline whole-class activity or a web assignment).
@@ -1241,7 +1274,13 @@ function ScholarSections({
       ] as const),
   );
 
-  const finishedCount = archivedSessions?.length ?? 0;
+  // The Archived section lists what the OPEN tab would list, archived
+  // (shared/scholarHomeNow.ts → filterArchivedRowsForTab: Now = All, Prep =
+  // archived homework). Remote view has no tabs and keeps the whole list.
+  const archivedForTab = isRemoteMode
+    ? (archivedSessions ?? [])
+    : filterArchivedRowsForTab(archivedSessions ?? [], activeTab);
+  const archivedCount = archivedForTab.length;
   // H1 fix: true while the scholar hasn't finished the Welcome unit yet
   // (`onboardingPin` non-null) — demotes the Math Check-In card to a
   // secondary (outlined, not filled) CTA so it doesn't out-shout the
@@ -1853,7 +1892,23 @@ function ScholarSections({
       )}
 
       {/* ── APPS tab ─────────────────────────────────────────────────── */}
-      {isAppsTab && !isRemoteMode && <AppLauncher minuteNow={minuteNow} />}
+      {isAppsTab && !isRemoteMode && (
+        <Stack gap={6}>
+          <AppLauncher minuteNow={minuteNow} />
+          {/* The scholar's own builds, under "Apps you built" (hidden when
+              there are none). Archived builds follow in the Archived section
+              below, scoped to this tab. */}
+          <ScholarPlate
+            onOpenUnit={onOpenUnit}
+            onOpenUnitProgress={onOpenUnitProgress}
+            onExploreSeed={handleExploreSeed}
+            exploringSeedId={exploringSeedId}
+            focusLock={focusLock}
+            hideOnboarding
+            tabKey="apps"
+          />
+        </Stack>
+      )}
 
       {/* ── QUESTS tab ──────────────────────────────────────────────── */}
       {isQuestTab && !isRemoteMode && (
@@ -1878,12 +1933,14 @@ function ScholarSections({
         </Stack>
       )}
 
-      {/* ── Finished — collapsible, always at page bottom ─────────── */}
-      {finishedCount > 0 && (
+      {/* ── Archived — collapsible, always at page bottom, scoped to the
+          open tab (review/home-finished-filter.html). ─────────────────── */}
+      {archivedCount > 0 && (
         <Stack gap={3}>
           <Box
             as="button"
-            onClick={() => setFinishedOpen(!finishedOpen)}
+            onClick={() => setArchivedOpen(!archivedOpen)}
+            aria-expanded={archivedOpen}
             display="flex"
             alignItems="center"
             justifyContent="space-between"
@@ -1891,7 +1948,7 @@ function ScholarSections({
             py={2}
           >
             <HStack gap={2}>
-              {finishedOpen ? (
+              {archivedOpen ? (
                 <CaretDown color="var(--chakra-colors-charcoal-400)" />
               ) : (
                 <CaretRight color="var(--chakra-colors-charcoal-400)" />
@@ -1902,88 +1959,149 @@ function ScholarSections({
                 fontFamily="heading"
                 fontWeight="700"
               >
-                📦 Finished
+                📦 {HOME_ARCHIVE_COPY.archivedFilter}
               </Heading>
               <Text
                 fontSize="xs"
                 color="charcoal.400"
                 fontFamily="heading"
               >
-                {finishedCount}
+                {archivedCount}
               </Text>
             </HStack>
           </Box>
-          {finishedOpen && (
-            <Stack gap={4} pl={6}>
-              {archivedSessions && archivedSessions.length > 0 && (
-                <Stack gap={2}>
-                  {archivedSessions.map((p) => (
-                    <Flex
-                      key={p._id}
-                      as="button"
-                      onClick={() => keepWorking(p._id as Id<"sessions">)}
-                      textAlign="left"
-                      width="100%"
-                      p={3}
-                      bg="white"
-                      borderRadius="md"
-                      borderWidth="1px"
-                      borderColor="gray.200"
-                      shadow="xs"
-                      align="center"
-                      gap={3}
-                      cursor="pointer"
-                      opacity={reopeningId === p._id ? 0.6 : 1}
-                      aria-disabled={reopeningId === p._id}
-                      _hover={{ shadow: "sm", bg: "gray.50" }}
-                    >
-                      {p.personaEmoji && (
-                        <Text fontSize="md">{p.personaEmoji}</Text>
-                      )}
-                      <Stack gap={0} flex={1} minW={0}>
-                        <Text
-                          fontFamily="heading"
-                          fontWeight="500"
-                          color="charcoal.500"
-                          fontSize="sm"
-                          overflow="hidden"
-                          textOverflow="ellipsis"
-                          whiteSpace="nowrap"
-                        >
-                          {p.title}
-                        </Text>
-                        {p.unitTitle && (
-                          <Text
-                            fontSize="2xs"
-                            color="charcoal.400"
-                            fontFamily="heading"
-                          >
-                            {p.unitTitle}
-                          </Text>
-                        )}
-                      </Stack>
-                      <HStack
-                        gap={1}
-                        color="violet.600"
-                        fontFamily="heading"
-                        fontWeight="600"
-                        fontSize="xs"
-                        flexShrink={0}
-                      >
-                        <ArrowClockwise size={14} weight="bold" />
-                        <Text>
-                          {reopeningId === p._id ? "Opening…" : "Review"}
-                        </Text>
-                      </HStack>
-                    </Flex>
-                  ))}
-                </Stack>
-              )}
+          {archivedOpen && (
+            <Stack gap={2} pl={6}>
+              {archivedForTab.map((p) => (
+                <ArchivedSessionRow
+                  key={p._id}
+                  session={p}
+                  onOpen={() => openArchived(p)}
+                  explained={explainedId === String(p._id)}
+                  opening={reopeningId === p._id}
+                  canUnarchive={!isRemoteMode}
+                />
+              ))}
             </Stack>
           )}
         </Stack>
       )}
     </Stack>
+  );
+}
+
+// ── One row of the Archived section ───────────────────────────────────
+// Three kinds (shared/homeArchive.ts): work the scholar archived (tap = keep
+// working; the hover icon unarchives it), completed work Home dropped
+// (labelled Completed; tap = review), and an app a teacher archived (locked:
+// labelled, tap explains, no unarchive — only a teacher restores it).
+// The whole row is a stretched overlay button so the Unarchive icon stays a
+// real, separate control (no button inside a button).
+function ArchivedSessionRow({
+  session: p,
+  onOpen,
+  explained,
+  opening,
+  canUnarchive,
+}: {
+  session: ScholarSession;
+  onOpen: () => void;
+  explained: boolean;
+  opening: boolean;
+  /** False in the teacher's remote view, which only reads the list. */
+  canUnarchive: boolean;
+}) {
+  const locked = isTeacherArchived(p);
+  // Finished work (auto-archived, or archived after finishing) is re-entered
+  // with Keep working: the plate drops a completed session, so Unarchive
+  // would make it vanish. Unarchive is for unfinished work the scholar
+  // archived themselves.
+  const complete = !locked && p.isComplete;
+  const scholarArchived = !locked && !complete && p.finishedKind === "archived";
+  const verb = scholarArchived ? HOME_ARCHIVE_COPY.keepWorkingAction : "Review";
+  const subLabel = locked
+    ? TEACHER_ARCHIVE_COPY.scholarLabel
+    : complete
+      ? [HOME_ARCHIVE_COPY.completedLabel, p.unitTitle].filter(Boolean).join(" · ")
+      : p.unitTitle;
+  return (
+    <Flex
+      role="group"
+      className="group"
+      position="relative"
+      width="100%"
+      p={3}
+      bg="white"
+      borderRadius="md"
+      borderWidth="1px"
+      borderColor="gray.200"
+      shadow="xs"
+      align="center"
+      gap={3}
+      opacity={opening ? 0.6 : 1}
+      _hover={{ shadow: "sm", bg: "gray.50" }}
+    >
+      {p.personaEmoji && <Text fontSize="md">{p.personaEmoji}</Text>}
+      <Stack gap={0} flex={1} minW={0}>
+        <Text
+          fontFamily="heading"
+          fontWeight="500"
+          color="charcoal.500"
+          fontSize="sm"
+          overflow="hidden"
+          textOverflow="ellipsis"
+          whiteSpace="nowrap"
+        >
+          {p.title}
+        </Text>
+        {subLabel && (
+          <Text fontSize="2xs" color="charcoal.400" fontFamily="heading">
+            {subLabel}
+          </Text>
+        )}
+        {locked && explained && (
+          <Text fontSize="xs" color="charcoal.500" fontFamily="body" mt={1}>
+            {TEACHER_ARCHIVE_COPY.scholarExplain}
+          </Text>
+        )}
+      </Stack>
+      {scholarArchived && canUnarchive && (
+        // Raised above the overlay so it stays its own control.
+        <Box position="relative" zIndex={1} flexShrink={0}>
+          <HomeArchiveButton sessionId={p._id} archived />
+        </Box>
+      )}
+      {!locked && (
+        <HStack
+          gap={1}
+          color="violet.600"
+          fontFamily="heading"
+          fontWeight="600"
+          fontSize="sm"
+          flexShrink={0}
+          aria-hidden
+        >
+          <ArrowClockwise size={14} weight="bold" />
+          <Text>{opening ? "Opening…" : verb}</Text>
+        </HStack>
+      )}
+      <chakra.button
+        type="button"
+        position="absolute"
+        inset={0}
+        borderRadius="md"
+        cursor="pointer"
+        onClick={onOpen}
+        aria-label={locked ? p.title : `${verb}: ${p.title}`}
+        aria-expanded={locked ? explained : undefined}
+        aria-disabled={opening}
+        _focusVisible={{
+          outline: "2px solid",
+          outlineColor: "violet.400",
+          outlineOffset: "2px",
+        }}
+      />
+    </Flex>
   );
 }
 
@@ -2052,11 +2170,19 @@ function HomeworkNowRow({
   };
 
   const actionable = !starting;
+  const actionLabel = isOfflineHomework
+    ? "Open"
+    : row.sessionId
+      ? "Continue"
+      : "Start";
 
+  // A stretched overlay button carries the tap, so the Archive icon (any row
+  // with a session, like the plate's rows) stays its own control.
   return (
     <Box
-      as={actionable ? "button" : "div"}
-      onClick={actionable ? handleClick : undefined}
+      role="group"
+      className="group"
+      position="relative"
       textAlign="left"
       width="100%"
       p={4}
@@ -2065,7 +2191,6 @@ function HomeworkNowRow({
       borderWidth="1px"
       borderColor="gray.200"
       shadow="xs"
-      cursor={actionable ? "pointer" : "default"}
       opacity={starting ? 0.7 : 1}
       _hover={actionable ? { shadow: "sm", bg: "gray.50" } : undefined}
     >
@@ -2124,15 +2249,32 @@ function HomeworkNowRow({
             Opening…
           </Box>
         ) : (
-          <ActivityCardCta showCaret>
-            {isOfflineHomework
-              ? "Open"
-              : row.sessionId
-                ? "Continue"
-                : "Start"}
-          </ActivityCardCta>
+          <HStack gap={1.5} flexShrink={0}>
+            {row.sessionId && (
+              <Box position="relative" zIndex={1}>
+                <HomeArchiveButton sessionId={row.sessionId} archived={false} />
+              </Box>
+            )}
+            <ActivityCardCta showCaret>{actionLabel}</ActivityCardCta>
+          </HStack>
         )}
       </HStack>
+      {actionable && (
+        <chakra.button
+          type="button"
+          position="absolute"
+          inset={0}
+          borderRadius="xl"
+          cursor="pointer"
+          aria-label={`${actionLabel} ${row.title}`}
+          onClick={handleClick}
+          _focusVisible={{
+            outline: "2px solid",
+            outlineColor: "violet.400",
+            outlineOffset: "2px",
+          }}
+        />
+      )}
     </Box>
   );
 }
@@ -2256,12 +2398,12 @@ function ClassFocusActivityRow({
   } = useJoinFocus();
   const [starting, setStarting] = useState(false);
   const canOpen = focus.activityId == null || focus.soloStartableByMe;
-  const roomPhase = useRoomTurnPhase(focus.endsAt);
-  const timeLabel =
-    focus.endsAt != null
-      ? formatRoomTurnTime(focus.endsAt, focus.timeZone)
-      : null;
-  const roomTurnLine = classFocusPlateLine(roomPhase, timeLabel);
+  const roomClock = roomClockForFocus(focus);
+  const roomPhase = useRoomTurnPhase(roomClock.endsAt);
+  const roomTurnLine = liveFocusLine(roomPhase, {
+    ...roomClock,
+    timeZone: focus.timeZone,
+  });
 
   const handleOpen = async () => {
     if (!canOpen || starting || launching) return;

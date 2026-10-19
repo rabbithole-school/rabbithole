@@ -8,10 +8,10 @@
  * scores stay comparable regardless of which engine produced them:
  *
  *   - anthropic (default, the fallback): the Anthropic SDK, pinned to
- *     TUTOR_JUDGE_MODEL (Fable 5.1). Fable rejects a forced tool_choice, so
+ *     TUTOR_JUDGE_MODEL (Opus 5.5). It rejects a forced tool_choice, so
  *     the call uses tool_choice auto plus an instruction to call the tool,
  *     and a reply without the tool call is re-asked like a malformed one.
- *   - copilot: Claude Fable 5.1 via the GitHub Copilot CLI in headless mode. Routes
+ *   - copilot: Claude Opus 5.5 via the GitHub Copilot CLI in headless mode. Routes
  *     judging through a Copilot seat rather than the Anthropic API. Auth
  *     is COPILOT_GITHUB_TOKEN (a fine-grained PAT with the "Copilot Requests"
  *     permission — see `copilot login --help`). The CLI has no tool-forcing API,
@@ -37,7 +37,7 @@ export type JudgeEngineName = "anthropic" | "copilot";
  * (`--model claude-fable-5.1`); override with JUDGE_MODEL so workflow dispatches
  * can back-test an earlier Copilot judge.
  */
-export const COPILOT_JUDGE_CLI_MODEL = process.env.JUDGE_MODEL ?? "claude-fable-5.1";
+export const COPILOT_JUDGE_CLI_MODEL = process.env.JUDGE_MODEL ?? "claude-opus-5.5";
 
 /**
  * The Anthropic-engine judge. JUDGE_MODEL overrides it too (dotted or dashed —

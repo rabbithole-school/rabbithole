@@ -13,6 +13,9 @@ import {
   TURNED_BANNER_TEXT,
   TYPICAL_BLOCK_MS,
   WINDING_DOWN_BANNER_TEXT,
+  isLifetimeFocus,
+  liveFocusLine,
+  roomClockForFocus,
 } from "./roomTurn";
 import type { RoomTurnMemory, RoomTurnPhase } from "./roomTurn";
 
@@ -402,5 +405,65 @@ describe("isClassFocusRunningLong (teacher-only awareness)", () => {
     expect(
       isClassFocusRunningLong(now, now - (TYPICAL_BLOCK_MS + 1), undefined),
     ).toBe(true);
+  });
+});
+
+describe("block end vs. lifetime (the stale Saturday banner)", () => {
+  const TZ = "Pacific/Honolulu";
+  // The prod shape: pushed Tue Oct 13, "through Oct 30" = 23:59:59 that Friday.
+  const setAt = Date.parse("2026-10-13T18:55:00-10:00");
+  const lifetimeEnd = Date.parse("2026-10-30T23:59:59-10:00");
+  const saturday = Date.parse("2026-10-17T13:35:00-10:00");
+
+  test("an endsAt on a later institution day is a lifetime, not the room's clock", () => {
+    expect(isLifetimeFocus(setAt, lifetimeEnd, TZ)).toBe(true);
+    expect(roomClockForFocus({ setAt, endsAt: lifetimeEnd, timeZone: TZ })).toEqual({
+      endsAt: null,
+      lifetimeEndsAt: lifetimeEnd,
+    });
+  });
+
+  test("an endsAt later the same institution day stays a block end", () => {
+    const blockEnd = setAt + 45 * 60_000;
+    expect(isLifetimeFocus(setAt, blockEnd, TZ)).toBe(false);
+    expect(roomClockForFocus({ setAt, endsAt: blockEnd, timeZone: TZ })).toEqual({
+      endsAt: blockEnd,
+      lifetimeEndsAt: null,
+    });
+  });
+
+  test("the day boundary is the institution's, not UTC's", () => {
+    // 15:00 HST is already the next UTC day; 17:00 HST the same evening is a block end.
+    const afternoon = Date.parse("2026-10-13T15:00:00-10:00");
+    expect(isLifetimeFocus(afternoon, afternoon + 2 * 3_600_000, TZ)).toBe(false);
+  });
+
+  test("open-ended and malformed focuses are never lifetimes", () => {
+    expect(isLifetimeFocus(setAt, null, TZ)).toBe(false);
+    expect(isLifetimeFocus(null, lifetimeEnd, TZ)).toBe(false);
+    expect(isLifetimeFocus(0, lifetimeEnd, TZ)).toBe(false);
+    expect(isLifetimeFocus(setAt, lifetimeEnd, "Not/AZone")).toBe(false);
+  });
+
+  test("a lifetime focus reads as class work through its last day, never a block wrap", () => {
+    const clock = roomClockForFocus({ setAt, endsAt: lifetimeEnd, timeZone: TZ });
+    const line = liveFocusLine(roomTurnPhase(saturday, clock.endsAt), {
+      ...clock,
+      timeZone: TZ,
+    });
+    expect(line).toBe("Class work through Friday, Oct 30");
+    expect(line).not.toMatch(/block|11:59/);
+  });
+
+  test("a lifetime focus never winds down or turns on its last evening", () => {
+    const clock = roomClockForFocus({ setAt, endsAt: lifetimeEnd, timeZone: TZ });
+    expect(roomTurnPhase(lifetimeEnd - 60_000, clock.endsAt)).toBe("withClass");
+  });
+
+  test("a block focus keeps its room-clock line", () => {
+    const blockEnd = Date.parse("2026-10-13T19:30:00-10:00");
+    expect(
+      liveFocusLine("withClass", { endsAt: blockEnd, lifetimeEndsAt: null, timeZone: TZ }),
+    ).toBe("With the class until the block wraps (~7:30 PM)");
   });
 });

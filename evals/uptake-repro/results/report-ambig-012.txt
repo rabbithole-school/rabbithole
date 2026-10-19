@@ -1,0 +1,50 @@
+
+=== claude-sonnet-5-5  (n=400 exchanges; 340 with three known ratings) ===
+label mix low/mid/high   humans 10% / 42% / 48%   judge 10% / 46% / 44%
+three-rater items where all three disagree: 6%
+-- leave-one-out Spearman vs the other two raters' mean (three-rater items)
+   a held-out human      0.415
+   judge (label)         0.506   gap vs human 95% CI [-0.013, +0.201]
+   judge (expected val.) 0.607   gap vs human 95% CI [+0.093, +0.290]
+-- vs the published aggregates (all items)
+   rater mean: label Spearman 0.564  expected-value Spearman 0.660
+   z-score:    label Spearman 0.564  expected-value Spearman 0.660  Pearson 0.682
+-- pairwise agreement with a single rater (items with known ratings)
+   exact: human-human 58.0%   judge-human 62.4%
+   mean |diff|: human-human 0.457   judge-human 0.406
+   judge matches the majority label (n=344): 70.3%
+-- Krippendorff's alpha (interval)
+   humans 0.395   judge swapped in for one human 0.438   judge added as extra rater 0.431   (humans nominal 0.275)
+-- on-task validity vs majority
+   student: agreement 94.5%  (on-task rate: humans 95%, judge 98%)
+   teacher: agreement 94.2%  (on-task rate: humans 96%, judge 97%)
+-- confusion (rows = rounded rater mean low/mid/high, cols = judge low/mid/high)
+    low [17, 7, 3]
+    mid [21, 118, 41]
+    high [4, 58, 131]
+tokens: in 36,394  cache read 1,268,415  out 56,771
+
+=== claude-opus-5-5  (n=400 exchanges; 340 with three known ratings) ===
+label mix low/mid/high   humans 10% / 42% / 48%   judge 6% / 39% / 55%
+three-rater items where all three disagree: 6%
+-- leave-one-out Spearman vs the other two raters' mean (three-rater items)
+   a held-out human      0.413
+   judge (label)         0.560   gap vs human 95% CI [+0.043, +0.244]
+   judge (expected val.) 0.669   gap vs human 95% CI [+0.166, +0.342]
+-- vs the published aggregates (all items)
+   rater mean: label Spearman 0.612  expected-value Spearman 0.715
+   z-score:    label Spearman 0.609  expected-value Spearman 0.715  Pearson 0.735
+-- pairwise agreement with a single rater (items with known ratings)
+   exact: human-human 58.0%   judge-human 65.0%
+   mean |diff|: human-human 0.457   judge-human 0.370
+   judge matches the majority label (n=344): 72.4%
+-- Krippendorff's alpha (interval)
+   humans 0.395   judge swapped in for one human 0.461   judge added as extra rater 0.446   (humans nominal 0.275)
+-- on-task validity vs majority
+   student: agreement 95.8%  (on-task rate: humans 95%, judge 96%)
+   teacher: agreement 95.5%  (on-task rate: humans 96%, judge 96%)
+-- confusion (rows = rounded rater mean low/mid/high, cols = judge low/mid/high)
+    low [12, 15, 0]
+    mid [10, 106, 64]
+    high [2, 36, 155]
+tokens: in 36,394  cache read 1,252,440  out 58,213

@@ -74,7 +74,12 @@ import {
 } from "./lib/institutionPromptProfile";
 import { deleteSessionAppStates } from "./appStates";
 import { ensureOfflineSession } from "./portfolioMaterialize";
-import { entryTargetsScholar, isLiveEntry } from "./assignments";
+import {
+  entryTargetsScholar,
+  isLiveEntry,
+  resolveScholarWorkSubject,
+  scholarTimetableContext,
+} from "./assignments";
 import {
   hasReadableOfflineHomeworkContent,
   resolveReachableActivityResources,
@@ -126,9 +131,18 @@ import { appRoleFor, isAppActivity } from "../shared/appSurface";
 import {
   assertQuestBuildStepUnlocked,
   assertSessionBuildStepUnlocked,
+  scholarBuildKickoffFor,
   sessionBuildStepLock,
 } from "./lib/questBuildLock";
 import { plantParkedIdeaSeed } from "./lib/seeds";
+import { writeAuditLog } from "./lib/auditLog";
+import {
+  assertNotTeacherArchived,
+  mayReadTeacherArchived,
+  sessionHasCodeArtifact,
+  unarchivePatch,
+} from "./lib/teacherArchive";
+import { assignedWorkMode, isBuiltAppSession } from "./lib/homeOrigin";
 
 /** Parent password for time limit mode (set via PARENT_PASSWORD env var in Convex dashboard). */
 const PARENT_PASSWORD = process.env.PARENT_PASSWORD ?? "";
@@ -265,8 +279,76 @@ export const reapDeadStoppedPlaceholder = internalMutation({
   },
 });
 
-async function findActiveSessionForScopedActivity(
+function isScopedActivitySession(
+  session: Doc<"sessions">,
+  activityId: Id<"activities">,
+  assignmentId?: Id<"assignments">,
+): boolean {
+  return (
+    !session.isTestDrive &&
+    !session.isOffline &&
+    !session.seedExemplar &&
+    // A free-play copy is the scholar's own version, never "the" session
+    // a launch of the activity resumes (TRA-489).
+    !session.freePlay &&
+    !!session.activityId &&
+    String(session.activityId) === String(activityId) &&
+    (assignmentId
+      ? String(session.assignmentId ?? "") === String(assignmentId)
+      : session.assignmentId === undefined)
+  );
+}
+
+/**
+ * The scholar's teacher-archived session for this activity, under ANY
+ * assignment (or none). A teacher archive puts the app away AND holds the
+ * activity (ruling 4, review/teacher-archive-scholar-apps.html): relaunching
+ * must land on the archived session, never insert a fresh one the scholar
+ * rebuilds in — and omitting or swapping the assignment must not dodge that
+ * (most real app sessions are assignment-scoped). An exact assignment match
+ * wins when there are several. Bounded by the by_user_activity index.
+ */
+async function findTeacherArchivedSessionForActivity(
   ctx: Pick<MutationCtx, "db">,
+  userId: Id<"users">,
+  activityId: Id<"activities">,
+  assignmentId?: Id<"assignments">,
+) {
+  const forActivity = await ctx.db
+    .query("sessions")
+    .withIndex("by_user_activity", (q) =>
+      q.eq("userId", userId).eq("activityId", activityId),
+    )
+    .collect();
+  const held = forActivity.filter(
+    (session) =>
+      session.teacherArchivedAt != null &&
+      !session.isTestDrive &&
+      !session.isOffline &&
+      !session.seedExemplar &&
+      !session.freePlay,
+  );
+  return (
+    held.find(
+      (session) =>
+        String(session.assignmentId ?? "") === String(assignmentId ?? ""),
+    ) ??
+    held[0] ??
+    null
+  );
+}
+
+/**
+ * "The" session a launch of this scoped activity resumes: the active one, or
+ * else a teacher-archived one (returned as-is, so callers must not set it up,
+ * kick it off or un-archive it — check `teacherArchivedAt`), or else one the
+ * scholar archived themselves before finishing it. That last one is
+ * un-archived here and resumed: archiving assigned work from Home must never
+ * make the next launch start a blank copy and strand the scholar's work in
+ * Archived (review/home-finished-filter.html).
+ */
+async function findActiveSessionForScopedActivity(
+  ctx: MutationCtx,
   userId: Id<"users">,
   activityId: Id<"activities">,
   assignmentId?: Id<"assignments">,
@@ -277,22 +359,41 @@ async function findActiveSessionForScopedActivity(
       q.eq("userId", userId).eq("isArchived", false),
     )
     .collect();
-  return (
-    sessions.find(
-      (session) =>
-        !session.isTestDrive &&
-        !session.isOffline &&
-        !session.seedExemplar &&
-        // A free-play copy is the scholar's own version, never "the" session
-        // a launch of the activity resumes (TRA-489).
-        !session.freePlay &&
-        session.activityId &&
-        String(session.activityId) === String(activityId) &&
-        (assignmentId
-          ? String(session.assignmentId ?? "") === String(assignmentId)
-          : session.assignmentId === undefined),
-    ) ?? null
+  const active = sessions.find((session) =>
+    isScopedActivitySession(session, activityId, assignmentId),
   );
+  if (active) return active;
+  const teacherArchived = await findTeacherArchivedSessionForActivity(
+    ctx,
+    userId,
+    activityId,
+    assignmentId,
+  );
+  if (teacherArchived) return teacherArchived;
+  const archivedByScholar = (
+    await ctx.db
+      .query("sessions")
+      .withIndex("by_user_activity", (q) =>
+        q.eq("userId", userId).eq("activityId", activityId),
+      )
+      .order("desc")
+      .collect()
+  ).find(
+    (session) =>
+      session.isArchived &&
+      session.teacherArchivedAt == null &&
+      isScopedActivitySession(session, activityId, assignmentId),
+  );
+  if (
+    !archivedByScholar ||
+    (await isSessionActivityComplete(ctx, userId, archivedByScholar))
+  ) {
+    return null;
+  }
+  // Never teacher-archived (filtered above); unarchivePatch keeps the one
+  // rule for every non-restore un-archive path.
+  await ctx.db.patch(archivedByScholar._id, unarchivePatch(archivedByScholar));
+  return { ...archivedByScholar, isArchived: false };
 }
 
 async function dispatchCompletionReceiptForSession(
@@ -601,7 +702,7 @@ export const list = authedQuery({
 });
 
 /**
- * The scholar's "📦 Finished" list — every finished session they can KEEP
+ * The scholar's "📦 Archived" list — every archived or finished session they can KEEP
  * WORKING on (see hooks/useKeepWorking + sessions.reopen).
  *
  * `list({ archivedFilter: "archived" })` only ever caught sessions the scholar
@@ -660,7 +761,8 @@ export const finishedForScholar = authedQuery({
     const firstIncompleteActivityInUnit = args.includeWebActivities
       ? firstIncompleteLaunchableActivityInUnit
       : firstIncompleteSessionActivityInUnit;
-    const isReopenLive = reopenLiveChecker(ctx, targetUserId, Date.now());
+    const nowMs = Date.now();
+    const isReopenLive = reopenLiveChecker(ctx, targetUserId, nowMs);
 
     const all = (
       await ctx.db
@@ -719,11 +821,67 @@ export const finishedForScholar = authedQuery({
       finished.push({ session, finishedKind: "completed" });
     }
 
+    // The Home tab each row belongs to, decided by the rule scholarPlate uses
+    // for active rows (lib/homeOrigin.ts) — so a session sits under the same
+    // tab whether it is active or archived — plus `isApp` for the Apps tab and
+    // `isComplete`, which picks the scholar's action: Unarchive puts unfinished
+    // work back on Home, while finished work is re-entered with "Keep working
+    // on this" (sessions.reopen), because the plate drops a completed session.
+    // Unit, activity and assignment reads are cached per call; the artifact
+    // probe runs only for sessions that could hold an app.
+    const target = await ctx.db.get(targetUserId);
+    const timetable = target ? await scholarTimetableContext(ctx, target) : null;
+    const unitCache = new Map<string, Doc<"units"> | null>();
+    const assignmentCache = new Map<string, Doc<"assignments"> | null>();
+    const unitFor = async (id: Id<"units">) => {
+      if (!unitCache.has(id)) unitCache.set(id, await ctx.db.get(id));
+      return unitCache.get(id) ?? null;
+    };
+    const activityCache = new Map<string, Doc<"activities"> | null>();
+    const activityFor = async (id: Id<"activities">) => {
+      if (!activityCache.has(id)) activityCache.set(id, await ctx.db.get(id));
+      return activityCache.get(id) ?? null;
+    };
+    const assignmentFor = async (id: Id<"assignments">) => {
+      if (!assignmentCache.has(id)) assignmentCache.set(id, await ctx.db.get(id));
+      return assignmentCache.get(id) ?? null;
+    };
     return Promise.all(
-      finished.map(async ({ session, finishedKind }) => ({
-        ...(await enrichSessionForList(ctx, session)),
-        finishedKind,
-      })),
+      finished.map(async ({ session, finishedKind }) => {
+        const enriched = await enrichSessionForList(ctx, session);
+        const unit = session.unitId ? await unitFor(session.unitId) : null;
+        const mode =
+          session.assignmentId && session.activityId
+            ? assignedWorkMode(
+                await assignmentFor(session.assignmentId),
+                session.activityId,
+                targetUserId,
+                nowMs,
+              )
+            : undefined;
+        return {
+          ...enriched,
+          finishedKind,
+          origin: mode ?? ("is" as const),
+          subject: timetable
+            ? resolveScholarWorkSubject(
+                timetable,
+                session.assignmentId,
+                session.activityId,
+                unit?.subject,
+              )
+            : unit?.subject?.trim() || null,
+          isApp: await isBuiltAppSession(
+            ctx,
+            session,
+            session.activityId ? await activityFor(session.activityId) : null,
+          ),
+          isComplete:
+            finishedKind === "completed" ||
+            (!!session.activityId &&
+              (await isSessionActivityComplete(ctx, targetUserId, session))),
+        };
+      }),
     );
   },
 });
@@ -744,14 +902,19 @@ export const getWithMessages = authedQuery({
       throw new Error("Forbidden");
     }
     await requireActiveSessionOwnerAccess(ctx, session);
+    // Put away by a teacher (review/teacher-archive-scholar-apps.html): the
+    // session row still comes back (its `teacherArchivedAt` is how both
+    // clients render the labelled state), but a non-teacher gets no
+    // transcript. Teachers read everything, as for any archived session.
+    const transcriptHidden = !mayReadTeacherArchived(ctx.user, session);
 
-    const messages = await ctx.db
-      .query("messages")
-      .withIndex("by_session", (q) =>
-        q.eq("sessionId", args.id)
-      )
-      .order("asc")
-      .collect();
+    const messages = transcriptHidden
+      ? []
+      : await ctx.db
+          .query("messages")
+          .withIndex("by_session", (q) => q.eq("sessionId", args.id))
+          .order("asc")
+          .collect();
 
     // Scholar "Rabbithole got this wrong" flags for this session, loaded once
     // and keyed by messageId. Surfaces the pro-skepticism signal to BOTH the
@@ -823,13 +986,39 @@ export const getWithMessages = authedQuery({
       hasAppRequest: activity?.appRequest != null,
     });
     const teacherBuildKickoff = opening.teacherBuildKickoff;
+    // BUILD FIRST: the scholar's own Quest that starts at its build step opens
+    // by building the app they described (lib/mission.ts
+    // isScholarBuildKickoff, the same rule the stream's kickoff instruction
+    // reads, resolving the unit the same way: `session.unitId`). Owner only,
+    // and only before any real message (the clients kick off, or retry an
+    // empty kickoff placeholder, only then), so the unit's order is never
+    // re-read for a conversation in progress.
+    let scholarBuildKickoff = false;
+    if (
+      !messages.some((m) => m.content.trim() !== "") &&
+      session.userId === ctx.user._id &&
+      session.isTestDrive !== true &&
+      !session.isArchived &&
+      !session.isOffline &&
+      session.unitId &&
+      activity &&
+      isAppActivity(activity)
+    ) {
+      scholarBuildKickoff = await scholarBuildKickoffFor(ctx, {
+        session,
+        unit: await ctx.db.get(session.unitId),
+        activity,
+      });
+    }
     // Whether sessions.startFreePlay would succeed for THIS caller (TRA-489):
     // the Workshop shows "Start free play" beside the parking lot only then.
     // Short-circuits before any read unless this is the owner's vibecode
     // session with parked ideas.
-    const freePlayEligible = (
-      await resolveFreePlayEligibility(ctx, { session, caller: ctx.user })
-    ).eligible;
+    const freePlayEligible =
+      !transcriptHidden &&
+      session.teacherArchivedAt == null &&
+      (await resolveFreePlayEligibility(ctx, { session, caller: ctx.user }))
+        .eligible;
     // The EFFECTIVE read level — resolved exactly as the tutor prompt resolves
     // it (`resolveEffectiveLevels`: view-as identity, then per-session override
     // > synthetic/stored level). Web and iPad voice mode key on `listener`, so a
@@ -870,6 +1059,7 @@ export const getWithMessages = authedQuery({
         readLevel: sessionReadLevel,
         beginnerSpellings,
         ...(session.isTestDrive === true ? { teacherBuildKickoff } : {}),
+        scholarBuildKickoff,
       },
       messages: await Promise.all(
         messages.map(async (m) => {
@@ -1506,7 +1696,9 @@ export const create = authedMutation({
         assignmentId,
       );
       if (existing) {
-        const activity = await ctx.db.get(args.activityId);
+        const activity = existing.teacherArchivedAt != null
+          ? null // put away by a teacher: resolve to it, touch nothing
+          : await ctx.db.get(args.activityId);
         if (activity) {
           await ensureSessionActivitySetup(ctx, {
             sessionId: existing._id,
@@ -1717,6 +1909,16 @@ export async function createSessionFromSeedCore(
       nextIncomplete?.lesson.processId ??
       unit.processId ??
       undefined;
+    // The next activity's app was put away by a teacher: land on that
+    // session, never a fresh copy (review/teacher-archive-scholar-apps.html).
+    if (activityId) {
+      const held = await findTeacherArchivedSessionForActivity(
+        ctx,
+        userId,
+        activityId,
+      );
+      if (held) return { id: held._id };
+    }
   }
 
   // Topic-seed launch (no structured unit behind the star) normally bakes a
@@ -1881,6 +2083,8 @@ export const startUnit = authedMutation({
         activityId,
         programAssignment?._id,
       );
+      // Put away by a teacher: resolve to it as-is (no setup, no kickoff).
+      if (existing?.teacherArchivedAt != null) return { id: existing._id };
       if (existing && nextIncomplete?.activity) {
         await ensureSessionActivitySetup(ctx, {
           sessionId: existing._id,
@@ -1946,6 +2150,9 @@ export const ensureActivitySetup = authedMutation({
     }
     await requireActiveSessionOwnerAccess(ctx, session);
     if (!session.activityId) return { initialized: false };
+    // Put away by a teacher: no setup and no scheduled LLM jobs. A quiet
+    // no-op rather than a throw — both clients call this automatically.
+    if (session.teacherArchivedAt != null) return { initialized: false };
     const activity = await ctx.db.get(session.activityId);
     if (!activity) return { initialized: false };
     const lesson = session.lessonId ? await ctx.db.get(session.lessonId) : null;
@@ -1994,6 +2201,9 @@ export const update = authedMutation({
       throw new Error("Forbidden");
     }
     await requireActiveSessionOwnerAccess(ctx, session);
+    // A scholar can't rename or re-scope an app a teacher put away. Teachers
+    // keep their own fields (whispers, overrides) on it.
+    if (!isTeacher) assertNotTeacherArchived(session);
 
     const updates: Record<string, unknown> = {};
 
@@ -2090,6 +2300,12 @@ export const archive = authedMutation({
     }
     await requireActiveSessionOwnerAccess(ctx, session);
 
+    if (session.teacherArchivedAt != null) {
+      // Already put away by a teacher; remember the owner's own archive so
+      // restoreApp leaves it archived.
+      await ctx.db.patch(args.id, { teacherArchivePriorArchived: true });
+      return;
+    }
     await ctx.db.patch(args.id, { isArchived: true });
   },
 });
@@ -2125,6 +2341,8 @@ export const unarchive = authedMutation({
       throw new Error("Forbidden");
     }
     await requireActiveSessionOwnerAccess(ctx, session);
+    // A teacher archive is lifted only by sessions.restoreApp.
+    assertNotTeacherArchived(session);
 
     await ctx.db.patch(args.id, { isArchived: false });
   },
@@ -2157,6 +2375,8 @@ export const reopen = authedMutation({
       throw new Error("Forbidden");
     }
     await requireActiveSessionOwnerAccess(ctx, session);
+    // A teacher archive is lifted only by sessions.restoreApp.
+    assertNotTeacherArchived(session);
 
     // Only ever touches session visibility. Completion + badge records are
     // deliberately never read or written here, so re-entry can never regress
@@ -2180,6 +2400,136 @@ export const reopen = authedMutation({
  * teacher-awarded badge with no unit, or a unit the scholar never sessioned) so
  * the surface can hide the action. Read-only; never mutates completion state.
  */
+/**
+ * Teacher archive for a scholar-built app (review/teacher-archive-scholar-apps.html).
+ * Stamps `teacherArchivedAt` (+ `isArchived: true`) on the session and its
+ * whole free-play lineage. Only a session holding a code artifact; never a
+ * test drive. Only staff with access to the scholar. Reversible via restoreApp.
+ */
+export const archiveApp = authedMutation({
+  args: { id: v.id("sessions") },
+  handler: async (ctx, args): Promise<{ sessionIds: Id<"sessions">[] }> => {
+    return await setTeacherArchive(ctx, args.id, "archive");
+  },
+});
+
+/** Lift a teacher archive from the session and its free-play lineage. */
+export const restoreApp = authedMutation({
+  args: { id: v.id("sessions") },
+  handler: async (ctx, args): Promise<{ sessionIds: Id<"sessions">[] }> => {
+    return await setTeacherArchive(ctx, args.id, "restore");
+  },
+});
+
+// One scholar's free-play lineage is tiny (prod 2026-10-17: one copy, no
+// copy-of-a-copy); these bounds only stop a corrupt chain from running away.
+const FREE_PLAY_LINEAGE_MAX_HOPS = 20;
+const FREE_PLAY_LINEAGE_MAX_SESSIONS = 200;
+
+/**
+ * The whole free-play lineage of `session`: walk `freePlayOf` up to the root,
+ * then every session of the same scholar that chains back down to it (via
+ * the by_free_play_of index). Root first. Archiving only one copy would leave
+ * the same app playable in its source (or vice versa), so archive/restore
+ * always act on all of them.
+ */
+async function freePlayLineage(
+  ctx: Pick<MutationCtx, "db">,
+  session: Doc<"sessions">,
+): Promise<Doc<"sessions">[]> {
+  let root = session;
+  const seen = new Set<string>([String(root._id)]);
+  for (let hop = 0; hop < FREE_PLAY_LINEAGE_MAX_HOPS && root.freePlayOf; hop++) {
+    const parent = await ctx.db.get(root.freePlayOf);
+    if (!parent || parent.userId !== session.userId) break;
+    if (seen.has(String(parent._id))) break;
+    seen.add(String(parent._id));
+    root = parent;
+  }
+  const lineage: Doc<"sessions">[] = [root];
+  const inLineage = new Set<string>([String(root._id)]);
+  for (
+    let i = 0;
+    i < lineage.length && lineage.length < FREE_PLAY_LINEAGE_MAX_SESSIONS;
+    i++
+  ) {
+    const copies = await ctx.db
+      .query("sessions")
+      .withIndex("by_free_play_of", (q) => q.eq("freePlayOf", lineage[i]._id))
+      .take(FREE_PLAY_LINEAGE_MAX_SESSIONS);
+    for (const copy of copies) {
+      if (copy.userId !== session.userId) continue;
+      if (inLineage.has(String(copy._id))) continue;
+      inLineage.add(String(copy._id));
+      lineage.push(copy);
+    }
+  }
+  return lineage;
+}
+
+async function setTeacherArchive(
+  ctx: MutationCtx & { user: Doc<"users"> },
+  sessionId: Id<"sessions">,
+  op: "archive" | "restore",
+): Promise<{ sessionIds: Id<"sessions">[] }> {
+  const session = await ctx.db.get(sessionId);
+  if (!session) throw new Error("Session not found");
+  // Teacher roles only (curriculum:run / school:operations staff hold no
+  // scholar records), and only for a scholar this teacher can reach.
+  if (!isTeacherRole(ctx.user.role)) throw new Error("Forbidden");
+  await requireActiveSessionOwnerAccess(ctx, session);
+  // Rehearsals have their own reset (resetTestDrive); never lock one.
+  if (session.isTestDrive) {
+    throw new Error("A rehearsal can't be archived as a scholar app");
+  }
+
+  const lineage = await freePlayLineage(ctx, session);
+  if (op === "archive") {
+    // Apps only (ruling 1): chats and essays keep the scholar-undoable archive.
+    let holdsApp = false;
+    for (const s of lineage) {
+      if (await sessionHasCodeArtifact(ctx, s._id)) {
+        holdsApp = true;
+        break;
+      }
+    }
+    if (!holdsApp) throw new Error("This session has no app to archive");
+  }
+
+  const now = Date.now();
+  for (const s of lineage) {
+    if (op === "archive") {
+      // Idempotent: a re-archive keeps the first archive time and, above
+      // all, the first recorded prior state.
+      if (s.teacherArchivedAt != null) continue;
+      await ctx.db.patch(s._id, {
+        teacherArchivedAt: now,
+        teacherArchivePriorArchived: s.isArchived,
+        isArchived: true,
+      });
+    } else {
+      if (s.teacherArchivedAt == null) continue;
+      // Put back what was there before the teacher archive: a session the
+      // scholar (or a Quest retract) had already archived stays archived.
+      await ctx.db.patch(s._id, {
+        teacherArchivedAt: undefined,
+        teacherArchivePriorArchived: undefined,
+        isArchived: s.teacherArchivePriorArchived ?? false,
+      });
+    }
+  }
+
+  const sessionIds = lineage.map((s) => s._id);
+  await writeAuditLog(ctx, {
+    actorUserId: ctx.user._id,
+    action: op === "archive" ? "session.app_archived" : "session.app_restored",
+    targetUserId: session.userId,
+    detail: JSON.stringify({ sessionIds: sessionIds.map(String) }),
+    institutionId: session.institutionId ?? null,
+  });
+  return { sessionIds };
+}
+
 export const reopenableForUnit = authedQuery({
   args: { unitId: v.id("units") },
   handler: async (ctx, { unitId }) => {
@@ -2192,7 +2542,13 @@ export const reopenableForUnit = authedQuery({
         )
         .collect()
     ).filter(
-      (s) => !s.isTestDrive && !s.isOffline && !s.seedExemplar && !s.freePlay,
+      (s) =>
+        !s.isTestDrive &&
+        !s.isOffline &&
+        !s.seedExemplar &&
+        !s.freePlay &&
+        // Put away by a teacher: "Keep working" would offer a dead action.
+        s.teacherArchivedAt == null,
     );
     if (sessions.length === 0) return null;
 
@@ -2241,6 +2597,9 @@ export async function reapAndInsertAssistantPlaceholder(
     focusArtifactId?: Id<"artifacts">;
   },
 ): Promise<{ streamId: string; assistantMsgId: Id<"messages"> }> {
+  // A teacher-archived app takes no tutor turns — every streaming path
+  // funnels through here, before any LLM lease is taken.
+  assertNotTeacherArchived(session);
   // Dimension snapshot (as strings, for historical reference), resolved from
   // the unit — mirrors the placeholder fields sendMessage used to set inline.
   const unit = session.unitId ? await ctx.db.get(session.unitId) : null;
@@ -2720,6 +3079,9 @@ export const sendMessage = authedMutation({
       throw new Error("Forbidden");
     }
     await requireActiveSessionOwnerAccess(ctx, session);
+    // Refuse before the user turn is written (the placeholder guard would
+    // roll it back anyway; this keeps the refusal first and legible).
+    assertNotTeacherArchived(session);
     // B6: a locked Quest build step takes no turns, even in an existing session.
     await assertSessionBuildStepUnlocked(ctx, {
       session,
@@ -3040,6 +3402,8 @@ export const questFromParkedIdea = authedMutation({
       throw new Error("Not available in a rehearsal");
     }
     await requireActiveSessionOwnerAccess(ctx, source);
+    // A put-away app's parked ideas stay with it until a teacher restores it.
+    assertNotTeacherArchived(source);
 
     const lot = source.parkingLot ?? [];
     const match = removeParkingLotEntry(lot, args.text);
@@ -3100,6 +3464,8 @@ export const startFreePlay = authedMutation({
     if (!source) throw new Error("Session not found");
     if (source.userId !== ctx.user._id) throw new Error("Forbidden");
     await requireActiveSessionOwnerAccess(ctx, source);
+    // A put-away app can't be copied out (nor its existing copy reopened).
+    assertNotTeacherArchived(source);
 
     const existing = await ctx.db
       .query("sessions")
@@ -3254,6 +3620,7 @@ export const answerRenderCheck = authedMutation({
       throw new Error("Forbidden");
     }
     await requireActiveSessionOwnerAccess(ctx, session);
+    assertNotTeacherArchived(session);
     // Any session with an app may receive a render check (TRA-519); the
     // checkId/streamId match below is the gate.
     if (args.consoleLines.length > RENDER_CHECK_MAX_CONSOLE_LINES) {
@@ -4545,6 +4912,8 @@ export const regenerateReflection = authedMutation({
       if (!isTeacher) throw new Error("Forbidden");
     }
     await requireActiveSessionOwnerAccess(ctx, session);
+    // The scholar can't spend an LLM job on an app a teacher put away.
+    if (!isTeacherRole(ctx.user.role)) assertNotTeacherArchived(session);
     await ctx.db.patch(args.sessionId, {
       reflectionStatus: "pending" as const,
       reflectionError: undefined,
