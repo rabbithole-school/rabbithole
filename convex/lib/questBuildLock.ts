@@ -17,6 +17,7 @@ import { isAppActivity } from "../../shared/appSurface";
 import { questBuildLockLabel } from "../../shared/missionCopy";
 import {
   isQuestUnit,
+  isScholarBuildKickoff,
   lockedQuestBuildTitle,
   questBuildLock,
   type QuestBuildLock,
@@ -104,6 +105,41 @@ async function questLockInputs(
     if (mine) started.add(String(activity._id));
   }
   return { ordered: items.map((i) => i.activity), done, started };
+}
+
+/**
+ * The scholar build kickoff (`isScholarBuildKickoff`) for one session, fed the
+ * Quest's real activity order. Reads the order only for an app activity in the
+ * owner's own Quest, outside a test drive; every other session answers false
+ * without a read.
+ */
+export async function scholarBuildKickoffFor(
+  ctx: LockCtx,
+  args: {
+    session: Pick<Doc<"sessions">, "userId" | "isTestDrive">;
+    unit: Doc<"units"> | null | undefined;
+    activity: Doc<"activities"> | null | undefined;
+  },
+): Promise<boolean> {
+  const { session, unit, activity } = args;
+  if (
+    session.isTestDrive === true ||
+    !unit ||
+    !isQuestUnit(unit) ||
+    unit.authorScholarId !== session.userId ||
+    !activity ||
+    !isAppActivity(activity)
+  ) {
+    return false;
+  }
+  const ordered = await orderedQuestActivities(ctx, unit._id, session.userId);
+  return isScholarBuildKickoff({
+    isTestDrive: false,
+    ownerId: session.userId,
+    unit,
+    activity,
+    ordered,
+  });
 }
 
 /**

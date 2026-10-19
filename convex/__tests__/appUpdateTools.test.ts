@@ -450,6 +450,31 @@ describe("character section and instruction", () => {
   });
 });
 
+// In the scholar's own Quest an app update carries its own restraint (prod
+// 2026-10-16: a run in a Quest build step opened an unprompted quiz about the
+// Quest plan's rule). Presence only, never wording.
+describe("app update in the scholar's own Quest", () => {
+  test("ownQuest adds its restraint and false is a no-op", () => {
+    const base = { hasCharacter: false, canStaySilent: true };
+    expect(appUpdateInstruction({ ...base, hasAsks: false, ownQuest: true })).not.toBe(
+      appUpdateInstruction({ ...base, hasAsks: false }),
+    );
+    expect(appUpdateInstruction({ ...base, hasAsks: false, ownQuest: false })).toBe(
+      appUpdateInstruction({ ...base, hasAsks: false }),
+    );
+    expect(
+      appUpdateInstruction({ ...base, hasAsks: false, ownQuest: true }),
+    ).toContain(STAY_SILENT_TOOL_NAME);
+  });
+
+  test("a character app in an own Quest gets the restraint too", () => {
+    const character = { hasCharacter: true, canStaySilent: true, hasAsks: false };
+    expect(appUpdateInstruction({ ...character, ownQuest: true })).not.toBe(
+      appUpdateInstruction(character),
+    );
+  });
+});
+
 // TRA-477: the tutor read the author's notes aloud on app updates ("The
 // author's notes say…", "verdict loophole, stage 1", a placeholder's value).
 // Structure only: where the notes sit, and what never reaches the scholar.

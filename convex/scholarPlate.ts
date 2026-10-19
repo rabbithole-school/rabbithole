@@ -90,6 +90,8 @@ import { uniqueSubjects } from "../lib/subjects";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
 import { isAppActivity } from "../shared/appSurface";
+import { sessionHasCodeArtifact } from "./lib/teacherArchive";
+import { assignedWorkMode, isBuiltAppSession } from "./lib/homeOrigin";
 
 export const activeForMe = authedQuery({
   args: {
@@ -244,12 +246,7 @@ export async function buildPlateForTarget(
     const now = Date.now();
     const todayDayKey = dayKeyForTimezone(now, timeZone);
     const allAssignments = await ctx.db.query("assignments").collect();
-    const modeByAssignmentActivity = new Map<
-      string,
-      "classFocus" | "homework"
-    >();
-    const liveModeKeys = new Set<string>();
-    const selfPacedAssignmentIds = new Set<Id<"assignments">>();
+    const assignmentById = new Map<Id<"assignments">, Doc<"assignments">>();
     const teacherIdByAssignment = new Map<Id<"assignments">, Id<"users">>();
     const unitIdByAssignment = new Map<Id<"assignments">, Id<"units">>();
     const scheduleEntryByAssignmentActivity = new Map<
@@ -267,7 +264,7 @@ export async function buildPlateForTarget(
       if (a.archivedAt) continue;
       if (!a.scholarIds.includes(target._id)) continue;
       teacherIdByAssignment.set(a._id, a.teacherId);
-      if (a.selfPaced) selfPacedAssignmentIds.add(a._id);
+      assignmentById.set(a._id, a);
       // Standing (unitId-less) assignments have no unit — skip the map
       // entry; downstream code already treats a missing entry as "skip
       // this session's unit classification" (same as an archived/deleted
@@ -288,14 +285,6 @@ export async function buildPlateForTarget(
         const key = `${a._id}::${e.activityId}`;
         scheduleEntryByAssignmentActivity.set(key, e);
         const expired = e.endsAt != null && e.endsAt <= now;
-        // Origin mode — a live entry's mode always wins; an expired one
-        // only fills in if no live mode is known for this activity.
-        if (!expired) {
-          modeByAssignmentActivity.set(key, e.mode);
-          liveModeKeys.add(key);
-        } else if (!liveModeKeys.has(key) && !modeByAssignmentActivity.has(key)) {
-          modeByAssignmentActivity.set(key, e.mode);
-        }
         // Synthetic rows exist only while the assignment is showing. Started
         // sessions keep their mode through the map above, so they survive as
         // ordinary open work after an unopened focus disappears.
@@ -313,12 +302,18 @@ export async function buildPlateForTarget(
         }
       }
     }
+    // Origin mode — the rule the Archived list shares (lib/homeOrigin.ts),
+    // so a session keeps its tab when it is archived.
     const modeForAssignmentActivity = (
       assignmentId: Id<"assignments">,
       activityId: Id<"activities">,
     ) =>
-      modeByAssignmentActivity.get(`${assignmentId}::${activityId}`) ??
-      (selfPacedAssignmentIds.has(assignmentId) ? "classFocus" : undefined);
+      assignedWorkMode(
+        assignmentById.get(assignmentId),
+        activityId,
+        target._id,
+        now,
+      );
 
     // ── Pre-fetch teacher docs we'll need for attribution ──────────────
     const teacherIds = new Set(teacherIdByAssignment.values());
@@ -404,7 +399,9 @@ export async function buildPlateForTarget(
         if (next) {
           const existing = sessions.find(
             (p) =>
-              !p.isArchived &&
+              // A teacher-archived session still holds the activity (it
+              // resolves here rather than letting the pin start a fresh one).
+              (!p.isArchived || p.teacherArchivedAt != null) &&
               p.activityId != null &&
               String(p.activityId) === String(next.activity._id) &&
               String(p.assignmentId ?? "") === String(onboardingAssignmentId),
@@ -620,6 +617,7 @@ export async function buildPlateForTarget(
       lastTouched: number;
       notStarted: boolean;
       isArchived: boolean;
+      isApp: boolean;
       origin: "classFocus" | "homework" | "is";
       isSeed: boolean;
       activityKind: ActivityKind;
@@ -745,6 +743,7 @@ export async function buildPlateForTarget(
         lastTouched,
         notStarted: currentComplete || p.lastMessageAt === undefined,
         isArchived: p.isArchived === true,
+        isApp: currentComplete ? false : await isBuiltAppSession(ctx, p, activity),
         origin,
         isSeed,
         activityKind: activity?.kind ?? "online",
@@ -804,6 +803,24 @@ export async function buildPlateForTarget(
     const startedAssignedKeys = new Set<string>();
     for (const p of sessions) {
       if (p.assignmentId && p.activityId) {
+        startedAssignedKeys.add(`${p.assignmentId}::${p.activityId}`);
+      }
+    }
+    // An archived session is started work too: archiving unfinished assigned
+    // work moves it to Archived, and it must not come back here as a fresh
+    // Start row (review/home-finished-filter.html). Relaunching it from
+    // anywhere resumes that session (sessions.create).
+    if (!includeArchived) {
+      const archivedSessions = await ctx.db
+        .query("sessions")
+        .withIndex("by_user_and_archived", (q) =>
+          q.eq("userId", target._id).eq("isArchived", true),
+        )
+        .collect();
+      for (const p of archivedSessions) {
+        if (p.isTestDrive || p.isOffline || !p.assignmentId || !p.activityId) {
+          continue;
+        }
         startedAssignedKeys.add(`${p.assignmentId}::${p.activityId}`);
       }
     }
@@ -882,6 +899,7 @@ export async function buildPlateForTarget(
         lastTouched: ent.setAt ?? now,
         notStarted: true,
         isArchived: false,
+        isApp: false,
         origin: ent.mode,
         isSeed: false,
         activityKind: activity.kind,
@@ -947,6 +965,7 @@ function emptyResult() {
       lastTouched: number;
       notStarted: boolean;
       isArchived: boolean;
+      isApp: boolean;
       origin: "classFocus" | "homework" | "is";
       isSeed: boolean;
       activityKind: ActivityKind;
@@ -1057,6 +1076,7 @@ export const homeForScholar = teacherQuery({
         Awaited<ReturnType<typeof buildPlateForTarget>>["rows"][number] & {
           unitIsActive: boolean | null;
           unitIsDraft: boolean | null;
+          hasApp: boolean;
         }
       >,
       onboarding: null as
@@ -1119,6 +1139,11 @@ export const homeForScholar = teacherQuery({
           ...r,
           unitIsActive: prov?.isActive ?? null,
           unitIsDraft: prov?.isDraft ?? null,
+          // Picks the row's archive verb: "Archive app" (sessions.archiveApp)
+          // when the session holds a scholar-built app, else today's archive.
+          hasApp: r.sessionId
+            ? await sessionHasCodeArtifact(ctx, r.sessionId)
+            : false,
         };
       }),
     );

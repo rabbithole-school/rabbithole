@@ -172,6 +172,83 @@ describe("normalizeBakedActivityOrder", () => {
     expect(res.normalized).toBe(false);
   });
 
+  test("build-first: the one build stage is repaired into the app and its marker stripped", async () => {
+    const t = convexTest(schema, modules);
+    const { unitId, lessonId } = await seedQuest(t);
+    await seedStages(t, lessonId, [{ title: "Bridge game", stage: "build", order: 3 }]);
+    const res = await t.mutation(
+      internal.bakeUnitFromSeed.normalizeBakedActivityOrder,
+      { unitId, buildFirst: true },
+    );
+    expect(res).toEqual({ normalized: true, reason: null });
+    const [build] = await activitiesIn(t, lessonId);
+    expect(build).toMatchObject({ kind: "online", appActivity: true, order: 0 });
+    expect(build.deliverable).toMatchObject({
+      kind: "artifact",
+      notes: "Quality bar for Bridge game.",
+    });
+    // It is the first activity the session links to.
+    const first = await t.query(
+      internal.bakeUnitFromSeed.firstOnlineActivityInUnit,
+      { unitId },
+    );
+    expect(first?.activityId).toBe(build._id);
+  });
+
+  test("build-first repairs one unmarked app activity instead of dropping it", async () => {
+    const t = convexTest(schema, modules);
+    const { unitId, lessonId } = await seedQuest(t);
+    await seedStages(t, lessonId, [
+      { title: "Bridge game", stage: "build", order: 0, app: true },
+    ]);
+    await t.run(async (ctx) => {
+      const [a] = await ctx.db
+        .query("activities")
+        .withIndex("by_lesson", (q) => q.eq("lessonId", lessonId))
+        .collect();
+      await ctx.db.patch(a._id, {
+        deliverable: { ...a.deliverable!, notes: "Quality bar, no marker." },
+      });
+    });
+    const res = await t.mutation(
+      internal.bakeUnitFromSeed.normalizeBakedActivityOrder,
+      { unitId, buildFirst: true },
+    );
+    expect(res).toEqual({ normalized: true, reason: null });
+    const [build] = await activitiesIn(t, lessonId);
+    expect(build.deliverable?.notes).toBe("Quality bar, no marker.");
+  });
+
+  test("build-first refuses a bot that fell back to the discovery arc", async () => {
+    const t = convexTest(schema, modules);
+    const { unitId, lessonId } = await seedQuest(t);
+    await seedStages(t, lessonId, [
+      { title: "Bet", stage: "commit", order: 0 },
+      { title: "Load test", stage: "capture", order: 1 },
+      { title: "Name the rule", stage: "reckon", order: 2 },
+    ]);
+    const res = await t.mutation(
+      internal.bakeUnitFromSeed.normalizeBakedActivityOrder,
+      { unitId, buildFirst: true },
+    );
+    expect(res.normalized).toBe(false);
+  });
+
+  test("a build marker outside build-first fails the discovery arc", async () => {
+    const t = convexTest(schema, modules);
+    const { unitId, lessonId } = await seedQuest(t);
+    await seedStages(t, lessonId, [
+      { title: "Bet", stage: "commit", order: 0 },
+      { title: "Load test", stage: "capture", order: 1 },
+      { title: "Bridge game", stage: "build", order: 2 },
+    ]);
+    const res = await t.mutation(
+      internal.bakeUnitFromSeed.normalizeBakedActivityOrder,
+      { unitId },
+    );
+    expect(res.normalized).toBe(false);
+  });
+
   test("B6, any Quest bake: an app activity never precedes the first learning step", async () => {
     const t = convexTest(schema, modules);
     const { unitId, lessonId } = await seedQuest(t);

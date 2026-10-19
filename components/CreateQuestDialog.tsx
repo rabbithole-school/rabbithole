@@ -10,7 +10,9 @@
  * On launch it creates a Unit (with authorScholarId set to the scholar), drops
  * the scholar straight into an ad-lib session, and fires the background "bake"
  * — threading the chosen path so the quest is designed around that angle (DRY
- * with the seed flow; see review/seed-to-unit-bake-plan.md). "Endless chat"
+ * with the seed flow; see review/seed-to-unit-bake-plan.md). When the scholar's
+ * words already describe a specific thing to make, the menu never shows: the
+ * picker hands off and the quest launches as that build (`BUILD_IT_PATH`). "Endless chat"
  * bakes with no chosen angle and leaves the live chat alone — it never gets
  * upgraded into the baked unit's first activity.
  */
@@ -32,7 +34,7 @@ import {
 import { X } from "@phosphor-icons/react";
 import { StyledDialogContent } from "@/components/ui/StyledDialogContent";
 import { BakePathPicker } from "@/components/BakePathPicker";
-import { bakePathArg, type PathChoice } from "@/lib/bakePaths";
+import { bakePathArg, BUILD_IT_PATH, type PathChoice } from "@/lib/bakePaths";
 import { api } from "@/convex/_generated/api";
 import { toaster } from "@/lib/toaster";
 
@@ -51,6 +53,14 @@ export function CreateQuestDialog({
   const [description, setDescription] = useState("");
   const [chosen, setChosen] = useState<PathChoice | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // The picker found a specific build and handed off: launching without a menu.
+  const [startingBuild, setStartingBuild] = useState(false);
+  // A failed hand-off falls back to the menu for good: the cached suggestion
+  // would otherwise hand off again on remount and retry in a loop.
+  const [showMenuAnyway, setShowMenuAnyway] = useState(false);
+  // One hand-off per quest even if the picker reports it twice before a
+  // re-render (a cached hit under StrictMode's double effect).
+  const handedOffRef = useRef(false);
   const createQuest = useMutation(api.units.createQuest);
   const createSession = useMutation(api.sessions.create);
   const scheduleBake = useMutation(api.units.scheduleCustomQuestBake);
@@ -69,12 +79,16 @@ export function CreateQuestDialog({
     setTitle("");
     setDescription("");
     setChosen(null);
+    setStartingBuild(false);
+    setShowMenuAnyway(false);
+    handedOffRef.current = false;
   };
 
   // Always closable — even mid-start; closing abandons the pending attempt.
   const handleClose = () => {
     attemptRef.current += 1;
     setSubmitting(false);
+    setStartingBuild(false);
     onClose();
     reset();
   };
@@ -84,8 +98,8 @@ export function CreateQuestDialog({
     setStep("path");
   };
 
-  const handleCreate = async () => {
-    if (submitting || !chosen) return;
+  const launch = async (choice: PathChoice) => {
+    if (submitting) return;
     const t = title.trim();
     if (!t) return;
     const attempt = ++attemptRef.current;
@@ -111,7 +125,7 @@ export function CreateQuestDialog({
       // never waits for it. "Endless chat" → no chosen angle (a plain bake);
       // any other choice steers the bake. Best-effort; the ad-lib session
       // works regardless.
-      const bakePath = bakePathArg(chosen);
+      const bakePath = bakePathArg(choice);
       try {
         await scheduleBake({
           unitId: result.unitId,
@@ -140,6 +154,9 @@ export function CreateQuestDialog({
       if (!live()) return;
       attemptRef.current += 1;
       setSubmitting(false);
+      // Back to the menu the hand-off skipped, so the scholar can still start.
+      setShowMenuAnyway(true);
+      setStartingBuild(false);
       toaster.error({
         title: "Couldn't create",
         description: e instanceof Error ? e.message : String(e),
@@ -275,16 +292,38 @@ export function CreateQuestDialog({
             ) : (
               <>
                 <Dialog.Body px={6} py={3}>
-                  <BakePathPicker
-                    source={{
-                      kind: "topic",
-                      topic: title.trim(),
-                      ...(description.trim()
-                        ? { rationale: description.trim() }
-                        : {}),
-                    }}
-                    onSelect={setChosen}
-                  />
+                  {startingBuild ? (
+                    <Text
+                      textAlign="center"
+                      fontSize="sm"
+                      color="charcoal.500"
+                      fontWeight="600"
+                      py={6}
+                    >
+                      🛠️ Starting your build…
+                    </Text>
+                  ) : (
+                    <BakePathPicker
+                      source={{
+                        kind: "topic",
+                        topic: title.trim(),
+                        ...(description.trim()
+                          ? { rationale: description.trim() }
+                          : {}),
+                      }}
+                      onSelect={setChosen}
+                      onSpecificBuild={
+                        showMenuAnyway
+                          ? undefined
+                          : () => {
+                              if (handedOffRef.current) return;
+                              handedOffRef.current = true;
+                              setStartingBuild(true);
+                              void launch(BUILD_IT_PATH);
+                            }
+                      }
+                    />
+                  )}
                 </Dialog.Body>
                 <Box px={6} pb={5} pt={3}>
                   <Button
@@ -292,7 +331,7 @@ export function CreateQuestDialog({
                     bg="violet.500"
                     color="white"
                     _hover={{ bg: "violet.600" }}
-                    onClick={handleCreate}
+                    onClick={() => chosen && launch(chosen)}
                     disabled={!chosen || submitting}
                     loading={submitting}
                     loadingText="Starting…"

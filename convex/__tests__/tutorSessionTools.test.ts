@@ -1127,11 +1127,13 @@ describe("choosing between the two image tools", () => {
 
   test("create_code marks the turn as having built an app", async () => {
     const runMutation = vi.fn().mockResolvedValue("new-id");
+    // No app in the session yet, so create_code makes the first one.
+    const runQuery = vi.fn().mockResolvedValue(null);
     const toolState = state();
     const tools = (await toolsFor(
       "conversation",
       OWNER,
-      { runMutation } as unknown as ActionCtx,
+      { runMutation, runQuery } as unknown as ActionCtx,
       [],
       { state: toolState },
     )) as unknown as Array<{ name: string; run: (input: never) => Promise<unknown> }>;
@@ -2230,7 +2232,10 @@ describe("app editor (str_replace_based_edit_tool) on code artifacts", () => {
       .mockResolvedValueOnce("fresh")
       .mockResolvedValueOnce("next-message")
       .mockResolvedValue({ kind: "success", artifact: appRow({ _id: "fresh", revision: 1 }) });
-    const runQuery = vi.fn().mockResolvedValue(appRow({ _id: "fresh", revision: 0 }));
+    const runQuery = vi
+      .fn()
+      .mockResolvedValueOnce(null) // no app yet: create_code makes one
+      .mockResolvedValue(appRow({ _id: "fresh", revision: 0 }));
     const { tools, call } = await editor({ runQuery, runMutation }, { seenRevision: null });
     const create = tools.find((candidate) => candidate.name === "create_code")!;
     const created = String(await create.run({ title: "New", code: "<p>hi</p>" } as never));
@@ -2241,5 +2246,61 @@ describe("app editor (str_replace_based_edit_tool) on code artifacts", () => {
       internal.artifacts.aiStrReplace,
       expect.objectContaining({ artifactId: "fresh", baseRevision: 0 }),
     );
+  });
+
+  // TRA-519 one app surface: a rewrite of the session's app is its next
+  // version (History), never a second same-titled app beside it.
+  function createCode(tools: Array<{ name: string }>) {
+    return (tools.find((candidate) => candidate.name === "create_code") as unknown as EditorTool)
+      .run as (input: unknown) => Promise<unknown>;
+  }
+
+  test("create_code on a session with an app rewrites that app in place, bound to the revision seen", async () => {
+    const runQuery = vi.fn().mockResolvedValue({ _id: APP_ID, title: "Clicker", revision: 2 });
+    const runMutation = vi.fn().mockResolvedValue({
+      kind: "success",
+      artifact: appRow({ title: "Clicker 2", content: "<p>v2</p>", revision: 3 }),
+    });
+    const { tools, emit } = await editor({ runQuery, runMutation });
+    const result = String(await createCode(tools)({ title: "Clicker 2", code: "<p>v2</p>" }));
+
+    // Function references are proxies that deep-equal each other, so compare names.
+    expect(getFunctionName(runQuery.mock.calls[0][0])).toBe("artifacts:aiFocusApp");
+    expect(runMutation).toHaveBeenCalledTimes(1);
+    expect(getFunctionName(runMutation.mock.calls[0][0])).toBe("artifacts:aiReplaceApp");
+    expect(runMutation.mock.calls[0][1]).toMatchObject({
+      artifactId: APP_ID, content: "<p>v2</p>", baseRevision: 2,
+    });
+    expect(result).toContain(APP_PATH);
+    // No newArtifactId: the clients keep the same app selected.
+    expect(emit).toHaveBeenCalledWith({ artifactUpdate: true });
+    expect(emit.mock.calls.some(([event]) => "newArtifactId" in (event as object))).toBe(false);
+  });
+
+  test("create_code's rewrite refuses when the scholar edited the app since the model saw it", async () => {
+    const runQuery = vi.fn().mockResolvedValue({ _id: APP_ID, title: "Clicker", revision: 3 });
+    const runMutation = vi.fn().mockResolvedValue({ kind: "conflict", artifact: appRow({ revision: 3 }) });
+    const { tools } = await editor({ runQuery, runMutation });
+    await expect(createCode(tools)({ title: "Clicker", code: "<p>v2</p>" })).rejects.toThrow("STALE_FILE");
+    expect(runMutation).toHaveBeenCalledTimes(1);
+  });
+
+  test("create_code asks for a view first when the model never saw the app", async () => {
+    const runQuery = vi.fn().mockResolvedValue({ _id: APP_ID, title: "Clicker", revision: 2 });
+    const runMutation = vi.fn();
+    const { tools } = await editor({ runQuery, runMutation }, { seenRevision: null });
+    await expect(createCode(tools)({ title: "Clicker", code: "<p>v2</p>" })).rejects.toThrow("READ_REQUIRED");
+    expect(runMutation).not.toHaveBeenCalled();
+  });
+
+  test("create_code with new_app makes a second app without looking for the first", async () => {
+    const runQuery = vi.fn();
+    const runMutation = vi.fn().mockResolvedValueOnce("second").mockResolvedValueOnce("next-message");
+    const { tools } = await editor({ runQuery, runMutation });
+    const result = String(await createCode(tools)({ title: "Other", code: "<p>x</p>", new_app: true }));
+    expect(runQuery).not.toHaveBeenCalled();
+    expect(getFunctionName(runMutation.mock.calls[0][0])).toBe("artifacts:aiCreate");
+    expect(runMutation.mock.calls[0][1]).toMatchObject({ title: "Other" });
+    expect(result).toContain("Path: /apps/second.html");
   });
 });

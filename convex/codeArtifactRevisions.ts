@@ -16,6 +16,11 @@ import { isTeacherRole } from "./lib/roles";
 import { requireActiveScholarAccess } from "./lib/access";
 import type { DataModel, Doc, Id } from "./_generated/dataModel";
 import { pickFocusApp, pickTurnRecordApp } from "./lib/focusApp";
+import {
+  assertMayReadTeacherArchived,
+  mayReadTeacherArchived,
+} from "./lib/teacherArchive";
+import { isTeacherArchived } from "../shared/teacherArchive";
 
 type MutationCtx = GenericMutationCtx<DataModel>;
 
@@ -33,6 +38,8 @@ async function requireSessionRead(
   if (isTeacher && session.userId !== ctx.user._id) {
     await requireActiveScholarAccess(ctx, ctx.user, session.userId);
   }
+  // A put-away app's history is teacher-only until a teacher restores it.
+  if (!mayReadTeacherArchived(ctx.user, session)) return null;
   return session;
 }
 
@@ -147,6 +154,14 @@ export const recordTurnRevision = internalMutation({
     revision?: number;
     autosaveActivityId?: Id<"activities">;
   }> => {
+    // Put away by a teacher mid-turn: record nothing and never autosave. A
+    // quiet no-op, not a throw — this runs in the stream's commit path, where
+    // a throw would cost the turn's finalization (the tutor's code writes are
+    // already refused in artifacts.ai*).
+    const owning = await ctx.db.get(args.sessionId);
+    if (owning && isTeacherArchived(owning)) {
+      return { recorded: false };
+    }
     const artifacts = await ctx.db
       .query("artifacts")
       .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
@@ -290,6 +305,12 @@ export const getRevisionHtml = authedQuery({
   handler: async (ctx, args) => {
     const rev = await ctx.db.get(args.revisionId);
     if (!rev) return null;
+    // A one-shot fetch on Restore click (not a subscription), so a scholar
+    // gets the legible refusal rather than a bare "Forbidden".
+    const owning = await ctx.db.get(rev.sessionId);
+    if (owning?.userId === ctx.user._id) {
+      assertMayReadTeacherArchived(ctx.user, owning);
+    }
     const session = await requireSessionRead(ctx, rev.sessionId);
     if (!session) throw new Error("Forbidden");
     return { html: rev.html, revision: rev.revision };

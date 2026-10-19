@@ -105,9 +105,13 @@ export const JUDGE_MODEL = "claude-opus-4-8" as const;
  * either model being compared (enforced by assertJudgeNotWeaker in
  * evals/tutor-quality/lib/judgeEngine.ts). Opus 4.8 judging Opus 5.5 called a
  * bake-off a wash that a blind read called 10-0 (TRA-408), so this sits on
- * the top tier. The nightly Copilot engine already judged with Fable 5.1.
+ * the top tier. Opus 5.5 since 2026-10-18: on 400 expert-labeled classroom
+ * exchanges it tracked the experts as well as Fable 5.1 and agreed with it
+ * within one point on 96-100% of turns (evals/uptake-repro/FINDINGS.md), for
+ * less money and time. A comparison involving a Fable tutor still needs
+ * JUDGE_MODEL=claude-fable-5-1; assertJudgeNotWeaker refuses otherwise.
  */
-export const TUTOR_JUDGE_MODEL = MODELS.FABLE;
+export const TUTOR_JUDGE_MODEL = MODELS.OPUS_5_5;
 
 /**
  * Friendly display labels for the raw model ids above.

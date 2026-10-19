@@ -235,7 +235,7 @@ export const RENDER_CHECK_POLL_INTERVAL_MS = 400;
 export const RENDER_CHECK_TIMEOUT_MS = 8_000;
 
 const BUILD_TOOL_TRUNCATION_MESSAGE =
-  `Your tool call was cut off by the output limit before the code arrived. Build a SMALLER first version now (a working core under roughly 300 lines), then add features with ${CODE_EDITOR_TOOL_NAME} in later calls.`;
+  `Your tool call was cut off by the output limit before the code arrived. If the session already has an app, do NOT shrink it: make the change with ${CODE_EDITOR_TOOL_NAME} (str_replace or insert) in smaller pieces. Otherwise build a SMALLER first version now (a working core under roughly 300 lines), then add features with ${CODE_EDITOR_TOOL_NAME} in later calls.`;
 const BUILD_TOOL_TRUNCATION_STOP_MESSAGE =
   "Do not call create_code again this turn: reply to the teacher in one short paragraph describing what you will build and ask them to say go.";
 
@@ -390,7 +390,15 @@ export function renderChecksEnabled({
  * tells the tutor to re-score the rubric now (calling `update_rubric_score`)
  * and give a brief, honest Socratic reply rather than reciting the rubric.
  */
-export function rubricCheckInstruction(artifactTitle?: string): string {
+export function rubricCheckInstruction(
+  artifactTitle?: string,
+  opts: {
+    /** The session is in the scholar's own Quest (SessionMission.ownQuest):
+     *  its rubric came from the Quest bake, so the check reports where the
+     *  work stands and offers a build, never a quiz (prod 2026-10-16). */
+    ownQuest?: boolean;
+  } = {},
+): string {
   const work =
     artifactTitle && artifactTitle.trim()
       ? `their work "${artifactTitle.trim()}"`
@@ -401,9 +409,18 @@ export function rubricCheckInstruction(artifactTitle?: string): string {
     `rubric. Re-evaluate the current work against every rubric ` +
     `criterion and call update_rubric_score with a verdict for each criterion ` +
     `(pass the work's artifact_id). In chat, keep it short and warm: name ` +
-    `one thing they've nailed, then ask a single Socratic question about the ` +
-    `biggest remaining gap — do NOT recite the rubric, list the criteria, or ` +
-    `hand them a template. If the work already meets every criterion, ` +
+    `one thing they've nailed, then ` +
+    (opts.ownQuest
+      ? `name the biggest remaining gap in one plain sentence and offer to ` +
+        `build toward it as a yes ("Want the bots to react slower so some get ` +
+        `caught?"). This is their own Quest: do NOT quiz them, ask them to run ` +
+        `a test, or bring back a question they skipped; if they say no, drop ` +
+        `it. Do NOT recite the rubric, list the criteria, or hand them a ` +
+        `template. `
+      : `ask a single Socratic question about the ` +
+        `biggest remaining gap — do NOT recite the rubric, list the criteria, or ` +
+        `hand them a template. `) +
+    `If the work already meets every criterion, ` +
     `celebrate briefly. Before you reply, re-read every earlier ask you made in ` +
     `this conversation about the criterion you are about to probe, and what the ` +
     `scholar did with it. If they did what you asked, it is done — credit it and ` +
@@ -413,10 +430,15 @@ export function rubricCheckInstruction(artifactTitle?: string): string {
     `open with that admission in its first sentence — "I told you X was ` +
     `enough. I was too quick." — before any question. Do not present it as a ` +
     `part you cannot find: you found it, you accepted it, and you are the ` +
-    `one raising the bar now. If their work has not changed since ` +
-    `your last ask, a scholar clicking this button again is telling you your last ` +
-    `ask did not land — change the move: say what you can actually see in their ` +
-    `work, name the part you cannot find, and ask them to point you at it. ` +
+    `one raising the bar now. ` +
+    (opts.ownQuest
+      ? `If their work has not changed since your last check, say so in a few ` +
+        `words and leave the gap where it is: do not offer it again or ask them ` +
+        `for anything. `
+      : `If their work has not changed since ` +
+        `your last ask, a scholar clicking this button again is telling you your last ` +
+        `ask did not land — change the move: say what you can actually see in their ` +
+        `work, name the part you cannot find, and ask them to point you at it. `) +
     `If their work changed ` +
     `somewhere else, look at THAT part; do not reopen a settled one.]`
   );
@@ -443,6 +465,23 @@ export function teacherBuildKickoffInstruction(): string {
     `build session. Build the first working version of the app described in ` +
     `your APP BUILDER MODE lead-in NOW with create_code, then describe what ` +
     `you built and the judgment calls they may want to steer. Do not greet or ` +
+    `ask what to build.]`
+  );
+}
+
+/** The ephemeral opening instruction for a scholar's build-first Quest step
+ * (lib/mission.ts isScholarBuildKickoff): build from their own words. */
+export function scholarBuildKickoffInstruction(): string {
+  return (
+    `[SYSTEM — not a message the scholar typed. The scholar just opened their ` +
+    `own Quest, which is building the app they described: the build brief in ` +
+    `your system prompt, in their words. Build the first working version NOW ` +
+    `with create_code from their description, keeping their name for it and ` +
+    `their idea. Where the build reaches a choice that carries the concept (the ` +
+    `invariants of your build contract), make that choice visible in the app ` +
+    `and easy for them to change, rather than deciding it silently. Then, in ` +
+    `two or three short sentences, say what you built and ask them ONE ` +
+    `question about the first concept decision. No long greeting, and never ` +
     `ask what to build.]`
   );
 }
@@ -552,6 +591,9 @@ export type TutorPromptContext = {
 
 type TeacherBuildContext = {
   isTestDrive?: boolean;
+  /** getSessionContext's build-first verdict (lib/mission.ts
+   *  isScholarBuildKickoff); absent for callers that never kick off. */
+  scholarBuildKickoff?: boolean;
   lessonActivityContext:
     | Pick<LessonActivityContext, "starterAppId" | "appRequest">
     | null;
@@ -570,9 +612,9 @@ export function isTeacherBuildContext(ctx: TeacherBuildContext): boolean {
 export function kickoffInstructionForContext(
   ctx: TeacherBuildContext,
 ): string {
-  return isTeacherBuildContext(ctx)
-    ? teacherBuildKickoffInstruction()
-    : kickoffInstruction();
+  if (isTeacherBuildContext(ctx)) return teacherBuildKickoffInstruction();
+  if (ctx.scholarBuildKickoff === true) return scholarBuildKickoffInstruction();
+  return kickoffInstruction();
 }
 
 /**

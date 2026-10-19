@@ -18,10 +18,10 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   BakePathPicker,
   bakePathArg,
-  ENDLESS_CHAT,
   type PathChoice,
 } from "@/components/BakePathPicker";
 import { api } from "@/lib/convex";
+import { BUILD_IT_PATH } from "../../vendor/shared/missionCopy";
 import { fonts, palette, useColors } from "@/theme";
 import { AppTextInput } from "@/components/AppTextInput";
 
@@ -46,6 +46,14 @@ export function CreateQuestDialog({
   const [chosen, setChosen] = useState<PathChoice | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The picker found a specific build and handed off: launching without a menu.
+  const [startingBuild, setStartingBuild] = useState(false);
+  // The hand-off fires once per quest: after a failed auto-launch the picker
+  // shows its menu instead of handing off (and relaunching) again.
+  const [handOffSpent, setHandOffSpent] = useState(false);
+  // Same, synchronously: the picker can report a cached hit twice before a
+  // re-render (StrictMode's double effect).
+  const handedOffRef = useRef(false);
   // Bumped to abandon an in-flight start (close, unmount): a late
   // resolve from an abandoned attempt must never navigate or touch state.
   const attemptRef = useRef(0);
@@ -65,6 +73,9 @@ export function CreateQuestDialog({
     setDescription("");
     setChosen(null);
     setError(null);
+    setStartingBuild(false);
+    setHandOffSpent(false);
+    handedOffRef.current = false;
   };
 
   // Always closable — even mid-start. On a locked fleet iPad there is no Home
@@ -72,6 +83,7 @@ export function CreateQuestDialog({
   const close = () => {
     attemptRef.current += 1;
     setSubmitting(false);
+    setStartingBuild(false);
     onClose();
     reset();
   };
@@ -81,12 +93,14 @@ export function CreateQuestDialog({
     Haptics.selectionAsync().catch(() => {});
     setError(null);
     setChosen(null);
+    setStartingBuild(false);
+    setHandOffSpent(false);
+    handedOffRef.current = false;
     setStep("path");
   };
 
-  const handleCreate = async () => {
+  const launch = async (choice: PathChoice) => {
     if (submitting || !trimmedTitle) return;
-    const choice = chosen ?? ENDLESS_CHAT;
     const attempt = ++attemptRef.current;
     const live = () => attemptRef.current === attempt;
     setSubmitting(true);
@@ -135,6 +149,8 @@ export function CreateQuestDialog({
       if (!live()) return;
       attemptRef.current += 1;
       setSubmitting(false);
+      // Back to the menu the hand-off skipped, so the scholar can still start.
+      setStartingBuild(false);
       const message = e instanceof Error ? e.message : String(e);
       setError(message || "Please try again.");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(
@@ -242,28 +258,48 @@ export function CreateQuestDialog({
                 keyboardShouldPersistTaps="handled"
                 showsVerticalScrollIndicator={false}
               >
-                <BakePathPicker
-                  source={{
-                    kind: "topic",
-                    topic: trimmedTitle,
-                    ...(trimmedDescription
-                      ? { rationale: trimmedDescription }
-                      : {}),
-                  }}
-                  onSelect={setChosen}
-                />
+                {startingBuild ? (
+                  <Text style={styles.startingBuild}>
+                    🛠️ Starting your build…
+                  </Text>
+                ) : (
+                  <BakePathPicker
+                    source={{
+                      kind: "topic",
+                      topic: trimmedTitle,
+                      ...(trimmedDescription
+                        ? { rationale: trimmedDescription }
+                        : {}),
+                    }}
+                    onSelect={setChosen}
+                    {...(handOffSpent
+                      ? {}
+                      : {
+                          onSpecificBuild: () => {
+                            if (handedOffRef.current) return;
+                            handedOffRef.current = true;
+                            setHandOffSpent(true);
+                            setStartingBuild(true);
+                            void launch(BUILD_IT_PATH);
+                          },
+                        })}
+                  />
+                )}
                 {error && <Text style={styles.errorText}>{error}</Text>}
               </ScrollView>
               <View style={styles.pathFooter}>
                 <Pressable
                   accessibilityRole="button"
-                  disabled={submitting}
-                  onPress={handleCreate}
+                  // Nothing is pickable until the suggestions land (the picker
+                  // falls back on its own after a timeout), so Start waits for
+                  // a choice instead of launching one the scholar never saw.
+                  disabled={submitting || !chosen}
+                  onPress={() => chosen && launch(chosen)}
                   style={({ pressed }) => [
                     styles.primaryButton,
                     styles.startButton,
-                    pressed && !submitting && styles.primaryPressed,
-                    submitting && styles.primaryDisabled,
+                    pressed && !submitting && !!chosen && styles.primaryPressed,
+                    (submitting || !chosen) && styles.primaryDisabled,
                   ]}
                 >
                   {submitting ? (
@@ -454,6 +490,13 @@ function makeStyles(c: ReturnType<typeof useColors>) {
       fontFamily: fonts.medium,
       paddingHorizontal: 24,
       paddingBottom: 18,
+    },
+    startingBuild: {
+      textAlign: "center",
+      color: c.charcoalMuted,
+      fontSize: 14,
+      fontFamily: fonts.semibold,
+      paddingVertical: 24,
     },
     errorText: {
       color: c.statusRed,

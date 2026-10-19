@@ -49,6 +49,7 @@ import {
   ChatCircle,
   Check,
   ClockCounterClockwise,
+  DotsThreeVertical,
   Hammer,
   List,
   Lock,
@@ -91,6 +92,11 @@ import { ParkingLot } from "./ParkingLot";
 import { useSavedForLaterActions } from "../SavedForLaterBlock";
 import { toaster } from "@/lib/toaster";
 import { serverRefusal } from "@/lib/serverErrorMessage";
+import {
+  TeacherArchivedAppNotice,
+  useArchiveAppConfirm,
+} from "@/components/TeacherArchivedApp";
+import { TEACHER_ARCHIVE_COPY, isTeacherArchived } from "@/shared/teacherArchive";
 import {
   enterFullscreen,
   exitFullscreen,
@@ -315,8 +321,11 @@ export function VibecodeWorkshop({
     try {
       const result = await startFreePlay({ sessionId });
       router.push(`/scholar/${result.sessionId}`);
-    } catch {
-      toaster.error({ title: "Couldn't start free play" });
+    } catch (error) {
+      toaster.error({
+        title: "Couldn't start free play",
+        description: serverRefusal(error) ?? undefined,
+      });
       setStartingFreePlay(false);
     }
   }, [router, sessionId, startFreePlay]);
@@ -946,13 +955,19 @@ export function VibecodeWorkshop({
     };
   }, []);
 
+  // The Workshop opens by building on a teacher build hand-off (a test drive)
+  // or on a scholar's build-first Quest step (`scholarBuildKickoff`, which the
+  // server sets only for the session's owner). Same one-shot launch + retry.
+  const opensWithBuild =
+    (data?.session.isTestDrive === true &&
+      data.session.teacherBuildKickoff === true) ||
+    data?.session.scholarBuildKickoff === true;
   useEffect(() => {
     if (
       !data ||
       isStreaming ||
       kickoffPendingRef.current ||
-      data.session.isTestDrive !== true ||
-      data.session.teacherBuildKickoff !== true
+      !opensWithBuild
     ) {
       return;
     }
@@ -1040,7 +1055,7 @@ export function VibecodeWorkshop({
               platform: "web",
               supportsRenderCheck: true,
               kickoff: true,
-              // The teacher build kickoff builds the app — always Edit.
+              // A build kickoff (teacher or scholar) builds the app — always Edit.
               mode: "edit",
             },
             result.assistantMsgId,
@@ -1055,7 +1070,7 @@ export function VibecodeWorkshop({
             setBuildLaunching(false);
           }
         } catch (error) {
-          console.error("[vibecode] teacher build kickoff failed", error);
+          console.error("[vibecode] build kickoff failed", error);
           scheduleRetry(1_000, true);
         } finally {
           if (activeStreamIdRef.current === kickoffStreamId) {
@@ -1066,7 +1081,7 @@ export function VibecodeWorkshop({
         }
       })();
     }, 0);
-  }, [data, isStreaming, sendStream, sessionId, startActivityKickoff, resetBuildSignals, openedAt, kickoffRetryNonce]);
+  }, [data, opensWithBuild, isStreaming, sendStream, sessionId, startActivityKickoff, resetBuildSignals, openedAt, kickoffRetryNonce]);
 
   const buildStage = useMemo(
     () => deriveBuildStage(buildSignals),
@@ -1162,6 +1177,18 @@ export function VibecodeWorkshop({
     () => appCharacterNamesFrom(artifacts ?? []),
     [artifacts],
   );
+  // Teacher archive (review/teacher-archive-scholar-apps.html §4): a teacher
+  // reading a scholar's app (never their own, never a rehearsal) can put it
+  // away from the header menu; once archived they see a slim notice with
+  // Restore app and can still read the app and transcript.
+  const isTeacherReader =
+    !!data?.session &&
+    !isSessionOwner &&
+    !data.session.isTestDrive &&
+    isTeacherRole(currentUser?.role);
+  const appArchived = !!data?.session && isTeacherArchived(data.session);
+  const canArchiveApp = isTeacherReader && !!htmlArtifact && !appArchived;
+  const archiveAppConfirm = useArchiveAppConfirm(sessionId);
   const threadItems = interleaveAppAiTurns(
     reconciledMessages,
     tutorVoice ? (appAiTurns ?? []) : [],
@@ -1498,7 +1525,10 @@ export function VibecodeWorkshop({
         setHistoryOpen(false);
       } catch (error) {
         console.error("[vibecode] restore failed", error);
-        toaster.error({ title: "Couldn't restore that revision" });
+        toaster.error({
+          title: "Couldn't restore that revision",
+          description: serverRefusal(error) ?? undefined,
+        });
       } finally {
         setRestoring(false);
       }
@@ -1517,7 +1547,10 @@ export function VibecodeWorkshop({
         await clearSessionState({ artifactId: current._id });
       } catch (error) {
         console.error("[vibecode] reset app state failed", error);
-        toaster.error({ title: "Couldn't reset the app state" });
+        toaster.error({
+          title: "Couldn't reset the app state",
+          description: serverRefusal(error) ?? undefined,
+        });
         return;
       }
     }
@@ -2062,6 +2095,34 @@ export function VibecodeWorkshop({
       )}
       {modeControl}
       <Box flex={1} />
+      {canArchiveApp && (
+        <Menu.Root positioning={{ placement: "bottom-end" }}>
+          <Menu.Trigger asChild>
+            <IconButton
+              aria-label="App actions"
+              variant="ghost"
+              size="xs"
+              color="charcoal.400"
+            >
+              <DotsThreeVertical />
+            </IconButton>
+          </Menu.Trigger>
+          <Portal>
+            <Menu.Positioner>
+              <Menu.Content>
+                <Menu.Item
+                  value="archive-app"
+                  fontFamily="heading"
+                  fontSize="sm"
+                  onSelect={() => archiveAppConfirm.open(title)}
+                >
+                  {TEACHER_ARCHIVE_COPY.archiveAction}
+                </Menu.Item>
+              </Menu.Content>
+            </Menu.Positioner>
+          </Portal>
+        </Menu.Root>
+      )}
       {showYourWork && (
         <Button
           size="sm"
@@ -2341,6 +2402,10 @@ export function VibecodeWorkshop({
   return (
     <Flex flexDir="column" flex={1} minH={0} minW={0}>
       {header}
+      {isTeacherReader && appArchived && (
+        <TeacherArchivedAppNotice sessionId={sessionId} />
+      )}
+      {archiveAppConfirm.dialog}
       {isNarrow ? (
         <>
           {appPane}

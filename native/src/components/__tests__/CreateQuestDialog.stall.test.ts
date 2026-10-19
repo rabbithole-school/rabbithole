@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   createQuest: vi.fn(),
   createSession: vi.fn(),
   scheduleBake: vi.fn(),
+  handOff: false,
+  pickerProps: [] as { onSpecificBuild?: () => void }[],
 }));
 
 vi.mock("react-native", async () => {
@@ -76,11 +78,34 @@ vi.mock("@/components/AppTextInput", async () => {
       react.createElement("input", props as never),
   };
 });
-// The real picker is covered by BakePathPicker.fallback.test.ts; here the
-// path step only needs to exist.
-vi.mock("@/components/BakePathPicker", () => ({
-  BakePathPicker: () => null,
-  ENDLESS_CHAT: "endless-chat",
+// The real picker is covered by BakePathPicker.*.test.ts; here it only
+// records its props and, when told to, hands off a specific build on mount.
+vi.mock("@/components/BakePathPicker", async () => {
+  const react = await vi.importActual<typeof import("react")>("react");
+  return {
+    BakePathPicker: (props: {
+      onSpecificBuild?: () => void;
+      onSelect: (choice: unknown) => void;
+    }) => {
+      mocks.pickerProps.push(props);
+      react.useEffect(() => {
+        if (mocks.handOff) props.onSpecificBuild?.();
+        else props.onSelect("endless-chat");
+      }, []); // mount only
+      return null;
+    },
+    ENDLESS_CHAT: "endless-chat",
+    bakePathArg: (choice: unknown) =>
+      choice === "endless-chat" ? undefined : choice,
+  };
+});
+vi.mock("../../../vendor/shared/missionCopy", () => ({
+  BUILD_IT_PATH: {
+    emoji: "🛠️",
+    title: "Build it",
+    blurb: "Build the thing you described.",
+    shape: "buildFirst",
+  },
 }));
 
 import { CreateQuestDialog } from "../CreateQuestDialog";
@@ -117,6 +142,8 @@ async function renderAtPathStep(onClose: () => void) {
 describe("CreateQuestDialog while a quest start is stalled", () => {
   afterEach(() => {
     vi.clearAllMocks();
+    mocks.handOff = false;
+    mocks.pickerProps = [];
   });
 
   it("keeps the X live mid-start, and a late resolve after closing goes nowhere", async () => {
@@ -151,5 +178,47 @@ describe("CreateQuestDialog while a quest start is stalled", () => {
     });
     expect(mocks.createSession).not.toHaveBeenCalled();
     expect(mocks.routerPush).not.toHaveBeenCalled();
+  });
+
+  it("launches a specific build without a menu when the picker hands off", async () => {
+    mocks.handOff = true;
+    mocks.createQuest.mockResolvedValue({ unitId: "unit-1" });
+    mocks.createSession.mockResolvedValue({ id: "session-1" });
+    mocks.scheduleBake.mockResolvedValue(null);
+    const onClose = vi.fn();
+    await renderAtPathStep(onClose);
+
+    expect(mocks.createQuest).toHaveBeenCalledTimes(1);
+    expect(mocks.scheduleBake).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bakePath: expect.objectContaining({ shape: "buildFirst" }),
+      }),
+    );
+    expect(mocks.routerPush).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the starting line mid-launch, and a failed launch returns to the menu once", async () => {
+    mocks.handOff = true;
+    let rejectQuest!: (e: Error) => void;
+    mocks.createQuest.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          rejectQuest = reject;
+        }),
+    );
+    const root = await renderAtPathStep(vi.fn());
+    expect(textOf(root)).toContain("🛠️ Starting your build…");
+    expect(root.findAllByType("spinner")).toHaveLength(1);
+
+    await act(async () => {
+      rejectQuest(new Error("Offline"));
+    });
+    expect(textOf(root)).not.toContain("Starting your build");
+    expect(textOf(root)).toContain("Offline");
+    // The picker is back, without the hand-off, so it shows its menu rather
+    // than relaunching the build in a loop.
+    expect(mocks.pickerProps.at(-1)?.onSpecificBuild).toBeUndefined();
+    expect(mocks.createQuest).toHaveBeenCalledTimes(1);
   });
 });

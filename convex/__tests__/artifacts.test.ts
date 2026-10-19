@@ -443,3 +443,55 @@ describe("App designer P3: deleteArtifact is gated by the workshop verdict", () 
     expect(await artifactExists(t, artifactId)).toBe(false);
   });
 });
+
+// TRA-519 one app surface: create_code on a session that already has an app
+// rewrites it as its next revision instead of adding a same-titled second app.
+describe("rewriting an app in place", () => {
+  test("bumps the revision once, refuses a stale base, and keeps the scholar's newer edit", async () => {
+    const t = convexTest(schema, modules);
+    const { sessionId, artifactId } = await makeArtifact(t, {
+      content: "<p>v1</p>", revision: 2, type: "code",
+    });
+    expect(await t.mutation(internal.artifacts.aiReplaceApp, {
+      sessionId, artifactId, content: "<p>v2</p>", baseRevision: 2,
+    })).toMatchObject({
+      kind: "success", artifact: { content: "<p>v2</p>", title: "Notes", revision: 3 },
+    });
+    expect(await t.mutation(internal.artifacts.aiReplaceApp, {
+      sessionId, artifactId, content: "<p>stale</p>", baseRevision: 2,
+    })).toMatchObject({ kind: "conflict", artifact: { content: "<p>v2</p>", revision: 3 } });
+    expect(await t.run(async (ctx) => ctx.db.get(artifactId))).toMatchObject({
+      content: "<p>v2</p>", revision: 3, lastEditedBy: "ai",
+    });
+  });
+
+  test("never rewrites a writing box", async () => {
+    const t = convexTest(schema, modules);
+    const { sessionId, artifactId } = await makeArtifact(t, { content: "my words", revision: 0 });
+    expect(await t.mutation(internal.artifacts.aiReplaceApp, {
+      sessionId, artifactId, content: "<p>x</p>", baseRevision: 0,
+    })).toMatchObject({ kind: "refused" });
+    expect(await t.run(async (ctx) => ctx.db.get(artifactId))).toMatchObject({ content: "my words" });
+  });
+
+  test("aiFocusApp picks the open app, else the newest, and ignores documents", async () => {
+    const t = convexTest(schema, modules);
+    const { sessionId, artifactId: notesId } = await makeArtifact(t, { content: "notes", revision: 0 });
+    expect(await t.query(internal.artifacts.aiFocusApp, { sessionId })).toBeNull();
+    const [olderApp, newerApp] = await t.run(async (ctx) => [
+      await ctx.db.insert("artifacts", {
+        sessionId, title: "Older", content: "<p>a</p>", lastEditedBy: "ai", type: "code", revision: 4,
+      }),
+      await ctx.db.insert("artifacts", {
+        sessionId, title: "Newer", content: "<p>b</p>", lastEditedBy: "ai", type: "code", revision: 0,
+      }),
+    ]);
+    expect(await t.query(internal.artifacts.aiFocusApp, { sessionId })).toMatchObject({ _id: newerApp });
+    expect(await t.query(internal.artifacts.aiFocusApp, {
+      sessionId, focusArtifactId: olderApp,
+    })).toEqual({ _id: olderApp, title: "Older", revision: 4 });
+    expect(await t.query(internal.artifacts.aiFocusApp, {
+      sessionId, focusArtifactId: notesId,
+    })).toMatchObject({ _id: newerApp });
+  });
+});

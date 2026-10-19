@@ -18,6 +18,10 @@ import { requireActiveScholarAccess } from "./lib/access";
 import { isPlatformAdminRole, isTeacherRole } from "./lib/roles";
 import { requireRoomAccess } from "./lib/rooms";
 import {
+  assertNotTeacherArchived,
+  mayReadTeacherArchived,
+} from "./lib/teacherArchive";
+import {
   CUSTOM_APP_STATE_MIN_WRITE_INTERVAL_MS,
   MAX_CUSTOM_APP_STATE_KEY_CHARS,
   MAX_CUSTOM_APP_STATE_ROWS,
@@ -453,6 +457,9 @@ export const getSessionState = authedQuery({
       if (!isTeacherRole(ctx.user.role)) throw new Error("Forbidden");
       await requireActiveScholarAccess(ctx, ctx.user, session.userId);
     }
+    // Put away by a teacher: the owner's subscribed app host gets nothing
+    // (null, not a throw, so the frame's tree survives). Teachers still read.
+    if (!mayReadTeacherArchived(ctx.user, session)) return null;
     const snapshot = snapshotFromRow(
       await findStateRow(ctx, stateKey, {
         sessionId: session._id,
@@ -472,6 +479,13 @@ export const getSessionState = authedQuery({
  * Read the final saved state for each of a scholar's Vibecode sessions.
  * This is the Portfolio companion to artifacts.getByScholar: teacher-only,
  * institution-scoped, and deliberately has no mutation counterpart.
+ *
+ * Also lists every TEACHER-ARCHIVED app session, in any sessionMode, and
+ * stamps `teacherArchivedAt` on it: this row is where a teacher finds a
+ * put-away app to restore it (review/teacher-archive-scholar-apps.html). An
+ * archived app that never saved state still appears, as its newest code
+ * artifact with an empty snapshot (doc null, no log, version 0, updatedAt =
+ * the archive time).
  */
 export const listSessionStatesForScholar = teacherQuery({
   args: { scholarId: v.id("users") },
@@ -490,27 +504,53 @@ export const listSessionStatesForScholar = teacherQuery({
       log: AppStateLogEntry[];
       version: number;
       updatedAt: number;
+      teacherArchivedAt?: number;
     }> = [];
 
     for (const session of sessions) {
-      if (session.sessionMode !== "vibecode" || session.isTestDrive) continue;
+      if (session.isTestDrive) continue;
+      const teacherArchivedAt = session.teacherArchivedAt;
+      if (session.sessionMode !== "vibecode" && teacherArchivedAt == null) {
+        continue;
+      }
       const artifacts = await ctx.db
         .query("artifacts")
         .withIndex("by_session", (q) => q.eq("sessionId", session._id))
         .collect();
+      const archivedStamp =
+        teacherArchivedAt != null ? { teacherArchivedAt } : {};
       const latest = await readLatestSessionState(
         ctx,
         session._id,
         session.userId,
         artifacts,
       );
-      if (!latest) continue;
+      if (!latest) {
+        if (teacherArchivedAt == null) continue;
+        const newestApp = artifacts
+          .filter((artifact) => artifact.type === "code")
+          .sort((a, b) => b._creationTime - a._creationTime)[0];
+        if (!newestApp) continue;
+        snapshots.push({
+          sessionId: session._id,
+          sessionTitle: session.title,
+          artifactId: newestApp._id,
+          artifactTitle: newestApp.title,
+          doc: null,
+          log: [],
+          version: 0,
+          updatedAt: teacherArchivedAt,
+          ...archivedStamp,
+        });
+        continue;
+      }
       snapshots.push({
         sessionId: session._id,
         sessionTitle: session.title,
         artifactId: latest.artifact._id,
         artifactTitle: latest.artifact.title,
         ...latest.snapshot,
+        ...archivedStamp,
       });
     }
 
@@ -531,6 +571,7 @@ export const clearSessionState = authedMutation({
       args.artifactId,
     );
     if (session.userId !== ctx.user._id) throw new Error("Forbidden");
+    assertNotTeacherArchived(session);
     const existing = await findStateRow(ctx, stateKey, {
       sessionId: session._id,
       artifactId: artifact._id,
@@ -555,6 +596,9 @@ export const updateSessionState = authedMutation({
       args.artifactId,
     );
     if (session.userId !== ctx.user._id) throw new Error("Forbidden");
+    // A put-away game doesn't keep saving when played (an old build or a
+    // stale tab can still be running it).
+    assertNotTeacherArchived(session);
     if (args.actionResult !== undefined) {
       if (
         args.patch !== undefined ||
@@ -669,6 +713,7 @@ export const requestSessionActionForTutor = internalMutation({
     ) {
       throw new Error("App actions are available only in the owner's live app");
     }
+    assertNotTeacherArchived(session);
     if (args.actionArgs !== undefined) validateActionArgs(args.actionArgs);
     const existing = await findStateRow(ctx, stateKey, {
       sessionId: session._id,

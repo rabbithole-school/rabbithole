@@ -148,7 +148,7 @@ export function SessionRecapCard({
       </VStack>
       {requested && (
         <Text mt={3} fontSize="sm" color="charcoal.500">
-          Moved to Finished — you can pick it back up any time.
+          Archived — you can pick it back up any time.
         </Text>
       )}
     </Box>

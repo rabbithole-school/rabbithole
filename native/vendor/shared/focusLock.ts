@@ -24,11 +24,14 @@
  * focused unit; `label` names what the class is on right now. `endsAt` +
  * `timeZone` (both optional — not every caller has them) drive "the turn,
  * not the bell"'s soft "with the class until ~10:25" copy; omit them and a
- * caller just gets the timeless fallback line. Null = no live focus. */
+ * caller just gets the timeless fallback line. `endsAt` is the ROOM's clock
+ * only; a teacher-given lifetime on a later day travels as `lifetimeEndsAt`
+ * instead (shared/roomTurn.ts `roomClockForFocus`). Null = no live focus. */
 export type PlateFocusLock = {
   unitId: string | null;
   label: string | null;
   endsAt?: number | null;
+  lifetimeEndsAt?: number | null;
   timeZone?: string;
 } | null;
 

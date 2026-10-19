@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { authedMutation, authedQuery, teacherQuery } from "./lib/customFunctions";
+import { unarchivePatch } from "./lib/teacherArchive";
 import {
   accessibleGroupScholars,
   canReadScholarAsTeacher,
@@ -1248,7 +1249,7 @@ export const undoResolveSuggestion = authedMutation({
       for (const sessionId of item.questClosedSessionIds ?? []) {
         const session = await ctx.db.get(sessionId);
         if (session?.userId === context.scholar._id) {
-          await ctx.db.patch(session._id, { isArchived: false });
+          await ctx.db.patch(session._id, unarchivePatch(session));
         }
       }
     }
@@ -1555,7 +1556,7 @@ export const undoCloseQuest = authedMutation({
     for (const sessionId of item.questClosedSessionIds) {
       const session = await ctx.db.get(sessionId);
       if (session?.userId === context.scholar._id) {
-        await ctx.db.patch(session._id, { isArchived: false });
+        await ctx.db.patch(session._id, unarchivePatch(session));
       }
     }
     await ctx.db.patch(item._id, {

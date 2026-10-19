@@ -168,6 +168,42 @@ describe("mintTranscriptionSecret", () => {
   });
 });
 
+describe("voiceInputAvailable", () => {
+  const voiceInputAvailable = makeFunctionReference<
+    "query",
+    Record<string, never>,
+    boolean
+  >("realtimeTranscription:voiceInputAvailable") as FunctionReference<
+    "query",
+    "public",
+    Record<string, never>,
+    boolean
+  >;
+
+  test("is false without OPENAI_API_KEY, so clients never pre-warm a mint that can only throw", async () => {
+    delete process.env.OPENAI_API_KEY;
+    const t = convexTest(schema, modules);
+    const asScholar = await withUser(t, await seedScholar(t));
+
+    await expect(asScholar.query(voiceInputAvailable, {})).resolves.toBe(false);
+  });
+
+  test("is false for a signed-out caller instead of throwing", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    const t = convexTest(schema, modules);
+
+    await expect(t.query(voiceInputAvailable, {})).resolves.toBe(false);
+  });
+
+  test("is true when the key is configured", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    const t = convexTest(schema, modules);
+    const asScholar = await withUser(t, await seedScholar(t));
+
+    await expect(asScholar.query(voiceInputAvailable, {})).resolves.toBe(true);
+  });
+});
+
 describe("recordTranscriptionUsage", () => {
   const recordTranscriptionUsage = makeFunctionReference<
     "mutation",

@@ -1,0 +1,14 @@
+n=400 exchanges (377 with a majority label)
+-- three-way (none < funneling < focusing) vs the 3-rater z-score
+   Spearman: expected value 0.731, label 0.648
+   paper: human leave-out .644; best trained model (RoBERTa) ~.76
+   exact match with the majority label: 70.6%
+   label mix  humans none 47% / funneling 31% / focusing 23%
+              judge  none 39% / funneling 44% / focusing 16%
+   confusion (rows = human majority, cols = judge), order none/funneling/focusing
+     none      [129, 36, 11]
+     funneling [14, 95, 7]
+     focusing  [8, 35, 42]
+-- funneling vs focusing only (exchanges with a follow-up prompt)
+   Spearman P(focusing | prompt) vs filtered z-score: 0.634  (n=290; paper: human leave-out .318)
+   agreement with majority: 76.1% (n=201; focusing base rate 42%, judge calls focusing 26%)

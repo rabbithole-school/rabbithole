@@ -148,6 +148,8 @@ import { useBuilderDeliverable } from "@/components/vibecode/useBuilderDeliverab
 import { APP_SURFACE_COPY } from "../../../vendor/shared/appSurface";
 import { AppPresentControls } from "@/components/vibecode/AppPresentControls";
 import { serverRefusal } from "../../../vendor/shared/serverErrorMessage";
+import { isTeacherArchived } from "../../../vendor/shared/teacherArchive";
+import { TeacherArchivedSession } from "@/components/TeacherArchivedSession";
 
 type VibecodeMessage = {
   id: string;
@@ -385,7 +387,7 @@ export function VibecodeScreen({
       });
     } catch (e) {
       console.warn("[free-play] start failed", e);
-      Alert.alert("Couldn't start free play", "Please try again.");
+      Alert.alert("Couldn't start free play", serverRefusal(e) ?? "Please try again.");
     } finally {
       setStartingFreePlay(false);
     }
@@ -1433,19 +1435,26 @@ export function VibecodeScreen({
   // code tools) feed this screen's preview. One launch per session, one
   // automatic retry on a dropped fetch, then the preview settles into the
   // stopped card.
+  // The Workshop opens by building on a teacher build hand-off (a test drive)
+  // or on a scholar's build-first Quest step (`scholarBuildKickoff`, which the
+  // server sets only for the session's owner). Same one-shot launch + retry.
+  const opensWithBuild =
+    (data?.session.isTestDrive === true &&
+      data.session.teacherBuildKickoff === true) ||
+    data?.session.scholarBuildKickoff === true;
   useEffect(() => {
     if (
       !data ||
       streaming ||
       kickoffPendingRef.current ||
-      data.session.isTestDrive !== true ||
-      data.session.teacherBuildKickoff !== true
+      !opensWithBuild
     ) {
       return;
     }
     // Same ownership/liveness guard the shell used before it handed this off.
     if (
       data.session.isArchived ||
+      isTeacherArchived(data.session) ||
       data.session.isOffline ||
       !me ||
       String(me._id) !== String(data.session.userId)
@@ -1552,7 +1561,7 @@ export function VibecodeScreen({
               platform: "native",
               supportsRenderCheck: true,
               kickoff: true,
-              // The teacher build kickoff builds the app — always Edit.
+              // A build kickoff (teacher or scholar) builds the app — always Edit.
               mode: "edit",
             }),
           });
@@ -1596,6 +1605,7 @@ export function VibecodeScreen({
     }, 0);
   }, [
     data,
+    opensWithBuild,
     streaming,
     me,
     sessionId,
@@ -1878,6 +1888,12 @@ export function VibecodeScreen({
         </View>
       </>
     );
+  }
+
+  // Put away by a teacher. The session route catches this before mounting the
+  // builder; this covers a builder already open when the archive lands.
+  if (isTeacherArchived(data.session)) {
+    return <TeacherArchivedSession title={headerTitle} />;
   }
 
   return (

@@ -23,6 +23,7 @@
 // teacher role + scholar-access boundary themselves (same pattern as
 // assignments.coreAideArchive / coreAideDispatchActivity).
 
+import { unarchivePatch } from "./lib/teacherArchive";
 import { v } from "convex/values";
 import {
   authedMutation,
@@ -174,7 +175,16 @@ export async function retractScholarQuestCore(
     .withIndex("by_unit", (q) => q.eq("unitId", unitId))
     .collect();
   for (const s of sessions) {
-    if (s.isArchived || s.isTestDrive) continue;
+    if (s.isTestDrive) continue;
+    // A teacher-archived app keeps its stamp, but a later restoreApp must
+    // come back to "retracted", not to its pre-archive state.
+    if (s.teacherArchivedAt != null) {
+      if (s.teacherArchivePriorArchived !== true) {
+        await ctx.db.patch(s._id, { teacherArchivePriorArchived: true });
+      }
+      continue;
+    }
+    if (s.isArchived) continue;
     await ctx.db.patch(s._id, { isArchived: true });
     sessionsArchived++;
   }
@@ -230,6 +240,15 @@ export async function reopenScholarQuestCore(
     .collect();
   for (const s of sessions) {
     if (!s.isArchived || s.isTestDrive) continue;
+    // An app a teacher put away stays put away; only sessions.restoreApp
+    // lifts it (review/teacher-archive-scholar-apps.html). The reopen still
+    // counts for what restore returns to, mirroring retract above.
+    if (s.teacherArchivedAt != null) {
+      if (s.teacherArchivePriorArchived !== false) {
+        await ctx.db.patch(s._id, unarchivePatch(s));
+      }
+      continue;
+    }
     await ctx.db.patch(s._id, { isArchived: false });
     sessionsUnarchived++;
   }

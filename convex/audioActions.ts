@@ -56,10 +56,14 @@ async function transcribeBlob(
   formData.append("language", "en");
   formData.append("response_format", "verbose_json");
 
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is not configured; cannot transcribe audio.");
+  }
   const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
     headers: {
-      Authorization: "Bearer " + process.env.OPENAI_API_KEY,
+      Authorization: "Bearer " + apiKey,
     },
     body: formData,
   });

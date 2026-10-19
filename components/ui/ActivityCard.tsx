@@ -93,6 +93,8 @@ export function ActivityCard({
   return (
     <Surface
       role="group"
+      // Chakra v3's _groupHover keys off the class, not the role.
+      className="group"
       position="relative"
       px={4}
       py={3}

@@ -1744,7 +1744,7 @@ export async function makeTutorSessionTools(
 
   const createCodeTool = betaTool({
     name: "create_code",
-    description: "Create an interactive code artifact that the scholar can see rendered live. Use this when the scholar is building something visual with HTML/CSS/JavaScript — a web page, a game, an animation, a data visualization, or any interactive project. The code will be rendered in a live preview sandbox. Write a single self-contained HTML file with inline CSS and JavaScript.",
+    description: "Write a whole app: an interactive code artifact the scholar sees rendered live. Use this when the scholar is building something visual with HTML/CSS/JavaScript — a web page, a game, an animation, a data visualization, or any interactive project. Write a single self-contained HTML file with inline CSS and JavaScript. If this session already has an app, create_code REWRITES that app in place as its next version (the scholar keeps the old one in History) — use it when a change is too big for str_replace. Set new_app to true only when the scholar wants a second, different app beside the one they have.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1756,10 +1756,54 @@ export async function makeTutorSessionTools(
           type: "string" as const,
           description: "Complete self-contained HTML file with inline <style> and <script> tags. Must be a valid HTML document. Use modern CSS and vanilla JavaScript — no external libraries unless loaded via CDN.",
         },
+        new_app: {
+          type: "boolean" as const,
+          description: "Only when the scholar wants a separate, different app alongside the existing one. Omit to rewrite the existing app as a new version.",
+        },
       },
       required: ["title", "code"] as const,
     },
     run: async (input) => {
+      // TRA-519 one app surface: a session's app is ONE artifact whose past
+      // lives in History. A rewrite of the app the builder has open is its
+      // next version, not a second same-titled app beside it.
+      const existing =
+        input.new_app === true
+          ? null
+          : await ctx.runQuery(internal.artifacts.aiFocusApp, {
+              sessionId: projId,
+              ...focusAppArg,
+            });
+      if (existing) {
+        const path = codeArtifactPath(String(existing._id));
+        const baseRevision = seenAppRevisions.get(String(existing._id));
+        // Failures throw a ToolError, like the app editor's, so the model sees
+        // an error result and the clients' build row closes.
+        const fail = (message: string): never => {
+          emit({ toolComplete: { name: "create_code", result: "Not rebuilt" } });
+          return editorFailure(message);
+        };
+        if (baseRevision === undefined) {
+          return fail(`${readRequiredMessage(path)} Then call create_code again to rewrite it.`);
+        }
+        const result = await ctx.runMutation(internal.artifacts.aiReplaceApp, {
+          sessionId: projId,
+          artifactId: existing._id,
+          content: input.code,
+          baseRevision,
+        });
+        if (result.kind === "conflict") {
+          seenAppRevisions.forget(String(existing._id));
+          return fail(`${staleFileMessage(path, result.artifact.revision)} The scholar may have edited it in the Code view; keep their changes.`);
+        }
+        if (result.kind !== "success") return fail(result.error);
+        state.createdCodeArtifact = true;
+        seenAppRevisions.see(String(existing._id), result.artifact.revision);
+        emit({ artifactUpdate: true });
+        emit({ toolComplete: { name: "create_code", result: `Rebuilt "${result.artifact.title}"` } });
+        await splitAfterTool("Rebuilt code artifact");
+        return `Rewrote "${result.artifact.title}" as its next version (revision ${result.artifact.revision}); the previous version stays in the scholar's History. Its title is unchanged; rename it with edit_document only if the scholar asks. Document ID: ${String(existing._id)}. Path: ${path}. Change it with ${CODE_EDITOR_TOOL_NAME} (str_replace or insert) on that path.`;
+      }
       const newArtifactId = await ctx.runMutation(internal.artifacts.aiCreate, {
         sessionId: projId,
         title: input.title,

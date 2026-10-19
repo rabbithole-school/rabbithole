@@ -1,4 +1,4 @@
-import { useAction, useMutation } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import * as Haptics from "expo-haptics";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, AppState } from "react-native";
@@ -85,12 +85,23 @@ function audioLevelFromStats(stats: unknown): number | null {
   return level;
 }
 
+// Shown when a scholar taps the mic on a deployment with no OpenAI key (the
+// public local runner). Voice is on-demand there: nothing is pre-warmed.
+// Mirrors the web hook's copy.
+export const VOICE_UNAVAILABLE_MESSAGE =
+  "Voice needs an OpenAI key, which isn't set up here. Type instead.";
+
 export function useStreamingDictation(
   onTranscript: (text: string) => void,
   sessionId?: Id<"sessions">,
   onDiagnostic?: (event: string) => void,
 ) {
   const legacy = useVoiceDictation(sessionId);
+  // undefined while loading: pre-warm waits for `true`, a tap proceeds as
+  // before, so a deployment WITH the key behaves exactly as it always did.
+  const voiceAvailable = useQuery(
+    api.realtimeTranscription.voiceInputAvailable,
+  );
   const mintTranscriptionSecret = useAction(
     api.realtimeTranscription.mintTranscriptionSecret,
   );
@@ -255,10 +266,11 @@ export function useStreamingDictation(
   // them), and nothing retries: a tripped budget breaker costs one call per
   // mount / foreground / take, never a loop.
   const prefetchSecret = useCallback(() => {
+    if (voiceAvailable !== true) return;
     if (streamingDisabledRef.current) return;
     if (!shouldPrefetchSecret(secretRef.current, Date.now())) return;
     mintSecret().catch(() => {});
-  }, [mintSecret]);
+  }, [mintSecret, voiceAvailable]);
 
   const getSecret = useCallback(async (): Promise<MintedSecret> => {
     const cached = secretRef.current;
@@ -279,8 +291,18 @@ export function useStreamingDictation(
     });
   }, [legacy, onTranscript]);
 
+  // `auto` marks a listen nobody tapped for (pre-reader auto-listen);
+  // `latched` only means "silence ends the take".
   const startRecording = useCallback(
-    async (opts?: { latched?: boolean }) => {
+    async (opts?: { latched?: boolean; auto?: boolean }) => {
+      if (voiceAvailable === false) {
+        // A hands-free listen stays silent; a tap explains.
+        if (!opts?.auto) {
+          setError(VOICE_UNAVAILABLE_MESSAGE);
+          Alert.alert("Voice isn't set up here", VOICE_UNAVAILABLE_MESSAGE);
+        }
+        return;
+      }
       if (streamingDisabledRef.current) {
         emitDiagnostic("streaming-disabled");
         // The legacy recorder has no voice-activity detection, so it can't
@@ -588,6 +610,7 @@ export function useStreamingDictation(
       setDictationState,
       startLevelMonitor,
       stopInputCapture,
+      voiceAvailable,
     ],
   );
 

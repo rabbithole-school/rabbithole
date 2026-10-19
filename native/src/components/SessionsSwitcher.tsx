@@ -12,22 +12,23 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { fonts, useColors } from "@/theme";
+import { HOME_ARCHIVE_COPY } from "../../vendor/shared/homeArchive";
 
 export type SessionsView = "active" | "archived";
 
+// "archived" is the internal view key AND the word the scholar sees: it holds
+// work they archived, completed work the plate has dropped, and apps a teacher
+// archived (shared/homeArchive.ts). Both values filter the current Home tab.
 const LABELS: Record<SessionsView, string> = {
-  active: "Active Sessions",
-  // "archived" is the internal view key; the surface now also holds completed
-  // class-focus work the plate has dropped, so it reads "Finished" (parity with
-  // the web "📦 Finished" section).
-  archived: "Finished",
+  active: HOME_ARCHIVE_COPY.activeFilter,
+  archived: HOME_ARCHIVE_COPY.archivedFilter,
 };
 
 /**
  * The Home nav title as a pull-down (the iOS title-menu pattern, à la Files /
- * Mail mailbox switcher): tapping "Active Sessions ▾" drops a 2-row menu to
- * switch the screen in place between the active plate and the archived list.
- * Makes the header real-estate work harder than a static title.
+ * Mail mailbox switcher): tapping it drops a 2-row Active / Archived menu, a
+ * filter that combines with the Home tab strip (review/home-finished-filter.html).
+ * The counts the caller passes are the counts for the CURRENT tab.
  */
 export function SessionsTitleSwitcher({
   view,
@@ -44,7 +45,7 @@ export function SessionsTitleSwitcher({
    * "title" (default): the nav-title pull-down (text + chevron, centered).
    * "filter": a compact icon button for the header's top-left slot — the
    * menu drops from the left. Filled/violet when a non-default filter
-   * ("Finished") is applied.
+   * ("Archived") is applied.
    */
   variant?: "title" | "filter";
 }) {

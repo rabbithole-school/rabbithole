@@ -415,6 +415,17 @@ const sessionTableFields = {
     sessionTimeLimit: v.optional(v.number()), // minutes
     sessionStartTime: v.optional(v.number()), // timestamp ms
     isArchived: v.boolean(),
+    // A teacher put this session's app away (sessions.archiveApp). Set only on
+    // a session holding a code artifact, always together with isArchived:
+    // true, and only a teacher can lift it (sessions.restoreApp). Every
+    // scholar path that could undo, use, read or relaunch the app refuses
+    // while it is set (convex/lib/teacherArchive.ts).
+    teacherArchivedAt: v.optional(v.number()),
+    // The session's own isArchived just before the teacher archive, so
+    // restoreApp puts back exactly what was there (a scholar's own archive or
+    // a Quest retract survives the round trip). Set and cleared with
+    // teacherArchivedAt.
+    teacherArchivePriorArchived: v.optional(v.boolean()),
     // Scholar intentionally re-entered a completed session to keep revising.
     // Completion remains in activityCompletions/scholarUnitBadges; this marker
     // only keeps the reopened work visible on the active plate.
@@ -2180,6 +2191,11 @@ export default defineSchema({
     .index("by_assignment", ["assignmentId"])
     // The Debrief's Key Moments roll up real sessions for one activity.
     .index("by_activity", ["activityId"])
+    // A scholar's sessions for one activity, any assignment: the teacher-
+    // archive relaunch hold (sessions.ts findTeacherArchivedSessionForActivity).
+    .index("by_user_activity", ["userId", "activityId"])
+    // A session's free-play copies (the teacher-archive lineage walk).
+    .index("by_free_play_of", ["freePlayOf"])
     // "Has this scholar already followed this seed?" for one seed, without
     // reading every session they own (the teacher Prep `bestNext` read).
     .index("by_user_seed", ["userId", "seedId"]),

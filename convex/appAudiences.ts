@@ -71,6 +71,8 @@ import {
   scholarInstitutionReadableInLens,
 } from "./lib/institutionLens";
 import { audienceInstitutionId } from "./lib/auditLog";
+import { externalAppWithinLens } from "./lib/externalAppReach";
+import { MAX_SCOPE_SCHOLARS } from "../shared/teacherAppsScope";
 
 /**
  * ⚠️ TENANCY GATE for every audience-grant WRITE (assign / unassign / enable
@@ -563,23 +565,355 @@ export const enablementForApp = scholarAdminQuery({
 });
 
 /**
- * The Apps tab home (§6.2): every non-archived catalog app with its live
- * audiences (as chips) + how many scholars have it directly (the "+N scholars"
- * chip). The one place to see every app AND who has it. The catalog stays whole
- * (every non-archived app appears), but audiences, the direct count, and the
- * facepile are scoped to the caller's tenant.
+ * The Apps tab home (§6.2): every catalog app with its live audiences (as
+ * chips) + how many scholars have it directly (the "+N scholars" chip). The
+ * one place to see every app AND who has it. The catalog stays whole, but
+ * audiences, the direct count, and the facepile are scoped to the caller's
+ * tenant. `includeArchived` adds archived apps, flagged, for the Archived
+ * filter.
+ *
+ * `scholarIds` is the teacher's scope picker (review/teacher-apps-v2-sketch.html
+ * §4): set, it narrows the catalog to apps those scholars can reach and narrows
+ * reach and timed access to them. Absent, the page shows everyone in scope.
+ *
+ * `now` (minute-rounded by the client, T11) adds each app's current-or-next
+ * timed window (`timed`): a live or planned push of the app, or a per-scholar
+ * "Open until…" grant. Boundaries are returned; the client words them.
  */
 export const listAppsWithAudiences = scholarAdminQuery({
-  args: { groupId: v.optional(v.id("scholarGroups")) },
-  handler: async (ctx, { groupId }) => {
+  args: {
+    groupId: v.optional(v.id("scholarGroups")),
+    scholarIds: v.optional(v.array(v.id("users"))),
+    now: v.optional(v.number()),
+    includeArchived: v.optional(v.boolean()),
+  },
+  handler: async (ctx, { groupId, scholarIds, now, includeArchived }) => {
     const scope = await requireScholarAdminScope(ctx, ctx.user._id);
-    return coreListAppsWithAudiences(ctx, {
-      includeArchived: false,
+    const focus = scholarIds
+      ? await scopeFocus(ctx, scope, scholarIds)
+      : null;
+    const sink: CatalogSink = { apps: new Map(), links: [] };
+    const allRows = await coreListAppsWithAudiences(ctx, {
+      includeArchived: includeArchived ?? false,
       groupId,
       scope,
+      focus,
+      sink,
     });
+    // An archived app reaches nobody, so the catalog-wide listing would show
+    // every school's archived apps. Keep only those this caller could restore:
+    // the same lens test setCatalogAppArchived applies (assertCatalogAppWritable).
+    const allowed = scope.scholars === "all" ? undefined : scope.scholars;
+    const rows = [];
+    for (const row of allRows) {
+      if (
+        row.archived &&
+        !(await externalAppWithinLens(
+          ctx,
+          row._id,
+          sink.apps.get(String(row._id))?.createdBy,
+          ctx.user._id,
+          allowed,
+        ))
+      ) {
+        continue;
+      }
+      rows.push(row);
+    }
+    const timedByApp =
+      now === undefined
+        ? new Map<string, AppTimedWindow>()
+        : await timedAccessByApp(ctx, scope, focus, now, sink);
+    const facts = await customAppFacts(ctx, rows);
+    const withTimed = rows.map((row) => {
+      const fact = facts.get(String(row._id));
+      return {
+        ...row,
+        timed: row.archived ? null : (timedByApp.get(String(row._id)) ?? null),
+        screenshotUrl: fact?.screenshotUrl ?? null,
+        // Timestamps only; the client sorts and words them (T11). An external
+        // app records no edit, so its lastEditedAt is null.
+        createdAt: sink.apps.get(String(row._id))?._creationTime ?? 0,
+        lastEditedAt: fact?.lastEditedAt ?? null,
+        hasLearningContract: fact?.hasLearningContract ?? false,
+      };
+    });
+    // A focused scope lists only what those scholars can reach. Archived apps
+    // reach nobody and stay listed for the Archived filter's Restore.
+    return focus
+      ? withTimed.filter(
+          (row) =>
+            row.archived ||
+            row.audiences.length > 0 ||
+            row.directScholarCount > 0 ||
+            row.timed !== null,
+        )
+      : withTimed;
   },
 });
+
+/** The scholars a scoped Apps view narrows to: the picker's ids, kept only
+ *  where the caller's tenant scope reaches (`isScholarInScope`), with each
+ *  one's school so an institution-wide grant can be judged against them. */
+type ScopeFocus = {
+  scholars: Doc<"users">[];
+  scholarIds: Set<string>;
+  institutionIds: Set<string>;
+};
+
+/** What coreListAppsWithAudiences already read, handed on so the timed-access
+ *  pass doesn't collect the catalog and its direct rows a second time. */
+type CatalogSink = {
+  apps: Map<string, Doc<"externalApps">>;
+  links: Doc<"scholarApps">[];
+};
+
+/** What a custom catalog app's `customApps` row says about it, read in the one
+ *  pass the card image already needed:
+ *   • screenshotUrl — the screenshot it carries (`thumbnailStorageId`), when
+ *     it has one. No other source.
+ *   • lastEditedAt — `customApps.updatedAt`, which every write of the app's
+ *     HTML stamps (createStaticApp, updateStaticApp, starter promotion);
+ *     a legacy row without it falls back to its own creation.
+ *   • hasLearningContract — some un-archived activity starts scholars from
+ *     this app (`activities.starterAppId`, the link
+ *     make_app_a_coached_activity writes) and carries a `buildContract`.
+ *  External (web, native) apps have no such row: no image, no recorded edit,
+ *  and no contract (a web activity carries no mission, lib/buildContract.ts). */
+type CustomAppFacts = {
+  screenshotUrl: string | null;
+  lastEditedAt: number;
+  hasLearningContract: boolean;
+};
+
+async function customAppFacts(
+  ctx: QueryCtx,
+  rows: Array<{ _id: Id<"externalApps">; appKind: string }>,
+): Promise<Map<string, CustomAppFacts>> {
+  const out = new Map<string, CustomAppFacts>();
+  if (!rows.some((row) => row.appKind === "custom")) return out;
+  const live = await ctx.db
+    .query("customApps")
+    .withIndex("by_status", (q) => q.eq("status", "live"))
+    .collect();
+  const wanted = new Set(rows.map((row) => String(row._id)));
+  for (const app of live) {
+    if (!app.externalAppId) continue;
+    if (!wanted.has(String(app.externalAppId))) continue;
+    const screenshotUrl = app.thumbnailStorageId
+      ? await ctx.storage.getUrl(app.thumbnailStorageId)
+      : null;
+    const coached = await ctx.db
+      .query("activities")
+      .withIndex("by_starterAppId", (q) => q.eq("starterAppId", app._id))
+      .collect();
+    out.set(String(app.externalAppId), {
+      screenshotUrl,
+      lastEditedAt: app.updatedAt ?? app._creationTime,
+      hasLearningContract: coached.some(
+        (activity) => !activity.archivedAt && activity.buildContract != null,
+      ),
+    });
+  }
+  return out;
+}
+
+async function scopeFocus(
+  ctx: QueryCtx,
+  scope: ExternalAppScope,
+  scholarIds: Id<"users">[],
+): Promise<ScopeFocus> {
+  const inScope = [...new Set(scholarIds)]
+    .filter((id) => isScholarInScope(scope, id))
+    .slice(0, MAX_SCOPE_SCHOLARS);
+  const scholars = (await Promise.all(inScope.map((id) => ctx.db.get(id)))).filter(
+    (u): u is Doc<"users"> => u !== null,
+  );
+  const institutionIds = new Set<string>();
+  for (const scholar of scholars) {
+    const iid = await scholarInstitutionId(ctx, scholar._id);
+    if (iid) institutionIds.add(String(iid));
+  }
+  return {
+    scholars,
+    scholarIds: new Set(scholars.map((s) => String(s._id))),
+    institutionIds,
+  };
+}
+
+/** One app's current-or-next timed window for the Apps page chip. */
+export type AppTimedWindow = {
+  state: "live" | "next";
+  source: "push" | "schedule" | "grant";
+  startsAt: number;
+  /** Live: when it is expected to stop showing. Next: the planned end. */
+  endsAt: number | null;
+  /** Who it covers, as the push or grant names them. */
+  audience: string;
+  timeZone: string;
+};
+
+/**
+ * The current-or-next timed window per app, for the scope (or the focused
+ * scholars). Pushes are read from `openAppPushesForInstitution` and judged
+ * with the tile's own predicates (`isPushShowing`, `liveUntil`,
+ * `pushCoversScholar`), as `appPushAccess` does; a planned push (no `setAt`,
+ * `startsAt` ahead) is the "next" window the master schedule materialized.
+ * A live window wins over a planned one; among live ones the one lasting
+ * longest, among planned ones the soonest.
+ */
+async function timedAccessByApp(
+  ctx: QueryCtx,
+  scope: ExternalAppScope,
+  focus: ScopeFocus | null,
+  now: number,
+  sink: CatalogSink,
+): Promise<Map<string, AppTimedWindow>> {
+  const best = new Map<string, AppTimedWindow>();
+  const offer = (appId: string, w: AppTimedWindow) => {
+    const cur = best.get(appId);
+    if (!cur) return void best.set(appId, w);
+    if (w.state !== cur.state) {
+      if (w.state === "live") best.set(appId, w);
+      return;
+    }
+    if (w.state === "live") {
+      if ((w.endsAt ?? Infinity) > (cur.endsAt ?? Infinity)) best.set(appId, w);
+    } else if (w.startsAt < cur.startsAt) {
+      best.set(appId, w);
+    }
+  };
+
+  const institutions =
+    scope.institutions === "all"
+      ? await ctx.db.query("institutions").collect()
+      : (
+          await Promise.all([...scope.institutions].map((id) => ctx.db.get(id)))
+        ).filter((i): i is Doc<"institutions"> => i !== null);
+
+  // Only apps the listing holds get a window; an archived app is never
+  // visible on a tile, and one the listing dropped has no row to carry it.
+  const appIsVisible = (appId: Id<"externalApps">) =>
+    catalogAppIsVisible(sink.apps.get(String(appId)) ?? null);
+
+  for (const institution of institutions) {
+    if (focus && !focus.institutionIds.has(String(institution._id))) continue;
+    const { pushes, clock } = await openAppPushesForInstitution(
+      ctx,
+      institution._id,
+      now,
+    );
+    if (pushes.length === 0) continue;
+
+    // Build each focused scholar's audience context from just the groups and
+    // assignments these pushes reference, so pushCoversScholar decides.
+    let covers: (push: Doc<"pushes">) => boolean = () => true;
+    if (focus) {
+      const groups = new Map<string, Doc<"scholarGroups">>();
+      const assignments = new Map<string, Doc<"assignments">>();
+      for (const push of pushes) {
+        if (push.audience.kind === "group") {
+          const g = await ctx.db.get(push.audience.groupId);
+          if (g) groups.set(String(g._id), g);
+        } else if (push.audience.kind === "assignment") {
+          const a = await ctx.db.get(push.audience.assignmentId);
+          if (a) assignments.set(String(a._id), a);
+        }
+      }
+      const contexts = await Promise.all(
+        focus.scholars.map(async (scholar) => ({
+          scholarId: scholar._id,
+          institutionId: await scholarInstitutionId(ctx, scholar._id),
+          groupIds: [...groups.values()]
+            .filter((g) => g.scholarIds.includes(scholar._id))
+            .map((g) => g._id),
+          assignmentIds: [...assignments.values()]
+            .filter((a) => a.scholarIds.includes(scholar._id))
+            .map((a) => a._id),
+        })),
+      );
+      covers = (push) => contexts.some((c) => pushCoversScholar(push, c));
+    }
+
+    for (const push of pushes) {
+      if (push.target.kind !== "app") continue;
+      if (!covers(push)) continue;
+      const appId = push.target.externalAppId;
+      if (!appIsVisible(appId)) continue;
+      const source = push.schedulePlacementId ? "schedule" : "push";
+      const live = isPushShowing(push, clock);
+      const planned =
+        push.setAt === undefined &&
+        push.startsAt !== undefined &&
+        push.startsAt > now;
+      if (!live && !planned) continue;
+      const audience = await pushAudienceLabel(
+        ctx,
+        push.audience,
+        institution.name,
+      );
+      if (audience === null) continue;
+      offer(String(appId), {
+        state: live ? "live" : "next",
+        source,
+        startsAt: push.startsAt ?? push.setAt ?? now,
+        endsAt: live ? liveUntil(push, clock) : pushExpiresAt(push.timing),
+        audience,
+        timeZone: clock.timeZone,
+      });
+    }
+  }
+
+  // "Open until…" grants: a direct add with an expiry still ahead, from the
+  // direct rows the listing already read.
+  await offerGrants(
+    ctx,
+    sink.links.filter(
+      (l) =>
+        l.expiresAt !== undefined &&
+        l.expiresAt > now &&
+        isScholarInScope(scope, l.scholarId) &&
+        (!focus || focus.scholarIds.has(String(l.scholarId))),
+    ),
+    offer,
+    appIsVisible,
+    now,
+  );
+  return best;
+}
+
+async function offerGrants(
+  ctx: QueryCtx,
+  links: Doc<"scholarApps">[],
+  offer: (appId: string, w: AppTimedWindow) => void,
+  appIsVisible: (appId: Id<"externalApps">) => boolean,
+  now: number,
+) {
+  const byApp = new Map<string, Doc<"scholarApps">[]>();
+  for (const l of links) {
+    if (!l.enabled || l.source === "grant") continue;
+    const list = byApp.get(String(l.appId)) ?? [];
+    list.push(l);
+    byApp.set(String(l.appId), list);
+  }
+  for (const [appId, list] of byApp) {
+    if (!appIsVisible(list[0].appId)) continue;
+    const last = list.reduce((a, b) => ((a.expiresAt ?? 0) >= (b.expiresAt ?? 0) ? a : b));
+    const scholar = list.length === 1 ? await ctx.db.get(last.scholarId) : null;
+    const iid = await scholarInstitutionId(ctx, last.scholarId);
+    offer(appId, {
+      state: "live",
+      source: "grant",
+      startsAt: now,
+      endsAt: last.expiresAt ?? null,
+      audience:
+        list.length === 1
+          ? (scholar?.name ?? scholar?.username ?? "1 scholar")
+          : `${list.length} scholars`,
+      timeZone: iid ? await timeZoneForInstitution(ctx, iid) : "UTC",
+    });
+  }
+}
 
 /** Shared row-builder for the Apps-home list + the aide `list_external_apps`
  *  tool. `includeArchived` keeps archived apps (flagged) so the bot can list
@@ -595,9 +929,15 @@ async function coreListAppsWithAudiences(
      *  every grant) and is used only by internal callers that pass none. The
      *  scope never filters the app rows themselves — the catalog stays whole. */
     scope?: ExternalAppScope | null;
+    /** The Apps page's scope picker: narrows audiences and direct adds to the
+     *  grants that reach these scholars. Null = no narrowing. */
+    focus?: ScopeFocus | null;
+    /** Filled with the apps and direct rows read, for a caller's second pass. */
+    sink?: CatalogSink;
   },
 ) {
   const scope = opts.scope ?? null;
+  const focus = opts.focus ?? null;
   const group = opts.groupId ? await ctx.db.get(opts.groupId) : null;
   // Scope-check the group, with the SAME message as "doesn't exist" — otherwise
   // a valid FOREIGN id succeeds where an invalid one throws, which is an
@@ -639,7 +979,10 @@ async function coreListAppsWithAudiences(
                 grant.audienceKind !== "institution" ||
                 grant.audienceId === String(group.institutionId),
             );
-      const applicableGrants = await grantsInScope(ctx, groupFiltered, scope);
+      const scopedGrants = await grantsInScope(ctx, groupFiltered, scope);
+      const applicableGrants = focus
+        ? await grantsReachingFocus(ctx, scopedGrants, focus)
+        : scopedGrants;
       const audiences = await Promise.all(
         applicableGrants.map(async (g) => {
           const meta = await resolveAudienceMeta(
@@ -664,10 +1007,15 @@ async function coreListAppsWithAudiences(
         .query("scholarApps")
         .withIndex("by_app", (q) => q.eq("appId", app._id))
         .collect();
+      if (opts.sink) {
+        opts.sink.apps.set(String(app._id), app);
+        opts.sink.links.push(...links);
+      }
       const directLinks = links.filter(
         (l) =>
           (l.source === "manual" || l.source === "default") &&
-          (!scope || isScholarInScope(scope, l.scholarId)),
+          (!scope || isScholarInScope(scope, l.scholarId)) &&
+          (!focus || focus.scholarIds.has(String(l.scholarId))),
       );
       const directScholarCount = directLinks.length;
       // Tiny slice of scholar info for the DRY <ScholarFacepile> — first
@@ -718,6 +1066,28 @@ async function coreListAppsWithAudiences(
     }),
   );
   return rows.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Keep the grants whose audience includes at least one focused scholar: a
+ *  group with one of them on its roster, or a school one of them attends. */
+async function grantsReachingFocus(
+  ctx: QueryCtx,
+  grants: Doc<"appAudiences">[],
+  focus: ScopeFocus,
+): Promise<Doc<"appAudiences">[]> {
+  const out: Doc<"appAudiences">[] = [];
+  for (const grant of grants) {
+    if (grant.audienceKind === "institution") {
+      if (focus.institutionIds.has(grant.audienceId)) out.push(grant);
+      continue;
+    }
+    const gid = ctx.db.normalizeId("scholarGroups", grant.audienceId);
+    const group = gid ? await ctx.db.get(gid) : null;
+    if (group?.scholarIds.some((id) => focus.scholarIds.has(String(id)))) {
+      out.push(grant);
+    }
+  }
+  return out;
 }
 
 // ── "Who can use this app" read (audiences + direct scholars, by name) ─────

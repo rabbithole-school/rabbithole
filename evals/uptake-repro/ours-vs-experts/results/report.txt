@@ -1,0 +1,16 @@
+exchanges with a follow-up prompt: 290 (majority focusing 85, funneling 116, no majority 89)
+
+dimension              scored  Spearman vs z  AUC focus>funnel   mean on focusing / funneling
+socratic                  290          0.282             0.616   2.89 / 2.49
+overScaffolding           290          0.369             0.698   3.27 / 2.57
+followUpQuality           236          0.320             0.633   2.76 / 2.33
+noviceStance               79          0.207             0.709   3.18 / 2.50
+cognitiveOffloading       290          0.280             0.670   4.55 / 3.78
+noSpoilers                290          0.249             0.652   4.71 / 4.14
+
+socratic: rated 4–5 on 14% of expert-funneling replies, 31% of expert-focusing replies
+
+overScaffolding: rated 4–5 on 21% of expert-funneling replies, 39% of expert-focusing replies
+
+reference: codebook judge P(focusing | prompt)  Spearman 0.633  AUC 0.878  (n=290)
+reference: paper's human leave-out Spearman on this split .318

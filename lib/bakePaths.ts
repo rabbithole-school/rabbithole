@@ -4,14 +4,16 @@
 // the shared shape + the visual accents the menu cycles through.
 
 import type { Id } from "@/convex/_generated/dataModel";
-import { BUILD_SIMULATION_PATH } from "@/shared/missionCopy";
+import { BUILD_IT_PATH as BUILD_IT_COPY, BUILD_SIMULATION_PATH } from "@/shared/missionCopy";
 
 export interface SuggestedPath {
   emoji: string;
   title: string;
   blurb: string;
-  /** "build" marks the fixed "Build a simulation" card; the bake keys on it. */
-  shape?: "build";
+  /** "build" marks the fixed "Build a simulation" card; "buildFirst" the
+   * menu-less build a Custom Quest starts when the scholar already described
+   * the thing to make. The bake keys on it. */
+  shape?: "build" | "buildFirst";
 }
 
 /**
@@ -36,12 +38,16 @@ export type PathChoice = SuggestedPath | typeof ENDLESS_CHAT;
 /** The always-offered build path (TRA-519 B4), as a pickable path. */
 export const BUILD_PATH: SuggestedPath = { ...BUILD_SIMULATION_PATH };
 
+/** The path a Custom Quest launches with when `suggestBakePaths` reports
+ * `specificBuild`: the menu is skipped and the quest is that one build. */
+export const BUILD_IT_PATH: SuggestedPath = { ...BUILD_IT_COPY };
+
 /** The `bakePath` argument a launch sends for a choice; none for endless chat.
  * Carries `shape` so the bake can key on it (never on the title). Native twin:
  * `bakePathArg` in native/src/components/BakePathPicker.tsx. */
 export function bakePathArg(
   choice: PathChoice,
-): { title: string; blurb: string; shape?: "build" } | undefined {
+): { title: string; blurb: string; shape?: "build" | "buildFirst" } | undefined {
   if (choice === ENDLESS_CHAT) return undefined;
   return {
     title: choice.title,

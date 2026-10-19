@@ -42,6 +42,8 @@ import {
 import { SessionInterface } from "@/components/SessionInterface";
 import { WorkbenchSurface } from "@/components/workbench/WorkbenchSurface";
 import { VibecodeWorkshop } from "@/components/vibecode/VibecodeWorkshop";
+import { ScholarArchivedAppPane } from "@/components/TeacherArchivedApp";
+import { isTeacherArchived } from "@/shared/teacherArchive";
 import { ManualRehearsalBanner } from "@/components/ManualRehearsalBanner";
 import { flushAllArtifactSaves } from "@/components/ArtifactPanel";
 import { AppLogo } from "@/components/AppLogo";
@@ -422,6 +424,15 @@ function ScholarSessionInner() {
   const showBuilder =
     isBuilderPrimary ||
     (searchParams.get("view") === "builder" && !isWorkbench);
+  // A teacher put this app away: the scholar gets one calm state in place of
+  // every surface (no app frame, no composer, no Present), and no surface
+  // mounts, so no kickoff or tutor turn can fire. Staff (remote mode or not)
+  // still read the session (review/teacher-archive-scholar-apps.html §5).
+  const showScholarArchived =
+    !!currentSession &&
+    isTeacherArchived(currentSession) &&
+    !isRemoteMode &&
+    !isTeacherRole(user?.role);
 
   return (
     <Flex
@@ -650,6 +661,11 @@ function ScholarSessionInner() {
             <Flex flex={1} align="center" justify="center">
               <Spinner size="xl" color="violet.500" />
             </Flex>
+          ) : showScholarArchived && currentSession ? (
+            <ScholarArchivedAppPane
+              title={currentSession.title}
+              onBackHome={() => router.push(stamp("/scholar"))}
+            />
           ) : isWorkbench ? (
             <ErrorBoundary fallbackMessage="Something went wrong in the Workbench">
               <WorkbenchSurface

@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import type { Id } from "./_generated/dataModel";
 import {
   buildBakeInstruction,
+  isBuildFirstPath,
   isBuildPath,
   orderLearnBeforeBuild,
   parseBakeStageMarker,
@@ -55,6 +56,7 @@ describe("parseBakeStageMarker", () => {
     expect(parseBakeStageMarker("Requires a real comparison table.")).toBeNull();
     expect(parseBakeStageMarker("[bake-stage:watch] Explain a video.")).toBeNull();
     expect(parseBakeStageMarker("[bake-stage:commit]")).toBeNull();
+    expect(parseBakeStageMarker("[bake-stage:build] Runs once.")?.stage).toBe("build");
   });
 });
 
@@ -82,6 +84,21 @@ describe("build-path bake (TRA-519 B4)", () => {
     expect(instruction).toContain("3-4 ONLINE activities");
     expect(instruction).not.toContain('kind:"app"');
     expect(isBuildPath({ title: "Build a simulation", blurb: "x" })).toBe(false);
+  });
+});
+
+describe("build-first bake", () => {
+  test("a buildFirst path asks for exactly one app activity and no learning step", () => {
+    const instruction = buildBakeInstruction({
+      ...spec("A game called Canine rotation where a noodly dog teaches angles"),
+      path: { title: "Build it", blurb: "Build the thing you described.", shape: "buildFirst" },
+    });
+    expect(instruction).toContain("EXACTLY ONE activity");
+    expect(instruction).toContain('kind:"app"');
+    expect(instruction).toContain("[bake-stage:build]");
+    expect(instruction).not.toContain("STAY ON THE SCHOLAR'S ACTUAL QUESTION");
+    expect(isBuildFirstPath({ title: "Build it", blurb: "x", shape: "buildFirst" })).toBe(true);
+    expect(isBuildPath({ title: "Build it", blurb: "x", shape: "buildFirst" })).toBe(false);
   });
 });
 

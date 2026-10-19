@@ -26,12 +26,11 @@ import {
   Button,
   Flex,
   HStack,
-  IconButton,
   Spinner,
   Stack,
   Text,
 } from "@chakra-ui/react";
-import { Archive, ArrowCounterClockwise, Cards, Clock, Lock, Plus } from "@phosphor-icons/react";
+import { Cards, Clock, Lock, Plus } from "@phosphor-icons/react";
 import { api } from "@/convex/_generated/api";
 import { toaster } from "@/lib/toaster";
 import { ActivityModeIcon } from "@/lib/activityMode";
@@ -47,6 +46,7 @@ import { useRemote } from "@/hooks/useRemote";
 import { PeerTrails } from "@/components/PeerTrails";
 import { QuestionQueueList } from "@/components/QuestionQueue";
 import { CreateQuestDialog } from "@/components/CreateQuestDialog";
+import { HomeArchiveButton } from "@/components/HomeArchiveButton";
 import { ActivityCard, ActivityCardCta, ActivityCardMeta, ActivityCardTitle } from "@/components/ui/ActivityCard";
 import { DueChip } from "@/components/ui/DueChip";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -58,11 +58,11 @@ import {
   type PlateFocusLock,
 } from "@/lib/focusLock";
 import {
-  classFocusPlateLine,
-  formatRoomTurnTime,
+  liveFocusLine,
 } from "@/shared/roomTurn";
 import { useRoomTurnPhase } from "@/hooks/useRoomTurnPhase";
 import { filterRowsForTab } from "@/shared/scholarHomeNow";
+import { HOME_ARCHIVE_COPY } from "@/shared/homeArchive";
 
 type PlateResult = NonNullable<
   ReturnType<typeof useQuery<typeof api.scholarPlate.activeForMe>>
@@ -152,7 +152,9 @@ export function ScholarPlate({
 }) {
   const isRemoteMode = !!userId;
   const isQuestTab = tabKey === "quests";
-  const isAssignedTab = tabKey !== undefined && !isQuestTab;
+  // Apps lists the scholar's own builds from every lane, under one heading.
+  const isAppsTab = tabKey === "apps";
+  const isAssignedTab = tabKey !== undefined && !isQuestTab && !isAppsTab;
 
   // One 60s clock for the whole plate — threaded to every PlateRowCard via
   // PlateNowContext so an overdue-homework card mounted across institution
@@ -249,7 +251,15 @@ export function ScholarPlate({
             <OnboardingPin pin={result.onboarding} interactive={!isRemoteMode} />
           </Stack>
         )}
-        {SECTIONS.map((section) => {
+        {isAppsTab && (
+          <AppsYouBuiltSection
+            rows={filterRowsForTab(result.rows, "apps")}
+            onOpenUnitProgress={onOpenUnitProgress}
+            activeSessions={activeSessions}
+            focusLock={focusLock}
+          />
+        )}
+        {!isAppsTab && SECTIONS.map((section) => {
           if (isQuestTab && section.origin !== "is") return null;
           if (isAssignedTab && section.origin === "is") return null;
           const sectionRows = bySection[section.origin];
@@ -368,6 +378,85 @@ export function OnboardingPin({
   );
 }
 
+// ── Unit buckets — one per unit × assignment (anchorless rows share one),
+//    most recently touched first ─────────────────────────────────────
+type PlateBucket = {
+  unitId: Id<"units"> | null;
+  unitTitle: string | null;
+  unitEmoji: string | null;
+  unitCompletedCount: number | null;
+  unitActivityCount: number | null;
+  assignmentId?: Id<"assignments">;
+  teacherName?: string;
+  teacherImage?: string;
+  rows: PlateRow[];
+  sortKey: number;
+};
+
+function bucketPlateRows(rows: PlateRow[]): PlateBucket[] {
+  const bucketMap = new Map<string, PlateBucket>();
+  for (const r of rows) {
+    const key = r.unitId ? `${r.unitId}:${r.assignmentId ?? ""}` : "_anchorless";
+    const existing = bucketMap.get(key);
+    if (existing) {
+      existing.rows.push(r);
+      if (r.lastTouched > existing.sortKey) existing.sortKey = r.lastTouched;
+    } else {
+      bucketMap.set(key, {
+        unitId: r.unitId, unitTitle: r.unitTitle, unitEmoji: r.unitEmoji,
+        assignmentId: r.assignmentId,
+        unitCompletedCount: r.unitCompletedCount, unitActivityCount: r.unitActivityCount,
+        teacherName: r.teacherName, teacherImage: r.teacherImage,
+        rows: [r], sortKey: r.lastTouched,
+      });
+    }
+  }
+  return Array.from(bucketMap.values()).sort((a, b) => b.sortKey - a.sortKey);
+}
+
+function bucketKey(b: PlateBucket, i: number): string {
+  return b.unitId ? `${b.unitId}:${b.assignmentId ?? ""}` : `_anchorless_${i}`;
+}
+
+// ── Apps you built — the Apps tab's list of the scholar's own builds ──
+// One flat section under one heading (whatever lane each build came from),
+// drawn with the same unit-bucket rows every other tab uses (T1). Renders
+// nothing when the scholar has no build in progress.
+function AppsYouBuiltSection({
+  rows,
+  onOpenUnitProgress,
+  activeSessions,
+  focusLock,
+}: {
+  rows: PlateRow[];
+  onOpenUnitProgress?: (
+    unitId: Id<"units">,
+    assignmentId?: Id<"assignments">,
+  ) => void;
+  activeSessions: ActiveSession[] | undefined;
+  focusLock: PlateFocusLock;
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <Stack gap={4}>
+      <ScholarHomeSectionHeader>
+        {HOME_ARCHIVE_COPY.appsYouBuilt}
+      </ScholarHomeSectionHeader>
+      <Stack gap={5}>
+        {bucketPlateRows(rows).map((b, i) => (
+          <ScholarPlateActivityGroup
+            key={bucketKey(b, i)}
+            rows={b.rows}
+            onOpenUnitProgress={onOpenUnitProgress}
+            activeSessions={activeSessions}
+            focusLock={focusLock}
+          />
+        ))}
+      </Stack>
+    </Stack>
+  );
+}
+
 // ── Section ──────────────────────────────────────────────────────────
 function PlateSection({
   section,
@@ -417,38 +506,7 @@ function PlateSection({
   // a playable quest read as a contradiction (pilot9 J8b).
   const gateNote = "Custom Quests unlock after you finish Welcome";
   const hasQuestContent = rows.length > 0 || isUnitCards.length > 0;
-  type Bucket = {
-    unitId: Id<"units"> | null;
-    unitTitle: string | null;
-    unitEmoji: string | null;
-    unitCompletedCount: number | null;
-    unitActivityCount: number | null;
-    assignmentId?: Id<"assignments">;
-    teacherName?: string;
-    teacherImage?: string;
-    rows: PlateRow[];
-    sortKey: number;
-  };
-  const bucketMap = new Map<string, Bucket>();
-  for (const r of rows) {
-    const key = r.unitId ? `${r.unitId}:${r.assignmentId ?? ""}` : "_anchorless";
-    const existing = bucketMap.get(key);
-    if (existing) {
-      existing.rows.push(r);
-      if (r.lastTouched > existing.sortKey) existing.sortKey = r.lastTouched;
-    } else {
-      bucketMap.set(key, {
-        unitId: r.unitId, unitTitle: r.unitTitle, unitEmoji: r.unitEmoji,
-        assignmentId: r.assignmentId,
-        unitCompletedCount: r.unitCompletedCount, unitActivityCount: r.unitActivityCount,
-        teacherName: r.teacherName, teacherImage: r.teacherImage,
-        rows: [r], sortKey: r.lastTouched,
-      });
-    }
-  }
-  const sortedBuckets = Array.from(bucketMap.values()).sort(
-    (a, b) => b.sortKey - a.sortKey,
-  );
+  const sortedBuckets = bucketPlateRows(rows);
   const buckets =
     section.origin === "classFocus"
       ? prioritizeFocusedUnit(sortedBuckets, focusLock)
@@ -547,7 +605,7 @@ function PlateSection({
         <Stack gap={5}>
           {buckets.map((b, i) => (
             <ScholarPlateActivityGroup
-              key={String(b.unitId ? `${b.unitId}:${b.assignmentId ?? ""}` : `_anchorless_${i}`)}
+              key={bucketKey(b, i)}
               rows={b.rows}
               onOpenUnitProgress={onOpenUnitProgress}
               activeSessions={activeSessions}
@@ -1032,11 +1090,8 @@ function PlateRowCard({
 }) {
   const { stamp, remote } = useRemote();
   const router = useRouter();
-  const archive = useMutation(api.sessions.archive);
-  const unarchive = useMutation(api.sessions.unarchive);
   const createSession = useMutation(api.sessions.create);
   const openOfflineHomework = useMutation(api.sessions.openOfflineHomework);
-  const [isHovered, setIsHovered] = useState(false);
   const [starting, setStarting] = useState(false);
 
   const isOfflineHomework =
@@ -1049,11 +1104,8 @@ function PlateRowCard({
     !!focusLock?.unitId &&
     String(row.unitId ?? "") === focusLock.unitId;
   const roomPhase = useRoomTurnPhase(matchesLiveFocus ? focusLock?.endsAt ?? null : null);
-  const roomTimeLabel =
-    matchesLiveFocus && focusLock?.endsAt != null && focusLock.timeZone
-      ? formatRoomTurnTime(focusLock.endsAt, focusLock.timeZone)
-      : null;
-  const roomTurnLine = matchesLiveFocus ? classFocusPlateLine(roomPhase, roomTimeLabel) : null;
+  const roomTurnLine =
+    matchesLiveFocus && focusLock ? liveFocusLine(roomPhase, focusLock) : null;
 
   // Secondary overdue read on All / subject cards: a tiny "was due X" subline
   // on past-due homework (the same orange/vocabulary as the Now pill). The
@@ -1074,14 +1126,6 @@ function PlateRowCard({
   // selection is the plate's; the RENDERING is not, and now goes through the
   // one shared DueChip (review/scholar-activity-row-rationalization.html §4).
   const isOverdue = dueInfo?.status === "overdue";
-
-  const handleArchive = async (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!row.sessionId) return;
-    if (row.isArchived) await unarchive({ id: row.sessionId });
-    else await archive({ id: row.sessionId });
-  };
 
   // Card context: every card leans on the unit/activity's authored blurb
   // (`row.description` — now the scholar-facing one) so the cards are
@@ -1181,16 +1225,10 @@ function PlateRowCard({
       ? 0.6
       : 1;
 
+  // Any session-backed row can be archived (it then lists under the tab's
+  // Archived section). A not-started row has no session to archive.
   const archiveButton = row.sessionId ? (
-    <IconButton
-      aria-label={row.isArchived ? "Restore" : "Archive"}
-      size="xs" variant="ghost" color="charcoal.300"
-      _hover={{ color: "charcoal.600", bg: "gray.100" }}
-      visibility={isHovered ? "visible" : "hidden"}
-      onClick={handleArchive}
-    >
-      {row.isArchived ? <ArrowCounterClockwise size={14} /> : <Archive size={14} />}
-    </IconButton>
+    <HomeArchiveButton sessionId={row.sessionId} archived={row.isArchived} />
   ) : undefined;
 
   const cta = (
@@ -1262,8 +1300,6 @@ function PlateRowCard({
         trailing={archiveButton}
         cta={cta}
         secondaryAction={secondaryAction}
-        onMouseEnter={() => setIsHovered(true)}
-        onMouseLeave={() => setIsHovered(false)}
       >
         {body}
       </UnitGroupRow>
@@ -1284,8 +1320,6 @@ function PlateRowCard({
       href={href}
       onClick={onClick}
       opacity={opacity}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
       trailing={archiveButton}
       cta={cta}
       secondaryAction={secondaryAction}

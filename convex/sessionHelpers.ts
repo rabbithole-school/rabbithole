@@ -18,6 +18,7 @@ import { resolveSessionMission, type SessionMission } from "./lib/mission";
 import {
   lockedQuestBuildTitleFor,
   openQuestBuildTitleFor,
+  scholarBuildKickoffFor,
 } from "./lib/questBuildLock";
 import {
   deriveGranuleStatuses,
@@ -1113,6 +1114,14 @@ export const getSessionContext = internalQuery({
       },
     );
 
+    // BUILD FIRST (lib/mission.ts isScholarBuildKickoff): the opening turn of
+    // a build-first Quest step builds the scholar's app instead of the generic
+    // greeting (sessionStreamHelpers kickoffInstructionForContext). Same rule
+    // as getWithMessages' `scholarBuildKickoff`; only an opening turn reads it.
+    const scholarBuildKickoff = isFirstTurn
+      ? await scholarBuildKickoffFor(ctx, { session, unit, activity })
+      : false;
+
     // Recent game evidence from this lesson. Read through contextUserId so a
     // real-scholar Test Drive sees that scholar's rounds, while a synthetic
     // Test Drive performs no scholar-keyed lookup at all.
@@ -1755,6 +1764,7 @@ export const getSessionContext = internalQuery({
       parkingLot: session.parkingLot ?? [],
       // The session's MISSION (lib/mission.ts); null for exploration.
       mission,
+      scholarBuildKickoff,
       freePlay: appContext.builderStance && session.freePlay === true,
       isTestDrive: !!session.isTestDrive,
       sessionMode: session.sessionMode ?? null,
@@ -1803,6 +1813,9 @@ export const getSessionContext = internalQuery({
       accessScholarId: session.isTestDrive
         ? (session.testDriveAsScholarId ?? null)
         : session.userId,
+      // Put away by a teacher (sessions.archiveApp): /session-stream refuses
+      // the turn before any LLM lease (review/teacher-archive-scholar-apps.html).
+      teacherArchivedAt: session.teacherArchivedAt ?? null,
       dossierContent: resolvedDossier,
       dossierInterests: isSyntheticView ? [] : (dossier?.interests ?? []),
       teacherDirectives,

@@ -13,7 +13,7 @@ import { fonts, useColors } from "@/theme";
  * the scholar's own thinking (never a score or a praise dump).
  * Completed activities render immediately; conversational sessions can request
  * the same observer-backed recap via Wrap up, which also moves the open
- * exploration to Finished (masteryObservations.requestRecap, TRA-371).
+ * exploration to Archived (masteryObservations.requestRecap, TRA-371).
  */
 export function SessionRecapCard({
   sessionId,
@@ -128,7 +128,7 @@ export function SessionRecapCard({
       </View>
       {requested ? (
         <Text style={styles.finishedNote}>
-          Moved to Finished — you can pick it back up any time.
+          Archived — you can pick it back up any time.
         </Text>
       ) : null}
     </Animated.View>

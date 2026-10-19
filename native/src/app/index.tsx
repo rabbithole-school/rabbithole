@@ -7,6 +7,7 @@ import {
   ActivityIndicator,
   Alert,
   Pressable,
+  type PressableProps,
   RefreshControl,
   SectionList,
   StyleSheet,
@@ -93,8 +94,8 @@ import {
   RELATIONAL_LINE,
 } from "../../vendor/shared/admonishments";
 import {
-  classFocusPlateLine,
-  formatRoomTurnTime,
+  liveFocusLine,
+  roomClockForFocus,
 } from "../../vendor/shared/roomTurn";
 import {
   dayKeyForTimezone,
@@ -103,6 +104,7 @@ import {
 import {
   buildNowDigest,
   deriveHomeTabs,
+  filterArchivedRowsForTab,
   filterHomeworkForNow,
   filterRowsForTab,
   focusSectionLabel,
@@ -113,6 +115,8 @@ import {
   shouldShowHomeworkInNow,
   type ScholarHomeTab,
 } from "../../vendor/shared/scholarHomeNow";
+import { HOME_ARCHIVE_COPY } from "../../vendor/shared/homeArchive";
+import { serverErrorMessage } from "../../vendor/shared/serverErrorMessage";
 
 // iPad-first: a centered reading-width column (works in landscape + portrait).
 const COLUMN_MAX_WIDTH = 720;
@@ -206,6 +210,8 @@ type PlateRow = {
   subject: string | null;
   dueAt: number | null;
   endsAt: number | null;
+  // The session holds an app the scholar built — the row also lists on Apps.
+  isApp?: boolean;
 };
 type QuestEmptyRow = { kind: "quest-empty" };
 // A run of choice options (same choiceLessonId) collapsed into one menu card.
@@ -492,7 +498,7 @@ function ScholarHome() {
     api.assignments.currentClassFocusForMe,
     isAuthenticated ? { asLearner: true, now: minuteNow } : "skip",
   );
-  // `now` lets a reopened session fall back into Finished when its reopen day
+  // `now` lets a reopened session fall back into Archived when its reopen day
   // ends (sessions.finishedForScholar → isReopenLive).
   const archived = useSmoothedQuery(
     api.sessions.finishedForScholar,
@@ -542,8 +548,10 @@ function ScholarHome() {
     }
   }, [convex]);
 
-  // ── Tab row (Now · All · subjects · Scholar’s Prep · Quests) ─────────
-  // Active view only — hidden + reset to "now" when the header switches to Finished.
+  // ── Tab row (Now · All · subjects · Scholar’s Prep · Apps · Quests) ──
+  // Shared by both values of the Active / Archived filter: the tab picks which
+  // work, the filter picks whether it is in progress or archived, so flipping
+  // the filter keeps the scholar on their tab (review/home-finished-filter.html).
   const [activeTab, setActiveTab] = useState("now");
   // Per-tab persistence: each tab the scholar has visited keeps its OWN list
   // mounted (just hidden via display:none when inactive), so every tab's Convex
@@ -551,15 +559,6 @@ function ScholarHome() {
   // cascade — stay warm and repeat visits paint instantly with no flash. Lazy:
   // a tab isn't mounted until first opened, so unused tabs never pay for it.
   const [visitedTabs, setVisitedTabs] = useState<string[]>(["now"]);
-  // Sync: whenever the scholar switches to Finished view, reset the tab so
-  // coming back to Active always lands on "now" (and re-mounts fresh).
-  useEffect(() => {
-    if (view !== "active") {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- Finished view must reset the retained Active tab before it can be revisited.
-      setActiveTab("now");
-      setVisitedTabs(["now"]);
-    }
-  }, [view]);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- records a newly selected tab so its subscription remains mounted on later visits.
     setVisitedTabs((prev) =>
@@ -629,7 +628,9 @@ function ScholarHome() {
         // "The turn, not the bell" — when (+ in what timezone) this class
         // focus wraps, so the plate's class-focus card can render a soft
         // local time instead of a bare "paused until then".
-        endsAt: firstFocus.endsAt ?? null,
+        // Block end vs. a teacher-given lifetime — only a block end is
+        // the room's clock (shared/roomTurn.ts).
+        ...roomClockForFocus(firstFocus),
         timeZone: firstFocus.timeZone,
       }
     : null;
@@ -650,22 +651,27 @@ function ScholarHome() {
     rows.map((r) => r.sessionId).filter((x): x is Id<"sessions"> => !!x),
   );
 
-  // Derive tabs from the plate's subject tabs + current rows (Active view only).
-  // External apps available to this scholar drive the "Apps" tab (shown only
-  // when ≥1 app exists); the launcher grid renders on that tab exclusively.
+  // Derive tabs ONCE from the plate's subject tabs + active AND archived rows
+  // together, so flipping the Active / Archived filter never adds or removes a
+  // tab under the scholar's finger. The "Apps" tab shows when ≥1 app exists: a
+  // launcher tile, or an app the scholar built (active or archived). The
+  // launcher grid renders on that tab exclusively.
   const scholarApps = useSmoothedQuery(
     api.scholarApps.listForLauncher,
     isAuthenticated ? { now: minuteNow } : "skip",
   );
-  const hasApps = (scholarApps?.length ?? 0) > 0;
+  const hasApps =
+    (scholarApps?.length ?? 0) > 0 ||
+    rows.some((row) => row.isApp === true) ||
+    (archived ?? []).some((row) => row.isApp === true);
   const { tabs } = useMemo(() => {
     if (!plate) return { tabs: [] as ScholarHomeTab[], hasOther: false };
     return deriveHomeTabs({
       subjectTabs: plate.subjectTabs ?? [],
-      rows,
+      rows: [...rows, ...(archived ?? [])],
       hasApps,
     });
-  }, [plate, rows, hasApps]);
+  }, [plate, rows, archived, hasApps]);
 
   // A closure and a live block are mutually exclusive, so the harness forces
   // the BLOCK (the far more common state, and the one that carries a section
@@ -757,7 +763,9 @@ function ScholarHome() {
   // tab and the SKY map only. The Tree map has its own affordance on the Math
   // tab (the "View your frontier" card), so a tree-only unlock never arms the
   // pull gesture, and no other tab shows the horizon.
-  const skyRevealActive = effectiveActiveTab === "quests" && !!mapGates?.sky;
+  // Archived lists are plain lists — no horizon, no pull-to-Sky.
+  const skyRevealActive =
+    view === "active" && effectiveActiveTab === "quests" && !!mapGates?.sky;
   useEffect(() => {
     skyRevealActiveRef.current = skyRevealActive;
     mapUnlockedSV.set(skyRevealActive);
@@ -883,6 +891,22 @@ function ScholarHome() {
     const isNowTab = tab === "now";
     const isQuestTab = tab === "quests";
     const tabRows = filterRowsForTab(rows, tab);
+    // Apps: the scholar's own builds, whatever their origin, as ONE section
+    // under the launcher grid (rendered in the list header), with the same
+    // rows every other tab uses. No builds → no section, so no heading.
+    if (tab === "apps") {
+      if (tabRows.length === 0) return [];
+      return [
+        {
+          origin: "is" as const,
+          ...meta.is,
+          heading: HOME_ARCHIVE_COPY.appsYouBuilt,
+          tint: colors.charcoalMuted,
+          countText: null,
+          data: groupPlateRows(tabRows),
+        },
+      ];
+    }
     const effectiveRows =
       isNowTab && !showHomeworkInNow
         ? tabRows.filter((row) => row.origin !== "homework")
@@ -1096,10 +1120,19 @@ function ScholarHome() {
     },
   });
 
-  // The Home nav bar (experiment): the Now·All·subject tabs live in the
-  // title (center), and the Active⇄Finished switch is a compact filter
-  // button in the top-left. Tabs only exist in the Active view; the Finished
-  // view shows a plain title instead.
+  // The filter shows a count only where it matches the list: Archived lists
+  // exactly filterArchivedRowsForTab for the current tab. Active has no count
+  // — each tab's active list is assembled from several sources (Now's
+  // homework hours, Prep's own sections, Apps' tiles), so no one number
+  // matches what the scholar sees.
+  const archivedCountForTab = archived
+    ? filterArchivedRowsForTab(archived, effectiveActiveTab).length
+    : null;
+
+  // The Home nav bar: the Now·All·subject tabs live in the title (center), and
+  // the Active⇄Archived filter is a compact button in the top-left. The tab
+  // strip stays for both filter values; the plain title is only the fallback
+  // before the tabs are derived.
   const header = (
     <Stack.Screen
       options={{
@@ -1109,16 +1142,16 @@ function ScholarHome() {
             variant="filter"
             view={view}
             onSelect={setView}
-            activeCount={plate ? rows.length : null}
-            archivedCount={archived?.length ?? null}
+            activeCount={null}
+            archivedCount={archivedCountForTab}
           />
         ),
         headerTitle: () =>
-          view === "active" && tabs.length > 0 ? (
+          tabs.length > 0 ? (
             <ScholarHomeTabs tabs={tabs} activeTab={effectiveActiveTab} onChange={setActiveTab} />
           ) : (
             <Text style={styles.headerTitleText}>
-              {view === "archived" ? "Finished" : "My Sessions"}
+              {view === "archived" ? HOME_ARCHIVE_COPY.archivedFilter : "My Sessions"}
             </Text>
           ),
       }}
@@ -1151,27 +1184,26 @@ function ScholarHome() {
     );
   }
 
-  if (view === "archived") {
+  // The Archived value of the filter, for one tab: the archived rows that tab
+  // lists (filterArchivedRowsForTab), as Archived cards. Its refresh owner is
+  // keyed apart from the Active page's so the two never share a spinner.
+  const renderArchivedTab = (tab: string) => {
+    if (archived === undefined) {
+      return (
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color={colors.violet} />
+        </View>
+      );
+    }
+    const owner = `archived:${tab}`;
     return (
-      <>
-        {header}
-        {roomCueChrome}
-        {archived === undefined ? (
-          <View style={styles.center}>
-            <ActivityIndicator size="large" color={colors.violet} />
-          </View>
-        ) : (
-          <ArchivedSessions
-            rows={archived}
-            refreshing={
-              refreshOwner === "archived"
-            }
-            onRefresh={() => refreshHome("archived")}
-          />
-        )}
-      </>
+      <ArchivedSessions
+        rows={filterArchivedRowsForTab(archived, tab)}
+        refreshing={refreshOwner === owner}
+        onRefresh={tab === effectiveActiveTab ? () => refreshHome(owner) : undefined}
+      />
     );
-  }
+  };
 
   const renderTabList = (tab: string) => {
     const isNowTab = tab === "now";
@@ -1713,7 +1745,8 @@ function ScholarHome() {
             // background at the ends — so the two jobs that one black surface
             // was doing had to be split: the pager carries the page surface
             // colour (what the bounce reveals) and the sky page carries space.
-            const questSky = tab === "quests" && !!mapGates?.sky;
+            const questSky =
+              view === "active" && tab === "quests" && !!mapGates?.sky;
             // Lazy mount, widened by ONE page either side of the active one.
             // A visited tab renders its real list and STAYS mounted (the pager
             // keeps every page mounted) to keep its subscriptions warm; an
@@ -1742,7 +1775,7 @@ function ScholarHome() {
                 ]}
               >
                 {mounted ? (
-                  renderTabList(tab)
+                  view === "archived" ? renderArchivedTab(tab) : renderTabList(tab)
                 ) : (
                   <View style={styles.tabFill} />
                 )}
@@ -1896,6 +1929,57 @@ function OnboardingPinCard({ pin }: { pin: OnboardingPin }) {
   );
 }
 
+// Long-press → Archive, for every Home item that stands for a real session
+// (review/home-finished-filter.html). Spread the result onto the item's
+// Pressable: a long-press (not a swipe, so it can't fight the tab pager) opens
+// an [Cancel, Archive] sheet, and VoiceOver gets the same action by name. An
+// item with no session yet (a not-started start row) gets nothing (a
+// teacher-archived session never sits on the plate). The Welcome pin has
+// none either (web parity): it stays pinned until onboarding is done, so
+// archiving it would change nothing the scholar can see. Relaunching assigned work
+// resumes a session the scholar archived, so archiving live work loses nothing.
+function useLongPressArchive({
+  sessionId,
+  title,
+}: {
+  sessionId: Id<"sessions"> | null | undefined;
+  title: string;
+}): Pick<
+  PressableProps,
+  "onLongPress" | "accessibilityActions" | "onAccessibilityAction"
+> {
+  const archive = useMutation(api.sessions.archive);
+  const id = sessionId ?? null;
+  if (!id) return {};
+  const archiveNow = () => {
+    archive({ id }).catch((err: unknown) => {
+      console.error("Failed to archive session:", err);
+      Alert.alert(serverErrorMessage(err, HOME_ARCHIVE_COPY.archiveFailed));
+    });
+  };
+  return {
+    onLongPress: () => {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          title,
+          options: ["Cancel", HOME_ARCHIVE_COPY.archiveAction],
+          cancelButtonIndex: 0,
+        },
+        (i) => {
+          if (i === 1) archiveNow();
+        },
+      );
+    },
+    accessibilityActions: [
+      { name: "archive", label: HOME_ARCHIVE_COPY.archiveAction },
+    ],
+    onAccessibilityAction: (e) => {
+      if (e.nativeEvent.actionName === "archive") archiveNow();
+    },
+  };
+}
+
 // Shared open/start behavior for a plate row (a started session → open it; a
 // not-started assigned activity → create the session then open; a web activity
 // → launch the embedded webview). Used by both PlateCard and ChoiceOptionRow.
@@ -2046,11 +2130,13 @@ function HomeworkNowNativeRow({
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const { open, starting, isOfflineHomework } = useRowAction(row);
+  const archiveProps = useLongPressArchive(row);
   const actionable = !starting;
 
   return (
     <Pressable
       onPress={actionable ? open : undefined}
+      {...archiveProps}
       accessibilityRole="button"
       accessibilityLabel={row.title}
       accessibilityState={{ disabled: !actionable }}
@@ -2284,35 +2370,10 @@ function PlateActivityRow({
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const { open, starting, isOfflineHomework } = useRowAction(row);
-  const archive = useMutation(api.sessions.archive);
-  // An open exploration (a Quest with no activity) can never become complete,
-  // so moving it to Finished is its only way off the plate. Wrap up inside the
-  // session does this too; long-press is the housekeeping path from Home (web
-  // parity with ScholarPlate's hover archive — a long-press, not a swipe, so it
-  // can't fight the tab pager). Activity sessions finish through their activity.
-  const finishSessionId =
-    row.origin === "is" && !row.activityId ? row.sessionId : null;
-  const moveToFinished = () => {
-    if (!finishSessionId) return;
-    archive({ id: finishSessionId }).catch((err) => {
-      console.error("Failed to move quest to Finished:", err);
-      Alert.alert("Couldn't move that quest", "Please try again.");
-    });
-  };
-  const confirmMoveToFinished = () => {
-    if (!finishSessionId) return;
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    ActionSheetIOS.showActionSheetWithOptions(
-      {
-        title: row.title,
-        options: ["Cancel", "Move to Finished"],
-        cancelButtonIndex: 0,
-      },
-      (i) => {
-        if (i === 1) moveToFinished();
-      },
-    );
-  };
+  // Long-press → Archive, on any row that has a session (an open exploration,
+  // a continuation, started class or homework work). Web parity with
+  // ScholarPlate's hover archive.
+  const archiveProps = useLongPressArchive(row);
   const progress =
     row.unitCompletedCount != null && row.unitActivityCount != null
       ? `${row.unitCompletedCount} of ${row.unitActivityCount}`
@@ -2333,11 +2394,8 @@ function PlateActivityRow({
     !!focusLock?.unitId &&
     String(row.unitId ?? "") === focusLock.unitId;
   const roomPhase = useRoomTurnPhase(matchesLiveFocus ? focusLock?.endsAt ?? null : null);
-  const roomTimeLabel =
-    matchesLiveFocus && focusLock?.endsAt != null && focusLock.timeZone
-      ? formatRoomTurnTime(focusLock.endsAt, focusLock.timeZone)
-      : null;
-  const roomTurnLine = matchesLiveFocus ? classFocusPlateLine(roomPhase, roomTimeLabel) : null;
+  const roomTurnLine =
+    matchesLiveFocus && focusLock ? liveFocusLine(roomPhase, focusLock) : null;
 
   // Secondary overdue read on All / subject cards (web parity, ScholarPlate):
   // a small orange "was due X" line on past-due homework. Derived from Home's
@@ -2357,19 +2415,11 @@ function PlateActivityRow({
     >
       <Pressable
         onPress={open}
-        onLongPress={finishSessionId ? confirmMoveToFinished : undefined}
+        {...archiveProps}
         disabled={starting}
         accessibilityRole="button"
         accessibilityLabel={row.title}
         accessibilityState={{ disabled: starting }}
-        accessibilityActions={
-          finishSessionId
-            ? [{ name: "moveToFinished", label: "Move to Finished" }]
-            : undefined
-        }
-        onAccessibilityAction={(e) => {
-          if (e.nativeEvent.actionName === "moveToFinished") moveToFinished();
-        }}
         style={({ pressed }) => [
           styles.cardBodyMain,
           pressed && styles.cardPressed,
@@ -2489,6 +2539,7 @@ function ChoiceOptionRow({
   const colors = useColors();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const { open, starting, isOfflineHomework } = useRowAction(row);
+  const archiveProps = useLongPressArchive(row);
   const eta = row.etaMinutes ? `~${row.etaMinutes} min` : null;
   const context = isOfflineHomework
     ? row.description ?? null
@@ -2497,6 +2548,7 @@ function ChoiceOptionRow({
   return (
     <Pressable
       onPress={open}
+      {...archiveProps}
       disabled={starting}
       accessibilityRole="button"
       accessibilityLabel={row.title}

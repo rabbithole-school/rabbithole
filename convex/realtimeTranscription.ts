@@ -3,6 +3,7 @@
 
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { v } from "convex/values";
+import { query } from "./_generated/server";
 import { authedAction, authedMutation } from "./lib/customFunctions";
 import { llmBudgetExceeded, llmBudgetMessage } from "./llmBudget";
 
@@ -11,6 +12,20 @@ const TRANSCRIPTION_MODEL = "gpt-4o-transcribe";
 // (turn gaps easily exceed a minute while the tutor speaks) instead of
 // paying a mint round-trip before every listen.
 const CLIENT_SECRET_TTL_SECONDS = 600;
+
+// Whether this deployment can do voice input at all. Both paths — this
+// file's realtime secret and the Whisper fallback in audioActions.ts — need
+// OPENAI_API_KEY; a deployment without it (the public local runner) leaves
+// voice off. Clients check this before pre-warming so opening a chat never
+// calls an action that can only throw, and a mic tap explains itself instead.
+// A plain query (not authedQuery) so a screen that is mid sign-out reads
+// false instead of throwing into its error boundary.
+export const voiceInputAvailable = query({
+  args: {},
+  returns: v.boolean(),
+  handler: async (ctx) =>
+    (await getAuthUserId(ctx)) !== null && !!process.env.OPENAI_API_KEY,
+});
 
 type ClientSecretResponse = {
   value?: unknown;

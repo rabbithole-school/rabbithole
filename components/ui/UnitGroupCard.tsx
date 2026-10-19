@@ -305,6 +305,8 @@ export function UnitGroupRow({
   return (
     <Box
       role="group"
+      // Chakra v3's _groupHover keys off the class, not the role.
+      className="group"
       position="relative"
       px={3.5}
       py={3}

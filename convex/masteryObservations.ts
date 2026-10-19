@@ -827,7 +827,7 @@ export const claimRecapRefresh = internalMutation({
 });
 
 /**
- * The scholar's Wrap up: moves an open exploration to Finished, then refreshes
+ * The scholar's Wrap up: moves an open exploration to Archived, then refreshes
  * the observer-backed recap for their own session. The session-row claim makes
  * refreshes atomic and bounded across clients; activity completion state is
  * never changed.
@@ -847,7 +847,7 @@ export const requestRecap = authedAction({
       throw new Error("Forbidden");
     }
 
-    // Wrap up is the scholar's ending: an open exploration moves to Finished
+    // Wrap up is the scholar's ending: an open exploration moves to Archived
     // before (and regardless of) the observer refresh below.
     await ctx.runMutation(internal.sessions.finishOpenExploration, {
       sessionId: args.sessionId,
