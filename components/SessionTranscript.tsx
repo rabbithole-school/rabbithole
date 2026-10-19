@@ -282,16 +282,33 @@ function TutorThinkingIndicator({
 export function TutorTurnFailedNotice({
   onRetry,
   note,
+  addKeyHref,
 }: {
   onRetry: () => void;
-  /** Why, when it's worth saying (a busy server's honest wait). */
+  /** Why, when it's worth saying (a busy server's honest wait, a missing key). */
   note?: string | null;
+  /** The local runner's page for adding the tutor's Anthropic key. Opens in a
+   *  new tab so this chat, and its "Try again", stay where they are. */
+  addKeyHref?: string | null;
 }) {
   return (
     <Flex align="center" gap={2} alignSelf="flex-start" px={4} py={1} wrap="wrap">
       <Text fontSize="sm" fontFamily="body" color="charcoal.300">
         {note ?? "Didn't go through"}
       </Text>
+      {addKeyHref && (
+        <Button
+          asChild
+          size="xs"
+          variant="ghost"
+          color="violet.500"
+          fontFamily="heading"
+        >
+          <a href={addKeyHref} target="_blank" rel="noopener">
+            Add the key
+          </a>
+        </Button>
+      )}
       <Button
         size="xs"
         variant="ghost"

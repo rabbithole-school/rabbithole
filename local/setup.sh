@@ -225,8 +225,8 @@ cat <<EOF
   A scholar's view:   http://localhost:$WEB_PORT/dev-login?u=leilani_park&to=/scholar
   A parent's view:    http://localhost:$WEB_PORT/dev-login?u=parent_park&to=/parent
 
-  The tutor answers once the local backend has an Anthropic key (it asks for it):
-                      CONVEX_AGENT_MODE=anonymous npx convex env set ANTHROPIC_API_KEY
+  The tutor answers once it has an Anthropic key. Add one here (the chat links to it):
+                      http://localhost:$WEB_PORT/tutor-key
   Status:             pnpm local:status
   Stop:               pnpm local:stop      Start again: pnpm local:setup
   Logs:               local/.run/convex.log and local/.run/next.log

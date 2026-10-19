@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "36869465401dd52d6e371f55feca63a3bc010bfc",
+  "sourceCommit": "43806af7f39facc90231dc0e03b2db2b6a40b0c1",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -145,6 +145,21 @@
     {
       "path": "app/api/oauth/token/route.ts",
       "sha256": "e63567dec358506b582a9f4326899eb7d637dc7c087bf2997b72171e805af241",
+      "mode": "100644"
+    },
+    {
+      "path": "app/api/tutor-key/route.setOnce.test.ts",
+      "sha256": "12e5425bb55e8aad5fe5683b25e08f140b38bfb94af7a6ff80f124e4b24cd61e",
+      "mode": "100644"
+    },
+    {
+      "path": "app/api/tutor-key/route.test.ts",
+      "sha256": "605f7fbf926a18170f8502a7734e08691ce410a8d7147134b1e7bbd09ab9f4e3",
+      "mode": "100644"
+    },
+    {
+      "path": "app/api/tutor-key/route.ts",
+      "sha256": "61ee1b85110528a9214ecc00a7da9fd6007fdc4865dfd6395c70b8dbb79654c2",
       "mode": "100644"
     },
     {
@@ -965,6 +980,16 @@
     {
       "path": "app/teacher/shareback/[activityId]/page.tsx",
       "sha256": "65e763a5a948b8deadaef5b25fcf6d1bc222ace4c62e07b3a1622dc82e6b02d9",
+      "mode": "100644"
+    },
+    {
+      "path": "app/tutor-key/TutorKeyForm.tsx",
+      "sha256": "c2adfa6adc1bf6c27694fc8d2e12ae777bfb8fc5dfeebe13933de543dd82e17b",
+      "mode": "100644"
+    },
+    {
+      "path": "app/tutor-key/page.tsx",
+      "sha256": "66ab5637c2196e9d678ec2fe50b459441de855bd9e80a2e08d076283e2c8a09c",
       "mode": "100644"
     },
     {
@@ -2074,7 +2099,7 @@
     },
     {
       "path": "components/SessionInterface.tsx",
-      "sha256": "61512c7babb8b67ba9daf9a02f6145c7ab511d1731d8b64a84cf0879a68c60e6",
+      "sha256": "0e84d3f0d23a84436fe952e73d0f0bbf5c4fbada5e934acb371fa878e3e50cc8",
       "mode": "100644"
     },
     {
@@ -2089,7 +2114,7 @@
     },
     {
       "path": "components/SessionTranscript.tsx",
-      "sha256": "55cab8fc65b47ec97d253a524510f29fda9ef700a470609dc1b43c7fb552dc67",
+      "sha256": "69c1c2c3ee143dd48ef1b46559f7887517cabaed16a1ef4b98a73e7cf5d6b09f",
       "mode": "100644"
     },
     {
@@ -4884,7 +4909,7 @@
     },
     {
       "path": "convex/__tests__/appSnapshots.test.ts",
-      "sha256": "c05b8a0b51bf2ba5790194ac46795e94f98fa8559cd9abc21c7b8424bd3a0ccb",
+      "sha256": "a97ad1febe1fb8552d39613fcc22baae4fa73f042ab35c63fec8de6fe6eca357",
       "mode": "100644"
     },
     {
@@ -7178,6 +7203,11 @@
       "mode": "100644"
     },
     {
+      "path": "convex/__tests__/tutorKey.test.ts",
+      "sha256": "ba002f6cd86b853a2122616a14c545c9bd4417e72e38c9825be2f40ffe41aaae",
+      "mode": "100644"
+    },
+    {
       "path": "convex/__tests__/tutorModel.test.ts",
       "sha256": "b8a01d27beedb85324d8067d7438a59ef1f5f233261fc6db89ee011b1869e793",
       "mode": "100644"
@@ -7369,7 +7399,7 @@
     },
     {
       "path": "convex/_generated/api.d.ts",
-      "sha256": "550691f6e97c284c8b70522f4d7b07a2a9f4a7ee9d90ba7dc3aab135046d5d68",
+      "sha256": "3f1cee53d4c72ac57bab0c6c6ded450135d21adfccbef60a42e7a68c7b340853",
       "mode": "100644"
     },
     {
@@ -7969,7 +7999,7 @@
     },
     {
       "path": "convex/http.ts",
-      "sha256": "04fc499965a5b5beb359293e67f04613c6762f4e0099692b2a37145029d8dd31",
+      "sha256": "fe0a3e28e7334b77169af71416c10ccc33e85a63ad97407a9e68e7e06128caec",
       "mode": "100644"
     },
     {
@@ -8814,7 +8844,7 @@
     },
     {
       "path": "convex/lib/anthropic.ts",
-      "sha256": "4d9ad5abe863c265c77656d122d466ba37960e1635dcaa3bff704acfb9c92558",
+      "sha256": "7a8e9960c7c74e00ed34300ea510ac7718da99a25a0e3118733e5bef17b7d65b",
       "mode": "100644"
     },
     {
@@ -9084,7 +9114,7 @@
     },
     {
       "path": "convex/lib/deploymentSafety.ts",
-      "sha256": "753509c8685ee617f74995e03f8075a7685efc3c7a1f8688818d2ff32f1fd6f7",
+      "sha256": "cbb13c076a48cac92d8958dc1f49616cad853f09f4a1b7a0e035d56931bee6f1",
       "mode": "100644"
     },
     {
@@ -11604,7 +11634,7 @@
     },
     {
       "path": "convex/sessionHelpers.ts",
-      "sha256": "75455f3561de10b45e40e331b84ba5c4571f139e24fa984d9048e53c5caf8679",
+      "sha256": "7a853a562bffcbb767b623f174227cad847001b7e3253d805bcd8b67a3885f9e",
       "mode": "100644"
     },
     {
@@ -11845,6 +11875,11 @@
     {
       "path": "convex/tsconfig.json",
       "sha256": "3e4f83aefecb173aa2516ae37cc55602db6f0a5ad41b96c37e8bb047d13a9f68",
+      "mode": "100644"
+    },
+    {
+      "path": "convex/tutorKey.ts",
+      "sha256": "41965395579ea11721f5ecd6a7371e09037db62898a362380a0cc7aeeaa14479",
       "mode": "100644"
     },
     {
@@ -14029,7 +14064,7 @@
     },
     {
       "path": "hooks/useAgentStream.ts",
-      "sha256": "2dedff26e52f60341a4306dfd6fe61e3ce0acb1e79f5d98610ba4536518a0510",
+      "sha256": "3349cfdf584d134503043f0633902d627b508d2abe27f3590387caffd45d5565",
       "mode": "100644"
     },
     {
@@ -14330,6 +14365,11 @@
     {
       "path": "lib/__tests__/kidSafePrinciples.test.ts",
       "sha256": "72cdcd62677355d9951277134ca12af93b6dd31b5e622a3f6406190a43a19043",
+      "mode": "100644"
+    },
+    {
+      "path": "lib/__tests__/localRunnerKey.test.ts",
+      "sha256": "86abb548ca15a4b16a8ad7522699cc19144ed2603fda78a647faf08b9f694654",
       "mode": "100644"
     },
     {
@@ -14895,6 +14935,11 @@
     {
       "path": "lib/listRowStyles.ts",
       "sha256": "b3b6a1bfdadbe14dfddf3857c5fb6f0cc13f7aee655de2635465a948d3eec95c",
+      "mode": "100644"
+    },
+    {
+      "path": "lib/localRunnerKey.ts",
+      "sha256": "4f92383ca94f38ffddb05ba60ff833db2640b2e1466a65444c042e6632a2f185",
       "mode": "100644"
     },
     {
@@ -15604,12 +15649,12 @@
     },
     {
       "path": "local/setup.sh",
-      "sha256": "d42d772b8533039135889955ffd69a45ce34045b68d4b88155efcea249cc9469",
+      "sha256": "86eeaf8002dacc537f9216bfab4c38d9393c78f163ccfd0a503cae13a2795116",
       "mode": "100755"
     },
     {
       "path": "local/status.sh",
-      "sha256": "5c1a402ab967bf738d8b1f3d2afa84c6640aae1f42d0cb406212d148bfa93d2c",
+      "sha256": "d1e3a92b5863c56bb50cad597b03b74f827890b4ee9a9bdc65514d5ed084f168",
       "mode": "100755"
     },
     {
@@ -16609,7 +16654,7 @@
     },
     {
       "path": "native/src/app/session/[id].tsx",
-      "sha256": "edea3c158f6bffde0c144a26be2c209ea4abf8577dc0d33d4f06d27cbe25ac29",
+      "sha256": "47004f301091322fcb472f7d6da2b2d21ca93505deac60c2387d34a898d56dbc",
       "mode": "100644"
     },
     {
@@ -19204,7 +19249,7 @@
     },
     {
       "path": "native/vendor/convex_generated/api.d.ts",
-      "sha256": "550691f6e97c284c8b70522f4d7b07a2a9f4a7ee9d90ba7dc3aab135046d5d68",
+      "sha256": "3f1cee53d4c72ac57bab0c6c6ded450135d21adfccbef60a42e7a68c7b340853",
       "mode": "100644"
     },
     {
@@ -19885,6 +19930,11 @@
     {
       "path": "native/vendor/shared/treeMapLayout.ts",
       "sha256": "09d96e782a46672439a9943b15ecbc9eb69e7589f3f9e87fcfea3571338ac6e6",
+      "mode": "100644"
+    },
+    {
+      "path": "native/vendor/shared/tutorKey.ts",
+      "sha256": "0e7f1af59271003038584ff5c8fe847d576dd6003f0070be1481dfd0f0497a99",
       "mode": "100644"
     },
     {
@@ -21668,6 +21718,11 @@
       "mode": "100644"
     },
     {
+      "path": "shared/tutorKey.ts",
+      "sha256": "0e7f1af59271003038584ff5c8fe847d576dd6003f0070be1481dfd0f0497a99",
+      "mode": "100644"
+    },
+    {
       "path": "shared/tutorQualityRubric.ts",
       "sha256": "ca9ae1942b0fb17135d29103af79dbf3542d2b887de4edbb0050b29bf6428df2",
       "mode": "100644"
@@ -22093,5 +22148,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "8a00a12aa91281b950eaf98e1f0cd548401ebed40f38627c4783d4c2d657495c"
+  "treeHash": "dda52e293522600ce8fc7519828d2c9a99712f7b471bcf6c81498eba5c610dc7"
 }

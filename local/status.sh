@@ -13,7 +13,7 @@ if pid_alive convex; then
   if (cd "$ROOT" && npx convex env get ANTHROPIC_API_KEY 2>/dev/null | grep -q .); then
     say "Tutor key:                             set"
   else
-    say "Tutor key:                             not set"
+    say "Tutor key:                             not set (add one at http://localhost:$WEB_PORT/tutor-key)"
   fi
 fi
 pid_alive next && say "" && say "Open http://localhost:$WEB_PORT/dev-login"

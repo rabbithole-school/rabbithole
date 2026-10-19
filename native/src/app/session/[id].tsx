@@ -65,6 +65,7 @@ import {
 import { GraphemeText } from "@/components/GraphemeText";
 import { BeginnerReplyText } from "@/components/BeginnerReplyText";
 import { busyRetryCopy } from "../../../vendor/shared/llmLimiter";
+import { isTutorNeedsKeyError, TUTOR_NEEDS_KEY_MESSAGE } from "../../../vendor/shared/tutorKey";
 import {
   beginnerAlphabet,
   conversationTextSteps,
@@ -534,6 +535,16 @@ function SessionScreen() {
   const [busyRetryAfterSec, setBusyRetryAfterSec] = useState<
     number | null | undefined
   >(undefined);
+  // The turn failed because the deployment has no Anthropic key (TRA-536).
+  // Native only says so; adding a key happens on the web app.
+  const [tutorNeedsKey, setTutorNeedsKey] = useState(false);
+  // Per-stream twin of tutorNeedsKey, read synchronously by the caller once
+  // runTutorStream returns (reset at the start of every stream). A kickoff
+  // that fails for want of a key is HELD (web parity: kickoffHeldForKey in
+  // components/SessionInterface.tsx): welcomeSentRef stays set so the kickoff
+  // effect can't re-fire into a 503 loop, and the failed-turn row says why.
+  const streamNeededKeyRef = useRef(false);
+  const [kickoffHeldForKey, setKickoffHeldForKey] = useState(false);
   // When the in-flight turn began (ms) — clock for the escalating pending copy.
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   // Ticks once a second while a turn is pending, to advance that copy and to
@@ -611,7 +622,8 @@ function SessionScreen() {
       }
       return false;
     })();
-  const isDeadTurn = !streaming && (clientFailedHere || deadScholarTurn);
+  const isDeadTurn =
+    !streaming && (clientFailedHere || deadScholarTurn || kickoffHeldForKey);
   const isServerPending =
     !isDeadTurn && !streaming && serverTurnState === "pending";
   // Composer is disabled while a turn is pending (client OR server truth), but
@@ -1019,6 +1031,12 @@ function SessionScreen() {
 
           const reader = resp.body?.getReader();
           const handleEvent = (ev: TutorStreamEvent) => {
+            // No Anthropic key on this deployment: a terminal refusal (503),
+            // shown in the failed-turn row instead of the generic note.
+            if (isTutorNeedsKeyError(ev.error)) {
+              streamNeededKeyRef.current = true;
+              setTutorNeedsKey(true);
+            }
             // Tutor tool activity → the quiet inline status row. `generate_image`
             // is excluded here; it drives the dedicated "Making a picture…"
             // state via generatingImage instead (matching the web split).
@@ -1080,6 +1098,8 @@ function SessionScreen() {
 
       const startedAt = Date.now();
       setBusyRetryAfterSec(undefined);
+      setTutorNeedsKey(false);
+      streamNeededKeyRef.current = false;
       // Voice mode silences a reply that didn't complete (Stop / failure /
       // abort), so its queued sentences can't drain into a hands-free listen.
       let turnCompleted = false;
@@ -1328,6 +1348,8 @@ function SessionScreen() {
       setStreamingText("");
       setActivity(null);
       if (!isAppRequest) setUserTurnFailed(false);
+      // The scholar wrote first: a held opener is no longer needed.
+      if (!isAppRequest) setKickoffHeldForKey(false);
       setTurnStartedAt(Date.now());
       const res =
         appUpdateTurn ??
@@ -1547,6 +1569,13 @@ function SessionScreen() {
     requestStopMut,
   ]);
 
+  // Release a kickoff held for a missing key; the kickoff effect runs it again.
+  const retryHeldKickoff = useCallback(() => {
+    welcomeSentRef.current = null;
+    setKickoffHeldForKey(false);
+    bumpKickoffRetry((n) => n + 1);
+  }, []);
+
   // Set when the take was started from a "your turn" card's mic (TRA-504),
   // so the transcript goes to the tutor marked as the child's read-aloud.
   const readingYourTurnRef = useRef(false);
@@ -1725,7 +1754,13 @@ function SessionScreen() {
             res.assistantMsgId,
           );
           if (completed !== "completed") {
-            welcomeSentRef.current = null;
+            // No key: hold the kickoff (welcomeSentRef stays set, so this
+            // effect won't refire) until the scholar taps Try again.
+            if (completed === "failed" && streamNeededKeyRef.current) {
+              setKickoffHeldForKey(true);
+            } else {
+              welcomeSentRef.current = null;
+            }
           }
         } catch (e) {
           console.warn("[activity-kickoff] failed", e);
@@ -1770,6 +1805,7 @@ function SessionScreen() {
     runTutorStream,
     questBakeHolding,
     builderViewRequested,
+    kickoffHeldForKey,
   ]);
 
   // Voice dictation. The mic button starts recording; the RecordingBar's ✓
@@ -2063,11 +2099,17 @@ function SessionScreen() {
                   <View style={styles.colTutor}>
                     <View style={styles.tutorBare}>
                       <TutorTurnFailedRow
-                        onRetry={onRetryTurn}
+                        // A kickoff held for a missing key re-runs the
+                        // kickoff; everything else retries the user turn.
+                        onRetry={
+                          kickoffHeldForKey ? retryHeldKickoff : onRetryTurn
+                        }
                         note={
-                          busyRetryAfterSec !== undefined
-                            ? busyRetryCopy(busyRetryAfterSec)
-                            : null
+                          tutorNeedsKey
+                            ? TUTOR_NEEDS_KEY_MESSAGE
+                            : busyRetryAfterSec !== undefined
+                              ? busyRetryCopy(busyRetryAfterSec)
+                              : null
                         }
                       />
                     </View>

@@ -36,6 +36,7 @@ import {
   stripMarkdownForSpeech,
 } from "@/lib/sentenceStream";
 import { busyRetryCopy } from "@/shared/llmLimiter";
+import { isTutorNeedsKeyError, TUTOR_NEEDS_KEY_MESSAGE } from "@/shared/tutorKey";
 import {
   beginnerAlphabet,
   checkDecodable,
@@ -211,6 +212,12 @@ export function SessionInterface({
   const kickoffRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [kickoffPending, setKickoffPending] = useState(false);
   const [, bumpKickoffRetry] = useState(0);
+  // The deployment has no Anthropic key (TRA-536). Set by the stream's refusal
+  // event so the kickoff can tell it apart from an ordinary failure: that
+  // kickoff is held (no automatic retry loop) and the chat says why, with a
+  // Try again that re-runs the kickoff once a key is added.
+  const streamNeededKeyRef = useRef(false);
+  const [kickoffHeldForKey, setKickoffHeldForKey] = useState(false);
   const [whisperInput, setWhisperInput] = useState("");
   // Shared web image-attachment pipeline (staged File + preview + upload).
   // Same hook the practice "talk me through it" chat uses, so the two composers
@@ -262,6 +269,7 @@ export function SessionInterface({
 
   // Shared streaming hook
   const onStreamEvent = useCallback((data: StreamEvent) => {
+    if (isTutorNeedsKeyError(data.error)) streamNeededKeyRef.current = true;
     if (data.newArtifactId) {
       setActiveArtifactId(data.newArtifactId);
       setRightPanelOpen(true);
@@ -313,6 +321,17 @@ export function SessionInterface({
   }, [onSessionUpdate]);
 
   const stream = useAgentStream({ onEvent: onStreamEvent });
+  // Every tutor stream goes through here so streamNeededKeyRef describes THIS
+  // send only: a user turn that failed for want of a key must not make a later
+  // kickoff, failing for some other reason, read as held for a key.
+  const streamSend = stream.send;
+  const sendTutorStream = useCallback(
+    (...args: Parameters<typeof streamSend>) => {
+      streamNeededKeyRef.current = false;
+      return streamSend(...args);
+    },
+    [streamSend],
+  );
   const { isStreaming, streamingContent, streamingMsgId, toolActivity, generatingImage } = stream;
   const runWithSendLock = useSendLock();
 
@@ -1405,6 +1424,8 @@ export function SessionInterface({
     // preempts any run still settling), so overlapping turns can't interleave.
     const convexUrl = convexSiteUrl();
     if (!isAppRequest) setUserTurnFailed(false);
+    // The scholar wrote first: the held opener is no longer needed.
+    if (!isAppRequest) setKickoffHeldForKey(false);
     if (appSnapshot) {
       setLastSentAppSnapshot({
         sessionId,
@@ -1415,7 +1436,7 @@ export function SessionInterface({
       ? newestAppTutorAskContext(appUpdate.batch)
       : undefined;
     if (appUpdate) setAppUpdateMsgId(prepared.assistantMsgId);
-    const completed = await stream.send(
+    const completed = await sendTutorStream(
       `${convexUrl}/session-stream`,
       {
         sessionId: prepared.sessionId,
@@ -1469,6 +1490,12 @@ export function SessionInterface({
   // "Check my work" re-runs the rubric), and the affordance is never shown for
   // them, so this path is user-turn-only.
   const retryAssistantTurn = useMutation(api.sessions.retryAssistantTurn);
+  // Release a kickoff held for a missing key; the kickoff effect runs it again.
+  const retryHeldKickoff = useCallback(() => {
+    setKickoffHeldForKey(false);
+    welcomeSentRef.current = null;
+    bumpKickoffRetry((n) => n + 1);
+  }, []);
   const handleRetryTurn = useCallback(async () => {
     if (isStreaming) return;
     // Hold the lock only around the placeholder mutation, then stream OUTSIDE
@@ -1497,7 +1524,7 @@ export function SessionInterface({
     // errored. Either way there is nothing to stream.
     if (!prepared) return;
     const convexUrl = convexSiteUrl();
-    const completed = await stream.send(
+    const completed = await sendTutorStream(
       `${convexUrl}/session-stream`,
       {
         sessionId: prepared.sessionId,
@@ -1508,7 +1535,7 @@ export function SessionInterface({
       prepared.assistantMsgId,
     );
     if (!completed) setUserTurnFailed(true);
-  }, [isStreaming, retryAssistantTurn, runWithSendLock, sessionId, stream]);
+  }, [isStreaming, retryAssistantTurn, runWithSendLock, sessionId, sendTutorStream]);
 
   const handleInstructionHandback = useCallback(
     async (handback: InstructionHandbackStart) => {
@@ -1521,7 +1548,7 @@ export function SessionInterface({
       const acquired = await runWithSendLock(async () => true);
       if (!acquired) throw new Error("The tutor is already responding");
       const convexUrl = convexSiteUrl();
-      await stream.send(
+      await sendTutorStream(
         `${convexUrl}/session-stream`,
         {
           sessionId: handback.sessionId,
@@ -1532,7 +1559,7 @@ export function SessionInterface({
         handback.assistantMsgId,
       );
     },
-    [isStreaming, runWithSendLock, stream],
+    [isStreaming, runWithSendLock, sendTutorStream],
   );
 
   // Re-score the deliverable against its rubric ("Check my work"). Unlike a
@@ -1564,7 +1591,7 @@ export function SessionInterface({
     // A new silent turn supersedes any lingering failed-user-turn state.
     setUserTurnFailed(false);
     const convexUrl = convexSiteUrl();
-    await stream.send(
+    await sendTutorStream(
       `${convexUrl}/session-stream`,
       {
         sessionId: prepared.sessionId,
@@ -1663,7 +1690,7 @@ export function SessionInterface({
           // A new silent turn supersedes any lingering failed-user-turn state.
           setUserTurnFailed(false);
           const convexUrl = convexSiteUrl();
-          const completed = await stream.send(
+          const completed = await sendTutorStream(
             `${convexUrl}/session-stream`,
             {
               sessionId: result.sessionId,
@@ -1675,7 +1702,10 @@ export function SessionInterface({
             result.assistantMsgId,
           );
           if (!completed) {
-            welcomeSentRef.current = null;
+            // No key: hold the kickoff (welcomeSentRef stays set, so this
+            // effect won't refire) until the scholar taps Try again.
+            if (streamNeededKeyRef.current) setKickoffHeldForKey(true);
+            else welcomeSentRef.current = null;
           }
         } catch (error) {
           console.error("Error starting activity kickoff:", error);
@@ -1701,7 +1731,7 @@ export function SessionInterface({
 
     welcomeSentRef.current = sessionId;
     void handleSend("<start>");
-  }, [sessionData, isStreaming, sessionId, currentUser, activeKickoffPlaceholder, questBakeHolding]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionData, isStreaming, sessionId, currentUser, activeKickoffPlaceholder, questBakeHolding, kickoffHeldForKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle keyboard
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -2067,13 +2097,18 @@ export function SessionInterface({
           isStreaming: tutorVisiblyStreaming,
           sendBlocked: kickoffBlocksSending,
           questBakeHolding,
-          userTurnFailed,
-          onRetryTurn: handleRetryTurn,
+          // A kickoff held for a missing key shows the same failed-turn
+          // notice; its Try again re-runs the kickoff.
+          userTurnFailed: userTurnFailed || kickoffHeldForKey,
+          onRetryTurn: kickoffHeldForKey ? retryHeldKickoff : handleRetryTurn,
           // A busy server's honest wait, said in kid words (busyRetryCopy).
-          failedTurnNote:
-            stream.busyRetryAfterSec !== undefined
+          // A deployment with no Anthropic key says so (TRA-536).
+          failedTurnNote: stream.needsKey
+            ? TUTOR_NEEDS_KEY_MESSAGE
+            : stream.busyRetryAfterSec !== undefined
               ? busyRetryCopy(stream.busyRetryAfterSec)
               : null,
+          failedTurnAddKeyHref: stream.needsKey?.addKeyPath ?? null,
           input,
           setInput,
           handleKeyDown,
@@ -2474,6 +2509,9 @@ interface ChatColumnProps {
   onRetryTurn?: () => void;
   /** Why the last turn failed, when worth saying (a busy server's wait). */
   failedTurnNote?: string | null;
+  /** Where to add the tutor's Anthropic key, when the turn failed for want of
+   *  one and this deployment (the local runner) takes it from the app. */
+  failedTurnAddKeyHref?: string | null;
   /** A listener's or beginner's own session (TRA-504): cleaned replies and
    *  larger text; a beginner's also gets the your-turn box and its mic. Null
    *  for everyone else. */
@@ -2756,6 +2794,7 @@ function ChatColumn({
   userTurnFailed = false,
   onRetryTurn,
   failedTurnNote = null,
+  failedTurnAddKeyHref = null,
   beginner = null,
   input,
   setInput,
@@ -3316,7 +3355,7 @@ function ChatColumn({
         )}
 
         <VStack gap={4} maxW="3xl" mx="auto" align="stretch">
-          {messages.length === 0 && !streamingContent && (
+          {messages.length === 0 && !streamingContent && !isTurnDead && (
             <Flex py={12} justify="center" direction="column" align="center" gap={3}>
               <Spinner size="lg" color="violet.500" />
               {/* The bake runs into the minutes. A bare spinner for that long
@@ -3592,6 +3631,7 @@ function ChatColumn({
             <TutorTurnFailedNotice
               onRetry={onRetryTurn}
               note={failedTurnNote}
+              addKeyHref={failedTurnAddKeyHref}
             />
           )}
 

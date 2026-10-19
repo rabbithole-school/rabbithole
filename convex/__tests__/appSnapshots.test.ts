@@ -240,6 +240,8 @@ describe("app snapshot turn attachment", () => {
 
   test("a stale snapshot falls through to the normal tutor gate", async () => {
     vi.stubEnv("LLM_DAILY_BUDGET_USD", "0.000001");
+    // With no key the turn stops at the no-key refusal, before the budget gate.
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const t = convexTest(schema, modules);
     const staleStorageId = await storeBlob(t, "image/jpeg", 8);
