@@ -56,7 +56,7 @@ seconds. If it stops early, it names the log to read; fix the cause and run
 
 ## 3. While it installs: who, what, and a key
 
-Ask:
+Ask, showing all four choices:
 
 > “Who are YOU?” said the Caterpillar.
 >
@@ -83,9 +83,20 @@ or on a Mac open a terminal there for them with
 they paste the key; that's on purpose. The script checks the key before
 saving it, and works whether or not setup has finished.
 
-If they'd rather not get a key, that's fine: skip to step 5. Every page works
-without one except the tutor's chat, which shows a red “Connection lost” and
-leaves the question unanswered. That's the missing key, not a broken install.
+If they don't have a key yet, offer to help them get one; it takes a few
+minutes, in the browser. Anthropic only makes keys in its web console, so
+open the pages for them and walk them through: sign in or sign up at
+https://platform.claude.com, add credits under Billing (a few dollars is
+plenty) and set a spending limit there, then create a key at
+https://platform.claude.com/settings/keys and copy it. The console shows the
+key only once, so have them run `bin/set-key.sh` right after.
+
+The tutor is the point of trying Rabbithole, so don't offer a tour without a
+key in its place. If they decide not to get one, say plainly that the tutor
+is what's worth seeing and that they can come back to it any time with
+`bin/set-key.sh`. Without a key, the tutor's chat shows a red
+“Connection lost” and leaves the question unanswered: that's the missing
+key, not a broken install.
 
 Let their answer to the Caterpillar shape what you point out from here: a
 parent wants to know what a child will see, a teacher what they can steer, a
@@ -127,7 +138,7 @@ Then show the adults' side. No passwords.
 The teacher steers the tutor and sees what it noticed: on the teacher's home,
 “Needs a look” holds notes Rabbithole's observer wrote about the pretend
 scholars' sessions. The parent's view shows what their own child has been
-doing. Start a parent here if they skipped the key.
+doing.
 
 `bin/status.sh` says whether everything is running. If you need to see the
 pages yourself and can run Playwright, this signs in as the teacher and saves
@@ -164,9 +175,8 @@ for an issue.
 
 ## Done when
 
-The person has had one exchange with the tutor on their kid's topic (or, if
-they skipped the key, seen the teacher's and parent's views), and has seen
-who steers it. Tell them how to stop and remove it, and offer the postcard.
+The person has had one exchange with the tutor on their kid's topic and has
+seen who steers it. Tell them how to stop and remove it, and offer the postcard.
 
 ## What leaves this computer
 
