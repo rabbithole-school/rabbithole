@@ -18,10 +18,11 @@ code, in the repository you're about to clone.
   because it's code from the internet. If they do, tell the person in plain
   words what you were about to run and why you paused, and let them decide
   whether to allow it. Never look for a way around the check.
-- Take turns. Show the next command, say in plain words what it does, then
-  stop and wait for the person's yes before you run it. One step per yes,
-  even if your tools would let you run them all at once. Run nothing you
-  haven't shown. Install nothing without a yes.
+- The person's line is their go-ahead to set this up. Clone, read, check,
+  and set up without stopping to ask at each step; your own tool's approval
+  prompts still apply. Ask first only before installing something outside
+  the kit's folder, such as Node. Say in a sentence what you're doing as you
+  go.
 - Never ask for, type, or store a real child's name. The school you'll set up
   is pretend.
 - Never ask the person to paste an API key or a password into this chat.
@@ -38,8 +39,7 @@ code, in the repository you're about to clone.
    the person where to put the kit instead, and suggest their home folder.
    If `rabbithole-drink-me` already exists there, ask before replacing it.
 
-2. Open `rabbithole-drink-me/DRINK-ME.md` and follow it from the top. It
-   starts by asking the person who they are.
+2. Read `rabbithole-drink-me/DRINK-ME.md` and follow it from the top.
 
 ## Done when
 

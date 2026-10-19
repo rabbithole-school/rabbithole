@@ -24,16 +24,15 @@ report it (step 7).
 
 ## Rules
 
-1. **Ask before you act, one step at a time.** Assume the person has never
-   used a terminal and that git and Node mean nothing to them. Show the next
-   command, say in plain words what it does, then end your message and wait
-   for their yes. Run it yourself once they say yes. One step per yes, even
-   if your tools would let you run several at once: don't join commands with
-   `&&` or `;` unless this file shows them joined, and run nothing you haven't
-   shown, not even a read-only check. Never skip ahead of step 2's
-   questions. Install nothing without a yes. If your safety settings
-   pause a step, say what it was and why in plain words, and let the person
-   decide. Never work around the check.
+1. **Keep it moving.** The person's line asked you to set this up, so
+   reading, checking, setting up, and opening its pages need no extra yes
+   from them; your own tool's approval prompts still apply. Ask first only
+   before you install something outside the kit's folder (git, Node, pnpm,
+   anything from Homebrew). Assume the person has never used a terminal:
+   say in a plain sentence what you're doing and why, without walking them
+   through commands. If your safety settings pause a step, say what it was
+   and why in plain words, and let the person decide. Never work around the
+   check.
 2. **Pretend people only.** Never ask for, type, or store a real child's name
    or details. The school in this kit is fictional, and it stays that way.
 3. **Keys stay out of the chat.** Never ask the person to paste an API key or
@@ -63,9 +62,12 @@ that folder is inside another project (then ask, and suggest the home folder):
 If you came from drink-me.rabbithole.school/drink-me, you've already cloned
 it. Run every command below from the kit's folder.
 
-## 2. Ask who they are
+## 2. Start it, then ask who they are
 
-Before anything else, ask:
+Run `bin/doctor.sh` (step 3). If it says "All good.", start `bin/setup.sh`
+(step 4) in the background, since it takes a few minutes the first time,
+and ask these while it runs. If the doctor found something to install, ask
+these in the same message as your question about installing it.
 
 > “Who are YOU?” said the Caterpillar.
 >
@@ -74,8 +76,9 @@ Before anything else, ask:
 > 3. A school or technology leader
 > 4. Someone who likes to tinker
 
-Then ask one more question: “What's something a kid you know is curious about
-right now?” Ask for a topic, never a name. Keep the answer for step 6.
+Also ask: “What's something a kid you know is curious about right now?” Ask
+for a topic, never a name. Keep the answer for step 6. Both questions go in
+one message.
 
 The steps are the same for everyone in this pilot. Let the answer decide what
 you explain along the way. A parent wants to know what a child will see, a
@@ -85,8 +88,8 @@ tinkerer how it's built.
 ## 3. Check the computer
 
 Run `bin/doctor.sh`. It changes nothing. For each problem, it prints the fix
-(Homebrew commands on a Mac). Ask before installing anything, then run the
-doctor again until it says “All good.”
+(Homebrew commands on a Mac). Ask once before installing what it lists, then
+install it all and run the doctor again until it says “All good.”
 
 ## 4. Set it up
 
@@ -104,8 +107,9 @@ fails or gets interrupted, it names a log in `rabbithole/local/.run/`. Read it, 
 
 ## 5. Show them around
 
-Ask the person to open these in a browser. With their yes, you can open them
-for them: `open <url>` on a Mac, `xdg-open <url>` on Linux.
+Open the right page for them as soon as setup prints READY: `open <url>` on
+a Mac, `xdg-open <url>` on Linux. Start a parent on the parent's view and
+everyone else on the teacher's view, then point them to the others.
 
 - `http://localhost:3000/dev-login` lists every pretend person. Pick anyone;
   there's no password.
@@ -125,8 +129,9 @@ Rabbithole's observer wrote about pretend scholars' sessions. The teacher
 steers the tutor, and the tutor won't hand a scholar the answer.
 
 To check without a browser, `bin/status.sh` says whether everything runs and
-how many pretend people exist. If you can run Playwright, this signs in as
-the pretend teacher in a real browser and saves screenshots:
+how many pretend people exist. Only if the person can't see the pages
+themselves, and you can run Playwright, this signs in as the pretend teacher
+and saves screenshots:
 
     cd rabbithole && pnpm exec playwright install chromium && node ../lib/smoke.mjs "$PWD" http://localhost:3000 kawena /tmp
 
@@ -169,7 +174,7 @@ tutor answers back with another question rather than the answer.
 
 ## 7. Postcard and problems
 
-When they're done, or stuck, offer to send a postcard. Fill it in from what
+When they're done, or stuck, offer a postcard once. Fill it in from what
 happened, and never include anything about a real child:
 
     bin/postcard.sh --who parent --got "signed in as the pretend teacher" --agent "<your name>" --minutes 14 --note "..."
