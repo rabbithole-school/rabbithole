@@ -16,6 +16,8 @@ dist/
 coverage/
 *.tsbuildinfo
 .vercel/
+# Written by next dev on first start
+next-env.d.ts
 
 # Operating-system files
 .DS_Store
