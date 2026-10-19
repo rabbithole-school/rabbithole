@@ -69,11 +69,10 @@ all you need. It's what the tutor will talk about in step 4.
 
 Then the key. The tutor needs an Anthropic API key from
 console.anthropic.com, and the person pays Anthropic for what it uses, on
-their own key. Trying it costs a few dollars at most, and they can set a
-spending limit in the console first. Running it for a whole class every day
-is a different number (at the school that built it, about $1.40 per scholar
-per school day); give it if they ask what real use costs, not as the price of
-trying it. Scheduled jobs use the key too, so stop Rabbithole when done.
+their own key. Each tutor reply costs about 10 to 40 cents, so trying it
+costs a dollar or two; a kid who uses it all school day costs a few dollars a
+day. They can set a spending limit in the console first. Scheduled jobs use
+the key too, so stop Rabbithole when done.
 
 The key goes in through `bin/set-key.sh`, which the person runs in their own
 terminal so the key never passes through you. Give them the command with the
