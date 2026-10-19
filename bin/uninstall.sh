@@ -6,7 +6,7 @@
 set -euo pipefail
 . "$(dirname "$0")/../lib/common.sh"
 stop_all
-rm -rf "$APP" "$KIT/.kit" # .kit/ held logs for kits older than October 2026
+rm -rf "$APP" "$KIT/.kit" "$PENDING_KEY" # .kit/ held logs for kits older than October 2026
 say "Removed $APP (the app, its local database, its packages, and its logs)."
 if [ "${1:-}" = "--all" ]; then
   for d in "$HOME/.cache/convex/binaries" "$HOME/Library/Caches/convex/binaries"; do

@@ -33,6 +33,7 @@ EOF
 }
 
 if pid_alive next && pid_alive convex; then
+  hand_over_key || die "couldn't hand the key over; run bin/set-key.sh again"
   say "Rabbithole is already running."
   ready
   exit 0
@@ -60,5 +61,6 @@ app_run setup "$@" | awk '/\] READY$/ { done = 1 } !done { print; fflush() }' ||
   die "setup stopped early. Its logs are in rabbithole/local/.run/; read the one named above, fix the cause, and run bin/setup.sh again."
 
 [ "${1:-}" = "--no-serve" ] && { say ""; say "Set up. Start it with: bin/setup.sh"; exit 0; }
+hand_over_key || die "couldn't hand the key over; run bin/set-key.sh again"
 printf '\n[drink-me] READY\n'
 ready
