@@ -24,10 +24,14 @@ ready() {
   Pick a pretend person:  http://localhost:$WEB_PORT/dev-login
   A teacher's view:       http://localhost:$WEB_PORT/dev-login?u=kawena&to=/teacher
   A scholar's view:       http://localhost:$WEB_PORT/dev-login?u=leilani_park&to=/scholar
-  A parent's view:        http://localhost:$WEB_PORT/dev-login?u=parent_park&to=/parent  Let the tutor answer:   bin/set-key.sh --browser   (a page for pasting an Anthropic key)
+  A parent's view:        http://localhost:$WEB_PORT/dev-login?u=parent_park&to=/parent
+
   Stop:                   bin/stop.sh      Start again: bin/setup.sh
   Logs:                   rabbithole/local/.run/convex.log and next.log
 EOF
+  if [ ! -f "$PENDING_KEY" ] && app_run status 2>/dev/null | grep -q 'Tutor key: *not set'; then
+    say "  Let the tutor answer:   bin/set-key.sh --browser   (a page for pasting an Anthropic key)"
+  fi
 }
 
 if pid_alive next && pid_alive convex; then

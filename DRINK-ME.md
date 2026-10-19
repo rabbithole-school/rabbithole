@@ -153,7 +153,7 @@ screenshots:
 ## 6. Going further
 
 This copy is for trying it out: anyone at this computer can sign in as anyone,
-and only this computer can reach it. If the person wants to run it for a real
+and kids on other devices can't reach it. If the person wants to run it for a real
 class, with real sign-in, kids on their own devices, or managed iPads, the
 full code is in `rabbithole/`, and `rabbithole/DEPLOYMENT.md` lists what a
 real deployment needs. Read them and help the person from there.
@@ -185,6 +185,8 @@ seen who steers it. Tell them how to stop and remove it, and offer the postcard.
 ## What leaves this computer
 
 - Package downloads from the npm registry, and the Convex backend from GitHub.
+- Two public curriculum-standards files the pretend school is seeded with,
+  from raw.githubusercontent.com (downloads only).
 - Fonts the pages load from Google Fonts and fonts.cdnfonts.com.
 - Crash reports from the local Convex backend, only if it crashes. Its usage
   ping is off.
@@ -193,3 +195,7 @@ seen who steers it. Tell them how to stop and remove it, and offer the postcard.
 - Whatever the person types to you goes to your own provider.
 
 Nothing is sent to the people who make Rabbithole.
+
+The web pages answer only on this computer. The local database behind them
+also listens on the local network (the Convex tools don't offer a way to
+stop that yet); it holds only the pretend school, but say so if asked.
