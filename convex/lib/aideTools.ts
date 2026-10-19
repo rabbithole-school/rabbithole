@@ -349,7 +349,7 @@ export async function assembleCurriculumTools(
   });
 
   // Managed-iPad operations (list_managed_devices / list_rabbithole_lock_devices
-  // / set_rabbithole_lock / restart_managed_device) — school operations
+  // / set_rabbithole_lock / set_freeze_mode / restart_managed_device) — school operations
   // (teacher / school_admin / platform_admin, or base staff with an active
   // school:operations grant), every surface; empty otherwise. Needs a named
   // transport because the writes audit it. The backing internal functions

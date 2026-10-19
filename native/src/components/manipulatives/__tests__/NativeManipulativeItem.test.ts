@@ -18,6 +18,11 @@ const { items, NativeManipulative, Pressable, passthrough } = vi.hoisted(() => {
 });
 
 vi.mock("@/components/SpeakableLabel", () => ({ SpeakableLabel: passthrough }));
+// Freeze Mode's modal wrapper adds an overlay this test doesn't exercise;
+// hand back the mocked React Native Modal.
+vi.mock("@/components/FreezableModal", async () => ({
+  Modal: (await import("react-native")).Modal,
+}));
 vi.mock("react-native", () => ({
   ActivityIndicator: passthrough,
   Keyboard: { dismiss: vi.fn() },

@@ -1767,6 +1767,9 @@ export const consumeManagedClaim = internalMutation({
                 rabbitholeLockAppliedDesiredState: undefined,
                 rabbitholeLockAppliedAt: undefined,
                 rabbitholeLockInSingleAppMode: undefined,
+                // A freeze belongs to the scholar it was set on, not the next one.
+                freezeUntil: undefined,
+                freezeUpdatedBy: undefined,
                 assignedDeviceCaptureStationId: undefined,
                 assignedDeviceCaptureExpiresAt: undefined,
                 assignedDeviceCaptureUpdatedAt: undefined,

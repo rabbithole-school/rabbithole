@@ -6,13 +6,13 @@ import * as Haptics from "expo-haptics";
 import {
   ActivityIndicator,
   Alert,
-  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, {
   Easing,

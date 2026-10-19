@@ -163,11 +163,12 @@ const DEVICE_TOOL_NAMES = [
   "list_managed_devices",
   "list_rabbithole_lock_devices",
   "set_rabbithole_lock",
+  "set_freeze_mode",
   "restart_managed_device",
 ];
 
 /** The curriculum surface's managed-iPad subset — what tools/list advertises
- *  for these four names. Each must appear at most once. */
+ *  for these names. Each must appear at most once. */
 async function listDeviceTools(as: ReturnType<TestHarness["withIdentity"]>) {
   const all = await as.action(api.mcp.listCurriculumTools, {});
   return all.filter((tool) => DEVICE_TOOL_NAMES.includes(tool.name));
@@ -394,6 +395,31 @@ describe("mcp device tools — the institution boundary", () => {
       (await t.run((ctx) => ctx.db.get(foreign.pairedDeviceId)))
         ?.rabbitholeLockDesiredState,
     ).toBeUndefined();
+  });
+
+  test("set_freeze_mode freezes the caller's own iPad and refuses another school's", async () => {
+    const t = convexTest(schema, modules);
+    const home = await seedSchool(t, "moli", "Kai");
+    const foreign = await seedSchool(t, "other", "Hoku");
+    const asTeacher = await withUser(t, home.teacherId);
+
+    const refused = await asTeacher.action(api.mcp.callCurriculumTool, {
+      name: "set_freeze_mode",
+      input: { paired_device_ids: [foreign.pairedDeviceId], frozen: true, minutes: 15 },
+    });
+    expect(refused).toContain("unavailable in your school context");
+    expect(
+      (await t.run((ctx) => ctx.db.get(foreign.pairedDeviceId)))?.freezeUntil,
+    ).toBeUndefined();
+
+    const frozen = await asTeacher.action(api.mcp.callCurriculumTool, {
+      name: "set_freeze_mode",
+      input: { paired_device_ids: [home.pairedDeviceId], frozen: true, minutes: 15 },
+    });
+    expect(frozen).toContain("1 iPad frozen for 15 minutes");
+    expect(
+      (await t.run((ctx) => ctx.db.get(home.pairedDeviceId)))?.freezeUntil,
+    ).toEqual(expect.any(Number));
   });
 
   test("a mixed-tenant batch changes nothing, including the caller's own device", async () => {

@@ -158,7 +158,9 @@ export function AsamParentGate({
                       Scan with a staff member&apos;s phone
                     </Text>
                     <Text style={styles.scanDetail}>
-                      Sign in to arm or disarm this iPad.
+                      {lockState?.frozenUntil
+                        ? "Sign in to unfreeze this iPad."
+                        : "Sign in to arm or disarm this iPad."}
                     </Text>
                     {deviceSettingsUrl ? (
                       <Text style={styles.url} numberOfLines={1}>

@@ -12,7 +12,8 @@
 //
 // The contract is prose, and prose is UX — the authorization boundary is the
 // internal functions these call (`deviceLock.listForAgent` /
-// `deviceLock.setFromAgent` / `managedDeviceClaims.listForAgent` /
+// `deviceLock.setFromAgent` / `deviceLock.freezeFromAgent` /
+// `managedDeviceClaims.listForAgent` /
 // `simplemdm.restartDeviceFromAgent`), each of which re-resolves the caller
 // and refuses the whole batch if any id falls outside their school:operations
 // institutions. A model that skips the confirmation step still cannot reach
@@ -112,7 +113,7 @@ export async function makeDeviceOpsTools(
     betaTool({
       name: "list_rabbithole_lock_devices",
       description:
-        "List paired school iPads and their Rabbithole Lock state. Use this BEFORE set_rabbithole_lock to resolve the exact paired_device_ids and show the requester which iPads will change. Optionally search by device label, serial, scholar name/username, or id. The inventory is complete; rows for Extended Education (program-guest) scholars are tagged extendedEducation: true.",
+        "List paired school iPads with their Rabbithole Lock and Freeze Mode state (frozenUntil is the epoch-ms instant a frozen iPad thaws, null when not frozen). Use this BEFORE set_rabbithole_lock or set_freeze_mode to resolve the exact paired_device_ids and show the requester which iPads will change. Optionally search by device label, serial, scholar name/username, or id. The inventory is complete; rows for Extended Education (program-guest) scholars are tagged extendedEducation: true.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -143,7 +144,7 @@ export async function makeDeviceOpsTools(
     betaTool({
       name: "set_rabbithole_lock",
       description:
-        "Arm or disarm Rabbithole Lock on one or more paired school iPads. You MUST call list_rabbithole_lock_devices first, show the exact resolved devices and action to the requester, and receive confirmation before calling this write tool. Never pass an id you inferred from a name without having listed it. Disarm defaults to until_midnight in each iPad's school timezone; alternatives are one_time (re-arms when Rabbithole is entered again), until_further_notice, and timed (re-arms automatically after a fixed number of minutes — pass disarm_minutes, 5-480, whenever disarm_mode is timed).",
+        "Arm or disarm Rabbithole Lock on one or more paired school iPads. You MUST call list_rabbithole_lock_devices first, show the exact resolved devices and action to the requester, and receive confirmation before calling this write tool. Never pass an id you inferred from a name without having listed it. Disarm defaults to until_midnight in each iPad's school timezone; alternatives are one_time (re-arms when Rabbithole is entered again), until_further_notice, and timed (re-arms automatically after a fixed number of minutes — pass disarm_minutes, 5-480, whenever disarm_mode is timed). A frozen iPad (Freeze Mode) cannot be disarmed until it is unfrozen.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -202,13 +203,59 @@ export async function makeDeviceOpsTools(
       },
     }),
 
+    betaTool({
+      name: "set_freeze_mode",
+      description:
+        "Freeze or unfreeze one or more paired school iPads. Freeze Mode is a staff-set pause: it arms Rabbithole Lock so the scholar can't leave the app and covers Rabbithole with a screen reading that the iPad is frozen until a stated time and to ask a teacher to unfreeze it. It thaws on its own after `minutes`, or when staff unfreeze it. You MUST call list_rabbithole_lock_devices first, show the requester the exact scholars and iPads you resolved plus the action (and for a freeze, how long), and get confirmation before calling this. Never pass an id you inferred from a name without having listed it. Freeze Mode is not a fix for an unresponsive or crashed iPad — that is restart_managed_device. Unfreezing leaves Rabbithole Lock armed.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          paired_device_ids: {
+            type: "array" as const,
+            description:
+              "Exact pairedDeviceId values returned by list_rabbithole_lock_devices.",
+            items: { type: "string" as const },
+          },
+          frozen: {
+            type: "boolean" as const,
+            description: "true to freeze, false to unfreeze.",
+          },
+          minutes: {
+            type: "number" as const,
+            description:
+              "Required when freezing: how many minutes from now the iPad stays frozen (integer, 5-480). Re-freezing a frozen iPad replaces its end time. Ignored when unfreezing.",
+          },
+        },
+        required: ["paired_device_ids", "frozen"] as const,
+      },
+      run: async (input) => {
+        const result = await ctx.runMutation(
+          internal.deviceLock.freezeFromAgent,
+          {
+            callerUserId,
+            source,
+            pairedDeviceIds: (input.paired_device_ids ??
+              []) as Id<"pairedDevices">[],
+            frozen: input.frozen === true,
+            minutes: input.minutes as number | undefined,
+          },
+        );
+        if (result.ok) {
+          emit({
+            toolComplete: { name: "set_freeze_mode", result: result.message },
+          });
+        }
+        return result.message;
+      },
+    }),
+
     // One device per call, deliberately: a restart drops whatever the scholar
     // has not sent, so a batch would multiply the cost of one wrong match.
     // The console's Restart button is one-device too.
     betaTool({
       name: "restart_managed_device",
       description:
-        "Restart ONE managed school iPad over MDM — the fix for a frozen or wedged app. You MUST call list_managed_devices first, tell the requester the exact scholar and iPad (label and serial) you resolved, and get an explicit yes in this conversation before calling this. Never pass an id you inferred from a name without having listed it. One iPad per call; there is no bulk restart. What staff should know: the iPad must be online to receive the restart (it waits in the queue until the iPad next checks in); anything the scholar hasn't sent or saved is lost; the iPad comes back signed in as the same scholar. Never use force sign-out as a substitute for a restart: on a managed iPad that invalidates its enrollment key and needs a staff follow-up before it can sign in again. Requires a supervised, SimpleMDM-enrolled iPad; a refusal says why.",
+        "Restart ONE managed school iPad over MDM — the fix for a hung or wedged app (not Freeze Mode, which staff set on purpose; see set_freeze_mode). You MUST call list_managed_devices first, tell the requester the exact scholar and iPad (label and serial) you resolved, and get an explicit yes in this conversation before calling this. Never pass an id you inferred from a name without having listed it. One iPad per call; there is no bulk restart. What staff should know: the iPad must be online to receive the restart (it waits in the queue until the iPad next checks in); anything the scholar hasn't sent or saved is lost; the iPad comes back signed in as the same scholar. Never use force sign-out as a substitute for a restart: on a managed iPad that invalidates its enrollment key and needs a staff follow-up before it can sign in again. Requires a supervised, SimpleMDM-enrolled iPad; a refusal says why.",
       inputSchema: {
         type: "object" as const,
         properties: {

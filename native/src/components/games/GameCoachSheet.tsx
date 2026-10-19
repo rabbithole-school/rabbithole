@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -10,6 +9,7 @@ import {
   Text,
   View,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import { useAuthToken } from "@convex-dev/auth/react";
 import { fetch as expoFetch } from "expo/fetch";
 import { SymbolView } from "expo-symbols";

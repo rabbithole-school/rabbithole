@@ -12,7 +12,8 @@
  * PR's scope. The Android hardware back button is a no-op here (there is no
  * scholar-side dismissal).
  */
-import { Modal, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import { fonts, palette } from "@/theme";
 import { REST_HEADLINE, restSubline } from "../../vendor/shared/roomCueCopy";
 

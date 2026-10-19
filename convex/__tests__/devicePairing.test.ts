@@ -427,7 +427,7 @@ describe("device pairing — code lookup (staff console)", () => {
     expect(found?.existingBinding?.scholarUsername).toBe("lani");
   });
 
-  test("same-scholar re-pair preserves a disarm; a scholar handoff resets to armed", async () => {
+  test("same-scholar re-pair preserves a disarm and a freeze; a scholar handoff resets to armed and unfrozen", async () => {
     const t = convexTest(schema, modules);
     const inst = await seedInstitution(t, "moli");
     const registrar = await seedUser(t, "staff");
@@ -456,6 +456,8 @@ describe("device pairing — code lookup (staff console)", () => {
         rabbitholeLockDisarmMode: "until_further_notice",
         rabbitholeLockUpdatedAt: Date.now(),
         rabbitholeLockUpdatedBy: registrar,
+        freezeUntil: Date.now() + 60_000,
+        freezeUpdatedBy: registrar,
       });
     });
 
@@ -473,6 +475,7 @@ describe("device pairing — code lookup (staff console)", () => {
       scholarId: kai,
       rabbitholeLockDesiredState: "disarmed",
       rabbitholeLockDisarmMode: "until_further_notice",
+      freezeUntil: expect.any(Number),
     });
 
     const handoff = await registerDevice(t, { deviceId: "ipad-lock-state" });
@@ -487,6 +490,8 @@ describe("device pairing — code lookup (staff console)", () => {
     expect(rebound?.scholarId).toBe(lani);
     expect(rebound?.rabbitholeLockDesiredState).toBeUndefined();
     expect(rebound?.rabbitholeLockDisarmMode).toBeUndefined();
+    expect(rebound?.freezeUntil).toBeUndefined();
+    expect(rebound?.freezeUpdatedBy).toBeUndefined();
   });
 
   test("staff at another institution see no binding without an error", async () => {

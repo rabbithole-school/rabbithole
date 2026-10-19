@@ -5,7 +5,6 @@ import * as Haptics from "expo-haptics";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -13,6 +12,7 @@ import {
   Text,
   View,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import {

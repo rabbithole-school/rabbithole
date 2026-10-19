@@ -1,12 +1,12 @@
 import { useMemo } from "react";
 import {
   ActivityIndicator,
-  Modal,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import { SymbolView } from "expo-symbols";
 
 import { fonts, type Colors, useColors } from "@/theme";

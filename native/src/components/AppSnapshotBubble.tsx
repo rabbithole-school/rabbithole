@@ -1,11 +1,11 @@
 import { useMemo, useState } from "react";
 import {
-  Modal,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import { Image } from "expo-image";
 import { SymbolView } from "expo-symbols";
 

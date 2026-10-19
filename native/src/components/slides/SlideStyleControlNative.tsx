@@ -16,12 +16,12 @@
 import { useCallback, useRef, useState } from "react";
 import {
   Dimensions,
-  Modal,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 
 import { fonts, useColors } from "@/theme";
 

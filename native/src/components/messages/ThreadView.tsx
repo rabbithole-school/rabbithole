@@ -5,13 +5,13 @@ import {
   ActivityIndicator,
   Alert,
   AppState,
-  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { Modal } from "@/components/FreezableModal";
 import Animated from "react-native-reanimated";
 import { Image } from "expo-image";
 import { SymbolView } from "expo-symbols";
