@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { v, type ObjectType } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 import { stream } from "convex-helpers/server/stream";
 import schema from "./schema";
@@ -1067,7 +1067,8 @@ const createQuestArgs = {
   badgeIcon: v.optional(v.string()),
 };
 
-async function createQuestHandler(
+/** Also the first step of the local runner's `localRunner:startTopicChat`. */
+export async function createQuestHandler(
   ctx: MutationCtx & { user: Doc<"users"> },
   args: {
     title: string;
@@ -1104,13 +1105,18 @@ export const createQuest = authedMutation({
  * bake skips a unit that already has activities). See
  * review/seed-to-unit-bake-plan.md.
  */
-export const scheduleCustomQuestBake = authedMutation({
-  args: {
-    unitId: v.id("units"),
-    sessionId: v.id("sessions"),
-    bakePath: v.optional(chosenPathValidator),
-  },
-  handler: async (ctx, args) => {
+const scheduleCustomQuestBakeArgs = {
+  unitId: v.id("units"),
+  sessionId: v.id("sessions"),
+  bakePath: v.optional(chosenPathValidator),
+};
+
+/** The core of `scheduleCustomQuestBake`, acting as `ctx.user`; also the last
+ *  step of the local runner's `localRunner:startTopicChat`. */
+export async function scheduleCustomQuestBakeAs(
+  ctx: MutationCtx & { user: Doc<"users"> },
+  args: ObjectType<typeof scheduleCustomQuestBakeArgs>,
+) {
     const unit = await ctx.db.get(args.unitId);
     if (!unit) throw new Error("Unit not found");
     // Only the scholar who owns this independent-study unit may bake it.
@@ -1152,7 +1158,11 @@ export const scheduleCustomQuestBake = authedMutation({
       },
     );
     return { scheduled: true as const };
-  },
+}
+
+export const scheduleCustomQuestBake = authedMutation({
+  args: scheduleCustomQuestBakeArgs,
+  handler: scheduleCustomQuestBakeAs,
 });
 
 /**

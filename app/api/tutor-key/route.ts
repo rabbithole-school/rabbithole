@@ -53,11 +53,20 @@ async function handle(request: Request) {
   }
 
   const check = await checkAnthropicKey(key);
-  if (check === "rejected") {
-    return refuse(400, "Anthropic didn't accept that key. Check it and try again.");
+  if (check.kind === "rejected") {
+    return refuse(400, `Anthropic didn't accept that key: ${check.message}`);
   }
-  if (check === "unreachable") {
-    return refuse(502, "Couldn't reach Anthropic to check the key. Try again in a moment.");
+  if (check.kind === "busy") {
+    return refuse(
+      503,
+      `Anthropic is busy right now (${check.message}). Your key may be fine; try again in a moment.`,
+    );
+  }
+  if (check.kind === "unreachable") {
+    return refuse(
+      502,
+      `This computer's Rabbithole couldn't reach Anthropic: ${check.reason}. Try again in a moment.`,
+    );
   }
 
   // The check above takes a network round trip: confirm nothing set a key

@@ -88,9 +88,53 @@ export function plausibleAnthropicKey(key: string): boolean {
   return /^[A-Za-z0-9_-]{20,300}$/.test(key);
 }
 
-export type KeyCheck = "ok" | "rejected" | "unreachable";
+export type KeyCheck =
+  | { kind: "ok" }
+  /** Anthropic answered with an HTTP error; `message` is its own words. */
+  | { kind: "rejected"; message: string }
+  /** Anthropic answered, but is rate-limiting or overloaded (429, 5xx): the
+   *  key may well be fine, so don't call it rejected. */
+  | { kind: "busy"; message: string }
+  /** No HTTP answer at all: offline, DNS, TLS, or the timeout. */
+  | { kind: "unreachable"; reason: string };
 
-/** Ask Anthropic whether the key works: list models, the cheapest call. */
+const MAX_MESSAGE_CHARS = 300;
+
+/** One line of plain text, bounded: safe to show on the page and to log. */
+function plainText(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const flat = value
+    .replace(/\p{Cc}+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return flat.length > MAX_MESSAGE_CHARS ? `${flat.slice(0, MAX_MESSAGE_CHARS - 1)}…` : flat;
+}
+
+/** Anthropic's error body is `{ type: "error", error: { type, message } }`. */
+async function anthropicError(res: Response): Promise<{ type: string; message: string }> {
+  let body: unknown = null;
+  try {
+    body = await res.json();
+  } catch {
+    /* not JSON: the status alone describes it */
+  }
+  const error = (body as { error?: { type?: unknown; message?: unknown } } | null)?.error;
+  return { type: plainText(error?.type), message: plainText(error?.message) };
+}
+
+function networkReason(err: unknown): string {
+  if (!(err instanceof Error)) return "network error";
+  if (err.name === "TimeoutError" || err.name === "AbortError") {
+    return "no answer within 15 seconds";
+  }
+  const cause = (err as { cause?: { code?: unknown; message?: unknown } }).cause;
+  return plainText(cause?.code) || plainText(cause?.message) || plainText(err.message) || "network error";
+}
+
+/** Ask Anthropic whether the key works: list models, the cheapest call.
+ *  Logs the outcome with console.warn so it lands in local/.run/next.log for
+ *  an agent to read: the HTTP status and Anthropic's error type and message,
+ *  never the key. */
 export async function checkAnthropicKey(
   key: string,
   fetchImpl: typeof fetch = fetch,
@@ -102,12 +146,24 @@ export async function checkAnthropicKey(
       headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
       signal: AbortSignal.timeout(15_000),
     });
-  } catch {
-    return "unreachable";
+  } catch (err) {
+    const reason = networkReason(err);
+    console.warn(`[tutor-key] key check: couldn't reach Anthropic (${reason})`);
+    return { kind: "unreachable", reason };
   }
-  if (res.ok) return "ok";
-  if (res.status === 401 || res.status === 403) return "rejected";
-  return "unreachable";
+  if (res.ok) {
+    console.warn(`[tutor-key] key check: Anthropic accepted the key (HTTP ${res.status})`);
+    return { kind: "ok" };
+  }
+  const { type, message } = await anthropicError(res);
+  console.warn(
+    `[tutor-key] key check: Anthropic answered HTTP ${res.status}` +
+      `${type ? ` ${type}` : ""}${message ? `: ${message}` : ""}`,
+  );
+  if (res.status === 429 || res.status >= 500) {
+    return { kind: "busy", message: message || `HTTP ${res.status}` };
+  }
+  return { kind: "rejected", message: message || `HTTP ${res.status}` };
 }
 
 /** Store the key as the local backend's ANTHROPIC_API_KEY. */

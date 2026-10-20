@@ -517,6 +517,7 @@ import type * as lib_writingMechanicsPolicy from "../lib/writingMechanicsPolicy.
 import type * as libraryCards from "../libraryCards.js";
 import type * as llmBudget from "../llmBudget.js";
 import type * as llmLimiter from "../llmLimiter.js";
+import type * as localRunner from "../localRunner.js";
 import type * as magicLinkRequests from "../magicLinkRequests.js";
 import type * as maintenance from "../maintenance.js";
 import type * as managedDeviceClaims from "../managedDeviceClaims.js";
@@ -1261,6 +1262,7 @@ declare const fullApi: ApiFromModules<{
   libraryCards: typeof libraryCards;
   llmBudget: typeof llmBudget;
   llmLimiter: typeof llmLimiter;
+  localRunner: typeof localRunner;
   magicLinkRequests: typeof magicLinkRequests;
   maintenance: typeof maintenance;
   managedDeviceClaims: typeof managedDeviceClaims;
