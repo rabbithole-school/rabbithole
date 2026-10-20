@@ -31,7 +31,7 @@ writeFileSync(
   path.join(dist, "llms.txt"),
   "# Rabbithole: drink-me\n\n" +
     "If a person asked you to take them down the rabbit hole, read " +
-    "https://drink-me.rabbithole.school/drink-me and follow it.\n",
+    "https://drink-me.rabbithole.school/drink-me.md and follow it.\n",
 );
 for (const f of ["index.html"]) copyFileSync(path.join(here, f), path.join(dist, f));
 console.log(`built site/dist${commit ? `, pinned to ${commit.slice(0, 7)}` : " (no commit pin available)"}`);

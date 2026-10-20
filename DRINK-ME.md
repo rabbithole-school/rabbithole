@@ -32,7 +32,7 @@ tutor's chat, once the person has answered step 3's questions.
 
 ## 1. The kit
 
-If you came from drink-me.rabbithole.school/drink-me, you've already cloned
+If you came from drink-me.rabbithole.school/drink-me.md, you've already cloned
 this kit into `rabbithole-drink-me`. Otherwise clone it into a folder of its
 own, outside any other project:
 

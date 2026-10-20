@@ -15,7 +15,7 @@ Paste this into Claude Code, Codex, Cursor, or any agent that can use a
 terminal:
 
 ```text
-Read drink-me.rabbithole.school/drink-me and take me down the rabbit hole.
+Fetch https://drink-me.rabbithole.school/drink-me.md and take me down the rabbit hole.
 ```
 
 That page tells the agent to clone this branch and follow
