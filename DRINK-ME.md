@@ -72,8 +72,12 @@ Ask, showing all four choices:
 > 3. A school or technology leader
 > 4. Someone who likes to tinker
 
-And: “What's something a kid you know is curious about right now?” A topic is
-all you need. It's what the tutor will talk about in step 4.
+And: “Is this for you to try, or is there a kid with you who'll try it?”
+
+Then the topic. If a kid is there, ask the kid: “What's something you're
+curious about right now?” If not: “What's something a kid you know is curious
+about right now?” A topic is all you need. Tell them that's where they'll
+land: in step 4 the tutor opens a chat about it.
 
 Then the key. The tutor needs an Anthropic API key, and the person pays Anthropic for what it uses, on
 their own key. Each tutor reply costs about 10 to 40 cents, so trying it
@@ -104,35 +108,33 @@ leader where data goes and what it costs, a tinkerer how it's built.
 
 ## 4. The tutor
 
-When setup prints READY, run `bin/set-key.sh`. It opens Rabbithole's own
-key page (`/tutor-key`, which works only on this computer and only while no
-key is set), where the person pastes the key. Rabbithole checks it with
-Anthropic, saves it, and takes their browser straight to the scholar's view;
-the script returns as soon as the key is in. So tell them, in one message: a
-page opened in their browser, the key goes there and never into this chat,
-and it will take them to the tutor. Then wait for the script instead of
-asking them to tell you; if your commands time out sooner, run it in the
-background and check its output every few seconds. If the page didn't open,
-the address is in the script's output. To replace a key that's already set,
-run `CONVEX_AGENT_MODE=anonymous npx convex env set ANTHROPIC_API_KEY` in
-`rabbithole/` from the person's own terminal.
+When setup prints READY, run `bin/start-chat.sh "<the topic from step 3>"`.
+It starts the pretend scholar's chat on that topic. If the tutor has no key
+yet, it first opens Rabbithole's own key page (`/tutor-key`, which works only
+on this computer and only while no key is set); once the key is saved, the
+page takes the browser straight into the chat. The script returns as soon as
+the person is on their way. So tell them, in one message: a page opened in
+their browser, the key goes there and never into this chat, and it will take
+them straight to a chat about their topic. Then wait for the script instead
+of asking them to tell you; if your commands time out sooner, run it in the
+background and check its output every few seconds. The chat's address is in
+the script's output if the page didn't open. To replace a key that's already
+set, run `CONVEX_AGENT_MODE=anonymous npx convex env set ANTHROPIC_API_KEY`
+in `rabbithole/` from the person's own terminal.
 
-If the browser isn't on the scholar's view, open it (`open <url>` on a Mac,
-`xdg-open` on Linux):
+The first visit takes 10 to 15 seconds while the page is built. The tutor
+speaks first, with a question about the topic; it calls the scholar Leilani,
+the pretend school's name for them. A banner may mention a class block;
+that's the pretend school's timetable.
 
-    http://localhost:3000/dev-login?u=leilani_park&to=/scholar
+If a kid is at the keyboard, the adult hands it over and watches. Say
+plainly, once, that what the kid types goes to Anthropic on the adult's key,
+like everything the tutor hears; it's their call. If the adult is trying it
+themselves, they answer the way the curious kid would.
 
-These addresses use the default port; if setup printed others, use those.
-The first visit to each page takes 10 to 15 seconds while it's built. Then:
-the Quests tab, “+ Custom Quest”, type the topic from step 3, Continue. When
-the choices load, click “Endless chat” (check its circle is filled), then
-“Start exploring”. A banner may mention a class block; that's the pretend
-school's timetable.
-
-The tutor speaks first, with a question. Have them wait for it before typing
-(a message sent while the chat loads can be lost), then answer like the
-curious kid would. The tutor answers back with another question, not the
-answer. That's the moment; let it land before moving on.
+Have them wait for the tutor's question before typing, then answer. The
+tutor answers back with another question, not the answer. That's the moment;
+let it land before moving on.
 
 Typing is the way in. The microphone needs an OpenAI key, which this kit
 doesn't set up; tapping it just says so.

@@ -31,7 +31,7 @@ ready() {
 EOF
   # Not grep -q: under pipefail its early exit would fail the pipeline.
   if app_run status 2>/dev/null | grep 'Tutor key: *not set' >/dev/null; then
-    say "  Let the tutor answer:   bin/set-key.sh   (opens Rabbithole's page for an Anthropic key)"
+    say "  Meet the tutor:         bin/start-chat.sh \"a topic\"   (asks for an Anthropic key first)"
   fi
 }
 
