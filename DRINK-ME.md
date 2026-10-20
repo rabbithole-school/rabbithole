@@ -153,7 +153,9 @@ The teacher steers the tutor and sees what it noticed: on the teacher's home,
 scholars' sessions. The parent's view shows what their own child has been
 doing.
 
-`bin/status.sh` says whether everything is running. If you need to see the
+`bin/status.sh` says whether everything is running and whether the tutor has
+a key. Use it rather than `npx convex env list`, which prints every secret's
+value, the key included. If you need to see the
 pages yourself and can run Playwright, this signs in as the teacher and saves
 screenshots:
 
