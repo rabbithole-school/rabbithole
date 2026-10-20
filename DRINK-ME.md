@@ -87,8 +87,10 @@ one; you'll open the page for it once setup prints READY (step 4).
 If they don't have a key yet, help them get one while setup runs; it takes a
 few minutes. Anthropic only makes keys in its web console: sign in or sign
 up at https://platform.claude.com, add a few dollars of credit under Billing
-(and a spending limit, if they like), then create a key at
-https://platform.claude.com/settings/keys. The console shows the key only
+(and a spending limit, if they like), then create a key **inside a
+workspace** (the Default workspace is fine) at
+https://platform.claude.com/settings/keys. A key made outside any workspace
+is refused for every request Rabbithole makes. The console shows the key only
 once, so have them keep it handy for the next step.
 
 The tutor is the point of trying Rabbithole, so don't offer a tour without a
