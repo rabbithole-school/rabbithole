@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { v, type ObjectType } from "convex/values";
 import {
   isUnitPublished,
   scholarHoldsAssignmentForUnit,
@@ -1527,8 +1527,7 @@ async function testDriveTargetUnitId(
   return unitId;
 }
 
-export const create = authedMutation({
-  args: {
+const createSessionArgs = {
     userId: v.optional(v.id("users")), // For teacher remote mode
     unitId: v.optional(v.id("units")),
     lessonId: v.optional(v.id("lessons")),
@@ -1547,8 +1546,17 @@ export const create = authedMutation({
     testDriveSyntheticName: v.optional(v.string()),
     testDriveSyntheticReadingLevel: v.optional(v.string()),
     testDriveSyntheticDossier: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
+};
+
+/**
+ * The core of `sessions.create`, acting as `ctx.user`. Exported so the local
+ * runner's `localRunner:startTopicChat` creates a scholar's Custom Quest
+ * session through exactly this path rather than a copy of it.
+ */
+export async function createSessionAs(
+  ctx: MutationCtx & { user: Doc<"users"> },
+  args: ObjectType<typeof createSessionArgs>,
+): Promise<{ id: Id<"sessions"> }> {
     const isTeacher =
       isTeacherRole(ctx.user.role);
     // A curriculum:run holder (lib/curriculumRun.ts) may Preflight a unit she
@@ -1825,7 +1833,11 @@ export const create = authedMutation({
     }
 
     return { id };
-  },
+}
+
+export const create = authedMutation({
+  args: createSessionArgs,
+  handler: createSessionAs,
 });
 
 /**

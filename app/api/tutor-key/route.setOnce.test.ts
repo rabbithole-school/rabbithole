@@ -14,7 +14,7 @@ vi.mock("@/lib/localRunnerKey", () => ({
   // pass its own first check if requests were not serialized.
   checkAnthropicKey: async () => {
     await new Promise((r) => setTimeout(r, 5));
-    return "ok" as const;
+    return { kind: "ok" } as const;
   },
   // Saving takes a round trip too (an env write to the backend), so an
   // unserialized racer could pass its pre-save re-check before this lands.

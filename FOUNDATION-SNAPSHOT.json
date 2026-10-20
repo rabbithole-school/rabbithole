@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "708da3abc90fc980a173e917f8b9c0d084d041e9",
+  "sourceCommit": "d97e6951cb29fa5133cd517ff2011b1c57023eb6",
   "files": [
     {
       "path": ".github/workflows/ci.yml",
@@ -148,8 +148,13 @@
       "mode": "100644"
     },
     {
+      "path": "app/api/tutor-key/route.messages.test.ts",
+      "sha256": "77919f2c2d65f6df763ec0677bffc3a7c45c86c2cad7f530c9d3c0ecf259bae6",
+      "mode": "100644"
+    },
+    {
       "path": "app/api/tutor-key/route.setOnce.test.ts",
-      "sha256": "12e5425bb55e8aad5fe5683b25e08f140b38bfb94af7a6ff80f124e4b24cd61e",
+      "sha256": "5f2538c9a6f633f5e959332db2a540b14db40c23498b07a2b0d7c260e19d3e5b",
       "mode": "100644"
     },
     {
@@ -159,7 +164,7 @@
     },
     {
       "path": "app/api/tutor-key/route.ts",
-      "sha256": "61ee1b85110528a9214ecc00a7da9fd6007fdc4865dfd6395c70b8dbb79654c2",
+      "sha256": "b014d04ba3026755b052585041e1826fc06187fe9edcf23836a03001b000e77e",
       "mode": "100644"
     },
     {
@@ -5793,6 +5798,11 @@
       "mode": "100644"
     },
     {
+      "path": "convex/__tests__/localRunnerTopicChat.test.ts",
+      "sha256": "1b2c01c9d5f610d48e3d13cd65eaa4c32046e558995fdea789822d686d77789e",
+      "mode": "100644"
+    },
+    {
       "path": "convex/__tests__/magicLinkAuth.test.ts",
       "sha256": "b18a86646947f54286cfe0542cf2d43ec3fb666ea88e425fcf863c01eab1d629",
       "mode": "100644"
@@ -7399,7 +7409,7 @@
     },
     {
       "path": "convex/_generated/api.d.ts",
-      "sha256": "3f1cee53d4c72ac57bab0c6c6ded450135d21adfccbef60a42e7a68c7b340853",
+      "sha256": "120133ff859a39145587e282f7ec95f82fb82b0da161b728f655941c1793565e",
       "mode": "100644"
     },
     {
@@ -10788,6 +10798,11 @@
       "mode": "100644"
     },
     {
+      "path": "convex/localRunner.ts",
+      "sha256": "a208154fd14de9a209676f71f922037896e901b91efa18be4ebf1ac52e1cd06d",
+      "mode": "100644"
+    },
+    {
       "path": "convex/magicLinkRequests.ts",
       "sha256": "635240bebafd53e96af221551014abb70db753412eae4daffdef048a4315053b",
       "mode": "100644"
@@ -11654,7 +11669,7 @@
     },
     {
       "path": "convex/sessions.ts",
-      "sha256": "dbebcd7f1b66caaf79c5a231c790125a665a938e6771e56a14e4be3714e06cb0",
+      "sha256": "06ef5a45085b0839a135d11d8be616998a54f842cd6338b010819c5630eb42fc",
       "mode": "100644"
     },
     {
@@ -11914,7 +11929,7 @@
     },
     {
       "path": "convex/units.ts",
-      "sha256": "854845dfcf620ec93cabb766a4b6d7ba19f18d1c53d3980d01044a1afea2098c",
+      "sha256": "37f2527b8a2a39c185fb7d0d07f95fa48afce8b0ebe9b2ceb15415490c7d52c3",
       "mode": "100644"
     },
     {
@@ -14369,7 +14384,7 @@
     },
     {
       "path": "lib/__tests__/localRunnerKey.test.ts",
-      "sha256": "86abb548ca15a4b16a8ad7522699cc19144ed2603fda78a647faf08b9f694654",
+      "sha256": "3cb40a6d6b1c26aa7d28e10c52c81b69f13e806736510330e455cfbe8ad9baab",
       "mode": "100644"
     },
     {
@@ -14939,7 +14954,7 @@
     },
     {
       "path": "lib/localRunnerKey.ts",
-      "sha256": "4f92383ca94f38ffddb05ba60ff833db2640b2e1466a65444c042e6632a2f185",
+      "sha256": "6e063cf7bea08be6420cd9ba164e87db7e76d5d174a0d03669a2449db13772de",
       "mode": "100644"
     },
     {
@@ -19259,7 +19274,7 @@
     },
     {
       "path": "native/vendor/convex_generated/api.d.ts",
-      "sha256": "3f1cee53d4c72ac57bab0c6c6ded450135d21adfccbef60a42e7a68c7b340853",
+      "sha256": "120133ff859a39145587e282f7ec95f82fb82b0da161b728f655941c1793565e",
       "mode": "100644"
     },
     {
@@ -22158,5 +22173,5 @@
       "mode": "100644"
     }
   ],
-  "treeHash": "7ede33175f04057b502946581533f4503573653dab66f8db35f57f239eb2e8cc"
+  "treeHash": "e2cbc582b133519a5d1ffa04ffcc25dc1f377700b4052c7594cb1abde43759b3"
 }
