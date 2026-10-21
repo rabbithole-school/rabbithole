@@ -7,7 +7,7 @@
 <title>Rabbithole · Drink me</title>
 <meta name="description" content="Wake up. Follow the white rabbit. Paste one line into an AI agent on your computer and go down the rabbit hole.">
 <meta name="theme-color" content="#020904">
-<link rel="alternate" type="text/markdown" href="/drink-me" title="Instructions for agents">
+<link rel="alternate" type="text/plain" href="https://rabbithole.school/drink-me.md" title="Instructions for agents">
 <style>
   /* TAKE A: THE TERMINAL. The page is one phosphor screen at night.
      The line you paste is the prompt at the cursor; everything else is
@@ -128,6 +128,8 @@
   .where span { color: var(--dim); font-size: 14px; }
   .copied { margin: 10px 0 0; color: var(--ph-hi); font-size: 14px; }
   .copied:empty { margin: 0; }
+  .for-agents { margin: 14px 0 0; color: var(--dim); font-size: 13px; }
+  .for-agents a { color: inherit; }
 
   /* ── the session ───────────────────────────────────────── */
   .session { margin-top: clamp(2rem, 6vh, 4rem); max-width: 50rem; }
@@ -244,6 +246,7 @@
           <p class="where"><strong>Paste it into Codex or Claude Code.</strong><span>or any AI agent on your computer</span></p>
         </div>
         <p class="copied" id="copied" role="status" aria-live="polite"></p>
+        <p class="for-agents">AI agents: your setup instructions are at <a href="https://rabbithole.school/drink-me.md">rabbithole.school/drink-me.md</a></p>
       </section>
 
       <section class="session" aria-label="The manifesto" data-run>
